@@ -1,0 +1,2308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>BCA Asset Tracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; padding: 0; }
+  #root { min-height: 100vh; }
+</style>
+
+<!-- Import map: lets the app's plain "import X from 'react'" style statements
+     resolve to real packages served over CDN, with no bundler/build step. -->
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@18.3.1",
+    "react-dom": "https://esm.sh/react-dom@18.3.1",
+    "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+    "lucide-react": "https://esm.sh/lucide-react@0.383.0?deps=react@18.3.1",
+    "xlsx": "https://esm.sh/xlsx@0.18.5"
+  }
+}
+</script>
+
+<!-- Babel Standalone: transpiles the JSX/ESM below in the browser at load time. -->
+<script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-type="module" data-presets="react">
+import ReactDOM from "react-dom/client";
+
+import React, { useState, useEffect, useMemo } from "react";
+import * as XLSX from "xlsx";
+import {
+  Search, Plus, X, Pencil, Trash2, Save, ChevronRight, ArrowLeft, MessageSquare,
+  Monitor, Phone, Tv, Camera, HardDrive, HelpCircle, Columns3, Lock, Filter, Check, DoorOpen, Download,
+  Wrench, UserCircle, Settings, History, Archive, ArchiveRestore, Building2, Package, Copy,
+} from "lucide-react";
+
+// Maps messy free-text peripheral fragments (as originally entered) to a
+// clean, canonical tag — used once to auto-parse the seed data into the
+// managed peripherals list, and by normalizePeripherals() generally.
+const PERIPHERAL_ALIASES = {
+  "keyboard": "Keyboard",
+  "mouse": "Mouse",
+  "camera": "Webcam",
+  "webcam": "Webcam",
+  "web cam": "Webcam",
+  "usb hub": "USB Hub",
+  "video splitter (gofanco)": "Video Splitter (gofanco)",
+  "stream deck": "Stream Deck",
+  "streamdeck": "Stream Deck",
+  "soundbar": "Soundbar",
+  "soundbar?": "Soundbar",
+  "tcl soundbar": "Soundbar",
+  "bestisan soundbar": "Soundbar",
+  "speakers": "Speakers",
+};
+function normalizePeripherals(raw) {
+  if (!raw) return [];
+  const tags = [];
+  raw.split("/").forEach(seg => {
+    const trimmed = seg.trim();
+    if (!trimmed) return;
+    const canonical = PERIPHERAL_ALIASES[trimmed.toLowerCase()] || trimmed.replace(/\b\w/g, c => c.toUpperCase());
+    if (!tags.includes(canonical)) tags.push(canonical);
+  });
+  return tags;
+}
+
+// Each row: [label, type, screenSize, hostname, room, brand, model, serial, person, peripherals, notes]
+const SEED = [
+["BCA0001","Computer","","OFFICE-02-i5G7","Room 102","Dell","OptiPlex5050 Micro","1613JH2","Jen Kramer","keyboard/mouse",""],
+["BCA0002","Monitor","24\"","","Room 102","AOC","G2490VX","PIOM8HA123828","Jen Kramer","",""],
+["BCA0003","Phone","","","Room 102","Grandstream","GRP2616","24UMN2ZM4150E150","Jen Kramer","",""],
+["BCA0004","Phone","","","Room 102","Grandstream","GRP2615 / GBX20","20EZ3EXL912D117C / 22MTCQCL903043D4","Marisol Luff","",""],
+["BCA0005","Computer","","FRONTDESK-i5G9","Room 102","Dell","OptiPlex7070 Micro","D10U003","Marisol Luff","keyboard/mouse",""],
+["BCA0006","Monitor","32\"","","Room 102","Samsung","U32J590UQ","092EHCHNB03054X","Marisol Luff","",""],
+["BCA0007","Phone","","","Room 102","Grandstream","GRP2616","24UMN2ZM4150E0F6","Lana Flaten","",""],
+["BCA0008","Computer","","OFFICE-01-i5G9","Room 102","Dell","OptiPlex 3070 Micro","R-RMM-E2K-D10U003","Lana Flaten","keyboard/mouse",""],
+["BCA0009","Monitor","32\"","","Room 102","Samsung","U32J590UQN","092EHCHNB03073E","Lana Flaten","",""],
+["BCA0010","Computer","","","Room 102","GMKtec","NucBox G2","G224170072","Security Cameras","keyboard/mouse",""],
+["BCA0011","Phone","","","Room 200","Grandstream","GRP2613","298A617M906ECB5B","Aaron Cantrell","",""],
+["BCA0012","Computer","","ROOM-113","Room 200","Dell","Optiplex 7060 Micro","?","Aaron Cantrell","Camera/keyboard/mouse/USB hub/video splitter (gofanco)",""],
+["BCA0013","Monitor","22\"","","Room 200","BenQ","GW2280-T","","Aaron Cantrell","",""],
+["BCA0014","Monitor","22\"","","Room 200","BenQ","GW2280-T","","Aaron Cantrell","",""],
+["BCA0015","Stream Deck","","","Room 200","","","20GA9902","Aaron Cantrell","",""],
+["BCA0016","DocuCam","","","Room 200","recordex","Simplicity Cam SC13zAF","SC13-001-7354","Aaron Cantrell","",""],
+["BCA0017","Computer","","ROOM-132","Room 201","MinisForum","TH50","YD436HTH50CCMPA0022","Sierra Sanchez","video splitter (gofanco)/camera/USB hub/keyboard/mouse/soundbar?/streamdeck","Eric verified video splitter (gofanco) having intermittent issues (worked after fiddling, no changes made)"],
+["BCA0018","Phone","","","Room 201","Grandstream","GRP2613","","Sierra Sanchez","",""],
+["BCA0019","Monitor","22\"","","Room 201","HP","HP22cwa","","Sierra Sanchez","",""],
+["BCA0020","Monitor","22\"","","Room 201","HP","HSTND-5071-L","","Sierra Sanchez","",""],
+["BCA0021","DocuCam","","","Room 201","recordex","SC13z AF","","Sierra Sanchez","",""],
+["BCA0022","Computer","","Room-123-i7g10","Room 300","Dell","D15S","","Denise Sloan","video splitter (gofanco)/camera/USB hub/keyboard/mouse","Also a bluetooth speaker? Personal?"],
+["BCA0023","Monitor","(27\"?)","","Room 300","Samsung","","","Denise Sloan","",""],
+["BCA0024","TV","","","Room 300","","","","Denise Sloan","",""],
+["BCA0025","Phone","","","Room 300","Grandstream","","","Denise Sloan","",""],
+["BCA0026","TV","","","Room 301","ViewSonic","","","Rio Chaney","",""],
+["BCA0027","Computer","","ROOM-E206","Room 301","Dell","Optiplex 5060 Micro","","Rio Chaney","Streamdeck/keyboard/mouse",""],
+["BCA0028","Monitor","(22\"?)","","Room 301","ASUS","","","Rio Chaney","",""],
+["BCA0029","Monitor","(22\"?)","","Room 301","ASUS","","","Rio Chaney","",""],
+["BCA0030","Phone","","","Room 301","Grandstream","","","Rio Chaney","","Change from Lois to Rio"],
+["BCA0031","Computer","","Class-403","Room 403","Dell","Opitplex 3070 Micro","","Rachel Parrish","camera/USB hub/keyboard/mouse/video splitter (gofanco)",""],
+["BCA0032","Monitor","(22\"?)","","Room 403","BenQ","","","Rachel Parrish","",""],
+["BCA0033","Monitor","(22\"?)","","Room 403","BenQ","","","Rachel Parrish","",""],
+["BCA0034","Phone","","","Room 403","Grandstream","","","Rachel Parrish","","Change from MacFarlane to Rachel Parrish"],
+["BCA0035","Computer","","ROOM-E207","Room 402","Dell","Optiplex 7060","","Nicolas Chaney","camera/StreamDeck/USB Hub/keyboard/mouse",""],
+["BCA0036","Monitor","(22\"?)","","Room 402","BenQ","","","Nicolas Chaney","",""],
+["BCA0037","Monitor","(22\"?)","","Room 402","BenQ","","","Nicolas Chaney","",""],
+["BCA0038","Phone","","","Room 402","Grandstream","","","Nicolas Chaney","",""],
+["BCA0039","Computer","","Class-401","Room 401","Dell","Optiplex Micro","","Mikayla Rose","Streamdeck/keyboard/mouse",""],
+["BCA0040","Monitor","(22\"?)","","Room 401","ASUS","","","Mikayla Rose","",""],
+["BCA0041","Monitor","(22\"?)","","Room 401","ASUS","","","Mikayla Rose","",""],
+["BCA0042","DocuCam","","","Room 401","ELMO","MX-P","","Mikayla Rose","",""],
+["BCA0043","Phone","","","Room 401","Grandstream","","","Mikayla Rose","",""],
+["BCA0044","Computer","","ROOM-131","Room 400","Dell","OptiPlex 7070 Micro","","Kelly Mackinga","USB hub/Stream Deck/keyboard/mouse/video splitter (gofanco)",""],
+["BCA0045","TV","","","Room 400","HiSense","","","Kelly Mackinga","",""],
+["BCA0046","Monitor","(21.5\")","","Room 400","BenQ","GW2280-T","","Kelly Mackinga","",""],
+["BCA0047","Monitor","(21.5\")","","Room 400","BenQ","GW2280-T","","Kelly Mackinga","",""],
+["BCA0048","DocuCam","","","Room 400","recordex","SC13zAF","","Kelly Mackinga","",""],
+["BCA0049","TV","(55\")","","Room 401","TCL","55Q77K","","Mikayla Rose","",""],
+["BCA0050","TV","","","Room 402","HiSense","","55G132327H02147","Nicolas Chaney","TCL Soundbar",""],
+["BCA0051","Phone","","","Room 100","Grandstream","","","Stacie Wheeler","","Change from Lisa Haugen to Stacie Wheeler"],
+["BCA0052","TV","","","Room 100","HiSense","50QD65QFC","","Stacie Wheeler","","Would like moved out"],
+["BCA0053","Computer","","ROOM-105","Room 101","Dell","Optiplex 7060","","Dillon Jacobsma/Breanna Davis","camera/video splitter (gofanco)/Stream Deck/soundbar/keyboard/mouse",""],
+["BCA0054","DocuCam","","","Room 101","ELMO","MX-P","","Dillon Jacobsma/Breanna Davis","",""],
+["BCA0055","Monitor","(22\"?)","","Room 101","HP","22cwa","","Dillon Jacobsma/Breanna Davis","",""],
+["BCA0056","Monitor","(22\"?)","","Room 101","HP","22cwa","","Dillon Jacobsma/Breanna Davis","",""],
+["BCA0057","TV","(70\")","","Room 101","Samsung","UN7OTU700DBXZA","","Dillon Jacobsma/Breanna Davis","Bestisan soundbar",""],
+["BCA0058","Phone","","","Room 101","Grandstream","","","Dillon Jacobsma/Breanna Davis","",""],
+["BCA0059","Computer","","ROOM-122","Room 302","Dell","Optiplex 7060","","","USB hub/Stream Deck/Web cam/keyboard/mouse/video splitter (gofanco)/Speakers",""],
+["BCA0060","DocuCam","","","Room 302","Recordex","SC13zAF","","","",""],
+["BCA0061","Monitor","(22\")","","Room 302","HP","22cwa","","","",""],
+["BCA0062","Monitor","(22\")","","Room 302","HP","22cwa","","","",""],
+["BCA0063","TV","(50\")","","Room 302","SANYO","FW50D36F B","","","",""],
+["BCA0064","Phone","","","Room 302","Grandstream","","","","",""],
+["BCA0065","Phone","","","Room 103","Grandstream","","","Solomon Pehrson","",""],
+["BCA0066","Monitor","(32\"?)","","Room 103","Samsung","","","Solomon Pehrson","",""],
+["BCA0067","Phone","","","Lisa's Office","Grandstream","","","Lisa Haugen","",""],
+["BCA0068","Monitor","(36\"?)","","Lisa's Office","Samsung","","","Lisa Haugen","",""],
+["BCA0069","Computer","","","Lisa's Office","Dell","Optiplex 5060 Micro","","Lisa Haugen","",""],
+["BCA0070","Phone","","","Room 202","Grandstream","","","Jon Scribner","","Change from Larry Halderman to Jon Scribner"],
+["BCA0071","Computer","","OFFICE-120A","Room 103","Dell","Optiplex 7050 (not Micro)","","Solomon Pehrson","keyboard/mouse","Need to Install User"],
+["BCA0072","Monitor","(32\"?)","","Storage Room","ViewSonic","","","","","EXTRA"],
+["BCA0073","Computer","","OFFICE-120B","Kitchen","MinisForum","NAB6 Lite","","Multiple teachers","keyboard/mouse",""],
+["BCA0074","Monitor","(22\"?)","","Kitchen","ASUS","","","Multiple teachers","",""],
+["BCA0075","DocuCam","","","","ELMO","MX-P","","","",""],
+["BCA0076","Computer","","ROOM-E204","Annex","Dell","Optiplex 5060 Micro","","","Keyboard/Mouse/Webcam/Streamdeck",""],
+["BCA0077","Monitor","(22\")","","Annex","ASUS","VP228HE","","","",""],
+["BCA0078","Monitor","(22\")","","Annex","ASUS","VP228HE","","","",""],
+["BCA0079","Phone","","","Annex","Grandstream","","","","",""],
+["BCA0080","TV","(70\")","","Annex","Samsung","UN70TU700DBXZA","","","",""],
+].map(r => ({
+  label: r[0], type: r[1], screenSize: r[2], hostname: r[3], room: r[4], brand: r[5],
+  model: r[6], serial: r[7], person: r[8], peripherals: normalizePeripherals(r[9]).join("/"), notes: r[10],
+  building: "",
+  totalQuantity: "",
+  status: "Active",
+  comments: [],
+  changes: [],
+  allocations: [],
+}));
+
+// Starter managed peripherals list, auto-parsed from the seed data above
+const DEFAULT_PERIPHERALS = Array.from(
+  new Set(SEED.flatMap(a => (a.peripherals ? a.peripherals.split("/") : [])))
+).sort();
+
+// Starter managed users list, auto-parsed from the seed data. Shared assets
+// recorded as "A/B" contribute both names individually; the original combined
+// value is still preserved on that asset until someone edits it.
+const DEFAULT_USERS = Array.from(
+  new Set(SEED.flatMap(a => (a.person ? a.person.split("/").map(s => s.trim()) : [])).filter(Boolean))
+).sort();
+
+// Infers a building name from a room's number — e.g. "Room 402" -> "Building 400".
+// Rooms without a number (Kitchen, Annex, Lisa's Office, Storage Room) get no building guess.
+function buildingNameForRoom(roomName) {
+  const match = roomName.match(/\d+/);
+  if (!match) return "";
+  const hundred = Math.floor(parseInt(match[0], 10) / 100) * 100;
+  return `Building ${hundred}`;
+}
+
+// Auto-generate a "Room" asset for every distinct room found among the device
+// assets above, so each physical room can be tracked (occupant, notes,
+// comment history) the same way any other asset is.
+function buildRoomAssets(deviceAssets) {
+  const byRoom = {};
+  deviceAssets.forEach(a => {
+    if (!a.room) return;
+    if (!byRoom[a.room]) byRoom[a.room] = {};
+    if (a.person) byRoom[a.room][a.person] = (byRoom[a.room][a.person] || 0) + 1;
+  });
+  const roomNames = Object.keys(byRoom).sort();
+  return roomNames.map((roomName, i) => {
+    const counts = byRoom[roomName];
+    const primaryPerson = Object.keys(counts).sort((x, y) => counts[y] - counts[x])[0] || "";
+    return {
+      label: "BCR" + String(i + 1).padStart(4, "0"),
+      type: "Room",
+      screenSize: "",
+      hostname: "",
+      room: roomName,
+      brand: "",
+      model: "",
+      serial: "",
+      person: primaryPerson,
+      peripherals: "",
+      notes: "",
+      building: buildingNameForRoom(roomName),
+      totalQuantity: "",
+      status: "Active",
+      comments: [],
+      changes: [],
+      allocations: [],
+    };
+  });
+}
+
+// Auto-generate a "Building" asset for every distinct building name assigned
+// to a Room above (sample data, based on room-number ranges).
+function buildBuildingAssets(roomAssets) {
+  const buildingNames = Array.from(new Set(roomAssets.map(r => r.building).filter(Boolean))).sort();
+  return buildingNames.map((name, i) => ({
+    label: "BCB" + String(i + 1).padStart(4, "0"),
+    type: "Building",
+    screenSize: "",
+    hostname: "",
+    room: "",
+    brand: "",
+    model: "",
+    serial: "",
+    person: "",
+    peripherals: "",
+    notes: "Sample building, auto-generated from room numbers — rename or adjust as needed.",
+    building: name,
+    totalQuantity: "",
+    status: "Active",
+    comments: [],
+    changes: [],
+    allocations: [],
+  }));
+}
+
+const SEED_ROOMS = buildRoomAssets(SEED);
+const SEED_FULL = [...SEED, ...SEED_ROOMS, ...buildBuildingAssets(SEED_ROOMS)];
+
+// Known types, used for the Type dropdown and for icons
+const TYPE_OPTIONS = ["Computer", "Monitor", "Phone", "TV", "DocuCam", "Stream Deck", "Room", "Building", "Bulk Item", "Other"];
+
+// Options for the structured per-asset change log
+const DEFAULT_CHANGE_TYPES = ["Purchase", "Repair", "Replacement", "Upgrade", "Maintenance", "Relocation", "Disposal", "Other"];
+
+// Which extra field applies to which types. A field not listed here (or an
+// asset whose type isn't in the list) simply doesn't show that field.
+const TYPE_ONLY_FIELDS = {
+  hostname: ["Computer"],
+  screenSize: ["Monitor", "TV"],
+  building: ["Room", "Building"], // Room links to a building; Building uses it as its own name
+  totalQuantity: ["Bulk Item"],
+  itemName: ["Bulk Item"], // What the bulk item actually is — "Folding Chair", "Cafeteria Table"…
+};
+// Fields that don't make sense for a Room asset at all (it's a space, not a device).
+const ROOM_EXCLUDED_FIELDS = ["brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"];
+// A Building is one level up from a Room — it has even less in common with a device asset.
+const BUILDING_EXCLUDED_FIELDS = ["brand", "model", "serial", "peripherals", "hostname", "screenSize", "room", "purchaseDate", "warrantyUntil"];
+// A Bulk Item (tables, chairs...) isn't individually tagged or tied to one room —
+// it's a pooled quantity, distributed across rooms via the Allocations tab instead.
+const BULK_ITEM_EXCLUDED_FIELDS = ["hostname", "screenSize", "peripherals", "serial", "room", "building", "person"];
+function fieldAppliesTo(key, type) {
+  if (type === "Room" && ROOM_EXCLUDED_FIELDS.includes(key)) return false;
+  if (type === "Building" && BUILDING_EXCLUDED_FIELDS.includes(key)) return false;
+  if (type === "Bulk Item" && BULK_ITEM_EXCLUDED_FIELDS.includes(key)) return false;
+  const restriction = TYPE_ONLY_FIELDS[key];
+  if (!restriction) return true; // common field, applies to every type
+  return restriction.includes(type);
+}
+
+const DEFAULT_COLUMNS = [
+  { key: "type", label: "Type", width: 140 },
+  { key: "itemName", label: "Item Name", width: 150 },
+  { key: "screenSize", label: "Screen Size", width: 110 },
+  { key: "totalQuantity", label: "Total Qty", width: 100 },
+  { key: "building", label: "Building", width: 130 },
+  { key: "room", label: "Room", width: 130 },
+  { key: "person", label: "User", width: 170 },
+  { key: "brand", label: "Brand", width: 120 },
+  { key: "model", label: "Model", width: 180 },
+  { key: "serial", label: "Serial", width: 180 },
+  { key: "hostname", label: "Hostname", width: 160 },
+  { key: "purchaseDate", label: "Purchase Date", width: 130 },
+  { key: "warrantyUntil", label: "Warranty Until", width: 130 },
+  { key: "peripherals", label: "Peripherals", width: 240 },
+  { key: "notes", label: "Notes", width: 240 },
+  { key: "label", label: "Asset ID", width: 110 },
+  { key: "status", label: "Status", width: 100 },
+].map(c => ({ ...c, visible: ["type", "itemName", "building", "room", "person", "status"].includes(c.key), custom: false }));
+
+const STATUS_OPTIONS = ["Active", "Archived"];
+const STATUS_FILTER_OPTIONS = ["All statuses", "Active", "Archived"];
+
+// Brookside Christian Academy palette (from brooksideacademy.com)
+const C = {
+  bg: "#F4F0E6",
+  surface: "#FFFFFF",
+  ink: "#2A3439",
+  brand: "#546F75",
+  brandDark: "#3E5054",
+  accent: "#A9764B",
+  border: "#DCD4C2",
+  hover: "#EAE3D3",
+  danger: "#9C3B2A",
+  success: "#4B6B4E",
+  muted: "#5C6B6E",
+  placeholder: "#9CA7A6",
+  empty: "#7C8A8C",
+  scrollThumb: "#C7BEA8",
+};
+
+const CATEGORY_ICONS = { Computer: HardDrive, Monitor: Monitor, Phone: Phone, TV: Tv, DocuCam: Camera, Room: DoorOpen, Building: Building2, "Bulk Item": Package };
+function iconFor(type) {
+  return CATEGORY_ICONS[type] || HelpCircle;
+}
+function slugify(name) {
+  return "col_" + name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 30) || "col_field";
+}
+function formatWhen(iso) {
+  const d = new Date(iso);
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+}
+function describeAudit(entry) {
+  if (entry.action === "created") return "Asset created";
+  if (entry.action === "deleted") return "Asset permanently deleted";
+  if (entry.action === "archived") return "Asset archived";
+  if (entry.action === "restored") return "Asset restored from archive";
+  if (entry.action === "allocated") {
+    return entry.previousQuantity != null
+      ? `Allocation to ${entry.room} changed from ${entry.previousQuantity} to ${entry.quantity}`
+      : `Allocated ${entry.quantity} to ${entry.room}`;
+  }
+  if (entry.action === "unallocated") return `Removed allocation of ${entry.quantity} from ${entry.room}`;
+  return `${entry.field} changed from "${entry.from || "—"}" to "${entry.to || "—"}"`;
+}
+// Follows a non-Room asset's Room link to that Room's own Building link.
+// Rooms and Buildings store their building directly and don't need this.
+function inferBuilding(asset, assets) {
+  if (!asset || !asset.room) return "";
+  const roomAsset = assets.find(a => a.type === "Room" && a.room === asset.room);
+  return roomAsset ? roomAsset.building || "" : "";
+}
+
+const USER_STORAGE_KEY = "asset-tracker-user"; // localStorage — who's using this browser
+// Your deployed Apps Script Web App URL. Redeploy in Apps Script (Deploy > Manage
+// deployments > New version) any time you change AssetTrackerSync.gs.
+const SHEET_API_URL = "https://script.google.com/macros/s/AKfycbzXaKRuCrTesxobxP-b2me1TSn0YoGogoYhNPTWU4qWWjXANXGlPuDzJSKGClOTsfOXRQ/exec";
+const emptyDraftFrom = columns => Object.fromEntries(columns.map(c => [c.key, ""]));
+
+function AssetTracker() {
+  const [assets, setAssets] = useState(null);
+  const [columns, setColumns] = useState(DEFAULT_COLUMNS);
+  const [changeTypes, setChangeTypes] = useState(DEFAULT_CHANGE_TYPES);
+  const [vendors, setVendors] = useState([]);
+  const [peripheralsList, setPeripheralsList] = useState(DEFAULT_PERIPHERALS);
+  const [showPeripheralsManager, setShowPeripheralsManager] = useState(false);
+  const [newPeripheralName, setNewPeripheralName] = useState("");
+  const [usersList, setUsersList] = useState(DEFAULT_USERS);
+  const [showUsersManager, setShowUsersManager] = useState(false);
+  const [newUserName, setNewUserName] = useState("");
+  const [auditLog, setAuditLog] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saveError, setSaveError] = useState(false);
+
+  const [view, setView] = useState("list"); // "list" | "detail"
+  const [selectedLabel, setSelectedLabel] = useState(null);
+  const [detailEditing, setDetailEditing] = useState(false);
+  const [detailTab, setDetailTab] = useState("details"); // "details" | "comments" | "changes" | "audit" | "allocations"
+  const [commentDraft, setCommentDraft] = useState("");
+  const [changeDraft, setChangeDraft] = useState({ changeType: "", vendor: "", cost: "", note: "" });
+  const [showChangeTypeManager, setShowChangeTypeManager] = useState(false);
+  const [showVendorManager, setShowVendorManager] = useState(false);
+  const [newChangeTypeName, setNewChangeTypeName] = useState("");
+  const [newVendorName, setNewVendorName] = useState("");
+  const [allocationDraft, setAllocationDraft] = useState({ room: "", quantity: "" });
+  const [allocationError, setAllocationError] = useState("");
+  const [confirmAllocationRemove, setConfirmAllocationRemove] = useState(null);
+
+  const [currentUser, setCurrentUser] = useState(null);
+  const [showNamePrompt, setShowNamePrompt] = useState(false);
+  const [nameInput, setNameInput] = useState("");
+
+  const [query, setQuery] = useState("");
+  const [roomFilter, setRoomFilter] = useState("All rooms");
+  const [typeFilter, setTypeFilter] = useState("All types");
+  const [userFilter, setUserFilter] = useState("All users");
+  const [statusFilter, setStatusFilter] = useState("Active");
+  const [sortConfig, setSortConfig] = useState(null); // { key, dir: "asc" | "desc" }
+  const [reassignTarget, setReassignTarget] = useState("");
+  const [moveTarget, setMoveTarget] = useState("");
+  const [activeFilterCol, setActiveFilterCol] = useState(null);
+  const [draft, setDraft] = useState({});
+  const [showAdd, setShowAdd] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [confirmArchive, setConfirmArchive] = useState(null);
+  const [confirmDeleteCol, setConfirmDeleteCol] = useState(null);
+  const [confirmCommentDelete, setConfirmCommentDelete] = useState(null);
+  const [confirmChangeDelete, setConfirmChangeDelete] = useState(null);
+  const [showColManager, setShowColManager] = useState(false);
+  const [newColName, setNewColName] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(SHEET_API_URL);
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const data = await res.json();
+
+        if (data && Array.isArray(data.assets) && data.assets.length > 0) {
+          const loadedAssets = data.assets.map(a => ({ comments: [], changes: [], allocations: [], status: "Active", building: "", itemName: "", purchaseDate: "", warrantyUntil: "", ...a }));
+          setAssets(loadedAssets);
+          // Migrate column config: append any default columns added in newer app versions.
+          let storedCols = data.columns && data.columns.length ? data.columns : DEFAULT_COLUMNS;
+          DEFAULT_COLUMNS.forEach(dc => {
+            if (!storedCols.some(c => c.key === dc.key)) {
+              const statusIdx = storedCols.findIndex(c => c.key === "status");
+              const insertAt = statusIdx === -1 ? storedCols.length : statusIdx;
+              storedCols = [...storedCols.slice(0, insertAt), dc, ...storedCols.slice(insertAt)];
+            }
+          });
+          setColumns(storedCols);
+          setChangeTypes(data.changeTypes && data.changeTypes.length ? data.changeTypes : DEFAULT_CHANGE_TYPES);
+          setVendors(Array.isArray(data.vendors) ? data.vendors : []);
+          setAuditLog(Array.isArray(data.auditLog) ? data.auditLog : []);
+          setPeripheralsList(data.peripheralsList && data.peripheralsList.length ? data.peripheralsList : DEFAULT_PERIPHERALS);
+          if (Array.isArray(data.usersList) && data.usersList.length) {
+            setUsersList(data.usersList);
+          } else {
+            const derived = Array.from(
+              new Set(loadedAssets.flatMap(a => (a.person ? a.person.split("/").map(s => s.trim()) : [])).filter(Boolean))
+            ).sort();
+            setUsersList(derived.length ? derived : DEFAULT_USERS);
+          }
+        } else {
+          // Empty sheet (first run) — seed it with the starter data, then write it back.
+          setAssets(SEED_FULL);
+          setColumns(DEFAULT_COLUMNS);
+          setChangeTypes(DEFAULT_CHANGE_TYPES);
+          setVendors([]);
+          setAuditLog([]);
+          setPeripheralsList(DEFAULT_PERIPHERALS);
+          setUsersList(DEFAULT_USERS);
+          await writeSnapshot({
+            assets: SEED_FULL, columns: DEFAULT_COLUMNS, changeTypes: DEFAULT_CHANGE_TYPES,
+            vendors: [], auditLog: [], peripheralsList: DEFAULT_PERIPHERALS, usersList: DEFAULT_USERS,
+          });
+        }
+      } catch (e) {
+        // Sheet unreachable — fall back to starter data so the app is still usable.
+        setAssets(SEED_FULL);
+        setColumns(DEFAULT_COLUMNS);
+        setChangeTypes(DEFAULT_CHANGE_TYPES);
+        setPeripheralsList(DEFAULT_PERIPHERALS);
+        setUsersList(DEFAULT_USERS);
+        setSaveError(true);
+      }
+      setLoading(false);
+    })();
+  }, []);
+
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(USER_STORAGE_KEY);
+      if (stored) setCurrentUser(stored);
+      else setShowNamePrompt(true);
+    } catch (e) {
+      setShowNamePrompt(true);
+    }
+  }, []);
+
+  function saveUserName(name) {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    setCurrentUser(trimmed);
+    setShowNamePrompt(false);
+    setNameInput("");
+    try {
+      localStorage.setItem(USER_STORAGE_KEY, trimmed);
+    } catch (e) {
+      // Non-fatal — name just won't persist to the next session on this device.
+    }
+  }
+
+  // POSTs the full app state to the Apps Script backend. Sent as text/plain
+  // rather than application/json — Apps Script parses e.postData.contents as
+  // JSON regardless of the declared content type, and text/plain is a "simple"
+  // request that skips the browser's CORS preflight (which Apps Script doesn't
+  // handle), avoiding a class of failures that has nothing to do with the data itself.
+  async function writeSnapshot(payload) {
+    const res = await fetch(SHEET_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify(payload),
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+    let result;
+    try {
+      result = JSON.parse(text);
+    } catch (e) {
+      throw new Error(`Non-JSON response: ${text.slice(0, 200)}`);
+    }
+    if (!result || !result.ok) throw new Error(result && result.error ? result.error : "Unknown write failure");
+    return true;
+  }
+
+  async function persist(nextAssets, nextColumns, nextChangeTypes = changeTypes, nextVendors = vendors, nextAuditLog = auditLog, nextPeripheralsList = peripheralsList, nextUsersList = usersList) {
+    setAssets(nextAssets);
+    setColumns(nextColumns);
+    setChangeTypes(nextChangeTypes);
+    setVendors(nextVendors);
+    setAuditLog(nextAuditLog);
+    setPeripheralsList(nextPeripheralsList);
+    setUsersList(nextUsersList);
+    try {
+      await writeSnapshot({
+        assets: nextAssets, columns: nextColumns, changeTypes: nextChangeTypes,
+        vendors: nextVendors, auditLog: nextAuditLog, peripheralsList: nextPeripheralsList, usersList: nextUsersList,
+      });
+      setSaveError(false);
+    } catch (e) {
+      setSaveError(true);
+    }
+  }
+
+  function logAudit(entries) {
+    return [...auditLog, ...entries];
+  }
+
+  const rooms = useMemo(() => {
+    if (!assets) return [];
+    const set = new Set(assets.map(a => a.room).filter(Boolean));
+    return ["All rooms", ...Array.from(set).sort()];
+  }, [assets]);
+
+  const types = useMemo(() => {
+    if (!assets) return [];
+    const set = new Set(assets.map(a => a.type || "Other"));
+    return ["All types", ...Array.from(set).sort()];
+  }, [assets]);
+
+  const users = useMemo(() => ["All users", ...usersList], [usersList]);
+
+  // Rooms as recognized by an actual Room asset — used to power the linked
+  // Room dropdown on every other asset type.
+  const roomAssetNames = useMemo(() => {
+    if (!assets) return [];
+    const set = new Set(assets.filter(a => a.type === "Room").map(a => a.room).filter(Boolean));
+    return Array.from(set).sort();
+  }, [assets]);
+
+  // Buildings as recognized by an actual Building asset — powers the linked
+  // Building dropdown on Room assets.
+  const buildingAssetNames = useMemo(() => {
+    if (!assets) return [];
+    const set = new Set(assets.filter(a => a.type === "Building").map(a => a.building).filter(Boolean));
+    return Array.from(set).sort();
+  }, [assets]);
+
+  const filtered = useMemo(() => {
+    if (!assets) return [];
+    const q = query.trim().toLowerCase();
+    const list = assets.filter(a => {
+      if (roomFilter !== "All rooms" && a.room !== roomFilter) return false;
+      if (typeFilter !== "All types" && (a.type || "Other") !== typeFilter) return false;
+      if (userFilter !== "All users" && !(a.person || "").split("/").map(s => s.trim()).includes(userFilter)) return false;
+      if (statusFilter !== "All statuses" && (a.status || "Active") !== statusFilter) return false;
+      if (!q) return true;
+      return Object.values(a).some(v => typeof v === "string" && v.toLowerCase().includes(q));
+    });
+    if (sortConfig) {
+      const { key, dir } = sortConfig;
+      const mult = dir === "desc" ? -1 : 1;
+      list.sort((x, y) => {
+        const xv = (x[key] || "").toString(), yv = (y[key] || "").toString();
+        const xn = parseFloat(xv), yn = parseFloat(yv);
+        if (!isNaN(xn) && !isNaN(yn) && xv.trim() !== "" && yv.trim() !== "") return (xn - yn) * mult;
+        return xv.localeCompare(yv, undefined, { numeric: true, sensitivity: "base" }) * mult;
+      });
+    }
+    return list;
+  }, [assets, query, roomFilter, typeFilter, userFilter, statusFilter, sortConfig]);
+
+  const visibleColumns = columns.filter(c => c.visible);
+  const gridTemplate = visibleColumns.map(c => `${c.width}px`).join(" ") + " 36px";
+
+  const filterConfigs = {
+    type: { label: "Type", value: typeFilter, setValue: setTypeFilter, options: types },
+    room: { label: "Room", value: roomFilter, setValue: setRoomFilter, options: rooms },
+    person: { label: "User", value: userFilter, setValue: setUserFilter, options: users },
+    status: { label: "Status", value: statusFilter, setValue: setStatusFilter, options: STATUS_FILTER_OPTIONS },
+  };
+
+  const selectedAsset = assets ? assets.find(a => a.label === selectedLabel) : null;
+
+  function openDetail(asset) {
+    setSelectedLabel(asset.label);
+    setView("detail");
+    setDetailEditing(false);
+    setCommentDraft("");
+    setChangeDraft({ changeType: "", vendor: "", cost: "", note: "" });
+    setDetailTab("details");
+    setConfirmCommentDelete(null);
+    setConfirmChangeDelete(null);
+    setConfirmArchive(null);
+    setAllocationDraft({ room: "", quantity: "" });
+    setAllocationError("");
+    setConfirmAllocationRemove(null);
+  }
+
+  function closeDetail() {
+    setView("list");
+    setSelectedLabel(null);
+    setDetailEditing(false);
+  }
+
+  function startEditSelected() {
+    setDraft({ ...emptyDraftFrom(columns), ...selectedAsset });
+    setDetailEditing(true);
+  }
+
+  function startAdd() {
+    const nums = assets.filter(a => a.label.startsWith("BCA")).map(a => parseInt((a.label.match(/\d+/) || ["0"])[0], 10));
+    const next = Math.max(0, ...nums) + 1;
+    setDraft({ ...emptyDraftFrom(columns), label: "BCA" + String(next).padStart(4, "0"), type: "Computer", status: "Active", comments: [], changes: [], allocations: [] });
+    setShowAdd(true);
+  }
+
+  function cancelAdd() {
+    setShowAdd(false);
+    setDraft({});
+  }
+
+  async function saveDraft() {
+    if (!draft.label?.trim() || !draft.type?.trim()) return;
+    if (showAdd) {
+      const createdEntry = {
+        at: new Date().toISOString(), by: currentUser || "", assetLabel: draft.label,
+        assetType: draft.type, action: "created",
+      };
+      await persist([...assets, { comments: [], changes: [], allocations: [], ...draft }], columns, changeTypes, vendors, logAudit([createdEntry]));
+      cancelAdd();
+    } else {
+      const original = selectedAsset;
+      const editEntries = [];
+      Object.keys(draft).forEach(key => {
+        if (key === "comments" || key === "changes" || key === "allocations") return;
+        const oldVal = original[key] || "";
+        const newVal = draft[key] || "";
+        if (oldVal === newVal) return;
+        const fieldLabel = columns.find(c => c.key === key)?.label || key;
+        editEntries.push({
+          at: new Date().toISOString(), by: currentUser || "", assetLabel: original.label,
+          assetType: draft.type || original.type, action: "edited", field: fieldLabel, from: oldVal, to: newVal,
+        });
+      });
+
+      // Rename cascades: keep name-based links consistent across the inventory.
+      const roomRenamed = original.type === "Room" && draft.room && draft.room !== original.room;
+      const buildingRenamed = original.type === "Building" && draft.building && draft.building !== original.building;
+
+      const next = assets.map(a => {
+        if (a.label === selectedLabel) return { ...a, ...draft };
+        let updated = a;
+        if (roomRenamed) {
+          if (updated.room === original.room) updated = { ...updated, room: draft.room };
+          if ((updated.allocations || []).some(al => al.room === original.room)) {
+            updated = { ...updated, allocations: updated.allocations.map(al => (al.room === original.room ? { ...al, room: draft.room } : al)) };
+          }
+        }
+        if (buildingRenamed && updated.building === original.building) {
+          updated = { ...updated, building: draft.building };
+        }
+        return updated;
+      });
+      if (roomRenamed) {
+        editEntries.push({
+          at: new Date().toISOString(), by: currentUser || "", assetLabel: original.label,
+          assetType: "Room", action: "edited", field: "Room rename cascade",
+          from: original.room, to: `${draft.room} (updated on all linked assets)`,
+        });
+      }
+      if (buildingRenamed) {
+        editEntries.push({
+          at: new Date().toISOString(), by: currentUser || "", assetLabel: original.label,
+          assetType: "Building", action: "edited", field: "Building rename cascade",
+          from: original.building, to: `${draft.building} (updated on all linked rooms)`,
+        });
+      }
+      await persist(next, columns, changeTypes, vendors, editEntries.length ? logAudit(editEntries) : auditLog);
+      setDetailEditing(false);
+    }
+  }
+
+  async function doDelete(label) {
+    const asset = assets.find(a => a.label === label);
+    const deletedEntry = {
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: label,
+      assetType: asset ? asset.type : "", action: "deleted",
+    };
+    await persist(assets.filter(a => a.label !== label), columns, changeTypes, vendors, logAudit([deletedEntry]));
+    setConfirmDelete(null);
+    if (selectedLabel === label) closeDetail();
+  }
+
+  async function archiveAsset(label) {
+    const asset = assets.find(a => a.label === label);
+    const entry = {
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: label,
+      assetType: asset ? asset.type : "", action: "archived",
+    };
+    const next = assets.map(a => (a.label === label ? { ...a, status: "Archived" } : a));
+    await persist(next, columns, changeTypes, vendors, logAudit([entry]));
+    setConfirmArchive(null);
+  }
+
+  async function restoreAsset(label) {
+    const asset = assets.find(a => a.label === label);
+    const entry = {
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: label,
+      assetType: asset ? asset.type : "", action: "restored",
+    };
+    const next = assets.map(a => (a.label === label ? { ...a, status: "Active" } : a));
+    await persist(next, columns, changeTypes, vendors, logAudit([entry]));
+  }
+
+  async function duplicateAsset(source) {
+    const nums = assets.filter(a => a.label.startsWith("BCA")).map(a => parseInt((a.label.match(/\d+/) || ["0"])[0], 10));
+    const nextLabel = "BCA" + String(Math.max(0, ...nums) + 1).padStart(4, "0");
+    const copy = {
+      ...source,
+      label: nextLabel,
+      serial: "",       // unique per unit — never copied
+      hostname: "",     // unique per unit — never copied
+      status: "Active",
+      comments: [],
+      changes: [],
+      allocations: [],
+    };
+    const entry = {
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: nextLabel,
+      assetType: copy.type, action: "created",
+    };
+    await persist([...assets, copy], columns, changeTypes, vendors, logAudit([entry]));
+    openDetail(copy);
+  }
+
+  // Bulk actions on the currently filtered set — powered by the active User / Room filter.
+  async function reassignFilteredTo(newUser) {
+    if (!newUser.trim()) return;
+    const targets = new Set(filtered.filter(a => fieldAppliesTo("person", a.type)).map(a => a.label));
+    const entries = [];
+    const next = assets.map(a => {
+      if (!targets.has(a.label) || a.person === newUser) return a;
+      entries.push({
+        at: new Date().toISOString(), by: currentUser || "", assetLabel: a.label,
+        assetType: a.type, action: "edited", field: "User", from: a.person || "", to: newUser,
+      });
+      return { ...a, person: newUser };
+    });
+    await persist(next, columns, changeTypes, vendors, entries.length ? logAudit(entries) : auditLog);
+    setUserFilter(newUser);
+    setReassignTarget("");
+  }
+
+  async function moveFilteredTo(newRoom) {
+    if (!newRoom) return;
+    const targets = new Set(filtered.filter(a => a.type !== "Room" && a.type !== "Building" && a.type !== "Bulk Item").map(a => a.label));
+    const entries = [];
+    const next = assets.map(a => {
+      if (!targets.has(a.label) || a.room === newRoom) return a;
+      entries.push({
+        at: new Date().toISOString(), by: currentUser || "", assetLabel: a.label,
+        assetType: a.type, action: "edited", field: "Room", from: a.room || "", to: newRoom,
+      });
+      return { ...a, room: newRoom };
+    });
+    await persist(next, columns, changeTypes, vendors, entries.length ? logAudit(entries) : auditLog);
+    setRoomFilter(newRoom);
+    setMoveTarget("");
+  }
+
+  async function addComment() {
+    if (!commentDraft.trim() || !selectedAsset) return;
+    const comment = { text: commentDraft.trim(), at: new Date().toISOString(), by: currentUser || "" };
+    const next = assets.map(a => (a.label === selectedLabel ? { ...a, comments: [...(a.comments || []), comment] } : a));
+    await persist(next, columns);
+    setCommentDraft("");
+  }
+
+  async function deleteComment(idx) {
+    const next = assets.map(a => {
+      if (a.label !== selectedLabel) return a;
+      const comments = (a.comments || []).filter((_, i) => i !== idx);
+      return { ...a, comments };
+    });
+    await persist(next, columns);
+  }
+
+  async function addChange() {
+    if (!changeDraft.changeType || !selectedAsset) return;
+    const entry = {
+      changeType: changeDraft.changeType,
+      vendor: changeDraft.vendor.trim(),
+      cost: changeDraft.cost.trim(),
+      note: changeDraft.note.trim(),
+      at: new Date().toISOString(),
+      by: currentUser || "",
+    };
+    const next = assets.map(a => (a.label === selectedLabel ? { ...a, changes: [...(a.changes || []), entry] } : a));
+    await persist(next, columns);
+    setChangeDraft({ changeType: "", vendor: "", cost: "", note: "" });
+  }
+
+  async function deleteChange(idx) {
+    const next = assets.map(a => {
+      if (a.label !== selectedLabel) return a;
+      const changes = (a.changes || []).filter((_, i) => i !== idx);
+      return { ...a, changes };
+    });
+    await persist(next, columns);
+  }
+
+  function getAllocatedTotal(asset) {
+    return ((asset && asset.allocations) || []).reduce((sum, a) => sum + (parseFloat(a.quantity) || 0), 0);
+  }
+  function getAvailable(asset) {
+    const total = parseFloat(asset && asset.totalQuantity) || 0;
+    return total - getAllocatedTotal(asset);
+  }
+
+  async function saveAllocation() {
+    if (!selectedAsset) return;
+    const room = allocationDraft.room;
+    const qty = parseFloat(allocationDraft.quantity);
+    if (!room || !qty || qty <= 0) {
+      setAllocationError("Pick a room and a quantity greater than 0.");
+      return;
+    }
+    const existing = selectedAsset.allocations || [];
+    const existingForRoom = existing.find(a => a.room === room);
+    const otherRoomsTotal = existing.filter(a => a.room !== room).reduce((sum, a) => sum + (parseFloat(a.quantity) || 0), 0);
+    const totalQty = parseFloat(selectedAsset.totalQuantity) || 0;
+    if (otherRoomsTotal + qty > totalQty) {
+      setAllocationError(`Only ${totalQty - otherRoomsTotal} available to assign here.`);
+      return;
+    }
+    setAllocationError("");
+    const nextAllocations = existingForRoom
+      ? existing.map(a => (a.room === room ? { ...a, quantity: qty } : a))
+      : [...existing, { room, quantity: qty }];
+    const entry = {
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel,
+      assetType: selectedAsset.type, action: "allocated", room, quantity: qty,
+      previousQuantity: existingForRoom ? existingForRoom.quantity : null,
+    };
+    const next = assets.map(a => (a.label === selectedLabel ? { ...a, allocations: nextAllocations } : a));
+    await persist(next, columns, changeTypes, vendors, logAudit([entry]));
+    setAllocationDraft({ room: "", quantity: "" });
+  }
+
+  async function removeAllocation(room) {
+    if (!selectedAsset) return;
+    const existing = selectedAsset.allocations || [];
+    const existingForRoom = existing.find(a => a.room === room);
+    const nextAllocations = existing.filter(a => a.room !== room);
+    const entry = {
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel,
+      assetType: selectedAsset.type, action: "unallocated", room, quantity: existingForRoom ? existingForRoom.quantity : 0,
+    };
+    const next = assets.map(a => (a.label === selectedLabel ? { ...a, allocations: nextAllocations } : a));
+    await persist(next, columns, changeTypes, vendors, logAudit([entry]));
+    setConfirmAllocationRemove(null);
+  }
+
+  function toggleColumnVisible(key) {
+    const col = columns.find(c => c.key === key);
+    if (col && col.locked) return;
+    persist(assets, columns.map(c => (c.key === key ? { ...c, visible: !c.visible } : c)));
+  }
+
+  function addColumn() {
+    if (!newColName.trim()) return;
+    let key = slugify(newColName);
+    let i = 1;
+    while (columns.some(c => c.key === key)) key = slugify(newColName) + "_" + i++;
+    const nextColumns = [...columns, { key, label: newColName.trim(), width: 160, visible: true, custom: true }];
+    const nextAssets = assets.map(a => ({ ...a, [key]: "" }));
+    persist(nextAssets, nextColumns);
+    setNewColName("");
+  }
+
+  function removeColumn(key) {
+    const nextColumns = columns.filter(c => c.key !== key);
+    const nextAssets = assets.map(a => {
+      const copy = { ...a };
+      delete copy[key];
+      return copy;
+    });
+    persist(nextAssets, nextColumns);
+    setConfirmDeleteCol(null);
+  }
+
+  function addChangeType() {
+    const name = newChangeTypeName.trim();
+    if (!name || changeTypes.includes(name)) return;
+    persist(assets, columns, [...changeTypes, name], vendors);
+    setNewChangeTypeName("");
+  }
+
+  function removeChangeType(name) {
+    persist(assets, columns, changeTypes.filter(t => t !== name), vendors);
+  }
+
+  function addVendor() {
+    const name = newVendorName.trim();
+    if (!name || vendors.includes(name)) return;
+    persist(assets, columns, changeTypes, [...vendors, name]);
+    setNewVendorName("");
+  }
+
+  function removeVendor(name) {
+    persist(assets, columns, changeTypes, vendors.filter(v => v !== name));
+  }
+
+  function addPeripheral() {
+    const name = newPeripheralName.trim();
+    if (!name || peripheralsList.includes(name)) return;
+    persist(assets, columns, changeTypes, vendors, auditLog, [...peripheralsList, name]);
+    setNewPeripheralName("");
+  }
+
+  function removePeripheral(name) {
+    persist(assets, columns, changeTypes, vendors, auditLog, peripheralsList.filter(p => p !== name));
+  }
+
+  function addUser() {
+    const name = newUserName.trim();
+    if (!name || usersList.includes(name)) return;
+    persist(assets, columns, changeTypes, vendors, auditLog, peripheralsList, [...usersList, name].sort());
+    setNewUserName("");
+  }
+
+  // Removing a user only takes them off the pick list — assets already assigned
+  // to them keep that value until someone reassigns them.
+  function removeUser(name) {
+    persist(assets, columns, changeTypes, vendors, auditLog, peripheralsList, usersList.filter(u => u !== name));
+  }
+
+  function exportToExcel() {
+    const assetRows = assets.map(a => {
+      const row = {};
+      columns.forEach(c => { row[c.label] = fieldAppliesTo(c.key, a.type) ? (a[c.key] || "") : ""; });
+      row["Comments logged"] = (a.comments || []).length;
+      row["Changes logged"] = (a.changes || []).length;
+      row["Total cost logged"] = (a.changes || []).reduce((sum, c) => sum + (parseFloat(c.cost) || 0), 0);
+      if (a.type === "Bulk Item") {
+        row["Allocated"] = getAllocatedTotal(a);
+        row["Available"] = getAvailable(a);
+      }
+      return row;
+    });
+    const commentRows = [];
+    assets.forEach(a => {
+      (a.comments || []).forEach(cm => {
+        commentRows.push({ "Asset ID": a.label, Type: a.type, Room: a.room, When: formatWhen(cm.at), Comment: cm.text, "Logged by": cm.by || "" });
+      });
+    });
+    const changeRows = [];
+    assets.forEach(a => {
+      (a.changes || []).forEach(ch => {
+        changeRows.push({
+          "Asset ID": a.label, Type: a.type, Room: a.room, When: formatWhen(ch.at),
+          "Change type": ch.changeType, Vendor: ch.vendor, Cost: parseFloat(ch.cost) || "", Note: ch.note,
+          "Logged by": ch.by || "",
+        });
+      });
+    });
+    const allocationRows = [];
+    assets.forEach(a => {
+      (a.allocations || []).forEach(al => {
+        allocationRows.push({ "Asset ID": a.label, Item: a.type === "Bulk Item" ? (a.notes || a.label) : a.label, Room: al.room, Quantity: al.quantity });
+      });
+    });
+
+    const auditRows = auditLog.map(entry => ({
+      "Asset ID": entry.assetLabel, Type: entry.assetType, When: formatWhen(entry.at),
+      Action: entry.action, Detail: describeAudit(entry), "By": entry.by || "",
+    }));
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(assetRows), "Assets");
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.json_to_sheet(changeRows.length ? changeRows : [{ "Asset ID": "", Type: "", Room: "", When: "", "Change type": "", Vendor: "", Cost: "", Note: "", "Logged by": "" }]),
+      "Changes"
+    );
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.json_to_sheet(commentRows.length ? commentRows : [{ "Asset ID": "", Type: "", Room: "", When: "", Comment: "", "Logged by": "" }]),
+      "Comments"
+    );
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.json_to_sheet(allocationRows.length ? allocationRows : [{ "Asset ID": "", Item: "", Room: "", Quantity: "" }]),
+      "Allocations"
+    );
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.json_to_sheet(auditRows.length ? auditRows : [{ "Asset ID": "", Type: "", When: "", Action: "", Detail: "", "By": "" }]),
+      "Audit Log"
+    );
+    XLSX.writeFile(wb, "brookside-asset-inventory.xlsx");
+  }
+
+  if (loading) {
+    return (
+      <div style={{ minHeight: "100vh", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'IBM Plex Mono', monospace", color: C.muted }}>
+        Loading inventory…
+      </div>
+    );
+  }
+
+  const globalStyle = (
+    <style>{`
+      @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+      * { box-sizing: border-box; }
+      input, select, textarea { font-family: 'IBM Plex Sans', sans-serif; }
+      ::placeholder { color: ${C.placeholder}; }
+      .row-body:hover { background: ${C.hover} !important; }
+      button { cursor: pointer; }
+      .icon-btn:hover { background: ${C.hover} !important; }
+      .scroller::-webkit-scrollbar { height: 10px; }
+      .scroller::-webkit-scrollbar-track { background: ${C.hover}; }
+      .scroller::-webkit-scrollbar-thumb { background: ${C.scrollThumb}; border-radius: 5px; }
+    `}</style>
+  );
+
+  const nameModal = showNamePrompt && (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 40, padding: 16 }}>
+      <div style={{ background: C.surface, border: `1.5px solid ${C.brandDark}`, borderRadius: 2, padding: 22, width: "100%", maxWidth: 320 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <UserCircle size={18} style={{ color: C.brand }} />
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>Who's this?</div>
+        </div>
+        <div style={{ fontSize: 13, color: C.muted, marginBottom: 12 }}>
+          Enter your name so edits and comments you make are attributed to you. This is just a label — not a login — and is remembered on this device.
+        </div>
+        <input
+          value={nameInput}
+          onChange={e => setNameInput(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && saveUserName(nameInput)}
+          placeholder="Your name"
+          autoFocus
+          style={{ width: "100%", padding: "9px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink, marginBottom: 12 }}
+        />
+        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+          {currentUser && (
+            <button onClick={() => { setShowNamePrompt(false); setNameInput(""); }} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 2, fontWeight: 600, fontSize: 13, color: C.ink }}>
+              Cancel
+            </button>
+          )}
+          <button
+            onClick={() => saveUserName(nameInput)}
+            disabled={!nameInput.trim()}
+            style={{ padding: "8px 14px", background: nameInput.trim() ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 13 }}
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  const peripheralsManagerModal = showPeripheralsManager && (
+    <ListManagerModal
+      title="Manage peripherals"
+      items={peripheralsList}
+      newValue={newPeripheralName}
+      onNewValueChange={setNewPeripheralName}
+      onAdd={addPeripheral}
+      onRemove={removePeripheral}
+      onClose={() => { setShowPeripheralsManager(false); setNewPeripheralName(""); }}
+      placeholder="New peripheral name"
+    />
+  );
+
+  const usersManagerModal = showUsersManager && (
+    <ListManagerModal
+      title="Manage users"
+      items={usersList}
+      newValue={newUserName}
+      onNewValueChange={setNewUserName}
+      onAdd={addUser}
+      onRemove={removeUser}
+      onClose={() => { setShowUsersManager(false); setNewUserName(""); }}
+      placeholder="New user's name"
+    />
+  );
+
+  // Fields to render in a form for the given type: common fields always,
+  // type-restricted fields (hostname, screenSize) only when they apply.
+  // Status is excluded — it's changed only via the Archive/Restore actions.
+  function formColumnsFor(type) {
+    return columns.filter(c => fieldAppliesTo(c.key, type) && c.key !== "status");
+  }
+
+  // ---------- DETAIL VIEW ----------
+  if (view === "detail" && selectedAsset) {
+    const Icon = iconFor(selectedAsset.type);
+    const comments = [...(selectedAsset.comments || [])].reverse();
+    const changeEntries = [...(selectedAsset.changes || [])].reverse();
+    const totalLoggedCost = (selectedAsset.changes || []).reduce((sum, c) => sum + (parseFloat(c.cost) || 0), 0);
+    const assetAuditEntries = auditLog.filter(e => e.assetLabel === selectedAsset.label).slice().reverse();
+    const titleText = selectedAsset.type === "Bulk Item" && selectedAsset.itemName
+      ? `${selectedAsset.itemName} (Bulk Item)`
+      : selectedAsset.screenSize ? `${selectedAsset.type} · ${selectedAsset.screenSize}` : selectedAsset.type;
+    const visibleDetailColumns = columns.filter(c => fieldAppliesTo(c.key, selectedAsset.type));
+    const inheritedBuilding = !fieldAppliesTo("building", selectedAsset.type) ? inferBuilding(selectedAsset, assets) : "";
+    const editFormColumns = formColumnsFor(draft.type);
+
+    // Contents of a Room: devices located there + bulk-item allocations to it.
+    // Contents of a Building: its linked Rooms, plus devices in those rooms.
+    const isPlace = selectedAsset.type === "Room" || selectedAsset.type === "Building";
+    let contentDevices = [], contentRooms = [], contentAllocations = [];
+    if (selectedAsset.type === "Room") {
+      contentDevices = assets.filter(a => a.type !== "Room" && a.type !== "Building" && a.type !== "Bulk Item" && a.room === selectedAsset.room);
+      contentAllocations = assets
+        .filter(a => a.type === "Bulk Item")
+        .flatMap(b => (b.allocations || []).filter(al => al.room === selectedAsset.room).map(al => ({ bulk: b, quantity: al.quantity })));
+    } else if (selectedAsset.type === "Building") {
+      contentRooms = assets.filter(a => a.type === "Room" && a.building === selectedAsset.building);
+      const roomNames = new Set(contentRooms.map(r => r.room));
+      contentDevices = assets.filter(a => a.type !== "Room" && a.type !== "Building" && a.type !== "Bulk Item" && roomNames.has(a.room));
+    }
+    const contentsCount = contentDevices.length + contentRooms.length + contentAllocations.length;
+
+    return (
+      <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'IBM Plex Sans', sans-serif", color: C.ink }}>
+        {globalStyle}
+        {nameModal}
+        {peripheralsManagerModal}
+        {usersManagerModal}
+        <div style={{ borderBottom: `2px solid ${C.brand}`, padding: "12px 20px", position: "sticky", top: 0, background: C.bg, zIndex: 10, display: "flex", alignItems: "center", gap: 10 }}>
+          <button onClick={closeDetail} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.brandDark, display: "flex" }} aria-label="Back to list">
+            <ArrowLeft size={20} />
+          </button>
+          <Icon size={17} style={{ color: C.brand, flexShrink: 0 }} />
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, fontWeight: 600, color: C.accent }}>{selectedAsset.label}</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: C.brandDark, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{titleText}</div>
+        </div>
+
+        <div style={{ display: "flex", gap: 4, padding: "0 20px", borderBottom: `1.5px solid ${C.border}`, position: "sticky", top: 53, background: C.bg, zIndex: 9, overflowX: "auto" }}>
+          {[
+            { key: "details", label: "Details" },
+            ...(isPlace ? [{ key: "contents", label: "Contents", count: contentsCount }] : []),
+            ...(selectedAsset.type === "Bulk Item" ? [{ key: "allocations", label: "Allocations", count: (selectedAsset.allocations || []).length }] : []),
+            { key: "comments", label: "Comments", count: comments.length },
+            { key: "changes", label: "Change Log", count: changeEntries.length },
+            { key: "audit", label: "Audit", count: assetAuditEntries.length },
+          ].map(tab => {
+            const active = detailTab === tab.key;
+            return (
+              <button
+                key={tab.key}
+                onClick={() => setDetailTab(tab.key)}
+                style={{
+                  background: "none", border: "none", padding: "10px 12px", whiteSpace: "nowrap",
+                  fontSize: 13, fontWeight: active ? 700 : 500, color: active ? C.brandDark : C.muted,
+                  borderBottom: active ? `2px solid ${C.brand}` : "2px solid transparent", marginBottom: -1.5,
+                }}
+              >
+                {tab.label}{tab.count > 0 ? ` (${tab.count})` : ""}
+              </button>
+            );
+          })}
+        </div>
+
+        <div style={{ padding: "18px 20px 60px", maxWidth: 720, margin: "0 auto" }}>
+          {detailTab === "details" && (!detailEditing ? (
+            <div style={{ border: `1.5px solid ${C.brandDark}`, borderRadius: 2, background: C.surface, padding: 18, marginBottom: 20 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: "14px 20px" }}>
+                {visibleDetailColumns.map(c => (
+                  <Detail key={c.key} label={c.label} value={selectedAsset[c.key]} />
+                ))}
+                {inheritedBuilding && (
+                  <div>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: 0.5, textTransform: "uppercase", color: C.placeholder }}>
+                      Building (via Room)
+                    </span>
+                    <div style={{ color: C.ink, fontSize: 14, fontStyle: "italic" }}>{inheritedBuilding}</div>
+                  </div>
+                )}
+              </div>
+              <div style={{ display: "flex", gap: 10, marginTop: 20, flexWrap: "wrap" }}>
+                <button onClick={startEditSelected} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: C.brand, color: "#fff", border: "none", fontWeight: 600, fontSize: 14, borderRadius: 2 }}>
+                  <Pencil size={15} /> Edit
+                </button>
+                {selectedAsset.type !== "Room" && selectedAsset.type !== "Building" && (
+                  <button
+                    onClick={() => duplicateAsset(selectedAsset)}
+                    style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: "transparent", color: C.brandDark, border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 14, borderRadius: 2 }}
+                  >
+                    <Copy size={15} /> Duplicate
+                  </button>
+                )}
+                {(selectedAsset.status || "Active") !== "Archived" ? (
+                  <button
+                    onClick={() => setConfirmArchive(selectedAsset.label)}
+                    style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: "transparent", color: C.brandDark, border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 14, borderRadius: 2 }}
+                  >
+                    <Archive size={15} /> Archive
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      onClick={() => restoreAsset(selectedAsset.label)}
+                      style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: "transparent", color: C.brandDark, border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 14, borderRadius: 2 }}
+                    >
+                      <ArchiveRestore size={15} /> Restore
+                    </button>
+                    <button
+                      onClick={() => setConfirmDelete(selectedAsset.label)}
+                      style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: "transparent", color: C.danger, border: `1.5px solid ${C.danger}`, fontWeight: 600, fontSize: 14, borderRadius: 2 }}
+                    >
+                      <Trash2 size={15} /> Permanently delete
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div style={{ border: `1.5px solid ${C.brandDark}`, borderRadius: 2, background: C.surface, padding: 18, marginBottom: 20 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12 }}>
+                {editFormColumns.map(c => (
+                  c.key === "type" ? (
+                    <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v })} />
+                  ) : c.key === "room" && draft.type !== "Room" ? (
+                    <RoomField key={c.key} value={draft.room || ""} onChange={v => setDraft({ ...draft, room: v })} roomOptions={roomAssetNames} />
+                  ) : c.key === "building" && draft.type !== "Building" ? (
+                    <BuildingField key={c.key} value={draft.building || ""} onChange={v => setDraft({ ...draft, building: v })} buildingOptions={buildingAssetNames} />
+                  ) : c.key === "person" ? (
+                    <UserField
+                      key={c.key}
+                      value={draft.person || ""}
+                      onChange={v => setDraft({ ...draft, person: v })}
+                      userOptions={usersList}
+                      onManage={() => setShowUsersManager(true)}
+                    />
+                  ) : c.key === "peripherals" ? (
+                    <PeripheralsField
+                      key={c.key}
+                      value={draft.peripherals || ""}
+                      onChange={v => setDraft({ ...draft, peripherals: v })}
+                      options={peripheralsList}
+                      onManage={() => setShowPeripheralsManager(true)}
+                    />
+                  ) : (
+                    <Field
+                      key={c.key}
+                      label={c.label}
+                      value={draft[c.key] || ""}
+                      onChange={v => setDraft({ ...draft, [c.key]: v })}
+                      wide={c.key === "notes"}
+                      type={c.key === "totalQuantity" ? "number" : undefined}
+                    />
+                  )
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+                <button onClick={saveDraft} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: C.success, color: "#fff", border: "none", fontWeight: 600, fontSize: 14, borderRadius: 2 }}>
+                  <Save size={15} /> Save
+                </button>
+                <button onClick={() => setDetailEditing(false)} style={{ padding: "9px 16px", background: "transparent", border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 14, borderRadius: 2, color: C.ink }}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ))}
+
+          {detailTab === "contents" && (
+            <>
+              {contentsCount === 0 ? (
+                <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>
+                  Nothing linked to this {selectedAsset.type.toLowerCase()} yet.
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {contentRooms.length > 0 && (
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginBottom: 2 }}>
+                      Rooms ({contentRooms.length})
+                    </div>
+                  )}
+                  {contentRooms.map(r => {
+                    const RIcon = iconFor(r.type);
+                    return (
+                      <button key={r.label} onClick={() => openDetail(r)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 2, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
+                        <RIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
+                        <span style={{ fontSize: 14, color: C.ink, flex: 1 }}>{r.room}</span>
+                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.accent }}>{r.label}</span>
+                        <ChevronRight size={14} style={{ color: C.placeholder }} />
+                      </button>
+                    );
+                  })}
+                  {contentDevices.length > 0 && (
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginTop: contentRooms.length ? 10 : 0, marginBottom: 2 }}>
+                      Devices ({contentDevices.length})
+                    </div>
+                  )}
+                  {contentDevices.map(d => {
+                    const DIcon = iconFor(d.type);
+                    return (
+                      <button key={d.label} onClick={() => openDetail(d)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 2, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
+                        <DIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
+                        <span style={{ fontSize: 14, color: C.ink, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {d.type}{d.brand ? ` · ${d.brand}` : ""}{selectedAsset.type === "Building" && d.room ? ` · ${d.room}` : ""}
+                        </span>
+                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.accent }}>{d.label}</span>
+                        <ChevronRight size={14} style={{ color: C.placeholder }} />
+                      </button>
+                    );
+                  })}
+                  {contentAllocations.length > 0 && (
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginTop: (contentRooms.length || contentDevices.length) ? 10 : 0, marginBottom: 2 }}>
+                      Bulk Items ({contentAllocations.length})
+                    </div>
+                  )}
+                  {contentAllocations.map(({ bulk, quantity }) => {
+                    const BIcon = iconFor(bulk.type);
+                    return (
+                      <button key={bulk.label} onClick={() => openDetail(bulk)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 2, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
+                        <BIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
+                        <span style={{ fontSize: 14, color: C.ink, flex: 1 }}>{bulk.itemName || "Bulk Item"}</span>
+                        <span style={{ fontWeight: 600, color: C.brandDark }}>× {quantity}</span>
+                        <ChevronRight size={14} style={{ color: C.placeholder }} />
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          )}
+
+          {detailTab === "allocations" && (
+            <>
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 16, fontSize: 13 }}>
+                <div><span style={{ color: C.muted }}>Total: </span><span style={{ fontWeight: 700, color: C.brandDark }}>{parseFloat(selectedAsset.totalQuantity) || 0}</span></div>
+                <div><span style={{ color: C.muted }}>Allocated: </span><span style={{ fontWeight: 700, color: C.brandDark }}>{getAllocatedTotal(selectedAsset)}</span></div>
+                <div><span style={{ color: C.muted }}>Available: </span><span style={{ fontWeight: 700, color: getAvailable(selectedAsset) < 0 ? C.danger : C.success }}>{getAvailable(selectedAsset)}</span></div>
+              </div>
+
+              <div style={{ border: `1.5px solid ${C.brandDark}`, borderRadius: 2, background: C.surface, padding: 14, marginBottom: 20 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
+                  <RoomField
+                    value={allocationDraft.room}
+                    onChange={v => {
+                      const existing = (selectedAsset.allocations || []).find(a => a.room === v);
+                      setAllocationDraft({ room: v, quantity: existing ? String(existing.quantity) : "" });
+                      setAllocationError("");
+                    }}
+                    roomOptions={roomAssetNames}
+                  />
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Quantity</span>
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      value={allocationDraft.quantity}
+                      onChange={e => { setAllocationDraft({ ...allocationDraft, quantity: e.target.value }); setAllocationError(""); }}
+                      placeholder="0"
+                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink }}
+                    />
+                  </label>
+                </div>
+                {allocationError && <div style={{ fontSize: 13, color: C.danger, marginBottom: 8 }}>{allocationError}</div>}
+                <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                  <button
+                    onClick={saveAllocation}
+                    disabled={!allocationDraft.room || !allocationDraft.quantity}
+                    style={{ padding: "8px 14px", background: (allocationDraft.room && allocationDraft.quantity) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 13 }}
+                  >
+                    Assign
+                  </button>
+                </div>
+              </div>
+
+              {(selectedAsset.allocations || []).length === 0 ? (
+                <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>Nothing assigned to a room yet.</div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {(selectedAsset.allocations || []).map(a => (
+                    <div key={a.room} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", border: `1px solid ${C.border}`, borderRadius: 2, background: C.surface, padding: "9px 14px" }}>
+                      <div style={{ fontSize: 14, color: C.ink }}>{a.room}</div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                        <span style={{ fontWeight: 600, color: C.brandDark }}>{a.quantity}</span>
+                        <button onClick={() => setConfirmAllocationRemove(a.room)} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4 }} aria-label={`Remove allocation for ${a.room}`}>
+                          <X size={14} color={C.placeholder} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
+          {detailTab === "changes" && (
+            <>
+              {totalLoggedCost > 0 && (
+                <div style={{ textAlign: "right", fontSize: 12, color: C.muted, marginBottom: 8 }}>
+                  Total logged: ${totalLoggedCost.toFixed(2)}
+                </div>
+              )}
+              <div style={{ border: `1.5px solid ${C.brandDark}`, borderRadius: 2, background: C.surface, padding: 14, marginBottom: 20 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>
+                      Change type
+                      <button onClick={() => setShowChangeTypeManager(true)} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4, display: "flex" }} aria-label="Manage change types">
+                        <Settings size={12} color={C.accent} />
+                      </button>
+                    </span>
+                    <select
+                      value={changeDraft.changeType}
+                      onChange={e => setChangeDraft({ ...changeDraft, changeType: e.target.value })}
+                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink, background: "#fff" }}
+                    >
+                      <option value="">Select…</option>
+                      {changeTypes.map(t => <option key={t} value={t}>{t}</option>)}
+                    </select>
+                  </label>
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>
+                      Vendor
+                      <button onClick={() => setShowVendorManager(true)} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4, display: "flex" }} aria-label="Manage vendors">
+                        <Settings size={12} color={C.accent} />
+                      </button>
+                    </span>
+                    <select
+                      value={changeDraft.vendor}
+                      onChange={e => setChangeDraft({ ...changeDraft, vendor: e.target.value })}
+                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink, background: "#fff" }}
+                    >
+                      <option value="">{vendors.length ? "Select…" : "No vendors yet"}</option>
+                      {(changeDraft.vendor && !vendors.includes(changeDraft.vendor) ? [changeDraft.vendor, ...vendors] : vendors).map(v => (
+                        <option key={v} value={v}>{v}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Cost</span>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      value={changeDraft.cost}
+                      onChange={e => setChangeDraft({ ...changeDraft, cost: e.target.value })}
+                      placeholder="0.00"
+                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink }}
+                    />
+                  </label>
+                </div>
+                <textarea
+                  value={changeDraft.note}
+                  onChange={e => setChangeDraft({ ...changeDraft, note: e.target.value })}
+                  placeholder="Details — what happened, why…"
+                  rows={2}
+                  style={{ width: "100%", padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, resize: "vertical", color: C.ink }}
+                />
+                <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+                  <button
+                    onClick={addChange}
+                    disabled={!changeDraft.changeType}
+                    style={{ padding: "8px 14px", background: changeDraft.changeType ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 13 }}
+                  >
+                    Log change
+                  </button>
+                </div>
+              </div>
+
+              {changeEntries.length === 0 ? (
+                <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>No changes logged yet.</div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {changeEntries.map((ch, i) => {
+                    const realIdx = changeEntries.length - 1 - i;
+                    return (
+                      <div key={realIdx} style={{ border: `1px solid ${C.border}`, borderRadius: 2, background: C.surface, padding: "10px 14px" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+                          <span style={{ fontWeight: 700, fontSize: 13, color: C.brandDark }}>{ch.changeType}</span>
+                          <button onClick={() => setConfirmChangeDelete(realIdx)} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4 }} aria-label="Delete change entry">
+                            <X size={13} color={C.placeholder} />
+                          </button>
+                        </div>
+                        <div style={{ fontSize: 13, color: C.muted, marginBottom: 4 }}>
+                          {[ch.vendor, ch.cost && `$${parseFloat(ch.cost).toFixed(2)}`].filter(Boolean).join(" · ") || "—"}
+                        </div>
+                        {ch.note && <div style={{ fontSize: 14, color: C.ink, whiteSpace: "pre-wrap", marginBottom: 6 }}>{ch.note}</div>}
+                        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.placeholder }}>
+                          {formatWhen(ch.at)}{ch.by ? ` · ${ch.by}` : ""}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          )}
+
+          {detailTab === "comments" && (
+            <>
+              <div style={{ border: `1.5px solid ${C.brandDark}`, borderRadius: 2, background: C.surface, padding: 14, marginBottom: 20 }}>
+                <textarea
+                  value={commentDraft}
+                  onChange={e => setCommentDraft(e.target.value)}
+                  placeholder="Log a note — e.g. serviced, moved, issue reported…"
+                  rows={3}
+                  style={{ width: "100%", padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, resize: "vertical", color: C.ink }}
+                />
+                <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+                  <button
+                    onClick={addComment}
+                    disabled={!commentDraft.trim()}
+                    style={{ padding: "8px 14px", background: commentDraft.trim() ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 13 }}
+                  >
+                    Add comment
+                  </button>
+                </div>
+              </div>
+
+              {comments.length === 0 ? (
+                <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>No comments logged yet.</div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {comments.map((cm, i) => {
+                    const realIdx = comments.length - 1 - i;
+                    return (
+                      <div key={realIdx} style={{ border: `1px solid ${C.border}`, borderRadius: 2, background: C.surface, padding: "10px 14px" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+                          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted }}>
+                            {formatWhen(cm.at)}{cm.by ? ` · ${cm.by}` : ""}
+                          </span>
+                          <button onClick={() => setConfirmCommentDelete(realIdx)} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4 }} aria-label="Delete comment">
+                            <X size={13} color={C.placeholder} />
+                          </button>
+                        </div>
+                        <div style={{ fontSize: 14, color: C.ink, whiteSpace: "pre-wrap" }}>{cm.text}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          )}
+
+          {detailTab === "audit" && (
+            assetAuditEntries.length === 0 ? (
+              <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>No edits recorded yet.</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {assetAuditEntries.map((entry, i) => (
+                  <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 2, background: C.surface, padding: "9px 14px" }}>
+                    <div style={{ fontSize: 13, color: C.ink, marginBottom: 3 }}>{describeAudit(entry)}</div>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.placeholder }}>
+                      {formatWhen(entry.at)}{entry.by ? ` · ${entry.by}` : ""}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )
+          )}
+        </div>
+
+        {confirmDelete && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20 }}>
+            <div style={{ background: C.surface, border: `1.5px solid ${C.brandDark}`, borderRadius: 2, padding: 24, maxWidth: 340 }}>
+              <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Permanently delete {confirmDelete}?</div>
+              <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>This erases it from the inventory entirely — including its comments and change log. Unlike archiving, this cannot be recovered.</div>
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                <button onClick={() => setConfirmDelete(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 2, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                <button onClick={() => doDelete(confirmDelete)} style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 13 }}>Permanently delete</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {confirmArchive && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20 }}>
+            <div style={{ background: C.surface, border: `1.5px solid ${C.brandDark}`, borderRadius: 2, padding: 24, maxWidth: 340 }}>
+              <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Archive {confirmArchive}?</div>
+              <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>It'll be hidden from the active list by default but nothing is deleted — you can restore it, or permanently delete it, anytime from here.</div>
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                <button onClick={() => setConfirmArchive(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 2, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                <button onClick={() => archiveAsset(confirmArchive)} style={{ padding: "8px 14px", background: C.brandDark, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 13 }}>Archive</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {confirmCommentDelete !== null && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20 }}>
+            <div style={{ background: C.surface, border: `1.5px solid ${C.brandDark}`, borderRadius: 2, padding: 24, maxWidth: 340 }}>
+              <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Delete this comment?</div>
+              <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>This can't be undone.</div>
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                <button onClick={() => setConfirmCommentDelete(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 2, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                <button
+                  onClick={() => { deleteComment(confirmCommentDelete); setConfirmCommentDelete(null); }}
+                  style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 13 }}
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {confirmChangeDelete !== null && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20 }}>
+            <div style={{ background: C.surface, border: `1.5px solid ${C.brandDark}`, borderRadius: 2, padding: 24, maxWidth: 340 }}>
+              <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Delete this change log entry?</div>
+              <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>This can't be undone.</div>
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                <button onClick={() => setConfirmChangeDelete(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 2, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                <button
+                  onClick={() => { deleteChange(confirmChangeDelete); setConfirmChangeDelete(null); }}
+                  style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 13 }}
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {confirmAllocationRemove !== null && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20 }}>
+            <div style={{ background: C.surface, border: `1.5px solid ${C.brandDark}`, borderRadius: 2, padding: 24, maxWidth: 340 }}>
+              <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Remove allocation for {confirmAllocationRemove}?</div>
+              <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>That quantity returns to the available pool. This can't be undone.</div>
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                <button onClick={() => setConfirmAllocationRemove(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 2, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                <button
+                  onClick={() => removeAllocation(confirmAllocationRemove)}
+                  style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 13 }}
+                >
+                  Remove
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {showChangeTypeManager && (
+          <ListManagerModal
+            title="Manage change types"
+            items={changeTypes}
+            newValue={newChangeTypeName}
+            onNewValueChange={setNewChangeTypeName}
+            onAdd={addChangeType}
+            onRemove={removeChangeType}
+            onClose={() => { setShowChangeTypeManager(false); setNewChangeTypeName(""); }}
+            placeholder="New change type"
+          />
+        )}
+
+        {showVendorManager && (
+          <ListManagerModal
+            title="Manage vendors"
+            items={vendors}
+            newValue={newVendorName}
+            onNewValueChange={setNewVendorName}
+            onAdd={addVendor}
+            onRemove={removeVendor}
+            onClose={() => { setShowVendorManager(false); setNewVendorName(""); }}
+            placeholder="New vendor name"
+          />
+        )}
+      </div>
+    );
+  }
+
+  // ---------- LIST VIEW ----------
+  const hiddenColumns = columns.filter(c => !c.visible);
+  const addFormColumns = formColumnsFor(draft.type);
+
+  return (
+    <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'IBM Plex Sans', 'Helvetica Neue', sans-serif", color: C.ink }}>
+      {globalStyle}
+      {nameModal}
+      {peripheralsManagerModal}
+      {usersManagerModal}
+
+      {/* Slim header */}
+      <div style={{ borderBottom: `2px solid ${C.brand}`, padding: "10px 20px", position: "sticky", top: 0, background: C.bg, zIndex: 10, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+        <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: C.brandDark }}>BCA Asset Tracker</h1>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <button
+            onClick={() => { setNameInput(currentUser || ""); setShowNamePrompt(true); }}
+            style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", padding: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: C.muted }}
+          >
+            <UserCircle size={14} style={{ color: C.brand }} />
+            {currentUser || "Set name"}
+            {saveError && <span style={{ color: C.danger, marginLeft: 8 }}>Sync failed</span>}
+          </button>
+        </div>
+      </div>
+
+      <div style={{ padding: "18px 20px 80px", maxWidth: 1300, margin: "0 auto" }}>
+        {/* Controls */}
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 18 }}>
+          <div style={{ position: "relative", flex: "1 1 260px" }}>
+            <Search size={16} style={{ position: "absolute", left: 12, top: 12, color: C.accent }} />
+            <input
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Search asset ID, room, user, serial…"
+              style={{ width: "100%", padding: "10px 12px 10px 36px", border: `1.5px solid ${C.brandDark}`, background: C.surface, fontSize: 14, borderRadius: 2, color: C.ink }}
+            />
+          </div>
+          <button
+            onClick={() => setShowColManager(true)}
+            style={{ display: "flex", alignItems: "center", gap: 6, padding: "10px 14px", background: C.surface, border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 14, borderRadius: 2, color: C.ink }}
+          >
+            <Columns3 size={16} /> Columns
+          </button>
+
+          <button
+            onClick={exportToExcel}
+            style={{ display: "flex", alignItems: "center", gap: 6, padding: "10px 14px", background: C.surface, border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 14, borderRadius: 2, color: C.ink }}
+          >
+            <Download size={16} /> Export
+          </button>
+
+          <button
+            onClick={startAdd}
+            style={{ display: "flex", alignItems: "center", gap: 6, padding: "10px 16px", background: C.brand, color: "#fff", border: "none", fontWeight: 600, fontSize: 14, borderRadius: 2 }}
+          >
+            <Plus size={16} /> Add asset
+          </button>
+        </div>
+
+        {/* Add form */}
+        {showAdd && (
+          <div style={{ border: `1.5px solid ${C.brandDark}`, background: C.surface, padding: 20, marginBottom: 18, borderRadius: 2 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <div style={{ fontWeight: 700, fontSize: 15, color: C.brandDark }}>Add asset</div>
+              <button onClick={cancelAdd} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12 }}>
+              {addFormColumns.map(c => (
+                c.key === "type" ? (
+                  <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v })} />
+                ) : c.key === "room" && draft.type !== "Room" ? (
+                  <RoomField key={c.key} value={draft.room || ""} onChange={v => setDraft({ ...draft, room: v })} roomOptions={roomAssetNames} />
+                ) : c.key === "building" && draft.type !== "Building" ? (
+                  <BuildingField key={c.key} value={draft.building || ""} onChange={v => setDraft({ ...draft, building: v })} buildingOptions={buildingAssetNames} />
+                ) : c.key === "person" ? (
+                  <UserField
+                    key={c.key}
+                    value={draft.person || ""}
+                    onChange={v => setDraft({ ...draft, person: v })}
+                    userOptions={usersList}
+                    onManage={() => setShowUsersManager(true)}
+                  />
+                ) : c.key === "peripherals" ? (
+                  <PeripheralsField
+                    key={c.key}
+                    value={draft.peripherals || ""}
+                    onChange={v => setDraft({ ...draft, peripherals: v })}
+                    options={peripheralsList}
+                    onManage={() => setShowPeripheralsManager(true)}
+                  />
+                ) : (
+                  <Field
+                    key={c.key}
+                    label={c.label}
+                    value={draft[c.key] || ""}
+                    onChange={v => setDraft({ ...draft, [c.key]: v })}
+                    wide={c.key === "notes"}
+                    placeholder={c.key === "screenSize" ? 'e.g. 24"' : undefined}
+                    type={c.key === "totalQuantity" ? "number" : undefined}
+                  />
+                )
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+              <button onClick={saveDraft} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: C.success, color: "#fff", border: "none", fontWeight: 600, fontSize: 14, borderRadius: 2 }}>
+                <Save size={15} /> Save
+              </button>
+              <button onClick={cancelAdd} style={{ padding: "9px 16px", background: "transparent", border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 14, borderRadius: 2, color: C.ink }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Result count + bulk actions on the filtered set */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: C.muted }}>
+            Showing {filtered.length} of {assets.length} assets
+            {sortConfig && (
+              <button onClick={() => setSortConfig(null)} style={{ background: "none", border: "none", padding: 0, marginLeft: 8, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: C.accent, textDecoration: "underline" }}>
+                clear sort
+              </button>
+            )}
+          </div>
+        </div>
+
+        {userFilter !== "All users" && filtered.length > 0 && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", border: `1.5px solid ${C.brand}`, borderRadius: 2, background: C.surface, padding: "10px 14px", marginBottom: 10, fontSize: 13 }}>
+            <span style={{ color: C.muted }}>Reassign {filtered.filter(a => fieldAppliesTo("person", a.type)).length} filtered asset(s) from <b style={{ color: C.brandDark }}>{userFilter}</b> to:</span>
+            <select
+              value={reassignTarget}
+              onChange={e => setReassignTarget(e.target.value)}
+              style={{ padding: "6px 10px", border: `1.5px solid ${C.border}`, fontSize: 13, borderRadius: 2, color: C.ink, background: "#fff", flex: "1 1 140px", maxWidth: 220 }}
+            >
+              <option value="">Select a user…</option>
+              {usersList.filter(u => u !== userFilter).map(u => <option key={u} value={u}>{u}</option>)}
+            </select>
+            <button onClick={() => setShowUsersManager(true)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label="Manage users">
+              <Settings size={14} color={C.accent} />
+            </button>
+            <button
+              onClick={() => reassignFilteredTo(reassignTarget)}
+              disabled={!reassignTarget.trim()}
+              style={{ padding: "6px 12px", background: reassignTarget.trim() ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 13 }}
+            >
+              Reassign
+            </button>
+          </div>
+        )}
+
+        {roomFilter !== "All rooms" && filtered.length > 0 && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", border: `1.5px solid ${C.brand}`, borderRadius: 2, background: C.surface, padding: "10px 14px", marginBottom: 10, fontSize: 13 }}>
+            <span style={{ color: C.muted }}>Move {filtered.filter(a => a.type !== "Room" && a.type !== "Building" && a.type !== "Bulk Item").length} filtered device(s) from <b style={{ color: C.brandDark }}>{roomFilter}</b> to:</span>
+            <select
+              value={moveTarget}
+              onChange={e => setMoveTarget(e.target.value)}
+              style={{ padding: "6px 10px", border: `1.5px solid ${C.border}`, fontSize: 13, borderRadius: 2, color: C.ink, background: "#fff", flex: "1 1 140px", maxWidth: 220 }}
+            >
+              <option value="">Select a room…</option>
+              {roomAssetNames.filter(r => r !== roomFilter).map(r => <option key={r} value={r}>{r}</option>)}
+            </select>
+            <button
+              onClick={() => moveFilteredTo(moveTarget)}
+              disabled={!moveTarget}
+              style={{ padding: "6px 12px", background: moveTarget ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 13 }}
+            >
+              Move
+            </button>
+          </div>
+        )}
+
+        {/* Table */}
+        <div style={{ border: `1.5px solid ${C.brandDark}`, borderRadius: 2, overflow: "hidden", background: C.surface }}>
+          <div className="scroller" style={{ overflowX: "auto" }}>
+            <div style={{ display: "grid", gridTemplateColumns: gridTemplate, background: C.brandDark, color: "#F4F0E6", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", minWidth: "max-content" }}>
+              {visibleColumns.map((c, i) => {
+                const cfg = filterConfigs[c.key];
+                const isFiltered = cfg && cfg.value !== cfg.options[0];
+                const sortedHere = sortConfig && sortConfig.key === c.key;
+                const sortArrow = sortedHere ? (sortConfig.dir === "asc" ? " ↑" : " ↓") : "";
+                return (
+                  <div key={c.key} style={{ position: i === 0 ? "sticky" : "static", left: i === 0 ? 0 : undefined, background: C.brandDark, zIndex: i === 0 ? 2 : 1 }}>
+                    {cfg ? (
+                      <button
+                        onClick={() => setActiveFilterCol(c.key)}
+                        style={{
+                          width: "100%", display: "flex", alignItems: "center", gap: 5, textAlign: "left",
+                          background: "none", border: "none", padding: "10px 14px",
+                          fontFamily: "inherit", fontSize: "inherit", letterSpacing: "inherit", textTransform: "inherit",
+                          color: isFiltered || sortedHere ? "#E8C9A0" : "#F4F0E6", fontWeight: isFiltered || sortedHere ? 700 : "inherit",
+                        }}
+                      >
+                        {c.label}{sortArrow}
+                        <Filter size={11} style={{ flexShrink: 0 }} />
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => setSortConfig(
+                          !sortedHere ? { key: c.key, dir: "asc" }
+                          : sortConfig.dir === "asc" ? { key: c.key, dir: "desc" }
+                          : null
+                        )}
+                        title="Tap to sort"
+                        style={{
+                          width: "100%", display: "flex", alignItems: "center", gap: 5, textAlign: "left",
+                          background: "none", border: "none", padding: "10px 14px",
+                          fontFamily: "inherit", fontSize: "inherit", letterSpacing: "inherit", textTransform: "inherit",
+                          color: sortedHere ? "#E8C9A0" : "#F4F0E6", fontWeight: sortedHere ? 700 : "inherit",
+                        }}
+                      >
+                        {c.label}{sortArrow}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+              <div style={{ padding: "10px 14px" }} />
+            </div>
+
+            {filtered.length === 0 && (
+              <div style={{ padding: 32, textAlign: "center", color: C.empty, fontSize: 14, minWidth: "max-content" }}>No assets match your search.</div>
+            )}
+
+            {filtered.map(a => (
+              <div
+                key={a.label}
+                className="row-body"
+                onClick={() => openDetail(a)}
+                style={{ display: "grid", gridTemplateColumns: gridTemplate, alignItems: "center", cursor: "pointer", background: C.surface, borderTop: `1px solid ${C.border}` }}
+              >
+                {visibleColumns.map((c, i) => {
+                  const isTypeCol = c.key === "type";
+                  const Icon = isTypeCol ? iconFor(a.type) : null;
+                  const applies = fieldAppliesTo(c.key, a.type);
+                  const isInferredBuilding = c.key === "building" && !applies;
+                  const inferredValue = isInferredBuilding ? inferBuilding(a, assets) : "";
+                  return (
+                    <div
+                      key={c.key}
+                      style={{
+                        padding: "12px 14px",
+                        fontSize: c.key === "label" ? 12 : 13,
+                        fontFamily: c.key === "label" ? "'IBM Plex Mono', monospace" : undefined,
+                        fontWeight: c.key === "label" ? 600 : isTypeCol ? 500 : 400,
+                        fontStyle: isInferredBuilding && inferredValue ? "italic" : "normal",
+                        color: c.key === "label" ? C.accent : (applies || (isInferredBuilding && inferredValue)) ? C.muted : C.border,
+                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                        display: "flex", alignItems: "center", gap: 8,
+                        position: i === 0 ? "sticky" : "static",
+                        left: i === 0 ? 0 : undefined,
+                        background: i === 0 ? C.surface : "transparent",
+                        zIndex: i === 0 ? 2 : "auto",
+                      }}
+                      title={isInferredBuilding && inferredValue ? "Inherited via this asset's Room" : undefined}
+                    >
+                      {Icon && <Icon size={15} style={{ flexShrink: 0, color: C.brand }} />}
+                      {applies ? (a[c.key] || "—") : isInferredBuilding ? (inferredValue || "") : ""}
+                    </div>
+                  );
+                })}
+                <div style={{ display: "flex", justifyContent: "center", padding: "12px 8px" }}>
+                  <ChevronRight size={15} style={{ color: C.placeholder }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Column header filter modal */}
+      {activeFilterCol && filterConfigs[activeFilterCol] && (
+        <div onClick={() => setActiveFilterCol(null)} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1.5px solid ${C.brandDark}`, borderRadius: 2, padding: 20, width: "100%", maxWidth: 300, maxHeight: "70vh", overflowY: "auto" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>
+                Filter by {filterConfigs[activeFilterCol].label}
+              </div>
+              <button onClick={() => setActiveFilterCol(null)} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              {filterConfigs[activeFilterCol].options.map(opt => {
+                const isSelected = opt === filterConfigs[activeFilterCol].value;
+                return (
+                  <button
+                    key={opt}
+                    onClick={() => { filterConfigs[activeFilterCol].setValue(opt); setActiveFilterCol(null); }}
+                    style={{
+                      display: "flex", alignItems: "center", justifyContent: "space-between",
+                      padding: "9px 10px", background: isSelected ? C.hover : "transparent", border: "none",
+                      borderRadius: 2, fontSize: 14, textAlign: "left", color: C.ink, fontWeight: isSelected ? 600 : 400,
+                    }}
+                  >
+                    {opt}
+                    {isSelected && <Check size={15} color={C.brand} />}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 12, paddingTop: 12, display: "flex", gap: 6 }}>
+              {[["asc", "Sort A → Z"], ["desc", "Sort Z → A"]].map(([dir, lbl]) => {
+                const active = sortConfig && sortConfig.key === activeFilterCol && sortConfig.dir === dir;
+                return (
+                  <button
+                    key={dir}
+                    onClick={() => { setSortConfig(active ? null : { key: activeFilterCol, dir }); setActiveFilterCol(null); }}
+                    style={{ flex: 1, padding: "7px 10px", background: active ? C.brand : "transparent", color: active ? "#fff" : C.ink, border: `1.5px solid ${active ? C.brand : C.border}`, borderRadius: 2, fontSize: 13, fontWeight: 600 }}
+                  >
+                    {lbl}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Column manager modal */}
+      {showColManager && (
+        <div onClick={() => setShowColManager(false)} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1.5px solid ${C.brandDark}`, borderRadius: 2, padding: 20, width: "100%", maxWidth: 340, maxHeight: "80vh", overflowY: "auto" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>Columns</div>
+              <button onClick={() => setShowColManager(false)} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+            </div>
+            <div style={{ fontSize: 12, color: C.empty, marginBottom: 10 }}>Hostname and Screen Size only apply to some types — they'll show blank for others.</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
+              {columns.map(c => (
+                <div key={c.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 14 }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, opacity: c.locked ? 0.6 : 1 }}>
+                    <input type="checkbox" checked={c.visible} disabled={c.locked} onChange={() => toggleColumnVisible(c.key)} />
+                    {c.label} {c.locked && <Lock size={11} />}
+                  </label>
+                  {c.custom && (
+                    <button onClick={() => setConfirmDeleteCol(c.key)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}>
+                      <Trash2 size={14} color={C.danger} />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 14, display: "flex", gap: 6 }}>
+              <input
+                value={newColName}
+                onChange={e => setNewColName(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && addColumn()}
+                placeholder="New column name"
+                style={{ flex: 1, padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink }}
+              />
+              <button onClick={addColumn} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 2, fontSize: 14, fontWeight: 600 }}>Add</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete column confirm */}
+      {confirmDeleteCol && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30 }}>
+          <div style={{ background: C.surface, border: `1.5px solid ${C.brandDark}`, borderRadius: 2, padding: 24, maxWidth: 360 }}>
+            <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Remove "{columns.find(c => c.key === confirmDeleteCol)?.label}" column?</div>
+            <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>This deletes that field's data from every asset. This can't be undone.</div>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button onClick={() => setConfirmDeleteCol(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 2, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+              <button onClick={() => removeColumn(confirmDeleteCol)} style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 13 }}>Remove</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Field({ label, value, onChange, placeholder, wide, type }) {
+  return (
+    <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: wide ? "1 / -1" : undefined }}>
+      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>{label}</span>
+      <input
+        type={type || "text"}
+        inputMode={type === "number" ? "numeric" : undefined}
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder={placeholder}
+        style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink }}
+      />
+    </label>
+  );
+}
+
+function TypeField({ value, onChange }) {
+  const options = TYPE_OPTIONS.includes(value) || !value ? TYPE_OPTIONS : [value, ...TYPE_OPTIONS];
+  return (
+    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Type</span>
+      <select
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink, background: "#fff" }}
+      >
+        {options.map(o => <option key={o} value={o}>{o}</option>)}
+      </select>
+    </label>
+  );
+}
+
+function RoomField({ value, onChange, roomOptions }) {
+  const options = !value || roomOptions.includes(value) ? roomOptions : [value, ...roomOptions];
+  return (
+    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Room</span>
+      <select
+        value={value || ""}
+        onChange={e => onChange(e.target.value)}
+        style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink, background: "#fff" }}
+      >
+        <option value="">{roomOptions.length ? "Select a room…" : "No Room assets yet"}</option>
+        {options.map(o => <option key={o} value={o}>{o}</option>)}
+      </select>
+    </label>
+  );
+}
+
+function BuildingField({ value, onChange, buildingOptions }) {
+  const options = !value || buildingOptions.includes(value) ? buildingOptions : [value, ...buildingOptions];
+  return (
+    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Building</span>
+      <select
+        value={value || ""}
+        onChange={e => onChange(e.target.value)}
+        style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink, background: "#fff" }}
+      >
+        <option value="">{buildingOptions.length ? "Select a building…" : "No Building assets yet"}</option>
+        {options.map(o => <option key={o} value={o}>{o}</option>)}
+      </select>
+    </label>
+  );
+}
+
+function UserField({ value, onChange, userOptions, onManage }) {
+  const selected = (value || "").split("/").map(s => s.trim()).filter(Boolean);
+  // Include any legacy/custom names already on this asset that aren't in the
+  // managed list, so editing never silently drops someone.
+  const allOptions = [...userOptions, ...selected.filter(s => !userOptions.includes(s))];
+
+  function toggle(opt) {
+    const next = selected.includes(opt) ? selected.filter(s => s !== opt) : [...selected, opt];
+    onChange(next.join("/"));
+  }
+
+  return (
+    <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 6 }}>
+      <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>
+        User{selected.length > 1 ? "s" : ""}
+        <button type="button" onClick={onManage} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4, display: "flex" }} aria-label="Manage users">
+          <Settings size={12} color={C.accent} />
+        </button>
+      </span>
+      {allOptions.length === 0 ? (
+        <div style={{ fontSize: 13, color: C.empty }}>No users defined yet — add some with the gear icon above.</div>
+      ) : (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {allOptions.map(opt => {
+            const active = selected.includes(opt);
+            return (
+              <button
+                key={opt}
+                type="button"
+                onClick={() => toggle(opt)}
+                style={{
+                  padding: "6px 12px", borderRadius: 14, fontSize: 13, fontWeight: active ? 600 : 500,
+                  border: `1.5px solid ${active ? C.brand : C.border}`,
+                  background: active ? C.brand : "#fff",
+                  color: active ? "#fff" : C.ink,
+                }}
+              >
+                {opt}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PeripheralsField({ value, onChange, options, onManage }) {
+  const selected = (value || "").split("/").map(s => s.trim()).filter(Boolean);
+  // Include any legacy/custom values already on this asset that aren't in the managed list,
+  // so editing never silently drops data.
+  const allOptions = [...options, ...selected.filter(s => !options.includes(s))];
+
+  function toggle(opt) {
+    const next = selected.includes(opt) ? selected.filter(s => s !== opt) : [...selected, opt];
+    onChange(next.join("/"));
+  }
+
+  return (
+    <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 6 }}>
+      <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>
+        Peripherals
+        <button onClick={onManage} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4, display: "flex" }} aria-label="Manage peripherals">
+          <Settings size={12} color={C.accent} />
+        </button>
+      </span>
+      {allOptions.length === 0 ? (
+        <div style={{ fontSize: 13, color: C.empty }}>No peripherals defined yet — add some with the gear icon above.</div>
+      ) : (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {allOptions.map(opt => {
+            const active = selected.includes(opt);
+            return (
+              <button
+                key={opt}
+                type="button"
+                onClick={() => toggle(opt)}
+                style={{
+                  padding: "6px 12px", borderRadius: 14, fontSize: 13, fontWeight: active ? 600 : 500,
+                  border: `1.5px solid ${active ? C.brand : C.border}`,
+                  background: active ? C.brand : "#fff",
+                  color: active ? "#fff" : C.ink,
+                }}
+              >
+                {opt}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Detail({ label, value }) {
+  return (
+    <div>
+      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: 0.5, textTransform: "uppercase", color: C.placeholder }}>{label}</span>
+      <div style={{ color: value ? C.ink : C.placeholder, fontSize: 14 }}>{value || "—"}</div>
+    </div>
+  );
+}
+
+function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onRemove, onClose, placeholder }) {
+  const [confirmItem, setConfirmItem] = useState(null);
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 40, padding: 16 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1.5px solid ${C.brandDark}`, borderRadius: 2, padding: 20, width: "100%", maxWidth: 320, maxHeight: "70vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>{title}</div>
+          <button onClick={onClose} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+        </div>
+        {items.length === 0 && (
+          <div style={{ fontSize: 13, color: C.empty, marginBottom: 12 }}>Nothing added yet.</div>
+        )}
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
+          {items.map(item => (
+            <div key={item} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 14 }}>
+              {confirmItem === item ? (
+                <>
+                  <span style={{ color: C.danger, fontSize: 13 }}>Remove "{item}"?</span>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button onClick={() => setConfirmItem(null)} style={{ padding: "3px 8px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 2, fontSize: 12, color: C.ink }}>Cancel</button>
+                    <button
+                      onClick={() => { onRemove(item); setConfirmItem(null); }}
+                      style={{ padding: "3px 8px", background: C.danger, color: "#fff", border: "none", borderRadius: 2, fontSize: 12, fontWeight: 600 }}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <span>{item}</span>
+                  <button onClick={() => setConfirmItem(item)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}>
+                    <Trash2 size={14} color={C.danger} />
+                  </button>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+        <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 14, display: "flex", gap: 6 }}>
+          <input
+            value={newValue}
+            onChange={e => onNewValueChange(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && onAdd()}
+            placeholder={placeholder}
+            style={{ flex: 1, padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink }}
+          />
+          <button onClick={onAdd} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 2, fontSize: 14, fontWeight: 600 }}>Add</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SelectBox({ value, onChange, options }) {
+  return (
+    <select
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      style={{ padding: "10px 12px", border: `1.5px solid ${C.brandDark}`, background: C.surface, fontSize: 14, borderRadius: 2, color: C.ink }}
+    >
+      {options.map(o => <option key={o} value={o}>{o}</option>)}
+    </select>
+  );
+}
+
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<AssetTracker />);
+</script>
+</body>
+</html>
