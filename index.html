@@ -42,10 +42,11 @@ import {
   Wrench, UserCircle, Settings, History, Archive, ArchiveRestore, Building2, Package, Copy,
 } from "lucide-react";
 
-// Starter managed peripherals/users lists — empty until the school builds
-// them up via the "manage" (gear icon) UI, or they arrive from the Sheet on load.
+// Starter managed peripherals/users/bulk-item-type lists — empty until the school
+// builds them up via the "manage" (gear icon) UI, or they arrive from the Sheet on load.
 const DEFAULT_PERIPHERALS = [];
 const DEFAULT_USERS = [];
+const DEFAULT_BULK_ITEM_TYPES = [];
 
 // Known types, used for the Type dropdown and for icons
 const TYPE_OPTIONS = ["Computer", "Monitor", "Phone", "TV", "DocuCam", "Stream Deck", "Room", "Building", "Bulk Item", "Other"];
@@ -60,7 +61,7 @@ const TYPE_ONLY_FIELDS = {
   screenSize: ["Monitor", "TV"],
   building: ["Room", "Building"], // Room links to a building; Building uses it as its own name
   totalQuantity: ["Bulk Item"],
-  itemName: ["Bulk Item"], // What the bulk item actually is — "Folding Chair", "Cafeteria Table"…
+  itemName: ["Bulk Item"], // Bulk Item's sub-type — picked from the managed bulkItemTypes list (e.g. "Folding Chair", "Cafeteria Table")
 };
 // Fields that don't make sense for a Room asset at all (it's a space, not a device).
 const ROOM_EXCLUDED_FIELDS = ["brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"];
@@ -80,7 +81,7 @@ function fieldAppliesTo(key, type) {
 
 const DEFAULT_COLUMNS = [
   { key: "type", label: "Type", width: 140 },
-  { key: "itemName", label: "Item Name", width: 150 },
+  { key: "itemName", label: "Sub-Type", width: 150 },
   { key: "screenSize", label: "Screen Size", width: 110 },
   { key: "totalQuantity", label: "Total Qty", width: 100 },
   { key: "building", label: "Building", width: 130 },
@@ -168,6 +169,9 @@ function AssetTracker() {
   const [usersList, setUsersList] = useState(DEFAULT_USERS);
   const [showUsersManager, setShowUsersManager] = useState(false);
   const [newUserName, setNewUserName] = useState("");
+  const [bulkItemTypes, setBulkItemTypes] = useState(DEFAULT_BULK_ITEM_TYPES);
+  const [showBulkItemTypesManager, setShowBulkItemTypesManager] = useState(false);
+  const [newBulkItemTypeName, setNewBulkItemTypeName] = useState("");
   const [auditLog, setAuditLog] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -240,6 +244,7 @@ function AssetTracker() {
       setVendors(Array.isArray(data.vendors) ? data.vendors : []);
       setAuditLog(Array.isArray(data.auditLog) ? data.auditLog : []);
       setPeripheralsList(Array.isArray(data.peripheralsList) ? data.peripheralsList : DEFAULT_PERIPHERALS);
+      setBulkItemTypes(Array.isArray(data.bulkItemTypes) ? data.bulkItemTypes : DEFAULT_BULK_ITEM_TYPES);
       if (Array.isArray(data.usersList) && data.usersList.length) {
         setUsersList(data.usersList);
       } else {
@@ -308,7 +313,7 @@ function AssetTracker() {
     return true;
   }
 
-  async function persist(nextAssets, nextColumns, nextChangeTypes = changeTypes, nextVendors = vendors, nextAuditLog = auditLog, nextPeripheralsList = peripheralsList, nextUsersList = usersList) {
+  async function persist(nextAssets, nextColumns, nextChangeTypes = changeTypes, nextVendors = vendors, nextAuditLog = auditLog, nextPeripheralsList = peripheralsList, nextUsersList = usersList, nextBulkItemTypes = bulkItemTypes) {
     // Guard against ever writing over the Sheet before a real snapshot has been
     // loaded — the UI shouldn't be reachable in that state, but this keeps a
     // load-failure from being able to clobber live data no matter how it's triggered.
@@ -320,10 +325,12 @@ function AssetTracker() {
     setAuditLog(nextAuditLog);
     setPeripheralsList(nextPeripheralsList);
     setUsersList(nextUsersList);
+    setBulkItemTypes(nextBulkItemTypes);
     try {
       await writeSnapshot({
         assets: nextAssets, columns: nextColumns, changeTypes: nextChangeTypes,
         vendors: nextVendors, auditLog: nextAuditLog, peripheralsList: nextPeripheralsList, usersList: nextUsersList,
+        bulkItemTypes: nextBulkItemTypes,
       });
       setSaveError(false);
     } catch (e) {
@@ -755,6 +762,19 @@ function AssetTracker() {
     persist(assets, columns, changeTypes, vendors, auditLog, peripheralsList, usersList.filter(u => u !== name));
   }
 
+  function addBulkItemType() {
+    const name = newBulkItemTypeName.trim();
+    if (!name || bulkItemTypes.includes(name)) return;
+    persist(assets, columns, changeTypes, vendors, auditLog, peripheralsList, usersList, [...bulkItemTypes, name].sort());
+    setNewBulkItemTypeName("");
+  }
+
+  // Removing a sub-type only takes it off the pick list — bulk items already
+  // using that value keep it until someone edits them.
+  function removeBulkItemType(name) {
+    persist(assets, columns, changeTypes, vendors, auditLog, peripheralsList, usersList, bulkItemTypes.filter(t => t !== name));
+  }
+
   function exportToExcel() {
     const assetRows = assets.map(a => {
       const row = {};
@@ -927,6 +947,19 @@ function AssetTracker() {
     />
   );
 
+  const bulkItemTypesManagerModal = showBulkItemTypesManager && (
+    <ListManagerModal
+      title="Manage bulk item sub-types"
+      items={bulkItemTypes}
+      newValue={newBulkItemTypeName}
+      onNewValueChange={setNewBulkItemTypeName}
+      onAdd={addBulkItemType}
+      onRemove={removeBulkItemType}
+      onClose={() => { setShowBulkItemTypesManager(false); setNewBulkItemTypeName(""); }}
+      placeholder="New sub-type, e.g. Folding Chair"
+    />
+  );
+
   // Fields to render in a form for the given type: common fields always,
   // type-restricted fields (hostname, screenSize) only when they apply.
   // Status is excluded — it's changed only via the Archive/Restore actions.
@@ -970,6 +1003,7 @@ function AssetTracker() {
         {nameModal}
         {peripheralsManagerModal}
         {usersManagerModal}
+        {bulkItemTypesManagerModal}
         <div style={{ borderBottom: `2px solid ${C.brand}`, padding: "12px 20px", position: "sticky", top: 0, background: C.bg, zIndex: 10, display: "flex", alignItems: "center", gap: 10 }}>
           <button onClick={closeDetail} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.brandDark, display: "flex" }} aria-label="Back to list">
             <ArrowLeft size={20} />
@@ -1083,6 +1117,14 @@ function AssetTracker() {
                       onChange={v => setDraft({ ...draft, peripherals: v })}
                       options={peripheralsList}
                       onManage={() => setShowPeripheralsManager(true)}
+                    />
+                  ) : c.key === "itemName" ? (
+                    <BulkTypeField
+                      key={c.key}
+                      value={draft.itemName || ""}
+                      onChange={v => setDraft({ ...draft, itemName: v })}
+                      options={bulkItemTypes}
+                      onManage={() => setShowBulkItemTypesManager(true)}
                     />
                   ) : (
                     <Field
@@ -1518,6 +1560,7 @@ function AssetTracker() {
       {nameModal}
       {peripheralsManagerModal}
       {usersManagerModal}
+      {bulkItemTypesManagerModal}
 
       {/* Slim header */}
       <div style={{ borderBottom: `2px solid ${C.brand}`, padding: "10px 20px", position: "sticky", top: 0, background: C.bg, zIndex: 10, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
@@ -1598,6 +1641,14 @@ function AssetTracker() {
                     onChange={v => setDraft({ ...draft, peripherals: v })}
                     options={peripheralsList}
                     onManage={() => setShowPeripheralsManager(true)}
+                  />
+                ) : c.key === "itemName" ? (
+                  <BulkTypeField
+                    key={c.key}
+                    value={draft.itemName || ""}
+                    onChange={v => setDraft({ ...draft, itemName: v })}
+                    options={bulkItemTypes}
+                    onManage={() => setShowBulkItemTypesManager(true)}
                   />
                 ) : (
                   <Field
@@ -1765,7 +1816,16 @@ function AssetTracker() {
                       title={isInferredBuilding && inferredValue ? "Inherited via this asset's Room" : undefined}
                     >
                       {Icon && <Icon size={15} style={{ flexShrink: 0, color: C.brand }} />}
-                      {applies ? (a[c.key] || "—") : isInferredBuilding ? (inferredValue || "") : ""}
+                      {isTypeCol && a.type === "Bulk Item" ? (
+                        <>
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.itemName || "Bulk Item"}</span>
+                          <span style={{ flexShrink: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, fontWeight: 700, letterSpacing: 0.5, color: C.accent, border: `1px solid ${C.accent}`, borderRadius: 3, padding: "1px 4px" }}>
+                            BULK
+                          </span>
+                        </>
+                      ) : (
+                        applies ? (a[c.key] || "—") : isInferredBuilding ? (inferredValue || "") : ""
+                      )}
                     </div>
                   );
                 })}
@@ -1941,6 +2001,30 @@ function BuildingField({ value, onChange, buildingOptions }) {
       >
         <option value="">{buildingOptions.length ? "Select a building…" : "No Building assets yet"}</option>
         {options.map(o => <option key={o} value={o}>{o}</option>)}
+      </select>
+    </label>
+  );
+}
+
+function BulkTypeField({ value, onChange, options, onManage }) {
+  // Include the current value even if it's not in the managed list (legacy/custom
+  // data), so editing never silently drops it.
+  const allOptions = !value || options.includes(value) ? options : [value, ...options];
+  return (
+    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>
+        Sub-type
+        <button type="button" onClick={onManage} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4, display: "flex" }} aria-label="Manage bulk item sub-types">
+          <Settings size={12} color={C.accent} />
+        </button>
+      </span>
+      <select
+        value={value || ""}
+        onChange={e => onChange(e.target.value)}
+        style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink, background: "#fff" }}
+      >
+        <option value="">{options.length ? "Select…" : "No sub-types yet — add one"}</option>
+        {allOptions.map(o => <option key={o} value={o}>{o}</option>)}
       </select>
     </label>
   );

@@ -108,6 +108,7 @@ function doGet(e) {
       vendors: config.vendors || null,
       peripheralsList: config.peripheralsList || null,
       usersList: config.usersList || null,
+      bulkItemTypes: config.bulkItemTypes || null,
     };
 
     // Plain fetch() from a browser is blocked by CORS here, since Apps Script
@@ -163,6 +164,7 @@ function doPost(e) {
       { key: "vendors", value: JSON.stringify(body.vendors || []) },
       { key: "peripheralsList", value: JSON.stringify(body.peripheralsList || []) },
       { key: "usersList", value: JSON.stringify(body.usersList || []) },
+      { key: "bulkItemTypes", value: JSON.stringify(body.bulkItemTypes || []) },
     ]);
 
     return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(ContentService.MimeType.JSON);

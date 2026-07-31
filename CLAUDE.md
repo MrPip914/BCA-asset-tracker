@@ -49,6 +49,10 @@ and the `*_EXCLUDED_FIELDS` arrays near the top of the file (`fieldAppliesTo()`)
 Room and Building assets don't have brand/model/serial; Bulk Items (chairs, tables — not
 individually tagged) get a `totalQuantity` and an `itemName` instead, and are distributed
 across rooms via their own `allocations` array rather than a single `room` field.
+`itemName` ("Sub-Type" in the UI) is picked from a managed list (`bulkItemTypes`, editable
+via the gear icon, same pattern as peripherals/vendors/change types) rather than freeform
+text, so it stays consistent — and the list view's Type column shows a Bulk Item's
+sub-type plus a small "BULK" badge instead of the literal "Bulk Item" for every row.
 
 Rooms link to Buildings (`building` field, dropdown of existing Building assets); devices
 link to Rooms (`room` field, dropdown of existing Room assets); a device's building is
