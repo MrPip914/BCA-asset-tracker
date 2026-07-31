@@ -73,7 +73,7 @@ function doGet(e) {
     const allocationRows = readTable_(SHEET_NAMES.allocations, ["assetLabel", "room", "quantity"]);
     const auditRows = readTable_(SHEET_NAMES.audit, [
       "assetLabel", "assetType", "action", "field", "from", "to",
-      "room", "quantity", "previousQuantity", "at", "by",
+      "room", "quantity", "previousQuantity", "note", "at", "by",
     ]);
     const configRows = readTable_(SHEET_NAMES.config, ["key", "value"]);
 
@@ -97,6 +97,7 @@ function doGet(e) {
       field: r.field || undefined, from: r.from || undefined, to: r.to || undefined,
       room: r.room || undefined, quantity: r.quantity === "" ? undefined : r.quantity,
       previousQuantity: r.previousQuantity === "" ? undefined : r.previousQuantity,
+      note: r.note || undefined,
       at: r.at, by: r.by,
     }));
 
@@ -154,7 +155,7 @@ function doPost(e) {
 
     writeTable_(
       SHEET_NAMES.audit,
-      ["assetLabel", "assetType", "action", "field", "from", "to", "room", "quantity", "previousQuantity", "at", "by"],
+      ["assetLabel", "assetType", "action", "field", "from", "to", "room", "quantity", "previousQuantity", "note", "at", "by"],
       body.auditLog || []
     );
 
