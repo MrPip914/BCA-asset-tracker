@@ -54,6 +54,16 @@ const TYPE_OPTIONS = ["Computer", "Monitor", "Phone", "TV", "DocuCam", "Stream D
 // Options for the structured per-asset change log
 const DEFAULT_CHANGE_TYPES = ["Purchase", "Repair", "Replacement", "Upgrade", "Maintenance", "Relocation", "Disposal", "Other"];
 
+// Preset intervals for scheduled maintenance — fixed (not a managed list) since
+// each needs a day-count to compute a next-due date.
+const MAINTENANCE_FREQUENCIES = [
+  { label: "Weekly", days: 7 },
+  { label: "Monthly", days: 30 },
+  { label: "Quarterly", days: 90 },
+  { label: "Semi-Annually", days: 182 },
+  { label: "Annually", days: 365 },
+];
+
 // Which extra field applies to which types. A field not listed here (or an
 // asset whose type isn't in the list) simply doesn't show that field.
 const TYPE_ONLY_FIELDS = {
@@ -131,6 +141,31 @@ function formatWhen(iso) {
   const d = new Date(iso);
   return d.toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
 }
+function formatDateOnly(dateStr) {
+  if (!dateStr) return "";
+  const d = new Date(dateStr + "T00:00:00");
+  if (isNaN(d.getTime())) return dateStr;
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+// Next-due date for a maintenance item, or null if it's never been performed
+// (so there's nothing to count forward from) or has no known interval.
+function nextMaintenanceDue(item) {
+  if (!item.lastPerformed || !item.frequencyDays) return null;
+  const last = new Date(item.lastPerformed + "T00:00:00");
+  if (isNaN(last.getTime())) return null;
+  return new Date(last.getTime() + item.frequencyDays * 86400000);
+}
+// "never" (no lastPerformed yet — needs attention), "overdue", "due-soon"
+// (within 14 days), or "ok".
+function maintenanceStatusOf(item) {
+  if (!item.lastPerformed) return "never";
+  const due = nextMaintenanceDue(item);
+  if (!due) return "never";
+  const daysUntil = Math.floor((due.getTime() - Date.now()) / 86400000);
+  if (daysUntil < 0) return "overdue";
+  if (daysUntil <= 14) return "due-soon";
+  return "ok";
+}
 function describeAudit(entry) {
   if (entry.action === "created") return "Asset created";
   if (entry.action === "deleted") return "Asset permanently deleted";
@@ -143,6 +178,8 @@ function describeAudit(entry) {
   }
   if (entry.action === "unallocated") return `Removed allocation of ${entry.quantity} from ${entry.room}`;
   if (entry.action === "noted") return `Note: ${entry.note}`;
+  if (entry.action === "maintenance_completed") return `Completed maintenance "${entry.field}" — last done ${entry.to}`;
+  if (entry.action === "maintenance_removed") return `Removed scheduled maintenance: ${entry.field}`;
   return `${entry.field} changed from "${entry.from || "—"}" to "${entry.to || "—"}"`;
 }
 // Follows a non-Room asset's Room link to that Room's own Building link.
@@ -214,6 +251,10 @@ function AssetTracker() {
   const [allocationDraft, setAllocationDraft] = useState({ room: "", quantity: "" });
   const [allocationError, setAllocationError] = useState("");
   const [confirmAllocationRemove, setConfirmAllocationRemove] = useState(null);
+  const [maintenanceDraft, setMaintenanceDraft] = useState({ task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
+  const [editingMaintenanceIdx, setEditingMaintenanceIdx] = useState(null);
+  const [maintenanceEditDraft, setMaintenanceEditDraft] = useState(null);
+  const [confirmMaintenanceDelete, setConfirmMaintenanceDelete] = useState(null);
 
   const [currentUser, setCurrentUser] = useState(null);
   const [showNamePrompt, setShowNamePrompt] = useState(false);
@@ -446,6 +487,10 @@ function AssetTracker() {
     setAllocationDraft({ room: "", quantity: "" });
     setAllocationError("");
     setConfirmAllocationRemove(null);
+    setMaintenanceDraft({ task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
+    setEditingMaintenanceIdx(null);
+    setMaintenanceEditDraft(null);
+    setConfirmMaintenanceDelete(null);
   }
 
   function closeDetail() {
@@ -719,6 +764,98 @@ function AssetTracker() {
     const next = assets.map(a => (a.label === selectedLabel ? { ...a, allocations: nextAllocations } : a));
     await persist(next, columns, changeTypes, vendors, logAudit([entry]));
     setConfirmAllocationRemove(null);
+  }
+
+  // Adding a new schedule isn't separately audited — its own at/by plus its
+  // presence in the Maintenance tab is enough (same reasoning as comments/changes).
+  async function addMaintenanceItem() {
+    if (!maintenanceDraft.task.trim() || !selectedAsset) return;
+    const freq = MAINTENANCE_FREQUENCIES.find(f => f.label === maintenanceDraft.frequency) || MAINTENANCE_FREQUENCIES[1];
+    const item = {
+      task: maintenanceDraft.task.trim(),
+      frequencyLabel: freq.label,
+      frequencyDays: freq.days,
+      lastPerformed: maintenanceDraft.lastPerformed || "",
+      owner: maintenanceDraft.owner.trim(),
+      at: new Date().toISOString(),
+      by: currentUser || "",
+    };
+    const next = assets.map(a => (a.label === selectedLabel ? { ...a, maintenanceItems: [...(a.maintenanceItems || []), item] } : a));
+    await persist(next, columns);
+    setMaintenanceDraft({ task: "", frequency: freq.label, lastPerformed: "", owner: "" });
+  }
+
+  function startEditMaintenance(idx) {
+    const item = (selectedAsset.maintenanceItems || [])[idx];
+    setMaintenanceEditDraft({ task: item.task, frequency: item.frequencyLabel, lastPerformed: item.lastPerformed || "", owner: item.owner || "" });
+    setEditingMaintenanceIdx(idx);
+  }
+
+  function cancelEditMaintenance() {
+    setEditingMaintenanceIdx(null);
+    setMaintenanceEditDraft(null);
+  }
+
+  // Mutating an existing schedule (unlike adding one) loses the prior value, so
+  // it's logged field-by-field — same approach as the main asset edit diff.
+  async function saveMaintenanceEdit() {
+    if (!maintenanceEditDraft.task.trim() || !selectedAsset) return;
+    const idx = editingMaintenanceIdx;
+    const items = selectedAsset.maintenanceItems || [];
+    const original = items[idx];
+    const freq = MAINTENANCE_FREQUENCIES.find(f => f.label === maintenanceEditDraft.frequency) || MAINTENANCE_FREQUENCIES[1];
+    const updated = {
+      ...original,
+      task: maintenanceEditDraft.task.trim(),
+      frequencyLabel: freq.label,
+      frequencyDays: freq.days,
+      lastPerformed: maintenanceEditDraft.lastPerformed || "",
+      owner: maintenanceEditDraft.owner.trim(),
+    };
+    const mkEntry = (field, from, to) => ({
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel,
+      assetType: selectedAsset.type, action: "maintenance_edited", field: `${original.task} — ${field}`, from, to,
+    });
+    const entries = [];
+    if (original.task !== updated.task) entries.push(mkEntry("Task", original.task, updated.task));
+    if (original.frequencyLabel !== updated.frequencyLabel) entries.push(mkEntry("Frequency", original.frequencyLabel, updated.frequencyLabel));
+    if ((original.owner || "") !== (updated.owner || "")) entries.push(mkEntry("Owner", original.owner || "—", updated.owner || "—"));
+    if ((original.lastPerformed || "") !== (updated.lastPerformed || "")) {
+      entries.push(mkEntry("Last performed", formatDateOnly(original.lastPerformed) || "—", formatDateOnly(updated.lastPerformed) || "—"));
+    }
+    const nextItems = items.map((it, i) => (i === idx ? updated : it));
+    const next = assets.map(a => (a.label === selectedLabel ? { ...a, maintenanceItems: nextItems } : a));
+    await persist(next, columns, changeTypes, vendors, entries.length ? logAudit(entries) : auditLog);
+    cancelEditMaintenance();
+  }
+
+  async function markMaintenanceDone(idx) {
+    if (!selectedAsset) return;
+    const items = selectedAsset.maintenanceItems || [];
+    const item = items[idx];
+    const today = new Date().toISOString().slice(0, 10);
+    const nextItems = items.map((it, i) => (i === idx ? { ...it, lastPerformed: today } : it));
+    const next = assets.map(a => (a.label === selectedLabel ? { ...a, maintenanceItems: nextItems } : a));
+    const entry = {
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
+      action: "maintenance_completed", field: item.task,
+      from: item.lastPerformed ? formatDateOnly(item.lastPerformed) : "never", to: formatDateOnly(today),
+    };
+    await persist(next, columns, changeTypes, vendors, logAudit([entry]));
+  }
+
+  async function deleteMaintenanceItem(idx) {
+    if (!selectedAsset) return;
+    const items = selectedAsset.maintenanceItems || [];
+    const item = items[idx];
+    const nextItems = items.filter((_, i) => i !== idx);
+    const next = assets.map(a => (a.label === selectedLabel ? { ...a, maintenanceItems: nextItems } : a));
+    const entry = {
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel,
+      assetType: selectedAsset.type, action: "maintenance_removed", field: item.task,
+    };
+    await persist(next, columns, changeTypes, vendors, logAudit([entry]));
+    setConfirmMaintenanceDelete(null);
   }
 
   function toggleColumnVisible(key) {
@@ -1007,6 +1144,12 @@ function AssetTracker() {
     const changeEntries = [...(selectedAsset.changes || [])].reverse();
     const totalLoggedCost = (selectedAsset.changes || []).reduce((sum, c) => sum + (parseFloat(c.cost) || 0), 0);
     const assetAuditEntries = auditLog.filter(e => e.assetLabel === selectedAsset.label).slice().reverse();
+    // Never-performed items sort first (need scheduling attention); the rest by
+    // ascending next-due date, which naturally puts the most-overdue on top.
+    const maintenanceItems = (selectedAsset.maintenanceItems || [])
+      .map((item, idx) => ({ item, idx, status: maintenanceStatusOf(item), due: nextMaintenanceDue(item) }))
+      .sort((a, b) => (a.due ? a.due.getTime() : -Infinity) - (b.due ? b.due.getTime() : -Infinity));
+    const overdueMaintenanceCount = maintenanceItems.filter(m => m.status === "overdue").length;
     const titleText = selectedAsset.type === "Bulk Item" && selectedAsset.itemName
       ? `${selectedAsset.itemName} (Bulk Item)`
       : selectedAsset.screenSize ? `${selectedAsset.type} · ${selectedAsset.screenSize}` : selectedAsset.type;
@@ -1052,6 +1195,7 @@ function AssetTracker() {
             { key: "details", label: "Details" },
             ...(isPlace ? [{ key: "contents", label: "Contents", count: contentsCount }] : []),
             ...(selectedAsset.type === "Bulk Item" ? [{ key: "allocations", label: "Allocations", count: (selectedAsset.allocations || []).length }] : []),
+            { key: "maintenance", label: "Maintenance", count: maintenanceItems.length, urgent: overdueMaintenanceCount > 0 },
             { key: "comments", label: "Comments", count: comments.length },
             { key: "changes", label: "Change Log", count: changeEntries.length },
             { key: "audit", label: "Audit", count: assetAuditEntries.length },
@@ -1063,7 +1207,7 @@ function AssetTracker() {
                 onClick={() => setDetailTab(tab.key)}
                 style={{
                   background: "none", border: "none", padding: "10px 12px", whiteSpace: "nowrap",
-                  fontSize: 13, fontWeight: active ? 700 : 500, color: active ? C.brandDark : C.muted,
+                  fontSize: 13, fontWeight: active || tab.urgent ? 700 : 500, color: tab.urgent ? C.danger : active ? C.brandDark : C.muted,
                   borderBottom: active ? `2px solid ${C.brand}` : "2px solid transparent", marginBottom: -1.5,
                 }}
               >
@@ -1323,6 +1467,161 @@ function AssetTracker() {
             </>
           )}
 
+          {detailTab === "maintenance" && (
+            <>
+              <div style={{ border: `1.5px solid ${C.brandDark}`, borderRadius: 2, background: C.surface, padding: 14, marginBottom: 20 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Task</span>
+                    <input
+                      value={maintenanceDraft.task}
+                      onChange={e => setMaintenanceDraft({ ...maintenanceDraft, task: e.target.value })}
+                      placeholder="e.g. Replace HVAC filter"
+                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink }}
+                    />
+                  </label>
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Frequency</span>
+                    <select
+                      value={maintenanceDraft.frequency}
+                      onChange={e => setMaintenanceDraft({ ...maintenanceDraft, frequency: e.target.value })}
+                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink, background: "#fff" }}
+                    >
+                      {MAINTENANCE_FREQUENCIES.map(f => <option key={f.label} value={f.label}>{f.label}</option>)}
+                    </select>
+                  </label>
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Last performed</span>
+                    <input
+                      type="date"
+                      value={maintenanceDraft.lastPerformed}
+                      onChange={e => setMaintenanceDraft({ ...maintenanceDraft, lastPerformed: e.target.value })}
+                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink }}
+                    />
+                  </label>
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Owner</span>
+                    <input
+                      value={maintenanceDraft.owner}
+                      onChange={e => setMaintenanceDraft({ ...maintenanceDraft, owner: e.target.value })}
+                      placeholder="Who's responsible?"
+                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink }}
+                    />
+                  </label>
+                </div>
+                <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                  <button
+                    onClick={addMaintenanceItem}
+                    disabled={!maintenanceDraft.task.trim()}
+                    style={{ padding: "8px 14px", background: maintenanceDraft.task.trim() ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 13 }}
+                  >
+                    Schedule
+                  </button>
+                </div>
+              </div>
+
+              {maintenanceItems.length === 0 ? (
+                <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>No maintenance scheduled yet.</div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {maintenanceItems.map(({ item, idx, status, due }) => {
+                    const statusMeta = {
+                      overdue: { label: "Overdue", color: C.danger },
+                      "due-soon": { label: "Due soon", color: C.accent },
+                      ok: { label: "On track", color: C.success },
+                      never: { label: "Not yet done", color: C.muted },
+                    }[status];
+                    if (editingMaintenanceIdx === idx) {
+                      return (
+                        <div key={idx} style={{ border: `1.5px solid ${C.brandDark}`, borderRadius: 2, background: C.surface, padding: 14 }}>
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
+                            <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
+                              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Task</span>
+                              <input
+                                value={maintenanceEditDraft.task}
+                                onChange={e => setMaintenanceEditDraft({ ...maintenanceEditDraft, task: e.target.value })}
+                                style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink }}
+                              />
+                            </label>
+                            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Frequency</span>
+                              <select
+                                value={maintenanceEditDraft.frequency}
+                                onChange={e => setMaintenanceEditDraft({ ...maintenanceEditDraft, frequency: e.target.value })}
+                                style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink, background: "#fff" }}
+                              >
+                                {MAINTENANCE_FREQUENCIES.map(f => <option key={f.label} value={f.label}>{f.label}</option>)}
+                              </select>
+                            </label>
+                            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Last performed</span>
+                              <input
+                                type="date"
+                                value={maintenanceEditDraft.lastPerformed}
+                                onChange={e => setMaintenanceEditDraft({ ...maintenanceEditDraft, lastPerformed: e.target.value })}
+                                style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink }}
+                              />
+                            </label>
+                            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Owner</span>
+                              <input
+                                value={maintenanceEditDraft.owner}
+                                onChange={e => setMaintenanceEditDraft({ ...maintenanceEditDraft, owner: e.target.value })}
+                                style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink }}
+                              />
+                            </label>
+                          </div>
+                          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                            <button
+                              onClick={saveMaintenanceEdit}
+                              disabled={!maintenanceEditDraft.task.trim()}
+                              style={{ padding: "8px 14px", background: maintenanceEditDraft.task.trim() ? C.success : C.border, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 13 }}
+                            >
+                              Save
+                            </button>
+                            <button onClick={cancelEditMaintenance} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 2, fontWeight: 600, fontSize: 13, color: C.ink }}>
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    }
+                    return (
+                      <div key={idx} style={{ border: `1px solid ${C.border}`, borderRadius: 2, background: C.surface, padding: "10px 14px" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4, gap: 8 }}>
+                          <span style={{ fontWeight: 700, fontSize: 13, color: C.brandDark }}>{item.task}</span>
+                          <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: statusMeta.color }}>
+                              {statusMeta.label}
+                            </span>
+                            <button onClick={() => setConfirmMaintenanceDelete(idx)} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4 }} aria-label={`Delete maintenance item ${item.task}`}>
+                              <X size={13} color={C.placeholder} />
+                            </button>
+                          </div>
+                        </div>
+                        <div style={{ fontSize: 13, color: C.muted, marginBottom: 4 }}>
+                          {[item.frequencyLabel, item.owner].filter(Boolean).join(" · ") || "—"}
+                        </div>
+                        <div style={{ fontSize: 13, color: C.ink, marginBottom: 8 }}>
+                          Last performed: {item.lastPerformed ? formatDateOnly(item.lastPerformed) : "Never"}
+                          {due && <> · Next due: <span style={{ color: statusMeta.color, fontWeight: 600 }}>{formatDateOnly(due.toISOString().slice(0, 10))}</span></>}
+                        </div>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <button onClick={() => markMaintenanceDone(idx)} style={{ padding: "6px 12px", background: C.brand, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 12 }}>
+                            Mark done today
+                          </button>
+                          <button onClick={() => startEditMaintenance(idx)} style={{ padding: "6px 12px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 2, fontWeight: 600, fontSize: 12, color: C.ink }}>
+                            Edit
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          )}
+
           {detailTab === "changes" && (
             <>
               {totalLoggedCost > 0 && (
@@ -1563,6 +1862,24 @@ function AssetTracker() {
                   style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 13 }}
                 >
                   Remove
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {confirmMaintenanceDelete !== null && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20 }}>
+            <div style={{ background: C.surface, border: `1.5px solid ${C.brandDark}`, borderRadius: 2, padding: 24, maxWidth: 340 }}>
+              <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Delete this maintenance schedule?</div>
+              <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>This can't be undone.</div>
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                <button onClick={() => setConfirmMaintenanceDelete(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 2, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                <button
+                  onClick={() => deleteMaintenanceItem(confirmMaintenanceDelete)}
+                  style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 13 }}
+                >
+                  Delete
                 </button>
               </div>
             </div>

@@ -30,13 +30,14 @@ outbound network requests to arbitrary domains, which is why this migration happ
   component). This is deliberately simple (no per-field diffing / patching) — correct at
   small-to-medium scale (tens to low hundreds of assets), but means every save rewrites
   every tab in the Sheet from scratch. `AssetTrackerSync.gs`'s `doPost` mirrors this:
-  it clears and rewrites the Assets/Comments/Changes/Allocations/AuditLog/Config tabs
-  each time, using `LockService` so concurrent saves don't corrupt a tab.
+  it clears and rewrites the Assets/Comments/Changes/Allocations/Maintenance/AuditLog/
+  Config tabs each time, using `LockService` so concurrent saves don't corrupt a tab.
 - **Sheet schema**: Assets tab holds flat fields only (see `ASSET_FIELDS` in the .gs
-  file). Comments, Changes (structured change log with type/vendor/cost), and
-  Allocations (bulk-item quantity assignments) each live in their own tab, keyed by the
-  asset's `label` (its asset ID, e.g. `BCA0001`). Config tab stores the managed lists
-  and column config as JSON blobs (key/value rows), since those aren't naturally tabular.
+  file). Comments, Changes (structured change log with type/vendor/cost), Allocations
+  (bulk-item quantity assignments), and Maintenance (scheduled maintenance items) each
+  live in their own tab, keyed by the asset's `label` (its asset ID, e.g. `BCA0001`).
+  Config tab stores the managed lists and column config as JSON blobs (key/value rows),
+  since those aren't naturally tabular.
 - **Personal identity**: a lightweight, unverified "who's using this browser" name tag
   is stored in `localStorage` (not the Sheet) — used only to stamp comments/changes/edits
   with an author name. Not real auth.
@@ -67,6 +68,16 @@ deletes/allocations (see `logAudit()`, `describeAudit()`) — this is separate f
 Assets are archived (soft-deleted, `status: "Archived"`) rather than deleted by default;
 permanent deletion is a separate, more heavily confirmed action only available on an
 already-archived asset.
+
+Every asset (any type) also has a `maintenanceItems` array — scheduled maintenance
+entries with `task`, `frequencyLabel`/`frequencyDays` (picked from the fixed
+`MAINTENANCE_FREQUENCIES` list, not a managed list, since a day-count is needed to
+compute a next-due date), `lastPerformed`, and `owner` (freeform text). `nextMaintenanceDue()`
+and `maintenanceStatusOf()` derive a next-due date and a status (`never` / `overdue` /
+`due-soon` / `ok`) used to sort the Maintenance tab (most urgent first) and to flag the
+tab itself in red when anything's overdue. Adding an item isn't separately audited (its
+own `at`/`by` is enough); marking done, editing, or deleting one is, since those mutate
+or remove data with no other history trail.
 
 ## Known constraints / things to watch
 

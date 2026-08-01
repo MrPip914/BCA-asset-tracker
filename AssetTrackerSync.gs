@@ -12,7 +12,7 @@
  * which is fine at this data size (tens to low hundreds of assets).
  *
  * Tabs created automatically on first run: Assets, Comments, Changes,
- * Allocations, AuditLog, Config.
+ * Allocations, Maintenance, AuditLog, Config.
  */
 
 const SHEET_NAMES = {
@@ -20,6 +20,7 @@ const SHEET_NAMES = {
   comments: "Comments",
   changes: "Changes",
   allocations: "Allocations",
+  maintenance: "Maintenance",
   audit: "AuditLog",
   config: "Config",
 };
@@ -71,6 +72,9 @@ function doGet(e) {
     const commentRows = readTable_(SHEET_NAMES.comments, ["assetLabel", "text", "at", "by"]);
     const changeRows = readTable_(SHEET_NAMES.changes, ["assetLabel", "changeType", "vendor", "cost", "note", "at", "by"]);
     const allocationRows = readTable_(SHEET_NAMES.allocations, ["assetLabel", "room", "quantity"]);
+    const maintenanceRows = readTable_(SHEET_NAMES.maintenance, [
+      "assetLabel", "task", "frequencyLabel", "frequencyDays", "lastPerformed", "owner", "at", "by",
+    ]);
     const auditRows = readTable_(SHEET_NAMES.audit, [
       "assetLabel", "assetType", "action", "field", "from", "to",
       "room", "quantity", "previousQuantity", "note", "at", "by",
@@ -89,6 +93,10 @@ function doGet(e) {
           changeType: c.changeType, vendor: c.vendor, cost: c.cost, note: c.note, at: c.at, by: c.by,
         })),
         allocations: allocationRows.filter(al => al.assetLabel === label).map(al => ({ room: al.room, quantity: al.quantity })),
+        maintenanceItems: maintenanceRows.filter(m => m.assetLabel === label).map(m => ({
+          task: m.task, frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
+          lastPerformed: m.lastPerformed, owner: m.owner, at: m.at, by: m.by,
+        })),
       };
     });
 
@@ -142,16 +150,26 @@ function doPost(e) {
     const commentRows = [];
     const changeRows = [];
     const allocationRows = [];
+    const maintenanceRows = [];
     assets.forEach(a => {
       (a.comments || []).forEach(c => commentRows.push({ assetLabel: a.label, text: c.text, at: c.at, by: c.by || "" }));
       (a.changes || []).forEach(c => changeRows.push({
         assetLabel: a.label, changeType: c.changeType, vendor: c.vendor || "", cost: c.cost || "", note: c.note || "", at: c.at, by: c.by || "",
       }));
       (a.allocations || []).forEach(al => allocationRows.push({ assetLabel: a.label, room: al.room, quantity: al.quantity }));
+      (a.maintenanceItems || []).forEach(m => maintenanceRows.push({
+        assetLabel: a.label, task: m.task, frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
+        lastPerformed: m.lastPerformed || "", owner: m.owner || "", at: m.at, by: m.by || "",
+      }));
     });
     writeTable_(SHEET_NAMES.comments, ["assetLabel", "text", "at", "by"], commentRows);
     writeTable_(SHEET_NAMES.changes, ["assetLabel", "changeType", "vendor", "cost", "note", "at", "by"], changeRows);
     writeTable_(SHEET_NAMES.allocations, ["assetLabel", "room", "quantity"], allocationRows);
+    writeTable_(
+      SHEET_NAMES.maintenance,
+      ["assetLabel", "task", "frequencyLabel", "frequencyDays", "lastPerformed", "owner", "at", "by"],
+      maintenanceRows
+    );
 
     writeTable_(
       SHEET_NAMES.audit,
