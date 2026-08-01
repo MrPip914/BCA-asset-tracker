@@ -79,6 +79,13 @@ outbound network requests to arbitrary domains, which is why this migration happ
   a Circuit's rooms-served-vs-feeds-sub-panel toggle. Actions that aren't a generic field edit
   (Swap Breaker, Move Circuit) live outside the component via `customRowActions`, which opens
   the caller's own dedicated modal.
+- **Main-page toolbar is intentionally minimal**: Columns/Export/Add Asset live in a hamburger
+  menu (`showToolbarMenu`) anchored top-right of the Assets/Maintenance tab row rather than as
+  always-visible buttons; the search box collapses to an icon (`searchOpen`) and expands on
+  click, staying expanded whenever `query` is non-empty so an active search is never hidden.
+  There's no "Showing X of Y assets" text — the one thing that lived there besides the count
+  (clearing an active sort) moved to a small × chip next to the sort arrow on the sorted
+  column's own header, so it's local to what it affects instead of a separate line.
 
 ## Data model
 
@@ -180,9 +187,10 @@ actually does the implementation work, it's in the best position to update the l
 - Page properties at the top: `title::`, `type:: project`, `alias::`.
 - A `# Requests` section (open/in-progress items) and a `# Done / Shipped` section.
 - Each request is a top-level bullet under one of those sections, with `added::` (date
-  added, Logseq date-link format like `[[Aug 1st, 2026]]`) and `status::` (`idea` →
-  `planned` → `in-progress` → `done`) as indented property lines, sometimes with extra
-  indented bullets underneath describing sub-parts.
+  added, Logseq date-link format like `[[Aug 1st, 2026]]`), `status::` (`idea` →
+  `planned` → `in-progress` → `done`), and `source::` (`eric` or `claude-code`) as
+  indented property lines, sometimes with extra indented bullets underneath describing
+  sub-parts.
 
 **When you finish implementing a feature that has a matching entry in `# Requests`:**
 1. Move that bullet (with its sub-bullets) from `# Requests` to `# Done / Shipped`.
@@ -190,10 +198,19 @@ actually does the implementation work, it's in the best position to update the l
 3. Leave every other entry untouched — don't reformat, reorder, or "clean up" the rest
    of the file in the same edit.
 
+**You may also add new requests directly** — e.g. when you notice a real gap while
+implementing something (an obvious follow-up, an edge case the current work doesn't
+cover, something that clearly wants to exist but is out of scope for the current change).
+When you do:
+- Tag it `source:: claude-code` (Eric's own requests from Cowork are `source:: eric`) so
+  it's visibly distinguishable at a glance from something Eric actually asked for.
+- Default to `status:: idea` and add a `note::` sub-bullet explaining why you're
+  suggesting it / what prompted it — Eric wasn't in the room for this one, so give him
+  enough context to evaluate it without having to ask you.
+- Don't add speculative "nice to have" noise for its own sake — add it because you hit a
+  concrete, real gap while working, not as a general brainstorm.
+
 **What NOT to do:**
-- Don't add brand-new feature requests to this file — Eric adds those through the Cowork
-  side when he mentions them in conversation. If you notice something that seems like it
-  should become a tracked request, mention it to Eric instead of writing it in yourself.
 - Don't mark something `done` on a guess — only when you've actually shipped the matching
   work in this session. A false "done" is worse than leaving it as `in-progress`, since
   this file is Eric's source of truth for what's still outstanding.
