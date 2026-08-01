@@ -6,10 +6,19 @@
  *
  * Design: the app keeps its whole state in memory and sends the FULL
  * snapshot on every save (that's how it already works with its built-in
- * storage). So doPost() here just rewrites every tab from the payload,
- * and doGet() reads all tabs back into that same shape. Simple and
- * always consistent — the tradeoff is each save rewrites everything,
- * which is fine at this data size (tens to low hundreds of assets).
+ * storage), and doGet() reads all tabs back into that same shape. Simple
+ * and always consistent at this data size (tens to low hundreds of assets).
+ *
+ * doPost() rewrites the Assets/Comments/Changes/Allocations/Maintenance
+ * tabs together, but only when the client reports (`body._dirty.assets`)
+ * that asset-related data actually changed — most config-only actions
+ * (managed-list edits, adding a custom column) don't touch these at all.
+ * Config is similarly gated on `body._dirty.config`. AuditLog is handled
+ * differently: since audit entries are only ever appended to, never edited
+ * or deleted, it's appended-to (`appendNewRows_`) rather than rewritten,
+ * so an ever-growing history doesn't get more expensive to save over time.
+ * Missing `_dirty` (an older client, or a direct API call) defaults to
+ * "rewrite everything" — the original behavior, kept as the safe fallback.
  *
  * Tabs created automatically on first run: Assets, Comments, Changes,
  * Allocations, Maintenance, AuditLog, Config.
@@ -62,6 +71,25 @@ function writeTable_(name, headers, rows) {
     const data = rows.map(row => headers.map(h => (row[h] === undefined || row[h] === null ? "" : row[h])));
     sheet.getRange(2, 1, data.length, headers.length).setValues(data);
   }
+}
+
+// Appends only the rows beyond what's already stored, instead of clearing and
+// rewriting the whole tab — safe only for tables that are pure append logs
+// (nothing ever edits or deletes an existing row). AuditLog is the only one
+// that qualifies today. If the caller's array is shorter than or equal to
+// what's already stored (a stale client, or nothing new), this is a no-op —
+// it never truncates existing history.
+function appendNewRows_(name, headers, rows) {
+  const sheet = getSheet_(name);
+  const lastRow = sheet.getLastRow();
+  if (lastRow === 0) {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  }
+  const existingCount = Math.max(lastRow - 1, 0);
+  if (rows.length <= existingCount) return;
+  const newRows = rows.slice(existingCount);
+  const data = newRows.map(row => headers.map(h => (row[h] === undefined || row[h] === null ? "" : row[h])));
+  sheet.getRange(existingCount + 2, 1, data.length, headers.length).setValues(data);
 }
 
 function doGet(e) {
@@ -142,49 +170,61 @@ function doPost(e) {
   try {
     const body = JSON.parse(e.postData.contents);
     const assets = body.assets || [];
+    // Which domains actually changed, as reported by the client (see persist()
+    // in index.html — computed there by reference-equality against its current
+    // state). Missing/absent _dirty (an older client, or a direct API call)
+    // means "rewrite everything" — the safe default, same as before this existed.
+    const dirty = body._dirty || { assets: true, config: true };
 
-    // Assets tab: flat fields only.
-    writeTable_(SHEET_NAMES.assets, ASSET_FIELDS, assets);
+    if (dirty.assets) {
+      // Assets tab: flat fields only.
+      writeTable_(SHEET_NAMES.assets, ASSET_FIELDS, assets);
 
-    // Child tables, flattened out with the parent asset's label as the key.
-    const commentRows = [];
-    const changeRows = [];
-    const allocationRows = [];
-    const maintenanceRows = [];
-    assets.forEach(a => {
-      (a.comments || []).forEach(c => commentRows.push({ assetLabel: a.label, text: c.text, at: c.at, by: c.by || "" }));
-      (a.changes || []).forEach(c => changeRows.push({
-        assetLabel: a.label, changeType: c.changeType, vendor: c.vendor || "", cost: c.cost || "", note: c.note || "", at: c.at, by: c.by || "",
-      }));
-      (a.allocations || []).forEach(al => allocationRows.push({ assetLabel: a.label, room: al.room, quantity: al.quantity }));
-      (a.maintenanceItems || []).forEach(m => maintenanceRows.push({
-        assetLabel: a.label, task: m.task, frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
-        lastPerformed: m.lastPerformed || "", owner: m.owner || "", at: m.at, by: m.by || "",
-      }));
-    });
-    writeTable_(SHEET_NAMES.comments, ["assetLabel", "text", "at", "by"], commentRows);
-    writeTable_(SHEET_NAMES.changes, ["assetLabel", "changeType", "vendor", "cost", "note", "at", "by"], changeRows);
-    writeTable_(SHEET_NAMES.allocations, ["assetLabel", "room", "quantity"], allocationRows);
-    writeTable_(
-      SHEET_NAMES.maintenance,
-      ["assetLabel", "task", "frequencyLabel", "frequencyDays", "lastPerformed", "owner", "at", "by"],
-      maintenanceRows
-    );
+      // Child tables, flattened out with the parent asset's label as the key.
+      const commentRows = [];
+      const changeRows = [];
+      const allocationRows = [];
+      const maintenanceRows = [];
+      assets.forEach(a => {
+        (a.comments || []).forEach(c => commentRows.push({ assetLabel: a.label, text: c.text, at: c.at, by: c.by || "" }));
+        (a.changes || []).forEach(c => changeRows.push({
+          assetLabel: a.label, changeType: c.changeType, vendor: c.vendor || "", cost: c.cost || "", note: c.note || "", at: c.at, by: c.by || "",
+        }));
+        (a.allocations || []).forEach(al => allocationRows.push({ assetLabel: a.label, room: al.room, quantity: al.quantity }));
+        (a.maintenanceItems || []).forEach(m => maintenanceRows.push({
+          assetLabel: a.label, task: m.task, frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
+          lastPerformed: m.lastPerformed || "", owner: m.owner || "", at: m.at, by: m.by || "",
+        }));
+      });
+      writeTable_(SHEET_NAMES.comments, ["assetLabel", "text", "at", "by"], commentRows);
+      writeTable_(SHEET_NAMES.changes, ["assetLabel", "changeType", "vendor", "cost", "note", "at", "by"], changeRows);
+      writeTable_(SHEET_NAMES.allocations, ["assetLabel", "room", "quantity"], allocationRows);
+      writeTable_(
+        SHEET_NAMES.maintenance,
+        ["assetLabel", "task", "frequencyLabel", "frequencyDays", "lastPerformed", "owner", "at", "by"],
+        maintenanceRows
+      );
+    }
 
-    writeTable_(
+    // Audit entries are only ever appended to client-side (never edited or
+    // deleted), so this can just add what's new instead of rewriting the
+    // whole — ever-growing — history on every save.
+    appendNewRows_(
       SHEET_NAMES.audit,
       ["assetLabel", "assetType", "action", "field", "from", "to", "room", "quantity", "previousQuantity", "note", "at", "by"],
       body.auditLog || []
     );
 
-    writeTable_(SHEET_NAMES.config, ["key", "value"], [
-      { key: "columns", value: JSON.stringify(body.columns || []) },
-      { key: "changeTypes", value: JSON.stringify(body.changeTypes || []) },
-      { key: "vendors", value: JSON.stringify(body.vendors || []) },
-      { key: "peripheralsList", value: JSON.stringify(body.peripheralsList || []) },
-      { key: "usersList", value: JSON.stringify(body.usersList || []) },
-      { key: "bulkItemTypes", value: JSON.stringify(body.bulkItemTypes || []) },
-    ]);
+    if (dirty.config) {
+      writeTable_(SHEET_NAMES.config, ["key", "value"], [
+        { key: "columns", value: JSON.stringify(body.columns || []) },
+        { key: "changeTypes", value: JSON.stringify(body.changeTypes || []) },
+        { key: "vendors", value: JSON.stringify(body.vendors || []) },
+        { key: "peripheralsList", value: JSON.stringify(body.peripheralsList || []) },
+        { key: "usersList", value: JSON.stringify(body.usersList || []) },
+        { key: "bulkItemTypes", value: JSON.stringify(body.bulkItemTypes || []) },
+      ]);
+    }
 
     return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(ContentService.MimeType.JSON);
   } catch (err) {

@@ -220,6 +220,12 @@ function groupDetailColumns(cols) {
 }
 
 const USER_STORAGE_KEY = "asset-tracker-user"; // localStorage — who's using this browser
+// localStorage — per-device column show/hide overrides. Column *definitions*
+// (key/label/width/custom flag) stay server-synced since custom columns add a
+// real field to every asset; only which ones are shown on THIS device is local,
+// so one person's view preference stops overriding everyone else's, and toggling
+// needs no server round-trip.
+const COLUMN_VISIBILITY_STORAGE_KEY = "asset-tracker-column-visibility";
 // Your deployed Apps Script Web App URL. Redeploy in Apps Script (Deploy > Manage
 // deployments > New version) any time you change AssetTrackerSync.gs.
 const SHEET_API_URL = "https://script.google.com/macros/s/AKfycbzXaKRuCrTesxobxP-b2me1TSn0YoGogoYhNPTWU4qWWjXANXGlPuDzJSKGClOTsfOXRQ/exec";
@@ -267,6 +273,7 @@ function AssetTracker() {
   const [currentUser, setCurrentUser] = useState(null);
   const [showNamePrompt, setShowNamePrompt] = useState(false);
   const [nameInput, setNameInput] = useState("");
+  const [columnVisibility, setColumnVisibility] = useState({}); // { [columnKey]: boolean } — per-device override, see COLUMN_VISIBILITY_STORAGE_KEY
 
   const [query, setQuery] = useState("");
   const [roomFilter, setRoomFilter] = useState("All rooms");
@@ -352,6 +359,15 @@ function AssetTracker() {
     }
   }, []);
 
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(COLUMN_VISIBILITY_STORAGE_KEY);
+      if (stored) setColumnVisibility(JSON.parse(stored));
+    } catch (e) {
+      // Non-fatal — falls back to each column's server-defined visible flag.
+    }
+  }, []);
+
   function saveUserName(name) {
     const trimmed = name.trim();
     if (!trimmed) return;
@@ -393,6 +409,17 @@ function AssetTracker() {
     // loaded — the UI shouldn't be reachable in that state, but this keeps a
     // load-failure from being able to clobber live data no matter how it's triggered.
     if (assets === null) return;
+    // Reference equality against current state, computed before any setState
+    // below. Every call site either passes a domain through untouched (same
+    // reference) or a freshly computed one (new reference) — that's already
+    // the convention throughout this file — so this reliably detects which
+    // domains actually changed without each call site needing to declare it.
+    // Lets the backend skip rewriting tabs that didn't change.
+    const dirty = {
+      assets: nextAssets !== assets,
+      config: nextColumns !== columns || nextChangeTypes !== changeTypes || nextVendors !== vendors
+        || nextPeripheralsList !== peripheralsList || nextUsersList !== usersList || nextBulkItemTypes !== bulkItemTypes,
+    };
     setAssets(nextAssets);
     setColumns(nextColumns);
     setChangeTypes(nextChangeTypes);
@@ -405,7 +432,7 @@ function AssetTracker() {
       await writeSnapshot({
         assets: nextAssets, columns: nextColumns, changeTypes: nextChangeTypes,
         vendors: nextVendors, auditLog: nextAuditLog, peripheralsList: nextPeripheralsList, usersList: nextUsersList,
-        bulkItemTypes: nextBulkItemTypes,
+        bulkItemTypes: nextBulkItemTypes, _dirty: dirty,
       });
       setSaveError(false);
     } catch (e) {
@@ -498,7 +525,11 @@ function AssetTracker() {
     return list;
   }, [allMaintenanceRows, maintenanceQuery, maintenanceStatusFilter]);
 
-  const visibleColumns = columns.filter(c => c.visible);
+  // Per-device override wins when set; otherwise falls back to the column's
+  // server-defined default (e.g. true for a newly added custom column this
+  // device hasn't seen/customized yet).
+  const isColumnVisible = c => columnVisibility[c.key] ?? c.visible;
+  const visibleColumns = columns.filter(isColumnVisible);
   const gridTemplate = visibleColumns.map(c => `${c.width}px`).join(" ") + " 36px";
 
   const filterConfigs = {
@@ -895,10 +926,18 @@ function AssetTracker() {
     setConfirmMaintenanceDelete(null);
   }
 
+  // Local-only — no persist() call. Column show/hide is a per-device viewing
+  // preference now, not shared state, so this never touches the Sheet.
   function toggleColumnVisible(key) {
     const col = columns.find(c => c.key === key);
     if (col && col.locked) return;
-    persist(assets, columns.map(c => (c.key === key ? { ...c, visible: !c.visible } : c)));
+    const next = { ...columnVisibility, [key]: !isColumnVisible(col) };
+    setColumnVisibility(next);
+    try {
+      localStorage.setItem(COLUMN_VISIBILITY_STORAGE_KEY, JSON.stringify(next));
+    } catch (e) {
+      // Non-fatal — the toggle still applies for this session, just won't stick next visit.
+    }
   }
 
   function addColumn() {
@@ -1953,7 +1992,7 @@ function AssetTracker() {
   }
 
   // ---------- LIST VIEW ----------
-  const hiddenColumns = columns.filter(c => !c.visible);
+  const hiddenColumns = columns.filter(c => !isColumnVisible(c));
   const addFormColumns = formColumnsFor(draft.type);
 
   return (
@@ -2412,7 +2451,7 @@ function AssetTracker() {
               {columns.map(c => (
                 <div key={c.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 14 }}>
                   <label style={{ display: "flex", alignItems: "center", gap: 8, opacity: c.locked ? 0.6 : 1 }}>
-                    <input type="checkbox" checked={c.visible} disabled={c.locked} onChange={() => toggleColumnVisible(c.key)} />
+                    <input type="checkbox" checked={isColumnVisible(c)} disabled={c.locked} onChange={() => toggleColumnVisible(c.key)} />
                     {c.label} {c.locked && <Lock size={11} />}
                   </label>
                   {c.custom && (

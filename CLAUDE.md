@@ -33,11 +33,18 @@ outbound network requests to arbitrary domains, which is why this migration happ
   sends the ENTIRE state as one JSON snapshot to the Apps Script backend (`persist()` ->
   `writeSnapshot()` -> `fetch(SHEET_API_URL, { method: "POST", ... })`). On load, it does
   one GET to the same URL and reconstructs everything (`useEffect` near the top of the
-  component). This is deliberately simple (no per-field diffing / patching) — correct at
-  small-to-medium scale (tens to low hundreds of assets), but means every save rewrites
-  every tab in the Sheet from scratch. `AssetTrackerSync.gs`'s `doPost` mirrors this:
-  it clears and rewrites the Assets/Comments/Changes/Allocations/Maintenance/AuditLog/
-  Config tabs each time, using `LockService` so concurrent saves don't corrupt a tab.
+  component). No per-field diffing on the client — but `persist()` does compute which
+  *domains* changed (`_dirty: { assets, config }`), via plain reference-equality against
+  current state (every call site already either passes a domain through untouched or a
+  freshly computed value, so this needs no per-call-site bookkeeping). `AssetTrackerSync.gs`'s
+  `doPost` uses that to skip rewriting the Assets/Comments/Changes/Allocations/Maintenance
+  tabs when nothing asset-related changed, and skip Config when no managed list or column
+  changed — e.g. toggling a managed-list entry no longer rewrites the Assets tab, and vice
+  versa. AuditLog is handled differently again: since entries are only ever appended to
+  (never edited or deleted client-side), `appendNewRows_` appends just the new rows instead
+  of rewriting the whole — ever-growing — history each time. A request with no `_dirty` at
+  all (an old client, or a direct API call) still rewrites everything, as the safe fallback.
+  `LockService` still guards every write so concurrent saves don't corrupt a tab.
 - **Sheet schema**: Assets tab holds flat fields only (see `ASSET_FIELDS` in the .gs
   file). Comments, Changes (structured change log with type/vendor/cost), Allocations
   (bulk-item quantity assignments), and Maintenance (scheduled maintenance items) each
@@ -47,6 +54,12 @@ outbound network requests to arbitrary domains, which is why this migration happ
 - **Personal identity**: a lightweight, unverified "who's using this browser" name tag
   is stored in `localStorage` (not the Sheet) — used only to stamp comments/changes/edits
   with an author name. Not real auth.
+- **Column visibility is per-device**, also `localStorage` (`COLUMN_VISIBILITY_STORAGE_KEY`),
+  not the Sheet. Column *definitions* (key/label/width/custom flag) stay server-synced via
+  Config, since a custom column adds a real field to every asset — only which columns are
+  *shown* is local. `isColumnVisible(c)` reads the local override first, falling back to the
+  column's server-defined `visible` (e.g. for a custom column another device just added, which
+  this device hasn't seen/hidden yet). `toggleColumnVisible()` never calls `persist()`.
 
 ## Data model
 
