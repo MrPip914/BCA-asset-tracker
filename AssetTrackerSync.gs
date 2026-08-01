@@ -21,7 +21,7 @@
  * "rewrite everything" — the original behavior, kept as the safe fallback.
  *
  * Tabs created automatically on first run: Assets, Comments, Changes,
- * Allocations, Maintenance, AuditLog, Config.
+ * Allocations, Maintenance, Breakers, Circuits, AuditLog, Config.
  */
 
 const SHEET_NAMES = {
@@ -30,6 +30,8 @@ const SHEET_NAMES = {
   changes: "Changes",
   allocations: "Allocations",
   maintenance: "Maintenance",
+  breakers: "Breakers",
+  circuits: "Circuits",
   audit: "AuditLog",
   config: "Config",
 };
@@ -41,6 +43,13 @@ const ASSET_FIELDS = [
   "brand", "model", "serial", "person", "peripherals", "notes",
   "totalQuantity", "purchaseDate", "warrantyUntil", "status",
 ];
+
+// Breakers are scoped to a Panel asset (panelLabel); Circuits are scoped to a
+// Breaker (breakerId), not directly to the Panel — chain is Circuit -> Breaker
+// -> Panel. Both need a real id (not array position) since they get swapped/
+// moved and other records point at them.
+const BREAKER_FIELDS = ["id", "panelLabel", "slots", "poles", "mount", "ampRating", "status", "serial", "installedDate", "notes"];
+const CIRCUIT_FIELDS = ["id", "breakerId", "label", "description", "roomsServed", "feedsPanelLabel"];
 
 function getSheet_(name) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -103,6 +112,8 @@ function doGet(e) {
     const maintenanceRows = readTable_(SHEET_NAMES.maintenance, [
       "assetLabel", "task", "frequencyLabel", "frequencyDays", "lastPerformed", "owner", "at", "by",
     ]);
+    const breakerRows = readTable_(SHEET_NAMES.breakers, BREAKER_FIELDS);
+    const circuitRows = readTable_(SHEET_NAMES.circuits, CIRCUIT_FIELDS);
     const auditRows = readTable_(SHEET_NAMES.audit, [
       "assetLabel", "assetType", "action", "field", "from", "to",
       "room", "quantity", "previousQuantity", "note", "at", "by",
@@ -124,6 +135,20 @@ function doGet(e) {
         maintenanceItems: maintenanceRows.filter(m => m.assetLabel === label).map(m => ({
           task: m.task, frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
           lastPerformed: m.lastPerformed, owner: m.owner, at: m.at, by: m.by,
+        })),
+        // Only meaningful for Electrical Panel assets, but attached unconditionally
+        // (like every other child array here) — no type check needed at this layer,
+        // it's just an empty array for anything that isn't a panel.
+        breakers: breakerRows.filter(b => b.panelLabel === label).map(b => ({
+          id: b.id, panelLabel: b.panelLabel,
+          slots: b.slots ? String(b.slots).split(",").map(s => s.trim()) : [],
+          poles: b.poles, mount: b.mount, ampRating: b.ampRating, status: b.status,
+          serial: b.serial, installedDate: b.installedDate, notes: b.notes,
+          circuits: circuitRows.filter(c => c.breakerId === b.id).map(c => ({
+            id: c.id, breakerId: c.breakerId, label: c.label, description: c.description,
+            roomsServed: c.roomsServed ? String(c.roomsServed).split(",").map(s => s.trim()) : [],
+            feedsPanelLabel: c.feedsPanelLabel,
+          })),
         })),
       };
     });
@@ -185,6 +210,8 @@ function doPost(e) {
       const changeRows = [];
       const allocationRows = [];
       const maintenanceRows = [];
+      const breakerRows = [];
+      const circuitRows = [];
       assets.forEach(a => {
         (a.comments || []).forEach(c => commentRows.push({ assetLabel: a.label, text: c.text, at: c.at, by: c.by || "" }));
         (a.changes || []).forEach(c => changeRows.push({
@@ -195,6 +222,20 @@ function doPost(e) {
           assetLabel: a.label, task: m.task, frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
           lastPerformed: m.lastPerformed || "", owner: m.owner || "", at: m.at, by: m.by || "",
         }));
+        // panelLabel is derived from the parent asset here (not trusted from the
+        // client payload), same as assetLabel is for every other child row above.
+        (a.breakers || []).forEach(b => {
+          breakerRows.push({
+            id: b.id, panelLabel: a.label,
+            slots: (b.slots || []).join(","), poles: b.poles, mount: b.mount,
+            ampRating: b.ampRating, status: b.status, serial: b.serial || "",
+            installedDate: b.installedDate || "", notes: b.notes || "",
+          });
+          (b.circuits || []).forEach(c => circuitRows.push({
+            id: c.id, breakerId: b.id, label: c.label, description: c.description || "",
+            roomsServed: (c.roomsServed || []).join(","), feedsPanelLabel: c.feedsPanelLabel || "",
+          }));
+        });
       });
       writeTable_(SHEET_NAMES.comments, ["assetLabel", "text", "at", "by"], commentRows);
       writeTable_(SHEET_NAMES.changes, ["assetLabel", "changeType", "vendor", "cost", "note", "at", "by"], changeRows);
@@ -204,6 +245,8 @@ function doPost(e) {
         ["assetLabel", "task", "frequencyLabel", "frequencyDays", "lastPerformed", "owner", "at", "by"],
         maintenanceRows
       );
+      writeTable_(SHEET_NAMES.breakers, BREAKER_FIELDS, breakerRows);
+      writeTable_(SHEET_NAMES.circuits, CIRCUIT_FIELDS, circuitRows);
     }
 
     // Audit entries are only ever appended to client-side (never edited or

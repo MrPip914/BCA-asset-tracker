@@ -49,8 +49,10 @@ outbound network requests to arbitrary domains, which is why this migration happ
   file). Comments, Changes (structured change log with type/vendor/cost), Allocations
   (bulk-item quantity assignments), and Maintenance (scheduled maintenance items) each
   live in their own tab, keyed by the asset's `label` (its asset ID, e.g. `BCA0001`).
-  Config tab stores the managed lists and column config as JSON blobs (key/value rows),
-  since those aren't naturally tabular.
+  Breakers (keyed by `panelLabel`) and Circuits (keyed by `breakerId`, one level deeper —
+  see Data model) are the same pattern with an extra level of nesting. Config tab stores
+  the managed lists and column config as JSON blobs (key/value rows), since those aren't
+  naturally tabular.
 - **Personal identity**: a lightweight, unverified "who's using this browser" name tag
   is stored in `localStorage` (not the Sheet) — used only to stamp comments/changes/edits
   with an author name. Not real auth.
@@ -60,11 +62,20 @@ outbound network requests to arbitrary domains, which is why this migration happ
   *shown* is local. `isColumnVisible(c)` reads the local override first, falling back to the
   column's server-defined `visible` (e.g. for a custom column another device just added, which
   this device hasn't seen/hidden yet). `toggleColumnVisible()` never calls `persist()`.
+- **`ChildEntityTable`** (bottom of the file) is a generic list/add/edit/delete component for
+  a structured child entity (fields config + items + onAdd/onSave/onDelete), built for
+  Breakers and Circuits and intended for reuse — Locks under Doors is planned next and will
+  need the identical list/add/edit/move shape. It owns its own add/edit/expand/delete-confirm
+  UI state; the caller supplies data + callbacks, plus `renderCustomFields` for anything that
+  doesn't fit the generic field-type system (text/number/date/select/multiselect) — used for
+  a Circuit's rooms-served-vs-feeds-sub-panel toggle. Actions that aren't a generic field edit
+  (Swap Breaker, Move Circuit) live outside the component via `customRowActions`, which opens
+  the caller's own dedicated modal.
 
 ## Data model
 
 Assets have a `type`: Computer, Monitor, Phone, TV, DocuCam, Stream Deck, Room, Building,
-Bulk Item, or Other. Which fields apply to which type is governed by `TYPE_ONLY_FIELDS`
+Bulk Item, Electrical Panel, or Other. Which fields apply to which type is governed by `TYPE_ONLY_FIELDS`
 and the `*_EXCLUDED_FIELDS` arrays near the top of the file (`fieldAppliesTo()`) — e.g.
 Room and Building assets don't have brand/model/serial; Bulk Items (chairs, tables — not
 individually tagged) get a `totalQuantity` and an `itemName` instead, and are distributed
@@ -98,6 +109,44 @@ tab itself in red when anything's overdue. Adding an item isn't separately audit
 own `at`/`by` is enough); marking done, editing, or deleting one is, since those mutate
 or remove data with no other history trail.
 
+**Electrical Panel** assets (`type: "Electrical Panel"`) are otherwise device-like — real
+brand/model/serial, purchase date, warranty, room placement via `inferBuilding()` like any
+other device — they just don't have `peripherals` (`ELECTRICAL_PANEL_EXCLUDED_FIELDS`). Each
+carries a `breakers` array (own Breakers tab in the detail view), one level deeper than
+anything else in the app: **Circuit → Breaker → Panel**. Breakers and Circuits are *not*
+Assets themselves (don't appear in the main list, no independent archive) but get a real
+`crypto.randomUUID()` id, since they get swapped/moved and other records point at them —
+array position can't serve as identity once things move.
+
+- A Breaker's `slots` is an explicit array of slot numbers (not a single position + inferred
+  second slot) — the one representation that covers single-pole (`["5"]`), double-pole/
+  240V (`["1","3"]` — stacked rows in the same column, not adjacent numbers), and tandem
+  (two breakers both listing the same slot, `mount: "tandem"` on both) without a special-cased
+  inference rule. A slot may be shared by more than one breaker only if every breaker sharing
+  it is `mount: "tandem"` — enforced client-side in `addBreaker`/`saveBreakerEdit`.
+- **Swap Breaker** (`openSwapBreaker`/`submitSwapBreaker`) is a distinct action from the
+  generic edit, for the common case of physically replacing a breaker — logs `breaker_swapped`
+  with old/new serial. It keeps the same `id` and slot(s). The generic edit form can also
+  touch serial/ampRating/installedDate (logged as `breaker_edited` field diffs); Swap is the
+  recommended path for a physical replacement, not the only way to change those fields.
+- A Circuit's `Circuit.feedsPanelLabel` marks it as feeding a downstream sub-panel instead of
+  serving rooms directly (`roomsServed`) — mutually exclusive, enforced in `addCircuit`/
+  `saveCircuitEdit`. A panel's "fed from" info is never stored on the Panel itself — it's
+  found by searching all circuits for `feedsPanelLabel === thisPanelLabel` at render time,
+  the same "computed, not stored" principle `inferBuilding()` already uses for a device's
+  building.
+- **Move Circuit** (`openMoveCircuit`/`submitMoveCircuit`) reassigns a circuit to a different
+  breaker — **same panel only** in this pass; moving to a different Panel asset would mean
+  mutating two assets atomically and is deferred as a follow-up.
+- Deleting a breaker with circuits attached, or a circuit's roomsServed/feedsPanelLabel
+  exclusivity, is validated client-side only (`canDeleteBreaker`, `addCircuit`) — consistent
+  with every other guard in this app (delete/archive confirmations etc.); nothing else
+  validates server-side either, so making this one check the exception wouldn't close a real
+  gap. Breakers/Circuits carry no `at`/`by` of their own (unlike comments/changes/maintenance
+  items), so — like Allocations — every mutation (add/edit/swap/move/remove) is audited, with
+  `snake_case` action names: `breaker_added`, `breaker_edited`, `breaker_swapped`,
+  `breaker_removed`, `circuit_added`, `circuit_edited`, `circuit_reassigned`, `circuit_removed`.
+
 ## Known constraints / things to watch
 
 - No auth beyond the cosmetic name tag — anyone with the deployed URL can read/write
@@ -109,4 +158,8 @@ or remove data with no other history trail.
 - No conflict detection: if two people save at nearly the same moment, last write wins
   and can silently drop the other person's change (each save is a full overwrite).
 - Deferred features discussed but not built: a physical audit/walkthrough mode, live
-  auto-refresh of stale data between users, audit log pruning.
+  auto-refresh of stale data between users, audit log pruning, cross-panel circuit moves
+  (same-panel only today — see Move Circuit above).
+- **Planned next**: Doors/Locks/Keys, reusing `ChildEntityTable`. Keying is many-to-many (one
+  key opens many locks), not a tree like Panel→Breaker→Circuit — will need its own join-table
+  design (`LockKeys`) and its own facility-wide view, not bolted onto the Panels tree pattern.

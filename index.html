@@ -37,9 +37,9 @@ import ReactDOM from "react-dom/client";
 import React, { useState, useEffect, useMemo } from "react";
 import * as XLSX from "xlsx";
 import {
-  Search, Plus, X, Pencil, Trash2, Save, ChevronRight, ArrowLeft, MessageSquare,
+  Search, Plus, X, Pencil, Trash2, Save, ChevronRight, ChevronDown, ArrowLeft, MessageSquare,
   Monitor, Phone, Tv, Camera, HardDrive, HelpCircle, Columns3, Lock, Filter, Check, DoorOpen, Download,
-  Wrench, UserCircle, Settings, History, Archive, ArchiveRestore, Building2, Package, Copy,
+  Wrench, UserCircle, Settings, History, Archive, ArchiveRestore, Building2, Package, Copy, Zap, Repeat, ArrowLeftRight,
 } from "lucide-react";
 
 // Starter managed peripherals/users/bulk-item-type lists — empty until the school
@@ -49,7 +49,7 @@ const DEFAULT_USERS = [];
 const DEFAULT_BULK_ITEM_TYPES = [];
 
 // Known types, used for the Type dropdown and for icons
-const TYPE_OPTIONS = ["Computer", "Monitor", "Phone", "TV", "DocuCam", "Stream Deck", "Room", "Building", "Bulk Item", "Other"];
+const TYPE_OPTIONS = ["Computer", "Monitor", "Phone", "TV", "DocuCam", "Stream Deck", "Room", "Building", "Bulk Item", "Electrical Panel", "Other"];
 
 // Options for the structured per-asset change log
 const DEFAULT_CHANGE_TYPES = ["Purchase", "Repair", "Replacement", "Upgrade", "Maintenance", "Relocation", "Disposal", "Other"];
@@ -80,10 +80,14 @@ const BUILDING_EXCLUDED_FIELDS = ["brand", "model", "serial", "peripherals", "ho
 // A Bulk Item (tables, chairs...) isn't individually tagged or tied to one room —
 // it's a pooled quantity, distributed across rooms via the Allocations tab instead.
 const BULK_ITEM_EXCLUDED_FIELDS = ["hostname", "screenSize", "peripherals", "serial", "room", "building", "person"];
+// An Electrical Panel is otherwise device-like (real brand/model/serial, purchase
+// date, warranty, room placement) — it just doesn't have peripherals like a computer.
+const ELECTRICAL_PANEL_EXCLUDED_FIELDS = ["peripherals"];
 function fieldAppliesTo(key, type) {
   if (type === "Room" && ROOM_EXCLUDED_FIELDS.includes(key)) return false;
   if (type === "Building" && BUILDING_EXCLUDED_FIELDS.includes(key)) return false;
   if (type === "Bulk Item" && BULK_ITEM_EXCLUDED_FIELDS.includes(key)) return false;
+  if (type === "Electrical Panel" && ELECTRICAL_PANEL_EXCLUDED_FIELDS.includes(key)) return false;
   const restriction = TYPE_ONLY_FIELDS[key];
   if (!restriction) return true; // common field, applies to every type
   return restriction.includes(type);
@@ -137,7 +141,7 @@ const C = {
   scrollThumb: "#C7BEA8",
 };
 
-const CATEGORY_ICONS = { Computer: HardDrive, Monitor: Monitor, Phone: Phone, TV: Tv, DocuCam: Camera, Room: DoorOpen, Building: Building2, "Bulk Item": Package };
+const CATEGORY_ICONS = { Computer: HardDrive, Monitor: Monitor, Phone: Phone, TV: Tv, DocuCam: Camera, Room: DoorOpen, Building: Building2, "Bulk Item": Package, "Electrical Panel": Zap };
 function iconFor(type) {
   return CATEGORY_ICONS[type] || HelpCircle;
 }
@@ -187,6 +191,14 @@ function describeAudit(entry) {
   if (entry.action === "noted") return `Note: ${entry.note}`;
   if (entry.action === "maintenance_completed") return `Completed maintenance "${entry.field}" — last done ${entry.to}`;
   if (entry.action === "maintenance_removed") return `Removed scheduled maintenance: ${entry.field}`;
+  if (entry.action === "breaker_added") return `Added breaker at ${entry.field} (${entry.to})`;
+  if (entry.action === "breaker_swapped") return `Swapped breaker at ${entry.field} — serial changed from "${entry.from}" to "${entry.to}"`;
+  if (entry.action === "breaker_removed") return `Removed breaker at ${entry.field}`;
+  if (entry.action === "circuit_added") return `Added circuit "${entry.field}" (${entry.to})`;
+  if (entry.action === "circuit_reassigned") return `Moved circuit "${entry.field}" from ${entry.from} to ${entry.to}`;
+  if (entry.action === "circuit_removed") return `Removed circuit "${entry.field}"`;
+  // breaker_edited / circuit_edited fall through to the generic case below —
+  // their field/from/to are already in the "X changed from A to B" shape.
   return `${entry.field} changed from "${entry.from || "—"}" to "${entry.to || "—"}"`;
 }
 // Follows a non-Room asset's Room link to that Room's own Building link.
@@ -269,6 +281,12 @@ function AssetTracker() {
   const [editingMaintenanceIdx, setEditingMaintenanceIdx] = useState(null);
   const [maintenanceEditDraft, setMaintenanceEditDraft] = useState(null);
   const [confirmMaintenanceDelete, setConfirmMaintenanceDelete] = useState(null);
+  const [swappingBreaker, setSwappingBreaker] = useState(null); // breaker object or null
+  const [swapDraft, setSwapDraft] = useState({ serial: "", ampRating: "", installedDate: "" });
+  const [swapError, setSwapError] = useState(null);
+  const [movingCircuit, setMovingCircuit] = useState(null); // { breakerId, circuit } or null
+  const [moveCircuitTarget, setMoveCircuitTarget] = useState("");
+  const [moveCircuitError, setMoveCircuitError] = useState(null);
 
   const [currentUser, setCurrentUser] = useState(null);
   const [showNamePrompt, setShowNamePrompt] = useState(false);
@@ -559,6 +577,12 @@ function AssetTracker() {
     setEditingMaintenanceIdx(null);
     setMaintenanceEditDraft(null);
     setConfirmMaintenanceDelete(null);
+    setSwappingBreaker(null);
+    setSwapDraft({ serial: "", ampRating: "", installedDate: "" });
+    setSwapError(null);
+    setMovingCircuit(null);
+    setMoveCircuitTarget("");
+    setMoveCircuitError(null);
   }
 
   function closeDetail() {
@@ -926,6 +950,235 @@ function AssetTracker() {
     setConfirmMaintenanceDelete(null);
   }
 
+  // ---------- Breakers / Circuits (Electrical Panel assets only) ----------
+  // Breakers/Circuits carry no at/by of their own (unlike comments/changes/
+  // maintenance items), so — like Allocations — every mutation is audited.
+  // These are plain (non-async) functions: onAdd/onSave need to return a
+  // validation-error string synchronously for ChildEntityTable to show it, so
+  // persist() is called fire-and-forget here, same as toggleColumnVisible/
+  // addColumn/addChangeType etc. already do elsewhere in this file.
+  function slotsLabel_(breaker) {
+    return (breaker.slots || []).join("/") || "—";
+  }
+
+  function updateBreakers(nextBreakers) {
+    return assets.map(a => (a.label === selectedLabel ? { ...a, breakers: nextBreakers } : a));
+  }
+
+  function addBreaker(draft) {
+    if (!selectedAsset) return "No panel selected.";
+    const slots = (draft.slots || "").split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
+    if (slots.length === 0) return "Enter at least one slot number.";
+    const mount = draft.mount || "full";
+    const existing = selectedAsset.breakers || [];
+    for (const s of slots) {
+      const sharing = existing.filter(b => (b.slots || []).includes(s));
+      if (sharing.length > 0 && (mount !== "tandem" || sharing.some(b => b.mount !== "tandem"))) {
+        return `Slot ${s} is already in use by a non-tandem breaker.`;
+      }
+    }
+    const breaker = {
+      id: crypto.randomUUID(), panelLabel: selectedAsset.label, slots,
+      poles: draft.poles || "1", mount,
+      ampRating: draft.ampRating || "", status: draft.status || "Active",
+      serial: draft.serial || "", installedDate: draft.installedDate || "", notes: draft.notes || "",
+      circuits: [],
+    };
+    const entry = {
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
+      action: "breaker_added", field: `Slot ${slotsLabel_(breaker)}`,
+      to: `${breaker.ampRating ? breaker.ampRating + "A" : "?A"}${mount === "tandem" ? " · tandem" : ""}`,
+    };
+    persist(updateBreakers([...existing, breaker]), columns, changeTypes, vendors, logAudit([entry]));
+  }
+
+  function saveBreakerEdit(id, draft) {
+    if (!selectedAsset) return "No panel selected.";
+    const slots = (draft.slots || "").split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
+    if (slots.length === 0) return "Enter at least one slot number.";
+    const mount = draft.mount || "full";
+    const existing = selectedAsset.breakers || [];
+    const original = existing.find(b => b.id === id);
+    if (!original) return "Breaker not found.";
+    for (const s of slots) {
+      const sharing = existing.filter(b => b.id !== id && (b.slots || []).includes(s));
+      if (sharing.length > 0 && (mount !== "tandem" || sharing.some(b => b.mount !== "tandem"))) {
+        return `Slot ${s} is already in use by a non-tandem breaker.`;
+      }
+    }
+    const updated = {
+      ...original, slots, poles: draft.poles || "1", mount,
+      ampRating: draft.ampRating || "", status: draft.status || "Active",
+      serial: draft.serial || "", installedDate: draft.installedDate || "", notes: draft.notes || "",
+    };
+    const mk = (field, from, to) => ({
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
+      action: "breaker_edited", field: `Slot ${slotsLabel_(original)} — ${field}`, from, to,
+    });
+    const entries = [];
+    if (slotsLabel_(original) !== slotsLabel_(updated)) entries.push(mk("Slots", slotsLabel_(original), slotsLabel_(updated)));
+    if ((original.poles || "") !== updated.poles) entries.push(mk("Poles", original.poles || "—", updated.poles));
+    if ((original.mount || "") !== updated.mount) entries.push(mk("Mount", original.mount || "—", updated.mount));
+    if ((original.ampRating || "") !== updated.ampRating) entries.push(mk("Amp Rating", original.ampRating || "—", updated.ampRating || "—"));
+    if ((original.status || "") !== updated.status) entries.push(mk("Status", original.status || "—", updated.status));
+    if ((original.serial || "") !== updated.serial) entries.push(mk("Serial", original.serial || "—", updated.serial || "—"));
+    if ((original.installedDate || "") !== updated.installedDate) {
+      entries.push(mk("Installed Date", formatDateOnly(original.installedDate) || "—", formatDateOnly(updated.installedDate) || "—"));
+    }
+    if ((original.notes || "") !== updated.notes) entries.push(mk("Notes", original.notes || "—", updated.notes || "—"));
+    const nextBreakers = existing.map(b => (b.id === id ? updated : b));
+    persist(updateBreakers(nextBreakers), columns, changeTypes, vendors, entries.length ? logAudit(entries) : auditLog);
+  }
+
+  // Referential integrity (a breaker with circuits attached can't be deleted)
+  // is enforced here, client-side only — consistent with every other guard in
+  // this app (delete/archive confirmations etc.); nothing else validates
+  // server-side either, so this one check wouldn't close a real gap by moving.
+  function canDeleteBreaker(breaker) {
+    if ((breaker.circuits || []).length > 0) return "This breaker still has circuits attached — move or remove them first.";
+    return null;
+  }
+
+  function deleteBreaker(id) {
+    if (!selectedAsset) return;
+    const existing = selectedAsset.breakers || [];
+    const breaker = existing.find(b => b.id === id);
+    if (!breaker) return;
+    const nextBreakers = existing.filter(b => b.id !== id);
+    const entry = {
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
+      action: "breaker_removed", field: `Slot ${slotsLabel_(breaker)}`,
+    };
+    persist(updateBreakers(nextBreakers), columns, changeTypes, vendors, logAudit([entry]));
+  }
+
+  // Swap is deliberately separate from the generic edit above — it's the only
+  // way to change serial/ampRating/installedDate, keeping "replaced the
+  // physical unit" distinct from "corrected a typo" in the audit trail.
+  function openSwapBreaker(breaker) {
+    setSwappingBreaker(breaker);
+    setSwapDraft({ serial: breaker.serial || "", ampRating: breaker.ampRating || "", installedDate: breaker.installedDate || "" });
+    setSwapError(null);
+  }
+
+  function submitSwapBreaker() {
+    if (!selectedAsset || !swappingBreaker) return;
+    const existing = selectedAsset.breakers || [];
+    const original = existing.find(b => b.id === swappingBreaker.id);
+    if (!original) { setSwapError("Breaker not found."); return; }
+    const updated = { ...original, serial: swapDraft.serial || "", ampRating: swapDraft.ampRating || "", installedDate: swapDraft.installedDate || "" };
+    const nextBreakers = existing.map(b => (b.id === original.id ? updated : b));
+    const entry = {
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
+      action: "breaker_swapped", field: `Slot ${slotsLabel_(original)}`,
+      from: original.serial || "—", to: updated.serial || "—",
+    };
+    persist(updateBreakers(nextBreakers), columns, changeTypes, vendors, logAudit([entry]));
+    setSwappingBreaker(null);
+    setSwapError(null);
+  }
+
+  function addCircuit(breakerId, draft) {
+    if (!selectedAsset) return "No panel selected.";
+    if (!draft.label || !draft.label.trim()) return "Enter a circuit label.";
+    const roomsServed = draft.roomsServed || [];
+    const feedsPanelLabel = draft.feedsPanelLabel || "";
+    if (roomsServed.length === 0 && !feedsPanelLabel) return "Pick either rooms served or a sub-panel this circuit feeds.";
+    if (roomsServed.length > 0 && feedsPanelLabel) return "A circuit can serve rooms or feed a sub-panel, not both.";
+    const existing = selectedAsset.breakers || [];
+    const breaker = existing.find(b => b.id === breakerId);
+    if (!breaker) return "Breaker not found.";
+    const circuit = {
+      id: crypto.randomUUID(), breakerId, label: draft.label.trim(), description: (draft.description || "").trim(),
+      roomsServed, feedsPanelLabel,
+    };
+    const nextBreakers = existing.map(b => (b.id === breakerId ? { ...b, circuits: [...(b.circuits || []), circuit] } : b));
+    const entry = {
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
+      action: "circuit_added", field: circuit.label,
+      to: feedsPanelLabel ? `Feeds ${feedsPanelLabel}` : `Serves ${roomsServed.join(", ")}`,
+    };
+    persist(updateBreakers(nextBreakers), columns, changeTypes, vendors, logAudit([entry]));
+  }
+
+  function saveCircuitEdit(breakerId, id, draft) {
+    if (!selectedAsset) return "No panel selected.";
+    if (!draft.label || !draft.label.trim()) return "Enter a circuit label.";
+    const roomsServed = draft.roomsServed || [];
+    const feedsPanelLabel = draft.feedsPanelLabel || "";
+    if (roomsServed.length === 0 && !feedsPanelLabel) return "Pick either rooms served or a sub-panel this circuit feeds.";
+    if (roomsServed.length > 0 && feedsPanelLabel) return "A circuit can serve rooms or feed a sub-panel, not both.";
+    const existing = selectedAsset.breakers || [];
+    const breaker = existing.find(b => b.id === breakerId);
+    if (!breaker) return "Breaker not found.";
+    const original = (breaker.circuits || []).find(c => c.id === id);
+    if (!original) return "Circuit not found.";
+    const updated = { ...original, label: draft.label.trim(), description: (draft.description || "").trim(), roomsServed, feedsPanelLabel };
+    const mk = (field, from, to) => ({
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
+      action: "circuit_edited", field: `${original.label} — ${field}`, from, to,
+    });
+    const entries = [];
+    if (original.label !== updated.label) entries.push(mk("Label", original.label, updated.label));
+    if ((original.description || "") !== updated.description) entries.push(mk("Description", original.description || "—", updated.description || "—"));
+    if ((original.roomsServed || []).join(",") !== roomsServed.join(",")) {
+      entries.push(mk("Rooms served", (original.roomsServed || []).join(", ") || "—", roomsServed.join(", ") || "—"));
+    }
+    if ((original.feedsPanelLabel || "") !== feedsPanelLabel) entries.push(mk("Feeds sub-panel", original.feedsPanelLabel || "—", feedsPanelLabel || "—"));
+    const nextBreakers = existing.map(b => (b.id === breakerId ? { ...b, circuits: (b.circuits || []).map(c => (c.id === id ? updated : c)) } : b));
+    persist(updateBreakers(nextBreakers), columns, changeTypes, vendors, entries.length ? logAudit(entries) : auditLog);
+  }
+
+  function deleteCircuit(breakerId, id) {
+    if (!selectedAsset) return;
+    const existing = selectedAsset.breakers || [];
+    const breaker = existing.find(b => b.id === breakerId);
+    if (!breaker) return;
+    const circuit = (breaker.circuits || []).find(c => c.id === id);
+    if (!circuit) return;
+    const nextBreakers = existing.map(b => (b.id === breakerId ? { ...b, circuits: (b.circuits || []).filter(c => c.id !== id) } : b));
+    const entry = {
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
+      action: "circuit_removed", field: circuit.label,
+    };
+    persist(updateBreakers(nextBreakers), columns, changeTypes, vendors, logAudit([entry]));
+  }
+
+  // Same-panel only for this pass — moving a circuit to a different Panel
+  // asset would mean mutating two assets atomically, deferred as a follow-up.
+  function openMoveCircuit(breakerId, circuit) {
+    setMovingCircuit({ breakerId, circuit });
+    setMoveCircuitTarget("");
+    setMoveCircuitError(null);
+  }
+
+  function submitMoveCircuit() {
+    if (!selectedAsset || !movingCircuit) return;
+    if (!moveCircuitTarget) { setMoveCircuitError("Pick a destination breaker."); return; }
+    if (moveCircuitTarget === movingCircuit.breakerId) { setMoveCircuitError("That's already this circuit's breaker."); return; }
+    const existing = selectedAsset.breakers || [];
+    const fromBreaker = existing.find(b => b.id === movingCircuit.breakerId);
+    const toBreaker = existing.find(b => b.id === moveCircuitTarget);
+    if (!fromBreaker || !toBreaker) { setMoveCircuitError("Breaker not found."); return; }
+    const circuit = (fromBreaker.circuits || []).find(c => c.id === movingCircuit.circuit.id);
+    if (!circuit) { setMoveCircuitError("Circuit not found."); return; }
+    const movedCircuit = { ...circuit, breakerId: toBreaker.id };
+    const nextBreakers = existing.map(b => {
+      if (b.id === fromBreaker.id) return { ...b, circuits: (b.circuits || []).filter(c => c.id !== circuit.id) };
+      if (b.id === toBreaker.id) return { ...b, circuits: [...(b.circuits || []), movedCircuit] };
+      return b;
+    });
+    const entry = {
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
+      action: "circuit_reassigned", field: circuit.label,
+      from: `Slot ${slotsLabel_(fromBreaker)}`, to: `Slot ${slotsLabel_(toBreaker)}`,
+    };
+    persist(updateBreakers(nextBreakers), columns, changeTypes, vendors, logAudit([entry]));
+    setMovingCircuit(null);
+    setMoveCircuitTarget("");
+    setMoveCircuitError(null);
+  }
+
   // Local-only — no persist() call. Column show/hide is a per-device viewing
   // preference now, not shared state, so this never touches the Sheet.
   function toggleColumnVisible(key) {
@@ -1062,6 +1315,25 @@ function AssetTracker() {
       Action: entry.action, Detail: describeAudit(entry), "By": entry.by || "",
     }));
 
+    const breakerRows = [];
+    const circuitRows = [];
+    assets.forEach(a => {
+      (a.breakers || []).forEach(b => {
+        breakerRows.push({
+          Panel: a.label, "Slot(s)": (b.slots || []).join("/"), "Amp Rating": b.ampRating || "",
+          Poles: b.poles || "", Mount: b.mount || "", Status: b.status || "", Serial: b.serial || "",
+          "Installed Date": b.installedDate || "", Notes: b.notes || "", Circuits: (b.circuits || []).length,
+        });
+        (b.circuits || []).forEach(c => {
+          circuitRows.push({
+            Panel: a.label, "Slot(s)": (b.slots || []).join("/"), Circuit: c.label,
+            Description: c.description || "",
+            Serves: c.feedsPanelLabel ? `Feeds → ${c.feedsPanelLabel}` : (c.roomsServed || []).join(", "),
+          });
+        });
+      });
+    });
+
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(assetRows), "Assets");
     XLSX.utils.book_append_sheet(
@@ -1078,6 +1350,18 @@ function AssetTracker() {
       wb,
       XLSX.utils.json_to_sheet(allocationRows.length ? allocationRows : [{ "Asset ID": "", Item: "", Room: "", Quantity: "" }]),
       "Allocations"
+    );
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.json_to_sheet(breakerRows.length ? breakerRows : [{
+        Panel: "", "Slot(s)": "", "Amp Rating": "", Poles: "", Mount: "", Status: "", Serial: "", "Installed Date": "", Notes: "", Circuits: "",
+      }]),
+      "Breakers"
+    );
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.json_to_sheet(circuitRows.length ? circuitRows : [{ Panel: "", "Slot(s)": "", Circuit: "", Description: "", Serves: "" }]),
+      "Circuits"
     );
     XLSX.utils.book_append_sheet(
       wb,
@@ -1271,6 +1555,7 @@ function AssetTracker() {
             { key: "details", label: "Details" },
             ...(isPlace ? [{ key: "contents", label: "Contents", count: contentsCount }] : []),
             ...(selectedAsset.type === "Bulk Item" ? [{ key: "allocations", label: "Allocations", count: (selectedAsset.allocations || []).length }] : []),
+            ...(selectedAsset.type === "Electrical Panel" ? [{ key: "breakers", label: "Breakers", count: (selectedAsset.breakers || []).length }] : []),
             { key: "maintenance", label: "Maintenance", count: maintenanceItems.length, urgent: overdueMaintenanceCount > 0 },
             { key: "comments", label: "Comments", count: comments.length },
             { key: "changes", label: "Change Log", count: changeEntries.length },
@@ -1541,6 +1826,148 @@ function AssetTracker() {
                 </div>
               )}
             </>
+          )}
+
+          {detailTab === "breakers" && selectedAsset.type === "Electrical Panel" && (
+            <ChildEntityTable
+              items={(selectedAsset.breakers || []).slice().sort((a, b) => (parseFloat((a.slots || [])[0]) || 0) - (parseFloat((b.slots || [])[0]) || 0))}
+              fields={[
+                { key: "slots", label: "Slot(s)", placeholder: "e.g. 5 or 1,3" },
+                { key: "ampRating", label: "Amp Rating", type: "number", placeholder: "20" },
+                { key: "poles", label: "Poles", type: "select", options: ["1", "2"] },
+                { key: "mount", label: "Mount", type: "select", options: ["full", "tandem"] },
+                { key: "status", label: "Status", type: "select", options: ["Active", "Spare", "Faulted", "Retired"] },
+                { key: "serial", label: "Serial", placeholder: "optional" },
+                { key: "installedDate", label: "Installed", type: "date" },
+                { key: "notes", label: "Notes", wide: true },
+              ]}
+              initialDraft={{ slots: "", ampRating: "", poles: "1", mount: "full", status: "Active", serial: "", installedDate: "", notes: "" }}
+              onAdd={addBreaker}
+              onSave={saveBreakerEdit}
+              onDelete={deleteBreaker}
+              canDelete={canDeleteBreaker}
+              deleteConfirmMessage={item => `Delete the breaker at Slot ${slotsLabel_(item)}?`}
+              addLabel="Add Breaker"
+              emptyMessage="No breakers added yet."
+              renderSummary={breaker => (
+                <div>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontWeight: 700, fontSize: 13, color: C.brandDark }}>Slot {slotsLabel_(breaker)}</span>
+                    <span style={{ fontSize: 13, color: C.muted }}>
+                      {breaker.ampRating ? `${breaker.ampRating}A` : "—"} · {breaker.poles === "2" ? "2-pole" : "1-pole"}{breaker.mount === "tandem" ? " · tandem" : ""}
+                    </span>
+                    <span style={{
+                      fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase",
+                      color: breaker.status === "Faulted" ? C.danger : breaker.status === "Retired" ? C.muted : C.success,
+                    }}>
+                      {breaker.status || "Active"}
+                    </span>
+                  </div>
+                  {(breaker.serial || breaker.installedDate) && (
+                    <div style={{ fontSize: 12, color: C.placeholder, marginTop: 2 }}>
+                      {breaker.serial ? `Serial: ${breaker.serial}` : ""}{breaker.serial && breaker.installedDate ? " · " : ""}
+                      {breaker.installedDate ? `Installed ${formatDateOnly(breaker.installedDate)}` : ""}
+                    </div>
+                  )}
+                </div>
+              )}
+              customRowActions={breaker => (
+                <button onClick={() => openSwapBreaker(breaker)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Swap breaker at Slot ${slotsLabel_(breaker)}`}>
+                  <Repeat size={14} color={C.muted} />
+                </button>
+              )}
+              renderExpanded={breaker => {
+                const otherPanelLabels = assets.filter(a => a.type === "Electrical Panel" && a.label !== selectedAsset.label).map(a => a.label);
+                function renderCircuitTargetFields(values, setValues) {
+                  const mode = values.feedsPanelLabel ? "subpanel" : (values._mode || "rooms");
+                  const roomsSelected = values.roomsServed || [];
+                  return (
+                    <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 8 }}>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Serves</span>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button
+                          type="button"
+                          onClick={() => setValues({ ...values, _mode: "rooms", feedsPanelLabel: "" })}
+                          style={{ flex: 1, padding: "7px 10px", background: mode === "rooms" ? C.brand : "transparent", color: mode === "rooms" ? "#fff" : C.ink, border: `1.5px solid ${mode === "rooms" ? C.brand : C.border}`, borderRadius: 2, fontSize: 13, fontWeight: 600 }}
+                        >
+                          Serves rooms
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setValues({ ...values, _mode: "subpanel", roomsServed: [] })}
+                          style={{ flex: 1, padding: "7px 10px", background: mode === "subpanel" ? C.brand : "transparent", color: mode === "subpanel" ? "#fff" : C.ink, border: `1.5px solid ${mode === "subpanel" ? C.brand : C.border}`, borderRadius: 2, fontSize: 13, fontWeight: 600 }}
+                        >
+                          Feeds sub-panel
+                        </button>
+                      </div>
+                      {mode === "rooms" ? (
+                        roomAssetNames.length === 0 ? (
+                          <div style={{ fontSize: 13, color: C.empty }}>No Room assets yet.</div>
+                        ) : (
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                            {roomAssetNames.map(room => {
+                              const active = roomsSelected.includes(room);
+                              return (
+                                <button
+                                  key={room}
+                                  type="button"
+                                  onClick={() => setValues({ ...values, roomsServed: active ? roomsSelected.filter(r => r !== room) : [...roomsSelected, room] })}
+                                  style={{ padding: "6px 12px", borderRadius: 14, fontSize: 13, fontWeight: active ? 600 : 500, border: `1.5px solid ${active ? C.brand : C.border}`, background: active ? C.brand : "#fff", color: active ? "#fff" : C.ink }}
+                                >
+                                  {room}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )
+                      ) : otherPanelLabels.length === 0 ? (
+                        <div style={{ fontSize: 13, color: C.empty }}>No other Electrical Panel assets yet.</div>
+                      ) : (
+                        <select
+                          value={values.feedsPanelLabel || ""}
+                          onChange={e => setValues({ ...values, feedsPanelLabel: e.target.value })}
+                          style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink, background: "#fff" }}
+                        >
+                          <option value="">Select a panel…</option>
+                          {otherPanelLabels.map(p => <option key={p} value={p}>{p}</option>)}
+                        </select>
+                      )}
+                    </div>
+                  );
+                }
+                return (
+                  <ChildEntityTable
+                    items={breaker.circuits || []}
+                    fields={[
+                      { key: "label", label: "Label", placeholder: "e.g. Circuit 14" },
+                      { key: "description", label: "Description", placeholder: "What does this feed?", wide: true },
+                    ]}
+                    initialDraft={{ label: "", description: "", roomsServed: [], feedsPanelLabel: "" }}
+                    onAdd={draft => addCircuit(breaker.id, draft)}
+                    onSave={(id, draft) => saveCircuitEdit(breaker.id, id, draft)}
+                    onDelete={id => deleteCircuit(breaker.id, id)}
+                    addLabel="Add Circuit"
+                    emptyMessage="No circuits on this breaker yet."
+                    renderCustomFields={renderCircuitTargetFields}
+                    deleteConfirmMessage={circuit => `Delete circuit "${circuit.label}"?`}
+                    renderSummary={circuit => (
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: 13, color: C.ink }}>{circuit.label}</div>
+                        <div style={{ fontSize: 12, color: C.muted }}>
+                          {circuit.feedsPanelLabel ? `Feeds → ${circuit.feedsPanelLabel}` : (circuit.roomsServed || []).length ? `Serves ${circuit.roomsServed.join(", ")}` : "—"}
+                          {circuit.description ? ` · ${circuit.description}` : ""}
+                        </div>
+                      </div>
+                    )}
+                    customRowActions={circuit => (
+                      <button onClick={() => openMoveCircuit(breaker.id, circuit)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Move circuit ${circuit.label}`}>
+                        <ArrowLeftRight size={14} color={C.muted} />
+                      </button>
+                    )}
+                  />
+                );
+              }}
+            />
           )}
 
           {detailTab === "maintenance" && (
@@ -1956,6 +2383,82 @@ function AssetTracker() {
                   style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 13 }}
                 >
                   Delete
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {swappingBreaker && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
+            <div style={{ background: C.surface, border: `1.5px solid ${C.brandDark}`, borderRadius: 2, padding: 24, width: "100%", maxWidth: 340 }}>
+              <div style={{ fontWeight: 700, marginBottom: 4, color: C.brandDark }}>Swap breaker at Slot {slotsLabel_(swappingBreaker)}</div>
+              <div style={{ fontSize: 13, color: C.muted, marginBottom: 14 }}>
+                Keeps the same slot(s) and id — logged as a physical replacement, separate from a field edit.
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 14 }}>
+                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>New Serial</span>
+                  <input
+                    value={swapDraft.serial}
+                    onChange={e => setSwapDraft({ ...swapDraft, serial: e.target.value })}
+                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink }}
+                  />
+                </label>
+                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Amp Rating</span>
+                  <input
+                    type="number"
+                    value={swapDraft.ampRating}
+                    onChange={e => setSwapDraft({ ...swapDraft, ampRating: e.target.value })}
+                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink }}
+                  />
+                </label>
+                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Installed Date</span>
+                  <input
+                    type="date"
+                    value={swapDraft.installedDate}
+                    onChange={e => setSwapDraft({ ...swapDraft, installedDate: e.target.value })}
+                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink }}
+                  />
+                </label>
+              </div>
+              {swapError && <div style={{ fontSize: 13, color: C.danger, marginBottom: 12 }}>{swapError}</div>}
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                <button onClick={() => { setSwappingBreaker(null); setSwapError(null); }} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 2, fontWeight: 600, fontSize: 13, color: C.ink }}>
+                  Cancel
+                </button>
+                <button onClick={submitSwapBreaker} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 13 }}>
+                  Swap
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {movingCircuit && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
+            <div style={{ background: C.surface, border: `1.5px solid ${C.brandDark}`, borderRadius: 2, padding: 24, width: "100%", maxWidth: 340 }}>
+              <div style={{ fontWeight: 700, marginBottom: 4, color: C.brandDark }}>Move circuit "{movingCircuit.circuit.label}"</div>
+              <div style={{ fontSize: 13, color: C.muted, marginBottom: 14 }}>Choose a different breaker on this panel.</div>
+              <select
+                value={moveCircuitTarget}
+                onChange={e => setMoveCircuitTarget(e.target.value)}
+                style={{ width: "100%", padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink, background: "#fff", marginBottom: 12 }}
+              >
+                <option value="">Select a breaker…</option>
+                {(selectedAsset.breakers || []).filter(b => b.id !== movingCircuit.breakerId).map(b => (
+                  <option key={b.id} value={b.id}>Slot {slotsLabel_(b)}</option>
+                ))}
+              </select>
+              {moveCircuitError && <div style={{ fontSize: 13, color: C.danger, marginBottom: 12 }}>{moveCircuitError}</div>}
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                <button onClick={() => { setMovingCircuit(null); setMoveCircuitError(null); }} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 2, fontWeight: 600, fontSize: 13, color: C.ink }}>
+                  Cancel
+                </button>
+                <button onClick={submitMoveCircuit} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 13 }}>
+                  Move
                 </button>
               </div>
             </div>
@@ -2749,6 +3252,243 @@ function SelectBox({ value, onChange, options }) {
     >
       {options.map(o => <option key={o} value={o}>{o}</option>)}
     </select>
+  );
+}
+
+// Generic list/add/edit/delete UI for a structured child entity (id + fields).
+// Built for Breakers and Circuits — validated against both real shapes in this
+// same pass, not designed speculatively for a single call site. Field-driven
+// (text/number/date/select/multiselect) covers the common cases;
+// renderCustomFields covers anything that doesn't fit that shape (e.g. a
+// circuit's rooms-vs-sub-panel toggle). Owns its own add/edit/expand/
+// delete-confirm UI state — the caller just supplies items + field config +
+// onAdd/onSave/onDelete. Actions that aren't a generic field edit (Swap
+// Breaker, Move Circuit) live outside this component via customRowActions,
+// which the caller uses to open its own dedicated modal.
+function ChildEntityTable({
+  items, fields, onAdd, onSave, onDelete, initialDraft,
+  renderCustomFields, renderSummary, renderExpanded, customRowActions,
+  addLabel, emptyMessage, canDelete, deleteConfirmMessage,
+}) {
+  const [draft, setDraft] = useState(initialDraft);
+  const [editingId, setEditingId] = useState(null);
+  const [editDraft, setEditDraft] = useState(null);
+  const [expandedIds, setExpandedIds] = useState({});
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [addError, setAddError] = useState(null);
+  const [editError, setEditError] = useState(null);
+
+  function renderField(f, values, setValues) {
+    const value = values[f.key];
+    const commonLabel = (
+      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>
+        {f.label}
+      </span>
+    );
+    if (f.type === "select") {
+      return (
+        <label key={f.key} style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: f.wide ? "1 / -1" : undefined }}>
+          {commonLabel}
+          <select
+            value={value || ""}
+            onChange={e => setValues({ ...values, [f.key]: e.target.value })}
+            style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink, background: "#fff" }}
+          >
+            <option value="">Select…</option>
+            {(f.options || []).map(o => <option key={o} value={o}>{o}</option>)}
+          </select>
+        </label>
+      );
+    }
+    if (f.type === "multiselect") {
+      const selected = Array.isArray(value) ? value : [];
+      return (
+        <div key={f.key} style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 6 }}>
+          {commonLabel}
+          {(f.options || []).length === 0 ? (
+            <div style={{ fontSize: 13, color: C.empty }}>None available yet.</div>
+          ) : (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {(f.options || []).map(opt => {
+                const active = selected.includes(opt);
+                return (
+                  <button
+                    key={opt}
+                    type="button"
+                    onClick={() => setValues({ ...values, [f.key]: active ? selected.filter(s => s !== opt) : [...selected, opt] })}
+                    style={{
+                      padding: "6px 12px", borderRadius: 14, fontSize: 13, fontWeight: active ? 600 : 500,
+                      border: `1.5px solid ${active ? C.brand : C.border}`, background: active ? C.brand : "#fff", color: active ? "#fff" : C.ink,
+                    }}
+                  >
+                    {opt}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      );
+    }
+    return (
+      <label key={f.key} style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: f.wide ? "1 / -1" : undefined }}>
+        {commonLabel}
+        <input
+          type={f.type === "number" ? "number" : f.type === "date" ? "date" : "text"}
+          value={value || ""}
+          onChange={e => setValues({ ...values, [f.key]: e.target.value })}
+          placeholder={f.placeholder}
+          style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 2, color: C.ink }}
+        />
+      </label>
+    );
+  }
+
+  function startEdit(item) {
+    setEditingId(item.id);
+    setEditDraft({ ...item });
+    setEditError(null);
+  }
+  function cancelEdit() {
+    setEditingId(null);
+    setEditDraft(null);
+    setEditError(null);
+  }
+  // onAdd/onSave may return a validation error string (e.g. slot overlap) —
+  // when they do, the draft is kept as-is so the user doesn't lose their input.
+  function saveEdit() {
+    const error = onSave(editingId, editDraft);
+    if (error) { setEditError(error); return; }
+    cancelEdit();
+  }
+  function submitAdd() {
+    const error = onAdd(draft);
+    if (error) { setAddError(error); return; }
+    setAddError(null);
+    setDraft(initialDraft);
+  }
+  function toggleExpanded(id) {
+    setExpandedIds({ ...expandedIds, [id]: !expandedIds[id] });
+  }
+
+  return (
+    <div>
+      <div style={{ border: `1.5px solid ${C.brandDark}`, borderRadius: 2, background: C.surface, padding: 14, marginBottom: 20 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
+          {fields.map(f => renderField(f, draft, setDraft))}
+          {renderCustomFields && renderCustomFields(draft, setDraft, true)}
+        </div>
+        {addError && <div style={{ fontSize: 13, color: C.danger, marginBottom: 8 }}>{addError}</div>}
+        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+          <button onClick={submitAdd} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 13 }}>
+            {addLabel}
+          </button>
+        </div>
+      </div>
+
+      {items.length === 0 ? (
+        <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>{emptyMessage}</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {items.map(item => {
+            const isEditing = editingId === item.id;
+            const isExpanded = !!expandedIds[item.id];
+            if (isEditing) {
+              return (
+                <div key={item.id} style={{ border: `1.5px solid ${C.brandDark}`, borderRadius: 2, background: C.surface, padding: 14 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
+                    {fields.map(f => renderField(f, editDraft, setEditDraft))}
+                    {renderCustomFields && renderCustomFields(editDraft, setEditDraft, false)}
+                  </div>
+                  {editError && <div style={{ fontSize: 13, color: C.danger, marginBottom: 8 }}>{editError}</div>}
+                  <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                    <button onClick={saveEdit} style={{ padding: "8px 14px", background: C.success, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 13 }}>
+                      Save
+                    </button>
+                    <button onClick={cancelEdit} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 2, fontWeight: 600, fontSize: 13, color: C.ink }}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              );
+            }
+            return (
+              <div key={item.id} style={{ border: `1px solid ${C.border}`, borderRadius: 2, background: C.surface, padding: "10px 14px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
+                    {renderExpanded && (
+                      <button onClick={() => toggleExpanded(item.id)} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4, display: "flex", flexShrink: 0 }} aria-label={isExpanded ? "Collapse" : "Expand"}>
+                        {isExpanded ? <ChevronDown size={15} color={C.brand} /> : <ChevronRight size={15} color={C.brand} />}
+                      </button>
+                    )}
+                    <div style={{ minWidth: 0, flex: 1 }}>{renderSummary ? renderSummary(item) : null}</div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                    {customRowActions && customRowActions(item)}
+                    <button onClick={() => startEdit(item)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label="Edit">
+                      <Pencil size={14} color={C.muted} />
+                    </button>
+                    <button
+                      onClick={() => setConfirmDeleteId(item.id)}
+                      className="icon-btn"
+                      style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }}
+                      aria-label="Delete"
+                    >
+                      <X size={14} color={C.placeholder} />
+                    </button>
+                  </div>
+                </div>
+                {isExpanded && renderExpanded && (
+                  <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.border}` }}>
+                    {renderExpanded(item)}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {confirmDeleteId !== null && (() => {
+        const item = items.find(i => i.id === confirmDeleteId);
+        const blockReason = canDelete && item ? canDelete(item) : null;
+        return (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30 }}>
+            <div style={{ background: C.surface, border: `1.5px solid ${C.brandDark}`, borderRadius: 2, padding: 24, maxWidth: 360 }}>
+              {blockReason ? (
+                <>
+                  <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Can't delete</div>
+                  <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>{blockReason}</div>
+                  <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                    <button onClick={() => setConfirmDeleteId(null)} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 13 }}>
+                      OK
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>
+                    {deleteConfirmMessage ? deleteConfirmMessage(item) : "Delete this item?"}
+                  </div>
+                  <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>This can't be undone.</div>
+                  <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                    <button onClick={() => setConfirmDeleteId(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 2, fontWeight: 600, fontSize: 13, color: C.ink }}>
+                      Cancel
+                    </button>
+                    <button
+                      onClick={() => { onDelete(confirmDeleteId); setConfirmDeleteId(null); }}
+                      style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 2, fontWeight: 600, fontSize: 13 }}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+    </div>
   );
 }
 
