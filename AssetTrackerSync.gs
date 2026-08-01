@@ -24,6 +24,15 @@
  * Allocations, Maintenance, Breakers, Circuits, AuditLog, Config.
  */
 
+// Bump this (number + short description) any time this file changes, so a
+// stuck deployment is obvious instead of silently serving stale logic.
+// Two ways to check what's actually LIVE (not just what's pasted in the
+// editor — those can differ if "New version" wasn't created on deploy):
+//   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
+//      "scriptVersion" in the raw JSON.
+//   2. Compare this string to SCRIPT_VERSION at the top of index.html.
+const SCRIPT_VERSION = "v1 (2026-08-01) — Electrical Panel / Breakers / Circuits";
+
 const SHEET_NAMES = {
   assets: "Assets",
   comments: "Comments",
@@ -163,6 +172,7 @@ function doGet(e) {
     }));
 
     const payload = {
+      scriptVersion: SCRIPT_VERSION,
       assets,
       auditLog,
       columns: config.columns || null,

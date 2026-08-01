@@ -241,6 +241,12 @@ const COLUMN_VISIBILITY_STORAGE_KEY = "asset-tracker-column-visibility";
 // Your deployed Apps Script Web App URL. Redeploy in Apps Script (Deploy > Manage
 // deployments > New version) any time you change AssetTrackerSync.gs.
 const SHEET_API_URL = "https://script.google.com/macros/s/AKfycbzXaKRuCrTesxobxP-b2me1TSn0YoGogoYhNPTWU4qWWjXANXGlPuDzJSKGClOTsfOXRQ/exec";
+// Must match SCRIPT_VERSION in AssetTrackerSync.gs, bumped by hand any time
+// either file changes. loadData() compares this against what the deployed
+// backend actually reports (data.scriptVersion) and flags a mismatch —
+// catches a stuck deployment (edited-but-not-redeployed) automatically
+// instead of it silently dropping data until someone happens to notice.
+const FRONTEND_SCRIPT_VERSION = "v1 (2026-08-01) — Electrical Panel / Breakers / Circuits";
 const emptyDraftFrom = columns => Object.fromEntries(columns.map(c => [c.key, ""]));
 
 function AssetTracker() {
@@ -261,6 +267,7 @@ function AssetTracker() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [saveError, setSaveError] = useState(false);
+  const [backendScriptVersion, setBackendScriptVersion] = useState(null);
 
   const [mainTab, setMainTab] = useState("assets"); // "assets" | "maintenance" — top-level page tab
   const [view, setView] = useState("list"); // "list" | "detail"
@@ -330,6 +337,9 @@ function AssetTracker() {
 
       const loadedAssets = data.assets.map(a => ({ comments: [], changes: [], allocations: [], status: "Active", building: "", itemName: "", purchaseDate: "", warrantyUntil: "", ...a }));
       setAssets(loadedAssets);
+      // No scriptVersion at all means an old backend that predates this check entirely —
+      // still a real mismatch, not a "nothing to compare" case.
+      setBackendScriptVersion(data.scriptVersion || "(none reported — backend predates version tracking)");
       // Migrate column config: append any default columns added in newer app versions.
       let storedCols = data.columns && data.columns.length ? data.columns : DEFAULT_COLUMNS;
       DEFAULT_COLUMNS.forEach(dc => {
@@ -2518,6 +2528,14 @@ function AssetTracker() {
             {currentUser || "Set name"}
             {saveError && <span style={{ color: C.danger, marginLeft: 8 }}>Sync failed</span>}
           </button>
+          {backendScriptVersion && backendScriptVersion !== FRONTEND_SCRIPT_VERSION && (
+            <span
+              style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.danger }}
+              title={`Deployed backend: ${backendScriptVersion}\nExpected: ${FRONTEND_SCRIPT_VERSION}\n\nAssetTrackerSync.gs was edited but the live deployment wasn't updated to match — some saves may silently fail to persist. Redeploy: Apps Script > Deploy > Manage deployments > pencil icon > Version: New version > Deploy.`}
+            >
+              Backend outdated
+            </span>
+          )}
         </div>
       </div>
 

@@ -17,7 +17,15 @@ outbound network requests to arbitrary domains, which is why this migration happ
   deploy — it lives entirely inside Google's infrastructure. If you change this file,
   you must re-paste it into the Apps Script editor and create a **new deployment
   version** (Deploy > Manage deployments > pencil icon > Version: New version > Deploy).
-  Just saving the script does not update the live `/exec` URL.
+  Just saving the script does not update the live `/exec` URL. This exact mistake
+  happened once already (silently — Maintenance and Breakers/Circuits both appeared
+  to work in-session but never actually reached the sheet, for several redeploy
+  cycles, before `SCRIPT_VERSION` below caught it) — so **whenever you edit this
+  file, bump `SCRIPT_VERSION` at its top *and* the matching `FRONTEND_SCRIPT_VERSION`
+  near the top of `index.html`, in the same commit.** `loadData()` compares the two
+  on every load and shows a "Backend outdated" warning (with both version strings in
+  its tooltip) if the live backend doesn't match — the fast way to confirm a redeploy
+  actually landed, instead of only finding out when a feature quietly fails to persist.
 
 ## Architecture
 
