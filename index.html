@@ -153,6 +153,28 @@ function inferBuilding(asset, assets) {
   return roomAsset ? roomAsset.building || "" : "";
 }
 
+// Buckets the read-only detail view's fields into labeled sections instead of
+// one flat list. Any column not named here (custom user-added columns) falls
+// into a trailing "Custom Fields" group rather than being dropped.
+const DETAIL_FIELD_GROUPS = [
+  { title: "Overview", keys: ["type", "itemName", "screenSize", "totalQuantity", "label", "status"] },
+  { title: "Location & Assignment", keys: ["building", "room", "person"] },
+  { title: "Device Details", keys: ["brand", "model", "serial", "hostname", "peripherals"] },
+  { title: "Purchase & Warranty", keys: ["purchaseDate", "warrantyUntil"] },
+  { title: "Notes", keys: ["notes"] },
+];
+function groupDetailColumns(cols) {
+  const groups = DETAIL_FIELD_GROUPS.map(g => ({ title: g.title, columns: [] }));
+  const custom = [];
+  cols.forEach(c => {
+    const groupIdx = DETAIL_FIELD_GROUPS.findIndex(g => g.keys.includes(c.key));
+    if (groupIdx === -1) custom.push(c);
+    else groups[groupIdx].columns.push(c);
+  });
+  if (custom.length) groups.push({ title: "Custom Fields", columns: custom });
+  return groups.filter(g => g.columns.length > 0);
+}
+
 const USER_STORAGE_KEY = "asset-tracker-user"; // localStorage — who's using this browser
 // Your deployed Apps Script Web App URL. Redeploy in Apps Script (Deploy > Manage
 // deployments > New version) any time you change AssetTrackerSync.gs.
@@ -990,6 +1012,7 @@ function AssetTracker() {
       : selectedAsset.screenSize ? `${selectedAsset.type} · ${selectedAsset.screenSize}` : selectedAsset.type;
     const visibleDetailColumns = columns.filter(c => fieldAppliesTo(c.key, selectedAsset.type));
     const inheritedBuilding = !fieldAppliesTo("building", selectedAsset.type) ? inferBuilding(selectedAsset, assets) : "";
+    const detailGroups = groupDetailColumns(visibleDetailColumns);
     const editFormColumns = formColumnsFor(draft.type);
 
     // Contents of a Room: devices located there + bulk-item allocations to it.
@@ -1053,19 +1076,21 @@ function AssetTracker() {
         <div style={{ padding: "18px 20px 60px", maxWidth: 720, margin: "0 auto" }}>
           {detailTab === "details" && (!detailEditing ? (
             <div style={{ border: `1.5px solid ${C.brandDark}`, borderRadius: 2, background: C.surface, padding: 18, marginBottom: 20 }}>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: "14px 20px" }}>
-                {visibleDetailColumns.map(c => (
-                  <Detail key={c.key} label={c.label} value={selectedAsset[c.key]} />
-                ))}
-                {inheritedBuilding && (
-                  <div>
-                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: 0.5, textTransform: "uppercase", color: C.placeholder }}>
-                      Building (via Room)
-                    </span>
-                    <div style={{ color: C.ink, fontSize: 14, fontStyle: "italic" }}>{inheritedBuilding}</div>
+              {detailGroups.map((group, gi) => (
+                <div key={group.title} style={{ marginTop: gi === 0 ? 0 : 18 }}>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginBottom: 10, paddingBottom: 6, borderBottom: `1px solid ${C.border}` }}>
+                    {group.title}
                   </div>
-                )}
-              </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "14px 20px" }}>
+                    {group.columns.map(c => (
+                      <Detail key={c.key} label={c.label} value={selectedAsset[c.key]} wide={c.key === "notes"} />
+                    ))}
+                    {group.title === "Location & Assignment" && inheritedBuilding && (
+                      <Detail label="Building (via Room)" value={inheritedBuilding} italic />
+                    )}
+                  </div>
+                </div>
+              ))}
               <div style={{ display: "flex", gap: 10, marginTop: 20, flexWrap: "wrap" }}>
                 <button onClick={startEditSelected} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: C.brand, color: "#fff", border: "none", fontWeight: 600, fontSize: 14, borderRadius: 2 }}>
                   <Pencil size={15} /> Edit
@@ -2151,11 +2176,11 @@ function PeripheralsField({ value, onChange, options, onManage }) {
   );
 }
 
-function Detail({ label, value }) {
+function Detail({ label, value, wide, italic }) {
   return (
-    <div>
+    <div style={{ gridColumn: wide ? "1 / -1" : undefined }}>
       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: 0.5, textTransform: "uppercase", color: C.placeholder }}>{label}</span>
-      <div style={{ color: value ? C.ink : C.placeholder, fontSize: 14 }}>{value || "—"}</div>
+      <div style={{ color: value ? C.ink : C.placeholder, fontSize: 14, fontStyle: italic ? "italic" : "normal" }}>{value || "—"}</div>
     </div>
   );
 }
