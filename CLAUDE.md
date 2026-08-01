@@ -183,40 +183,64 @@ scans this repo and marks things done as a backstop. Since Claude Code runs loca
 actually does the implementation work, it's in the best position to update the list
 **the moment a feature ships** — don't leave it to the backstop job to catch up.
 
-**File format** (don't restructure it, just follow the existing shape):
+**Never edit this file from a stale copy.** This page is written to by two independent
+systems (this repo's Claude Code, and a Cowork session/scheduled job in the cloud), so a
+version you read 10 minutes — or even 1 minute — ago may already be out of date. This has
+already caused real data loss twice (once from Cowork's side, once from Claude Code's
+side re-introducing an old bullet-list version over Cowork's table conversion). The rule,
+no exceptions: immediately before every single write to this file, re-read it fresh from
+disk in that same turn, apply your change to that fresh copy, and write it back right
+away. Never reuse a copy read earlier in the session, never batch up multiple planned
+edits against one earlier read, and never assume the format you remember is still what's
+on disk — check.
+
+**File format — as of Aug 1 2026 this is a TABLE, not a bullet list** (don't restructure
+it again, just follow this shape):
 - Page properties at the top: `title::`, `type:: project`, `alias::`.
-- A `# Requests` section (open/in-progress items) and a `# Done / Shipped` section.
-- Each request is a top-level bullet under one of those sections, with `added::` (date
-  added, Logseq date-link format like `[[Aug 1st, 2026]]`), `status::` (`idea` →
-  `planned` → `in-progress` → `done`), and `source::` (`eric` or `claude-code`) as
-  indented property lines, sometimes with extra indented bullets underneath describing
-  sub-parts.
+- A `# Requests` section (open/in-progress items) and a `# Done / Shipped` section, each
+  containing one markdown table (a single Logseq block — the whole table is one bullet's
+  multi-line content, not one bullet per row).
+- Requests table columns: `Feature | Status | Effort | Added | Source | Details`.
+  Done/Shipped table columns: `Feature | Effort | Added | Completed | Source | Details`
+  (Completed replaces Status once something's done).
+  - `Status`: `idea` → `planned` → `in-progress` (done rows move to the other table
+    entirely, not marked `done` in place).
+  - `Effort`: T-shirt size — `S` / `M` / `L` / `XL`, or `TBD` if unsized. Don't guess a
+    size just to fill the cell — leave `TBD` unless you're actually confident.
+  - `Added` / `Completed`: Logseq date-link format, `[[Aug 1st, 2026]]`.
+  - `Source`: `eric` or `claude-code`.
+  - `Details`: free text, single cell (no line breaks — keep it to one or two sentences,
+    semicolon-separated if it needs more than one point).
 
-**When you finish implementing a feature that has a matching entry in `# Requests`:**
-1. Move that bullet (with its sub-bullets) from `# Requests` to `# Done / Shipped`.
-2. Set `status:: done` and add `completed:: [[<today's date, same format as added::>]]`.
-3. Leave every other entry untouched — don't reformat, reorder, or "clean up" the rest
-   of the file in the same edit.
+**When you finish implementing a feature that has a matching row in the Requests table:**
+1. Move that entire row to the Done/Shipped table (reshape it into that table's column
+   order — Effort/Added/Completed/Source/Details, dropping Status).
+2. Fill in `Completed` with today's date, same link format as `Added`.
+3. Leave every other row untouched — don't reformat, reorder, resize columns, or "clean
+   up" the rest of either table in the same edit.
 
-**You may also add new requests directly** — e.g. when you notice a real gap while
+**You may also add new request rows directly** — e.g. when you notice a real gap while
 implementing something (an obvious follow-up, an edge case the current work doesn't
 cover, something that clearly wants to exist but is out of scope for the current change).
 When you do:
-- Tag it `source:: claude-code` (Eric's own requests from Cowork are `source:: eric`) so
-  it's visibly distinguishable at a glance from something Eric actually asked for.
-- Default to `status:: idea` and add a `note::` sub-bullet explaining why you're
-  suggesting it / what prompted it — Eric wasn't in the room for this one, so give him
-  enough context to evaluate it without having to ask you.
+- Set `Source` to `claude-code` (Eric's own requests from Cowork are `eric`) so it's
+  visibly distinguishable at a glance from something Eric actually asked for.
+- Default `Status` to `idea` and `Effort` to `TBD`, and use the `Details` cell to explain
+  why you're suggesting it / what prompted it — Eric wasn't in the room for this one, so
+  give him enough context to evaluate it without having to ask you.
 - Don't add speculative "nice to have" noise for its own sake — add it because you hit a
   concrete, real gap while working, not as a general brainstorm.
 
 **What NOT to do:**
-- Don't mark something `done` on a guess — only when you've actually shipped the matching
+- Don't mark something done on a guess — only when you've actually shipped the matching
   work in this session. A false "done" is worse than leaving it as `in-progress`, since
   this file is Eric's source of truth for what's still outstanding.
-- If two systems touch the file close together, only ever change the specific bullet(s)
-  you're updating — never rewrite the whole file — so a concurrent edit from the other
-  side doesn't get clobbered.
+- If two systems touch the file close together, only ever change the specific row(s)
+  you're updating — never regenerate the whole table — so a concurrent edit from the
+  other side doesn't get clobbered.
+- Before writing, re-read the file fresh rather than reusing a copy from earlier in your
+  session — a stale copy is exactly what caused this file to get accidentally clobbered
+  once already (Cowork made the same mistake and fixed its own process after).
 
 ## Known constraints / things to watch
 
