@@ -82,16 +82,26 @@ outbound network requests to arbitrary domains, which is why this migration happ
 
 ## Data model
 
-Assets have a `type`: Computer, Monitor, Phone, TV, DocuCam, Stream Deck, Room, Building,
-Bulk Item, Electrical Panel, or Other. Which fields apply to which type is governed by `TYPE_ONLY_FIELDS`
-and the `*_EXCLUDED_FIELDS` arrays near the top of the file (`fieldAppliesTo()`) — e.g.
-Room and Building assets don't have brand/model/serial; Bulk Items (chairs, tables — not
-individually tagged) get a `totalQuantity` and an `itemName` instead, and are distributed
-across rooms via their own `allocations` array rather than a single `room` field.
-`itemName` ("Sub-Type" in the UI) is picked from a managed list (`bulkItemTypes`, editable
-via the gear icon, same pattern as peripherals/vendors/change types) rather than freeform
-text, so it stays consistent — and the list view's Type column shows a Bulk Item's
+Assets have a `type`, picked from a managed list (`typesList`, editable via the gear icon on
+the Type field — same pattern as peripherals/vendors/change types, seeded from `TYPE_OPTIONS`
+on a brand-new sheet: Computer, Monitor, Phone, TV, DocuCam, Stream Deck, Room, Building,
+Bulk Item, Electrical Panel, Other). `LOCKED_TYPES` (Room, Building, Bulk Item, Electrical
+Panel) can't be removed from the manager — they have deep structural dependencies elsewhere
+(`TYPE_ONLY_FIELDS`/`*_EXCLUDED_FIELDS`, Contents/Allocations/Breakers tabs, `inferBuilding()`)
+that a plain managed-list removal would silently break. Which fields apply to which type is
+governed by `TYPE_ONLY_FIELDS` and the `*_EXCLUDED_FIELDS` arrays near the top of the file
+(`fieldAppliesTo()`) — e.g. Room and Building assets don't have brand/model/serial; Bulk Items
+(chairs, tables — not individually tagged) get a `totalQuantity` and an `itemName` instead, and
+are distributed across rooms via their own `allocations` array rather than a single `room` field.
+`itemName` ("Sub-Type" in the UI) is picked from its own managed list (`bulkItemTypes`) rather
+than freeform text, so it stays consistent — and the list view's Type column shows a Bulk Item's
 sub-type plus a small "BULK" badge instead of the literal "Bulk Item" for every row.
+
+The Type/Room/Building fields use a custom modal picker (`SelectionModal`) instead of a native
+`<select>` — a centered card with a scrollable option list and a checkmark on the selected
+item, visually matching the column-filter popup (`activeFilterCol`) rather than the browser's
+native dropdown chrome. `PickerTrigger` is the button that opens it, styled like the old
+`<select>` so form layouts didn't need to change.
 
 Rooms link to Buildings (`building` field, dropdown of existing Building assets); devices
 link to Rooms (`room` field, dropdown of existing Room assets); a device's building is
@@ -154,6 +164,42 @@ array position can't serve as identity once things move.
   items), so — like Allocations — every mutation (add/edit/swap/move/remove) is audited, with
   `snake_case` action names: `breaker_added`, `breaker_edited`, `breaker_swapped`,
   `breaker_removed`, `circuit_added`, `circuit_edited`, `circuit_reassigned`, `circuit_removed`.
+
+## Feature request tracking (shared with Cowork)
+
+Eric keeps the running feature request list for this app in his Logseq graph, not in this
+repo: `C:\Users\mrpip\OneDrive\Logseq\pages\Asset Tracker - Feature Requests.md`. It's a
+plain markdown file — read/write it directly with normal file tools, same as any other
+file. A separate Cowork session (cloud) is where Eric describes new feature ideas out
+loud and where they first get added to the list; a scheduled daily job on that side also
+scans this repo and marks things done as a backstop. Since Claude Code runs locally and
+actually does the implementation work, it's in the best position to update the list
+**the moment a feature ships** — don't leave it to the backstop job to catch up.
+
+**File format** (don't restructure it, just follow the existing shape):
+- Page properties at the top: `title::`, `type:: project`, `alias::`.
+- A `# Requests` section (open/in-progress items) and a `# Done / Shipped` section.
+- Each request is a top-level bullet under one of those sections, with `added::` (date
+  added, Logseq date-link format like `[[Aug 1st, 2026]]`) and `status::` (`idea` →
+  `planned` → `in-progress` → `done`) as indented property lines, sometimes with extra
+  indented bullets underneath describing sub-parts.
+
+**When you finish implementing a feature that has a matching entry in `# Requests`:**
+1. Move that bullet (with its sub-bullets) from `# Requests` to `# Done / Shipped`.
+2. Set `status:: done` and add `completed:: [[<today's date, same format as added::>]]`.
+3. Leave every other entry untouched — don't reformat, reorder, or "clean up" the rest
+   of the file in the same edit.
+
+**What NOT to do:**
+- Don't add brand-new feature requests to this file — Eric adds those through the Cowork
+  side when he mentions them in conversation. If you notice something that seems like it
+  should become a tracked request, mention it to Eric instead of writing it in yourself.
+- Don't mark something `done` on a guess — only when you've actually shipped the matching
+  work in this session. A false "done" is worse than leaving it as `in-progress`, since
+  this file is Eric's source of truth for what's still outstanding.
+- If two systems touch the file close together, only ever change the specific bullet(s)
+  you're updating — never rewrite the whole file — so a concurrent edit from the other
+  side doesn't get clobbered.
 
 ## Known constraints / things to watch
 

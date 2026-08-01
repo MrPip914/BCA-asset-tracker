@@ -31,7 +31,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v1 (2026-08-01) — Electrical Panel / Breakers / Circuits";
+const SCRIPT_VERSION = "v2 (2026-08-01) — Managed asset type list";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -181,6 +181,7 @@ function doGet(e) {
       peripheralsList: config.peripheralsList || null,
       usersList: config.usersList || null,
       bulkItemTypes: config.bulkItemTypes || null,
+      typesList: config.typesList || null,
     };
 
     // Plain fetch() from a browser is blocked by CORS here, since Apps Script
@@ -276,6 +277,7 @@ function doPost(e) {
         { key: "peripheralsList", value: JSON.stringify(body.peripheralsList || []) },
         { key: "usersList", value: JSON.stringify(body.usersList || []) },
         { key: "bulkItemTypes", value: JSON.stringify(body.bulkItemTypes || []) },
+        { key: "typesList", value: JSON.stringify(body.typesList || []) },
       ]);
     }
 

@@ -48,8 +48,14 @@ const DEFAULT_PERIPHERALS = [];
 const DEFAULT_USERS = [];
 const DEFAULT_BULK_ITEM_TYPES = [];
 
-// Known types, used for the Type dropdown and for icons
+// Known types, used for the Type dropdown and for icons. Managed via the gear icon
+// on the Type field (persisted as Config's `typesList`) — this array is only the
+// starter/fallback set for a brand-new sheet.
 const TYPE_OPTIONS = ["Computer", "Monitor", "Phone", "TV", "DocuCam", "Stream Deck", "Room", "Building", "Bulk Item", "Electrical Panel", "Other"];
+// These four have deep structural dependencies elsewhere (field-exclusion rules,
+// Contents/Allocations/Breakers tabs, inferBuilding()) — removing them from the
+// type list would break those, so the manager UI won't allow it.
+const LOCKED_TYPES = ["Room", "Building", "Bulk Item", "Electrical Panel"];
 
 // Options for the structured per-asset change log
 const DEFAULT_CHANGE_TYPES = ["Purchase", "Repair", "Replacement", "Upgrade", "Maintenance", "Relocation", "Disposal", "Other"];
@@ -246,7 +252,7 @@ const SHEET_API_URL = "https://script.google.com/macros/s/AKfycbzXaKRuCrTesxobxP
 // backend actually reports (data.scriptVersion) and flags a mismatch —
 // catches a stuck deployment (edited-but-not-redeployed) automatically
 // instead of it silently dropping data until someone happens to notice.
-const FRONTEND_SCRIPT_VERSION = "v1 (2026-08-01) — Electrical Panel / Breakers / Circuits";
+const FRONTEND_SCRIPT_VERSION = "v2 (2026-08-01) — Managed asset type list";
 const emptyDraftFrom = columns => Object.fromEntries(columns.map(c => [c.key, ""]));
 
 function AssetTracker() {
@@ -263,6 +269,9 @@ function AssetTracker() {
   const [bulkItemTypes, setBulkItemTypes] = useState(DEFAULT_BULK_ITEM_TYPES);
   const [showBulkItemTypesManager, setShowBulkItemTypesManager] = useState(false);
   const [newBulkItemTypeName, setNewBulkItemTypeName] = useState("");
+  const [typesList, setTypesList] = useState(TYPE_OPTIONS);
+  const [showTypesManager, setShowTypesManager] = useState(false);
+  const [newTypeName, setNewTypeName] = useState("");
   const [auditLog, setAuditLog] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -355,6 +364,7 @@ function AssetTracker() {
       setAuditLog(Array.isArray(data.auditLog) ? data.auditLog : []);
       setPeripheralsList(Array.isArray(data.peripheralsList) ? data.peripheralsList : DEFAULT_PERIPHERALS);
       setBulkItemTypes(Array.isArray(data.bulkItemTypes) ? data.bulkItemTypes : DEFAULT_BULK_ITEM_TYPES);
+      setTypesList(Array.isArray(data.typesList) && data.typesList.length ? data.typesList : TYPE_OPTIONS);
       if (Array.isArray(data.usersList) && data.usersList.length) {
         setUsersList(data.usersList);
       } else {
@@ -432,7 +442,7 @@ function AssetTracker() {
     return true;
   }
 
-  async function persist(nextAssets, nextColumns, nextChangeTypes = changeTypes, nextVendors = vendors, nextAuditLog = auditLog, nextPeripheralsList = peripheralsList, nextUsersList = usersList, nextBulkItemTypes = bulkItemTypes) {
+  async function persist(nextAssets, nextColumns, nextChangeTypes = changeTypes, nextVendors = vendors, nextAuditLog = auditLog, nextPeripheralsList = peripheralsList, nextUsersList = usersList, nextBulkItemTypes = bulkItemTypes, nextTypesList = typesList) {
     // Guard against ever writing over the Sheet before a real snapshot has been
     // loaded — the UI shouldn't be reachable in that state, but this keeps a
     // load-failure from being able to clobber live data no matter how it's triggered.
@@ -446,7 +456,8 @@ function AssetTracker() {
     const dirty = {
       assets: nextAssets !== assets,
       config: nextColumns !== columns || nextChangeTypes !== changeTypes || nextVendors !== vendors
-        || nextPeripheralsList !== peripheralsList || nextUsersList !== usersList || nextBulkItemTypes !== bulkItemTypes,
+        || nextPeripheralsList !== peripheralsList || nextUsersList !== usersList || nextBulkItemTypes !== bulkItemTypes
+        || nextTypesList !== typesList,
     };
     setAssets(nextAssets);
     setColumns(nextColumns);
@@ -456,11 +467,12 @@ function AssetTracker() {
     setPeripheralsList(nextPeripheralsList);
     setUsersList(nextUsersList);
     setBulkItemTypes(nextBulkItemTypes);
+    setTypesList(nextTypesList);
     try {
       await writeSnapshot({
         assets: nextAssets, columns: nextColumns, changeTypes: nextChangeTypes,
         vendors: nextVendors, auditLog: nextAuditLog, peripheralsList: nextPeripheralsList, usersList: nextUsersList,
-        bulkItemTypes: nextBulkItemTypes, _dirty: dirty,
+        bulkItemTypes: nextBulkItemTypes, typesList: nextTypesList, _dirty: dirty,
       });
       setSaveError(false);
     } catch (e) {
@@ -1284,6 +1296,28 @@ function AssetTracker() {
     persist(assets, columns, changeTypes, vendors, auditLog, peripheralsList, usersList, bulkItemTypes.filter(t => t !== name));
   }
 
+  function addType() {
+    const name = newTypeName.trim();
+    if (!name || typesList.includes(name)) return;
+    // Insert before "Other" (if present) so it stays the catch-all at the end of
+    // the picker, matching how new default columns get inserted before "status".
+    const otherIdx = typesList.indexOf("Other");
+    const nextTypesList = otherIdx === -1
+      ? [...typesList, name]
+      : [...typesList.slice(0, otherIdx), name, ...typesList.slice(otherIdx)];
+    persist(assets, columns, changeTypes, vendors, auditLog, peripheralsList, usersList, bulkItemTypes, nextTypesList);
+    setNewTypeName("");
+  }
+
+  // Removing a type only takes it off the pick list — assets already using that
+  // value keep it until someone edits them. LOCKED_TYPES can't be removed at all,
+  // since Room/Building/Bulk Item/Electrical Panel have structural dependencies
+  // elsewhere (field-exclusion rules, Contents/Allocations/Breakers tabs).
+  function removeType(name) {
+    if (LOCKED_TYPES.includes(name)) return;
+    persist(assets, columns, changeTypes, vendors, auditLog, peripheralsList, usersList, bulkItemTypes, typesList.filter(t => t !== name));
+  }
+
   function exportToExcel() {
     const assetRows = assets.map(a => {
       const row = {};
@@ -1514,6 +1548,21 @@ function AssetTracker() {
     />
   );
 
+  const typesManagerModal = showTypesManager && (
+    <ListManagerModal
+      title="Manage asset types"
+      items={typesList}
+      newValue={newTypeName}
+      onNewValueChange={setNewTypeName}
+      onAdd={addType}
+      onRemove={removeType}
+      onClose={() => { setShowTypesManager(false); setNewTypeName(""); }}
+      placeholder="New type name"
+      isLocked={t => LOCKED_TYPES.includes(t)}
+      hint="Room, Building, Bulk Item, and Electrical Panel are built into the app and can't be removed."
+    />
+  );
+
   // Fields to render in a form for the given type: common fields always,
   // type-restricted fields (hostname, screenSize) only when they apply.
   // Status is excluded — it's changed only via the Archive/Restore actions.
@@ -1565,6 +1614,7 @@ function AssetTracker() {
         {peripheralsManagerModal}
         {usersManagerModal}
         {bulkItemTypesManagerModal}
+        {typesManagerModal}
         <div style={{ borderBottom: `2px solid ${C.brand}`, padding: "12px 20px", position: "sticky", top: 0, background: C.bg, zIndex: 10, display: "flex", alignItems: "center", gap: 10 }}>
           <button onClick={closeDetail} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.brandDark, display: "flex" }} aria-label="Back to list">
             <ArrowLeft size={20} />
@@ -1662,7 +1712,7 @@ function AssetTracker() {
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12 }}>
                 {editFormColumns.map(c => (
                   c.key === "type" ? (
-                    <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v })} />
+                    <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v })} typeOptions={typesList} onManage={() => setShowTypesManager(true)} />
                   ) : c.key === "room" && draft.type !== "Room" ? (
                     <RoomField key={c.key} value={draft.room || ""} onChange={v => setDraft({ ...draft, room: v })} roomOptions={roomAssetNames} />
                   ) : c.key === "building" && draft.type !== "Building" ? (
@@ -2529,6 +2579,7 @@ function AssetTracker() {
       {peripheralsManagerModal}
       {usersManagerModal}
       {bulkItemTypesManagerModal}
+      {typesManagerModal}
 
       {/* Slim header */}
       <div style={{ borderBottom: `2px solid ${C.brand}`, padding: "10px 20px", position: "sticky", top: 0, background: C.bg, zIndex: 10, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
@@ -2622,7 +2673,7 @@ function AssetTracker() {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12 }}>
               {addFormColumns.map(c => (
                 c.key === "type" ? (
-                  <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v })} />
+                  <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v })} typeOptions={typesList} onManage={() => setShowTypesManager(true)} />
                 ) : c.key === "room" && draft.type !== "Room" ? (
                   <RoomField key={c.key} value={draft.room || ""} onChange={v => setDraft({ ...draft, room: v })} roomOptions={roomAssetNames} />
                 ) : c.key === "building" && draft.type !== "Building" ? (
@@ -3044,52 +3095,95 @@ function Field({ label, value, onChange, placeholder, wide, type }) {
   );
 }
 
-function TypeField({ value, onChange }) {
-  const options = TYPE_OPTIONS.includes(value) || !value ? TYPE_OPTIONS : [value, ...TYPE_OPTIONS];
+function PickerTrigger({ value, placeholder, onClick, ariaLabel }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={ariaLabel}
+      style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%",
+        padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10,
+        color: value ? C.ink : C.empty, background: "#fff", textAlign: "left",
+      }}
+    >
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{value || placeholder}</span>
+      <ChevronDown size={14} color={C.muted} style={{ flexShrink: 0, marginLeft: 6 }} />
+    </button>
+  );
+}
+
+function TypeField({ value, onChange, typeOptions, onManage }) {
+  const [open, setOpen] = useState(false);
+  const options = typeOptions.includes(value) || !value ? typeOptions : [value, ...typeOptions];
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Type</span>
-      <select
-        value={value}
-        onChange={e => onChange(e.target.value)}
-        style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, background: "#fff" }}
-      >
-        {options.map(o => <option key={o} value={o}>{o}</option>)}
-      </select>
+      <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>
+        Type
+        {onManage && (
+          <button type="button" onClick={onManage} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4, display: "flex" }} aria-label="Manage asset types">
+            <Settings size={12} color={C.accent} />
+          </button>
+        )}
+      </span>
+      <PickerTrigger value={value} placeholder="Select…" onClick={() => setOpen(true)} ariaLabel="Select type" />
+      {open && (
+        <SelectionModal
+          title="Select type"
+          options={options}
+          value={value}
+          onChange={onChange}
+          onClose={() => setOpen(false)}
+          onManage={onManage}
+          manageLabel="Manage asset types"
+        />
+      )}
     </label>
   );
 }
 
 function RoomField({ value, onChange, roomOptions }) {
+  const [open, setOpen] = useState(false);
   const options = !value || roomOptions.includes(value) ? roomOptions : [value, ...roomOptions];
+  const withClear = ["", ...options];
+  const placeholder = roomOptions.length ? "Select a room…" : "No Room assets yet";
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Room</span>
-      <select
-        value={value || ""}
-        onChange={e => onChange(e.target.value)}
-        style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, background: "#fff" }}
-      >
-        <option value="">{roomOptions.length ? "Select a room…" : "No Room assets yet"}</option>
-        {options.map(o => <option key={o} value={o}>{o}</option>)}
-      </select>
+      <PickerTrigger value={value} placeholder={placeholder} onClick={() => setOpen(true)} ariaLabel="Select room" />
+      {open && (
+        <SelectionModal
+          title="Select room"
+          options={withClear}
+          value={value || ""}
+          onChange={onChange}
+          onClose={() => setOpen(false)}
+          labelForOption={o => o || placeholder}
+        />
+      )}
     </label>
   );
 }
 
 function BuildingField({ value, onChange, buildingOptions }) {
+  const [open, setOpen] = useState(false);
   const options = !value || buildingOptions.includes(value) ? buildingOptions : [value, ...buildingOptions];
+  const withClear = ["", ...options];
+  const placeholder = buildingOptions.length ? "Select a building…" : "No Building assets yet";
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Building</span>
-      <select
-        value={value || ""}
-        onChange={e => onChange(e.target.value)}
-        style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, background: "#fff" }}
-      >
-        <option value="">{buildingOptions.length ? "Select a building…" : "No Building assets yet"}</option>
-        {options.map(o => <option key={o} value={o}>{o}</option>)}
-      </select>
+      <PickerTrigger value={value} placeholder={placeholder} onClick={() => setOpen(true)} ariaLabel="Select building" />
+      {open && (
+        <SelectionModal
+          title="Select building"
+          options={withClear}
+          value={value || ""}
+          onChange={onChange}
+          onClose={() => setOpen(false)}
+          labelForOption={o => o || placeholder}
+        />
+      )}
     </label>
   );
 }
@@ -3221,7 +3315,7 @@ function Detail({ label, value, wide, italic }) {
   );
 }
 
-function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onRemove, onClose, placeholder }) {
+function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onRemove, onClose, placeholder, isLocked, hint }) {
   const [confirmItem, setConfirmItem] = useState(null);
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 40, padding: 16 }}>
@@ -3230,11 +3324,14 @@ function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onR
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>{title}</div>
           <button onClick={onClose} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
         </div>
+        {hint && <div style={{ fontSize: 12, color: C.empty, marginBottom: 10 }}>{hint}</div>}
         {items.length === 0 && (
           <div style={{ fontSize: 13, color: C.empty, marginBottom: 12 }}>Nothing added yet.</div>
         )}
         <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
-          {items.map(item => (
+          {items.map(item => {
+            const locked = isLocked ? isLocked(item) : false;
+            return (
             <div key={item} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 14 }}>
               {confirmItem === item ? (
                 <>
@@ -3251,14 +3348,19 @@ function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onR
                 </>
               ) : (
                 <>
-                  <span>{item}</span>
-                  <button onClick={() => setConfirmItem(item)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}>
-                    <Trash2 size={14} color={C.danger} />
-                  </button>
+                  <span style={{ display: "flex", alignItems: "center", gap: 6, opacity: locked ? 0.6 : 1 }}>{item} {locked && <Lock size={11} />}</span>
+                  {locked ? (
+                    <span />
+                  ) : (
+                    <button onClick={() => setConfirmItem(item)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}>
+                      <Trash2 size={14} color={C.danger} />
+                    </button>
+                  )}
                 </>
               )}
             </div>
-          ))}
+            );
+          })}
         </div>
         <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 14, display: "flex", gap: 6 }}>
           <input
@@ -3269,6 +3371,52 @@ function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onR
             style={{ flex: 1, padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
           />
           <button onClick={onAdd} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600 }}>Add</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Generic modal picker mirroring the column-filter popup's look: centered card,
+// scrollable list of option buttons, checkmark on the selected one. Used for any
+// single-select field (Type/Room/Building) that shouldn't use a native <select>.
+function SelectionModal({ title, options, value, onChange, onClose, labelForOption, emptyLabel, onManage, manageLabel }) {
+  const getLabel = labelForOption || (o => o);
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 40, padding: 16 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 300, maxHeight: "70vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>{title}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+            {onManage && (
+              <button type="button" onClick={onManage} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.accent, display: "flex" }} aria-label={manageLabel || "Manage list"}>
+                <Settings size={15} />
+              </button>
+            )}
+            <button onClick={onClose} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+          </div>
+        </div>
+        {options.length === 0 && emptyLabel && (
+          <div style={{ fontSize: 13, color: C.empty, padding: "4px 2px 8px" }}>{emptyLabel}</div>
+        )}
+        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          {options.map(opt => {
+            const isSelected = opt === (value || "");
+            return (
+              <button
+                key={opt || "__none__"}
+                onClick={() => { onChange(opt); onClose(); }}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                  padding: "9px 10px", background: isSelected ? C.hover : "transparent", border: "none",
+                  borderRadius: 10, fontSize: 14, textAlign: "left", color: opt ? C.ink : C.empty, fontWeight: isSelected ? 600 : 400,
+                }}
+              >
+                {getLabel(opt)}
+                {isSelected && <Check size={15} color={C.brand} />}
+              </button>
+            );
+          })}
         </div>
       </div>
     </div>
