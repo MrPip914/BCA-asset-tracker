@@ -79,13 +79,17 @@ outbound network requests to arbitrary domains, which is why this migration happ
   a Circuit's rooms-served-vs-feeds-sub-panel toggle. Actions that aren't a generic field edit
   (Swap Breaker, Move Circuit) live outside the component via `customRowActions`, which opens
   the caller's own dedicated modal.
-- **Main-page toolbar is intentionally minimal**: Columns/Export/Add Asset live in a hamburger
-  menu (`showToolbarMenu`) anchored top-right of the Assets/Maintenance tab row rather than as
-  always-visible buttons; the search box collapses to an icon (`searchOpen`) and expands on
-  click, staying expanded whenever `query` is non-empty so an active search is never hidden.
-  There's no "Showing X of Y assets" text — the one thing that lived there besides the count
-  (clearing an active sort) moved to a small × chip next to the sort arrow on the sorted
-  column's own header, so it's local to what it affects instead of a separate line.
+- **Main-page toolbar is intentionally minimal, on both top-level tabs**: on Assets,
+  Columns/Export/Add Asset live in a hamburger menu (`showToolbarMenu`) anchored top-right of
+  the Assets/Maintenance tab row rather than as always-visible buttons; on Maintenance, the
+  same hamburger (shared state — only one tab's content is mounted at a time, so no conflict)
+  holds just Export, since there's no per-tab Columns or an "Add" equivalent there. On both,
+  the search box collapses to an icon (`searchOpen`) and expands on click — bound to `query` on
+  Assets, `maintenanceQuery` on Maintenance — staying expanded whenever its query is non-empty
+  so an active search is never hidden. Neither tab has a "Showing X of Y" count line: on Assets,
+  the one thing that lived there besides the count (clearing an active sort) moved to a small ×
+  chip next to the sort arrow on the sorted column's own header; on Maintenance, the overdue
+  count that lived there is now a standalone badge next to the status filter dropdown.
 
 ## Data model
 
