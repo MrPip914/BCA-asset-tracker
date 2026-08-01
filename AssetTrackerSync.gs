@@ -31,7 +31,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v2 (2026-08-01) — Managed asset type list";
+const SCRIPT_VERSION = "v3 (2026-08-01) — Fix date fields auto-converting to Sheets dates";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -87,7 +87,13 @@ function writeTable_(name, headers, rows) {
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
   if (rows.length > 0) {
     const data = rows.map(row => headers.map(h => (row[h] === undefined || row[h] === null ? "" : row[h])));
-    sheet.getRange(2, 1, data.length, headers.length).setValues(data);
+    // Force plain-text format before writing — otherwise Sheets auto-detects a
+    // date-like string (e.g. a maintenance item's "yyyy-MM-dd" lastPerformed)
+    // and silently converts the cell to a real Date, which then reads back as a
+    // full ISO timestamp instead of the plain date string the app expects.
+    const range = sheet.getRange(2, 1, data.length, headers.length);
+    range.setNumberFormat("@");
+    range.setValues(data);
   }
 }
 
@@ -107,7 +113,11 @@ function appendNewRows_(name, headers, rows) {
   if (rows.length <= existingCount) return;
   const newRows = rows.slice(existingCount);
   const data = newRows.map(row => headers.map(h => (row[h] === undefined || row[h] === null ? "" : row[h])));
-  sheet.getRange(existingCount + 2, 1, data.length, headers.length).setValues(data);
+  // See writeTable_'s comment — force text format so a date-like string doesn't
+  // get silently converted to a real Date cell.
+  const range = sheet.getRange(existingCount + 2, 1, data.length, headers.length);
+  range.setNumberFormat("@");
+  range.setValues(data);
 }
 
 function doGet(e) {

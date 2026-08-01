@@ -228,6 +228,17 @@ When you do:
   simultaneous use.
 - No conflict detection: if two people save at nearly the same moment, last write wins
   and can silently drop the other person's change (each save is a full overwrite).
+- **Date-only fields and Sheets auto-conversion**: any plain "yyyy-MM-dd" string (a
+  maintenance item's `lastPerformed`, a breaker's `installedDate`, `purchaseDate`,
+  `warrantyUntil`) used to come back from the Sheet as a full ISO timestamp instead —
+  Google Sheets auto-detects a date-looking string on write and silently converts the
+  cell to a real Date, which then serializes as `"2026-06-03T07:00:00.000Z"` rather than
+  the plain string the app expects. Fixed two ways (`SCRIPT_VERSION` v3): `writeTable_`/
+  `appendNewRows_` now force the written range to plain-text format (`setNumberFormat("@")`)
+  before writing, so it won't happen again; and the frontend's `dateOnly()` helper
+  normalizes any value that already round-tripped this way (slices to the first 10 chars)
+  wherever a date-only field is parsed or fed into a `type="date"` input, so already-
+  corrupted rows in the Sheet still display and compute correctly without a data migration.
 - Deferred features discussed but not built: a physical audit/walkthrough mode, live
   auto-refresh of stale data between users, audit log pruning, cross-panel circuit moves
   (same-panel only today — see Move Circuit above).

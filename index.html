@@ -158,9 +158,18 @@ function formatWhen(iso) {
   const d = new Date(iso);
   return d.toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
 }
+// A date-only field (lastPerformed, purchaseDate, etc.) is stored and sent as a
+// plain "yyyy-MM-dd" string, but Google Sheets auto-converts a plain date-looking
+// string into a real Date cell on write — reading it back then yields a full ISO
+// timestamp instead ("2026-06-03T07:00:00.000Z"). Slicing to the first 10 chars
+// normalizes either shape back to just the date part before it's combined with a
+// literal local-midnight time below, so already-round-tripped values still parse.
+function dateOnly(s) {
+  return s ? String(s).slice(0, 10) : "";
+}
 function formatDateOnly(dateStr) {
   if (!dateStr) return "";
-  const d = new Date(dateStr + "T00:00:00");
+  const d = new Date(dateOnly(dateStr) + "T00:00:00");
   if (isNaN(d.getTime())) return dateStr;
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
@@ -168,7 +177,7 @@ function formatDateOnly(dateStr) {
 // (so there's nothing to count forward from) or has no known interval.
 function nextMaintenanceDue(item) {
   if (!item.lastPerformed || !item.frequencyDays) return null;
-  const last = new Date(item.lastPerformed + "T00:00:00");
+  const last = new Date(dateOnly(item.lastPerformed) + "T00:00:00");
   if (isNaN(last.getTime())) return null;
   return new Date(last.getTime() + item.frequencyDays * 86400000);
 }
@@ -252,7 +261,7 @@ const SHEET_API_URL = "https://script.google.com/macros/s/AKfycbzXaKRuCrTesxobxP
 // backend actually reports (data.scriptVersion) and flags a mismatch —
 // catches a stuck deployment (edited-but-not-redeployed) automatically
 // instead of it silently dropping data until someone happens to notice.
-const FRONTEND_SCRIPT_VERSION = "v2 (2026-08-01) — Managed asset type list";
+const FRONTEND_SCRIPT_VERSION = "v3 (2026-08-01) — Fix date fields auto-converting to Sheets dates";
 const emptyDraftFrom = columns => Object.fromEntries(columns.map(c => [c.key, ""]));
 
 function AssetTracker() {
@@ -903,7 +912,7 @@ function AssetTracker() {
 
   function startEditMaintenance(idx) {
     const item = (selectedAsset.maintenanceItems || [])[idx];
-    setMaintenanceEditDraft({ task: item.task, frequency: item.frequencyLabel, lastPerformed: item.lastPerformed || "", owner: item.owner || "" });
+    setMaintenanceEditDraft({ task: item.task, frequency: item.frequencyLabel, lastPerformed: dateOnly(item.lastPerformed), owner: item.owner || "" });
     setEditingMaintenanceIdx(idx);
   }
 
@@ -1081,7 +1090,7 @@ function AssetTracker() {
   // physical unit" distinct from "corrected a typo" in the audit trail.
   function openSwapBreaker(breaker) {
     setSwappingBreaker(breaker);
-    setSwapDraft({ serial: breaker.serial || "", ampRating: breaker.ampRating || "", installedDate: breaker.installedDate || "" });
+    setSwapDraft({ serial: breaker.serial || "", ampRating: breaker.ampRating || "", installedDate: dateOnly(breaker.installedDate) });
     setSwapError(null);
   }
 
@@ -3504,7 +3513,10 @@ function ChildEntityTable({
   const [editError, setEditError] = useState(null);
 
   function renderField(f, values, setValues) {
-    const value = values[f.key];
+    // See dateOnly()'s comment: a date field may come back from the Sheet as a
+    // full ISO timestamp instead of the plain "yyyy-MM-dd" a <input type="date">
+    // requires — normalize so an already-round-tripped value still displays.
+    const value = f.type === "date" ? dateOnly(values[f.key]) : values[f.key];
     const commonLabel = (
       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>
         {f.label}
