@@ -21,6 +21,12 @@ outbound network requests to arbitrary domains, which is why this migration happ
 
 ## Architecture
 
+- **Top-level navigation**: `mainTab` ("assets" | "maintenance") switches the main page
+  between the asset list (`view === "list"`) and a site-wide Maintenance overview — every
+  asset's `maintenanceItems` flattened into one sortable-by-urgency table (`allMaintenanceRows`).
+  Both live inside the same `view === "list"` screen; opening an asset (either tab) still
+  goes through `openDetail()` into `view === "detail"`, and `openDetail(asset, "maintenance")`
+  jumps straight to that asset's Maintenance sub-tab — used by the overview's row click.
 - **State**: the whole app is one component (`AssetTracker`) holding all state — assets,
   managed lists (change types, vendors, peripherals, users), audit log, column config.
 - **Persistence model**: the app keeps its full state in memory and, on every change,

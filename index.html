@@ -111,6 +111,13 @@ const DEFAULT_COLUMNS = [
 
 const STATUS_OPTIONS = ["Active", "Archived"];
 const STATUS_FILTER_OPTIONS = ["All statuses", "Active", "Archived"];
+const MAINTENANCE_STATUS_FILTER_OPTIONS = [
+  { value: "All statuses", label: "All statuses" },
+  { value: "overdue", label: "Overdue" },
+  { value: "due-soon", label: "Due soon" },
+  { value: "ok", label: "On track" },
+  { value: "never", label: "Never done" },
+];
 
 // Brookside Christian Academy palette (from brooksideacademy.com)
 const C = {
@@ -237,6 +244,7 @@ function AssetTracker() {
   const [loadError, setLoadError] = useState(false);
   const [saveError, setSaveError] = useState(false);
 
+  const [mainTab, setMainTab] = useState("assets"); // "assets" | "maintenance" — top-level page tab
   const [view, setView] = useState("list"); // "list" | "detail"
   const [selectedLabel, setSelectedLabel] = useState(null);
   const [detailEditing, setDetailEditing] = useState(false);
@@ -266,6 +274,8 @@ function AssetTracker() {
   const [userFilter, setUserFilter] = useState("All users");
   const [statusFilter, setStatusFilter] = useState("Active");
   const [sortConfig, setSortConfig] = useState(null); // { key, dir: "asc" | "desc" }
+  const [maintenanceQuery, setMaintenanceQuery] = useState("");
+  const [maintenanceStatusFilter, setMaintenanceStatusFilter] = useState("All statuses");
   const [reassignTarget, setReassignTarget] = useState("");
   const [moveTarget, setMoveTarget] = useState("");
   const [activeFilterCol, setActiveFilterCol] = useState(null);
@@ -461,6 +471,33 @@ function AssetTracker() {
     return list;
   }, [assets, query, roomFilter, typeFilter, userFilter, statusFilter, sortConfig]);
 
+  // Flattened across every active asset's maintenanceItems, for the site-wide
+  // Maintenance tab — archived assets are excluded, matching the default Active
+  // filter on the Assets tab.
+  const allMaintenanceRows = useMemo(() => {
+    if (!assets) return [];
+    const rows = [];
+    assets.forEach(a => {
+      if ((a.status || "Active") === "Archived") return;
+      (a.maintenanceItems || []).forEach((item, idx) => {
+        rows.push({ asset: a, item, idx, status: maintenanceStatusOf(item), due: nextMaintenanceDue(item) });
+      });
+    });
+    return rows;
+  }, [assets]);
+  const maintenanceOverdueTotal = allMaintenanceRows.filter(r => r.status === "overdue").length;
+  const filteredMaintenanceRows = useMemo(() => {
+    const q = maintenanceQuery.trim().toLowerCase();
+    const list = allMaintenanceRows.filter(r => {
+      if (maintenanceStatusFilter !== "All statuses" && r.status !== maintenanceStatusFilter) return false;
+      if (!q) return true;
+      return [r.item.task, r.item.owner, r.asset.label, r.asset.room, r.asset.type]
+        .some(v => (v || "").toLowerCase().includes(q));
+    });
+    list.sort((a, b) => (a.due ? a.due.getTime() : -Infinity) - (b.due ? b.due.getTime() : -Infinity));
+    return list;
+  }, [allMaintenanceRows, maintenanceQuery, maintenanceStatusFilter]);
+
   const visibleColumns = columns.filter(c => c.visible);
   const gridTemplate = visibleColumns.map(c => `${c.width}px`).join(" ") + " 36px";
 
@@ -473,14 +510,14 @@ function AssetTracker() {
 
   const selectedAsset = assets ? assets.find(a => a.label === selectedLabel) : null;
 
-  function openDetail(asset) {
+  function openDetail(asset, initialTab = "details") {
     setSelectedLabel(asset.label);
     setView("detail");
     setDetailEditing(false);
     setEditNote("");
     setCommentDraft("");
     setChangeDraft({ changeType: "", vendor: "", cost: "", note: "" });
-    setDetailTab("details");
+    setDetailTab(initialTab);
     setConfirmCommentDelete(null);
     setConfirmChangeDelete(null);
     setConfirmArchive(null);
@@ -1942,7 +1979,32 @@ function AssetTracker() {
         </div>
       </div>
 
+      {/* Top-level page tabs */}
+      <div style={{ display: "flex", gap: 4, padding: "0 20px", borderBottom: `1.5px solid ${C.border}`, position: "sticky", top: 45, background: C.bg, zIndex: 9, overflowX: "auto" }}>
+        {[
+          { key: "assets", label: "Assets" },
+          { key: "maintenance", label: "Maintenance", count: allMaintenanceRows.length, urgent: maintenanceOverdueTotal > 0 },
+        ].map(tab => {
+          const active = mainTab === tab.key;
+          return (
+            <button
+              key={tab.key}
+              onClick={() => setMainTab(tab.key)}
+              style={{
+                background: "none", border: "none", padding: "10px 12px", whiteSpace: "nowrap",
+                fontSize: 13, fontWeight: active || tab.urgent ? 700 : 500, color: tab.urgent ? C.danger : active ? C.brandDark : C.muted,
+                borderBottom: active ? `2px solid ${C.brand}` : "2px solid transparent", marginBottom: -1.5,
+              }}
+            >
+              {tab.label}{tab.count > 0 ? ` (${tab.count})` : ""}
+            </button>
+          );
+        })}
+      </div>
+
       <div style={{ padding: "18px 20px 80px", maxWidth: 1300, margin: "0 auto" }}>
+        {mainTab === "assets" && (
+        <>
         {/* Controls */}
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 18 }}>
           <div style={{ position: "relative", flex: "1 1 260px" }}>
@@ -2205,6 +2267,89 @@ function AssetTracker() {
             ))}
           </div>
         </div>
+        </>
+        )}
+
+        {mainTab === "maintenance" && (
+        <>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 18 }}>
+            <div style={{ position: "relative", flex: "1 1 260px" }}>
+              <Search size={16} style={{ position: "absolute", left: 12, top: 12, color: C.accent }} />
+              <input
+                value={maintenanceQuery}
+                onChange={e => setMaintenanceQuery(e.target.value)}
+                placeholder="Search task, asset, owner…"
+                style={{ width: "100%", padding: "10px 12px 10px 36px", border: `1.5px solid ${C.brandDark}`, background: C.surface, fontSize: 14, borderRadius: 2, color: C.ink }}
+              />
+            </div>
+            <select
+              value={maintenanceStatusFilter}
+              onChange={e => setMaintenanceStatusFilter(e.target.value)}
+              style={{ padding: "10px 12px", border: `1.5px solid ${C.brandDark}`, background: C.surface, fontSize: 14, borderRadius: 2, color: C.ink }}
+            >
+              {MAINTENANCE_STATUS_FILTER_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
+
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: C.muted, marginBottom: 10 }}>
+            Showing {filteredMaintenanceRows.length} of {allMaintenanceRows.length} scheduled items
+            {maintenanceOverdueTotal > 0 && <span style={{ color: C.danger, marginLeft: 8 }}>· {maintenanceOverdueTotal} overdue</span>}
+          </div>
+
+          <div style={{ border: `1.5px solid ${C.brandDark}`, borderRadius: 2, overflow: "hidden", background: C.surface }}>
+            <div className="scroller" style={{ overflowX: "auto" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1.6fr 1.3fr 0.9fr 1fr 1fr 1fr 0.9fr", background: C.brandDark, color: "#F4F0E6", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", minWidth: "max-content" }}>
+                {["Task", "Asset", "Frequency", "Owner", "Last Performed", "Next Due", "Status"].map(h => (
+                  <div key={h} style={{ padding: "10px 14px" }}>{h}</div>
+                ))}
+              </div>
+
+              {filteredMaintenanceRows.length === 0 && (
+                <div style={{ padding: 32, textAlign: "center", color: C.empty, fontSize: 14, minWidth: "max-content" }}>
+                  {allMaintenanceRows.length === 0 ? "No maintenance scheduled yet." : "No scheduled items match your search."}
+                </div>
+              )}
+
+              {filteredMaintenanceRows.map(({ asset, item, idx, status, due }) => {
+                const statusMeta = {
+                  overdue: { label: "Overdue", color: C.danger },
+                  "due-soon": { label: "Due soon", color: C.accent },
+                  ok: { label: "On track", color: C.success },
+                  never: { label: "Not yet done", color: C.muted },
+                }[status];
+                const AssetIcon = iconFor(asset.type);
+                const assetName = asset.type === "Bulk Item" ? (asset.itemName || "Bulk Item")
+                  : asset.type === "Building" ? (asset.building || "Building")
+                  : asset.type === "Room" ? (asset.room || "Room")
+                  : asset.label;
+                return (
+                  <div
+                    key={`${asset.label}-${idx}`}
+                    className="row-body"
+                    onClick={() => openDetail(asset, "maintenance")}
+                    style={{ display: "grid", gridTemplateColumns: "1.6fr 1.3fr 0.9fr 1fr 1fr 1fr 0.9fr", alignItems: "center", cursor: "pointer", background: C.surface, borderTop: `1px solid ${C.border}` }}
+                  >
+                    <div style={{ padding: "12px 14px", fontSize: 13, color: C.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.task}</div>
+                    <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted, display: "flex", alignItems: "center", gap: 6, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      <AssetIcon size={14} style={{ flexShrink: 0, color: C.brand }} />
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{assetName}</span>
+                    </div>
+                    <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted }}>{item.frequencyLabel}</div>
+                    <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.owner || "—"}</div>
+                    <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted }}>{item.lastPerformed ? formatDateOnly(item.lastPerformed) : "Never"}</div>
+                    <div style={{ padding: "12px 14px", fontSize: 13, fontWeight: 600, color: statusMeta.color }}>{due ? formatDateOnly(due.toISOString().slice(0, 10)) : "—"}</div>
+                    <div style={{ padding: "12px 14px" }}>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: statusMeta.color }}>
+                        {statusMeta.label}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </>
+        )}
       </div>
 
       {/* Column header filter modal */}
