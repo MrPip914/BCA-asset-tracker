@@ -89,7 +89,18 @@ outbound network requests to arbitrary domains, which is why this migration happ
   so an active search is never hidden. Neither tab has a "Showing X of Y" count line: on Assets,
   the one thing that lived there besides the count (clearing an active sort) moved to a small ×
   chip next to the sort arrow on the sorted column's own header; on Maintenance, the overdue
-  count that lived there is now a standalone badge next to the status filter dropdown.
+  count that lived there is now a standalone badge above the table.
+- **Per-column filter + sort is a shared pattern, not duplicated per table**: `ColumnHeaderCell`
+  (Filter icon + click-to-cycle sort + clear-sort × chip) and `ColumnFilterModal` (option list +
+  Sort A→Z/Z→A) are generic, parameterized by a `filterConfigs` map (`{ [colKey]: { label, value,
+  setValue, options, labelForOption? } }`) plus `sortConfig`/`setSortConfig`. The Assets table's
+  Type/Room/User/Status columns and the Maintenance table's Frequency/Owner/Status columns (Task/
+  Asset/Last Performed/Next Due are plain sort-only, no filter) both go through these same two
+  components — each tab just supplies its own state and options. `labelForOption` exists for
+  columns whose stored value isn't the display text (Maintenance's Status filter stores
+  `"due-soon"` but shows "Due soon", via `MAINTENANCE_STATUS_FILTER_OPTIONS`). Maintenance's
+  default (unsorted) view is always due-soonest-first with never-performed items pinned to the
+  top; picking an explicit column sort overrides that until cleared.
 
 ## Data model
 

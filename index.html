@@ -326,6 +326,10 @@ function AssetTracker() {
   const [sortConfig, setSortConfig] = useState(null); // { key, dir: "asc" | "desc" }
   const [maintenanceQuery, setMaintenanceQuery] = useState("");
   const [maintenanceStatusFilter, setMaintenanceStatusFilter] = useState("All statuses");
+  const [maintenanceFrequencyFilter, setMaintenanceFrequencyFilter] = useState("All frequencies");
+  const [maintenanceOwnerFilter, setMaintenanceOwnerFilter] = useState("All owners");
+  const [maintenanceSortConfig, setMaintenanceSortConfig] = useState(null); // { key, dir: "asc" | "desc" } | null — null means the default due-date-ascending order
+  const [activeMaintenanceFilterCol, setActiveMaintenanceFilterCol] = useState(null);
   const [reassignTarget, setReassignTarget] = useState("");
   const [moveTarget, setMoveTarget] = useState("");
   const [activeFilterCol, setActiveFilterCol] = useState(null);
@@ -557,24 +561,73 @@ function AssetTracker() {
     const rows = [];
     assets.forEach(a => {
       if ((a.status || "Active") === "Archived") return;
+      const assetName = a.type === "Bulk Item" ? (a.itemName || "Bulk Item")
+        : a.type === "Building" ? (a.building || "Building")
+        : a.type === "Room" ? (a.room || "Room")
+        : a.label;
       (a.maintenanceItems || []).forEach((item, idx) => {
-        rows.push({ asset: a, item, idx, status: maintenanceStatusOf(item), due: nextMaintenanceDue(item) });
+        rows.push({ asset: a, assetName, item, idx, status: maintenanceStatusOf(item), due: nextMaintenanceDue(item) });
       });
     });
     return rows;
   }, [assets]);
   const maintenanceOverdueTotal = allMaintenanceRows.filter(r => r.status === "overdue").length;
+  const maintenanceFrequencyOptions = useMemo(() => (
+    ["All frequencies", ...Array.from(new Set(allMaintenanceRows.map(r => r.item.frequencyLabel).filter(Boolean))).sort()]
+  ), [allMaintenanceRows]);
+  const maintenanceOwnerOptions = useMemo(() => (
+    ["All owners", ...Array.from(new Set(allMaintenanceRows.map(r => r.item.owner).filter(Boolean))).sort()]
+  ), [allMaintenanceRows]);
+  const maintenanceFilterConfigs = {
+    frequency: { label: "Frequency", value: maintenanceFrequencyFilter, setValue: setMaintenanceFrequencyFilter, options: maintenanceFrequencyOptions },
+    owner: { label: "Owner", value: maintenanceOwnerFilter, setValue: setMaintenanceOwnerFilter, options: maintenanceOwnerOptions },
+    status: {
+      label: "Status", value: maintenanceStatusFilter, setValue: setMaintenanceStatusFilter,
+      options: MAINTENANCE_STATUS_FILTER_OPTIONS.map(o => o.value),
+      labelForOption: v => (MAINTENANCE_STATUS_FILTER_OPTIONS.find(o => o.value === v) || {}).label || v,
+    },
+  };
+  // Maps a sortable column key to its comparable value on a row — used by both
+  // the header's plain-sort columns (task/asset/lastPerformed/nextDue) and the
+  // filter-columns' "Sort A → Z"/"Z → A" (frequency/owner/status).
+  function maintenanceSortValue(row, key) {
+    switch (key) {
+      case "task": return row.item.task || "";
+      case "asset": return row.assetName || "";
+      case "frequency": return row.item.frequencyLabel || "";
+      case "owner": return row.item.owner || "";
+      case "lastPerformed": return dateOnly(row.item.lastPerformed);
+      case "nextDue": return row.due ? row.due.getTime() : Infinity;
+      case "status": return row.status || "";
+      default: return "";
+    }
+  }
   const filteredMaintenanceRows = useMemo(() => {
     const q = maintenanceQuery.trim().toLowerCase();
     const list = allMaintenanceRows.filter(r => {
       if (maintenanceStatusFilter !== "All statuses" && r.status !== maintenanceStatusFilter) return false;
+      if (maintenanceFrequencyFilter !== "All frequencies" && r.item.frequencyLabel !== maintenanceFrequencyFilter) return false;
+      if (maintenanceOwnerFilter !== "All owners" && r.item.owner !== maintenanceOwnerFilter) return false;
       if (!q) return true;
       return [r.item.task, r.item.owner, r.asset.label, r.asset.room, r.asset.type]
         .some(v => (v || "").toLowerCase().includes(q));
     });
-    list.sort((a, b) => (a.due ? a.due.getTime() : -Infinity) - (b.due ? b.due.getTime() : -Infinity));
+    if (maintenanceSortConfig) {
+      const { key, dir } = maintenanceSortConfig;
+      const mult = dir === "desc" ? -1 : 1;
+      list.sort((a, b) => {
+        const av = maintenanceSortValue(a, key), bv = maintenanceSortValue(b, key);
+        return typeof av === "number" && typeof bv === "number"
+          ? (av - bv) * mult
+          : av.toString().localeCompare(bv.toString()) * mult;
+      });
+    } else {
+      // Default view (no explicit sort): due-soonest first, with never-performed
+      // items surfaced at the very top since they need attention most.
+      list.sort((a, b) => (a.due ? a.due.getTime() : -Infinity) - (b.due ? b.due.getTime() : -Infinity));
+    }
     return list;
-  }, [allMaintenanceRows, maintenanceQuery, maintenanceStatusFilter]);
+  }, [allMaintenanceRows, maintenanceQuery, maintenanceStatusFilter, maintenanceFrequencyFilter, maintenanceOwnerFilter, maintenanceSortConfig]);
 
   // Per-device override wins when set; otherwise falls back to the column's
   // server-defined default (e.g. true for a newly added custom column this
@@ -2894,54 +2947,17 @@ function AssetTracker() {
           <div className="scroller" style={{ overflowX: "auto" }}>
             <div style={{ display: "grid", gridTemplateColumns: gridTemplate, background: C.brandDark, color: "#F4F0E6", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", minWidth: "max-content" }}>
               {visibleColumns.map((c, i) => {
-                const cfg = filterConfigs[c.key];
-                const isFiltered = cfg && cfg.value !== cfg.options[0];
-                const sortedHere = sortConfig && sortConfig.key === c.key;
-                const sortArrow = sortedHere ? (sortConfig.dir === "asc" ? " ↑" : " ↓") : "";
                 return (
-                  <div key={c.key} style={{ position: i === 0 ? "sticky" : "static", left: i === 0 ? 0 : undefined, background: C.brandDark, zIndex: i === 0 ? 2 : 1, display: "flex", alignItems: "center" }}>
-                    {cfg ? (
-                      <button
-                        onClick={() => setActiveFilterCol(c.key)}
-                        style={{
-                          flex: 1, display: "flex", alignItems: "center", gap: 5, textAlign: "left",
-                          background: "none", border: "none", padding: "10px 14px",
-                          fontFamily: "inherit", fontSize: "inherit", letterSpacing: "inherit", textTransform: "inherit",
-                          color: isFiltered || sortedHere ? "#E8C9A0" : "#F4F0E6", fontWeight: isFiltered || sortedHere ? 700 : "inherit",
-                        }}
-                      >
-                        {c.label}{sortArrow}
-                        <Filter size={11} style={{ flexShrink: 0 }} />
-                      </button>
-                    ) : (
-                      <button
-                        onClick={() => setSortConfig(
-                          !sortedHere ? { key: c.key, dir: "asc" }
-                          : sortConfig.dir === "asc" ? { key: c.key, dir: "desc" }
-                          : null
-                        )}
-                        title="Tap to sort"
-                        style={{
-                          flex: 1, display: "flex", alignItems: "center", gap: 5, textAlign: "left",
-                          background: "none", border: "none", padding: "10px 14px",
-                          fontFamily: "inherit", fontSize: "inherit", letterSpacing: "inherit", textTransform: "inherit",
-                          color: sortedHere ? "#E8C9A0" : "#F4F0E6", fontWeight: sortedHere ? 700 : "inherit",
-                        }}
-                      >
-                        {c.label}{sortArrow}
-                      </button>
-                    )}
-                    {sortedHere && (
-                      <button
-                        onClick={() => setSortConfig(null)}
-                        title="Clear sort"
-                        aria-label="Clear sort"
-                        style={{ flexShrink: 0, background: "none", border: "none", padding: "6px 10px 6px 0", color: "#E8C9A0", display: "flex" }}
-                      >
-                        <X size={11} />
-                      </button>
-                    )}
-                  </div>
+                  <ColumnHeaderCell
+                    key={c.key}
+                    label={c.label}
+                    colKey={c.key}
+                    sticky={i === 0}
+                    filterConfigs={filterConfigs}
+                    sortConfig={sortConfig}
+                    setSortConfig={setSortConfig}
+                    onOpenFilter={setActiveFilterCol}
+                  />
                 );
               })}
               <div style={{ padding: "10px 14px" }} />
@@ -3013,26 +3029,35 @@ function AssetTracker() {
 
         {mainTab === "maintenance" && (
         <>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 18 }}>
-            <select
-              value={maintenanceStatusFilter}
-              onChange={e => setMaintenanceStatusFilter(e.target.value)}
-              style={{ padding: "10px 12px", border: `1.5px solid ${C.border}`, background: C.surface, fontSize: 14, borderRadius: 10, color: C.ink }}
-            >
-              {MAINTENANCE_STATUS_FILTER_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
-            {maintenanceOverdueTotal > 0 && (
+          {maintenanceOverdueTotal > 0 && (
+            <div style={{ marginBottom: 18 }}>
               <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, fontWeight: 700, color: C.danger }}>
                 {maintenanceOverdueTotal} overdue
               </span>
-            )}
-          </div>
+            </div>
+          )}
 
           <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden", background: C.surface, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)" }}>
             <div className="scroller" style={{ overflowX: "auto" }}>
               <div style={{ display: "grid", gridTemplateColumns: "220px 170px 110px 130px 130px 130px 120px", background: C.brandDark, color: "#F4F0E6", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", minWidth: "max-content" }}>
-                {["Task", "Asset", "Frequency", "Owner", "Last Performed", "Next Due", "Status"].map(h => (
-                  <div key={h} style={{ padding: "10px 14px" }}>{h}</div>
+                {[
+                  { key: "task", label: "Task" },
+                  { key: "asset", label: "Asset" },
+                  { key: "frequency", label: "Frequency" },
+                  { key: "owner", label: "Owner" },
+                  { key: "lastPerformed", label: "Last Performed" },
+                  { key: "nextDue", label: "Next Due" },
+                  { key: "status", label: "Status" },
+                ].map(c => (
+                  <ColumnHeaderCell
+                    key={c.key}
+                    label={c.label}
+                    colKey={c.key}
+                    filterConfigs={maintenanceFilterConfigs}
+                    sortConfig={maintenanceSortConfig}
+                    setSortConfig={setMaintenanceSortConfig}
+                    onOpenFilter={setActiveMaintenanceFilterCol}
+                  />
                 ))}
               </div>
 
@@ -3042,7 +3067,7 @@ function AssetTracker() {
                 </div>
               )}
 
-              {filteredMaintenanceRows.map(({ asset, item, idx, status, due }) => {
+              {filteredMaintenanceRows.map(({ asset, assetName, item, idx, status, due }) => {
                 const statusMeta = {
                   overdue: { label: "Overdue", color: C.danger },
                   "due-soon": { label: "Due soon", color: C.accent },
@@ -3050,10 +3075,6 @@ function AssetTracker() {
                   never: { label: "Not yet done", color: C.muted },
                 }[status];
                 const AssetIcon = iconFor(asset.type);
-                const assetName = asset.type === "Bulk Item" ? (asset.itemName || "Bulk Item")
-                  : asset.type === "Building" ? (asset.building || "Building")
-                  : asset.type === "Room" ? (asset.room || "Room")
-                  : asset.label;
                 return (
                   <div
                     key={`${asset.label}-${idx}`}
@@ -3085,51 +3106,20 @@ function AssetTracker() {
       </div>
 
       {/* Column header filter modal */}
-      {activeFilterCol && filterConfigs[activeFilterCol] && (
-        <div onClick={() => setActiveFilterCol(null)} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
-          <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth:300, maxHeight: "70vh", overflowY: "auto" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>
-                Filter by {filterConfigs[activeFilterCol].label}
-              </div>
-              <button onClick={() => setActiveFilterCol(null)} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-              {filterConfigs[activeFilterCol].options.map(opt => {
-                const isSelected = opt === filterConfigs[activeFilterCol].value;
-                return (
-                  <button
-                    key={opt}
-                    onClick={() => { filterConfigs[activeFilterCol].setValue(opt); setActiveFilterCol(null); }}
-                    style={{
-                      display: "flex", alignItems: "center", justifyContent: "space-between",
-                      padding: "9px 10px", background: isSelected ? C.hover : "transparent", border: "none",
-                      borderRadius: 10, fontSize: 14, textAlign: "left", color: C.ink, fontWeight: isSelected ? 600 : 400,
-                    }}
-                  >
-                    {opt}
-                    {isSelected && <Check size={15} color={C.brand} />}
-                  </button>
-                );
-              })}
-            </div>
-            <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 12, paddingTop: 12, display: "flex", gap: 6 }}>
-              {[["asc", "Sort A → Z"], ["desc", "Sort Z → A"]].map(([dir, lbl]) => {
-                const active = sortConfig && sortConfig.key === activeFilterCol && sortConfig.dir === dir;
-                return (
-                  <button
-                    key={dir}
-                    onClick={() => { setSortConfig(active ? null : { key: activeFilterCol, dir }); setActiveFilterCol(null); }}
-                    style={{ flex: 1, padding: "7px 10px", background: active ? C.brand : "transparent", color: active ? "#fff" : C.ink, border: `1.5px solid ${active ? C.brand : C.border}`, borderRadius: 10, fontSize: 13, fontWeight: 600 }}
-                  >
-                    {lbl}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      )}
+      <ColumnFilterModal
+        activeCol={activeFilterCol}
+        filterConfigs={filterConfigs}
+        sortConfig={sortConfig}
+        setSortConfig={setSortConfig}
+        onClose={() => setActiveFilterCol(null)}
+      />
+      <ColumnFilterModal
+        activeCol={activeMaintenanceFilterCol}
+        filterConfigs={maintenanceFilterConfigs}
+        sortConfig={maintenanceSortConfig}
+        setSortConfig={setMaintenanceSortConfig}
+        onClose={() => setActiveMaintenanceFilterCol(null)}
+      />
 
       {/* Column manager modal */}
       {showColManager && (
@@ -3521,6 +3511,118 @@ function SelectionModal({ title, options, value, onChange, onClose, labelForOpti
               >
                 {getLabel(opt)}
                 {isSelected && <Check size={15} color={C.brand} />}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Header cell for a data-table column: either a filter+sort trigger (Filter icon,
+// opens ColumnFilterModal) for columns present in filterConfigs, or a plain
+// click-to-cycle sort button (asc -> desc -> none) for everything else. A small
+// × chip appears next to the sort arrow on whichever column is currently sorted,
+// so it can be cleared directly instead of reopening the modal or re-cycling taps.
+function ColumnHeaderCell({ label, colKey, sticky, filterConfigs, sortConfig, setSortConfig, onOpenFilter }) {
+  const cfg = filterConfigs[colKey];
+  const isFiltered = cfg && cfg.value !== cfg.options[0];
+  const sortedHere = sortConfig && sortConfig.key === colKey;
+  const sortArrow = sortedHere ? (sortConfig.dir === "asc" ? " ↑" : " ↓") : "";
+  return (
+    <div style={{ position: sticky ? "sticky" : "static", left: sticky ? 0 : undefined, background: C.brandDark, zIndex: sticky ? 2 : 1, display: "flex", alignItems: "center" }}>
+      {cfg ? (
+        <button
+          onClick={() => onOpenFilter(colKey)}
+          style={{
+            flex: 1, display: "flex", alignItems: "center", gap: 5, textAlign: "left",
+            background: "none", border: "none", padding: "10px 14px",
+            fontFamily: "inherit", fontSize: "inherit", letterSpacing: "inherit", textTransform: "inherit",
+            color: isFiltered || sortedHere ? "#E8C9A0" : "#F4F0E6", fontWeight: isFiltered || sortedHere ? 700 : "inherit",
+          }}
+        >
+          {label}{sortArrow}
+          <Filter size={11} style={{ flexShrink: 0 }} />
+        </button>
+      ) : (
+        <button
+          onClick={() => setSortConfig(
+            !sortedHere ? { key: colKey, dir: "asc" }
+            : sortConfig.dir === "asc" ? { key: colKey, dir: "desc" }
+            : null
+          )}
+          title="Tap to sort"
+          style={{
+            flex: 1, display: "flex", alignItems: "center", gap: 5, textAlign: "left",
+            background: "none", border: "none", padding: "10px 14px",
+            fontFamily: "inherit", fontSize: "inherit", letterSpacing: "inherit", textTransform: "inherit",
+            color: sortedHere ? "#E8C9A0" : "#F4F0E6", fontWeight: sortedHere ? 700 : "inherit",
+          }}
+        >
+          {label}{sortArrow}
+        </button>
+      )}
+      {sortedHere && (
+        <button
+          onClick={() => setSortConfig(null)}
+          title="Clear sort"
+          aria-label="Clear sort"
+          style={{ flexShrink: 0, background: "none", border: "none", padding: "6px 10px 6px 0", color: "#E8C9A0", display: "flex" }}
+        >
+          <X size={11} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+// Modal opened from a ColumnHeaderCell's filter button: option list (with an
+// optional cfg.labelForOption for columns whose stored value isn't the display
+// text, e.g. Maintenance's Status filter storing "due-soon" but showing "Due
+// soon") plus Sort A→Z / Z→A for that column.
+function ColumnFilterModal({ activeCol, filterConfigs, sortConfig, setSortConfig, onClose }) {
+  if (!activeCol || !filterConfigs[activeCol]) return null;
+  const cfg = filterConfigs[activeCol];
+  const getLabel = cfg.labelForOption || (o => o);
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth:300, maxHeight: "70vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>
+            Filter by {cfg.label}
+          </div>
+          <button onClick={onClose} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          {cfg.options.map(opt => {
+            const isSelected = opt === cfg.value;
+            return (
+              <button
+                key={opt}
+                onClick={() => { cfg.setValue(opt); onClose(); }}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                  padding: "9px 10px", background: isSelected ? C.hover : "transparent", border: "none",
+                  borderRadius: 10, fontSize: 14, textAlign: "left", color: C.ink, fontWeight: isSelected ? 600 : 400,
+                }}
+              >
+                {getLabel(opt)}
+                {isSelected && <Check size={15} color={C.brand} />}
+              </button>
+            );
+          })}
+        </div>
+        <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 12, paddingTop: 12, display: "flex", gap: 6 }}>
+          {[["asc", "Sort A → Z"], ["desc", "Sort Z → A"]].map(([dir, lbl]) => {
+            const active = sortConfig && sortConfig.key === activeCol && sortConfig.dir === dir;
+            return (
+              <button
+                key={dir}
+                onClick={() => { setSortConfig(active ? null : { key: activeCol, dir }); onClose(); }}
+                style={{ flex: 1, padding: "7px 10px", background: active ? C.brand : "transparent", color: active ? "#fff" : C.ink, border: `1.5px solid ${active ? C.brand : C.border}`, borderRadius: 10, fontSize: 13, fontWeight: 600 }}
+              >
+                {lbl}
               </button>
             );
           })}
