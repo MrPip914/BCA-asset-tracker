@@ -40,6 +40,7 @@ import {
   Search, Plus, X, Pencil, Trash2, Save, ChevronRight, ChevronDown, ArrowLeft, MessageSquare,
   Monitor, Phone, Tv, Camera, HardDrive, HelpCircle, Columns3, Lock, Filter, Check, DoorOpen, Download,
   Wrench, UserCircle, Settings, History, Archive, ArchiveRestore, Building2, Package, Copy, Zap, Repeat, ArrowLeftRight, Menu,
+  FlaskConical, RotateCcw,
 } from "lucide-react";
 
 // Starter managed peripherals/users/bulk-item-type lists — empty until the school
@@ -261,11 +262,124 @@ const SHEET_API_URL = "https://script.google.com/macros/s/AKfycbzXaKRuCrTesxobxP
 // backend actually reports (data.scriptVersion) and flags a mismatch —
 // catches a stuck deployment (edited-but-not-redeployed) automatically
 // instead of it silently dropping data until someone happens to notice.
-const FRONTEND_SCRIPT_VERSION = "v3 (2026-08-01) — Fix date fields auto-converting to Sheets dates";
+const FRONTEND_SCRIPT_VERSION = "v7 (2026-08-05) — Tandem/quad are now groups of individual Breaker rows (Breaker.groupId), not single-row+circuit-field hacks";
 const emptyDraftFrom = columns => Object.fromEntries(columns.map(c => [c.key, ""]));
+
+// --- Local Sandbox mode -----------------------------------------------------
+// Lets you iterate on the UI without touching the live Google Sheet: loadData()
+// reads MOCK_SNAPSHOT (below) instead of fetching SHEET_API_URL, and persist()
+// just updates in-memory state (mirrored to localStorage so a page refresh
+// doesn't lose sandbox edits) instead of POSTing to Apps Script. Toggle with the
+// "Sandbox" pill in the top-right corner — it's a plain on/off switch, remembered
+// per-device via localStorage, OFF by default so the app talks to the real Sheet
+// unless you deliberately turn it on. Nothing here ever touches the real backend.
+const SANDBOX_MODE_KEY = "asset-tracker-sandbox-mode";
+const SANDBOX_DATA_KEY = "asset-tracker-sandbox-data";
+// A trimmed, realistic snapshot — not the full live inventory (that'd bloat this
+// file for no benefit) — but with the Electrical Panel structure kept in full,
+// since that's the area under active development and the one most worth having
+// good fixture data for. Update this by hand when you want the sandbox to start
+// from a different baseline; it's plain data, safe to edit directly.
+const MOCK_SNAPSHOT = {
+  scriptVersion: FRONTEND_SCRIPT_VERSION,
+  assets: [
+    { label: "BCB0001", type: "Building", building: "Building 100", room: "", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    { label: "BCB0002", type: "Building", building: "Building 200", room: "", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    { label: "BCB0003", type: "Building", building: "Building 300", room: "", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    { label: "BCB0004", type: "Building", building: "Building 400", room: "", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    { label: "BCR0006", type: "Room", room: "Room 102", building: "Building 100", person: "Jen Kramer", notes: "", status: "Active" },
+    { label: "BCR0008", type: "Room", room: "Room 200", building: "Building 200", person: "Aaron Cantrell", notes: "", status: "Active" },
+    { label: "BCR0011", type: "Room", room: "Room 300", building: "Building 300", person: "Denise Sloan", notes: "", status: "Active" },
+    { label: "BCR0014", type: "Room", room: "Room 400", building: "Building 400", person: "Kelly Mackinga", notes: "", status: "Active" },
+    { label: "BCR0002", type: "Room", room: "Kitchen", building: "Building 100", person: "Multiple teachers", notes: "", status: "Active" },
+    { label: "BCR0018", type: "Room", room: "Storage Room", building: "Building 100", person: "", notes: "", status: "Active" },
+    { label: "BCA0001", type: "Computer", room: "Room 102", brand: "Dell", model: "OptiPlex 7010", serial: "MOCK-CMP-001", person: "Jen Kramer", peripherals: "Keyboard, Mouse", notes: "", status: "Active" },
+    { label: "BCA0002", type: "Monitor", room: "Room 102", brand: "Dell", model: "P2419H", serial: "MOCK-MON-001", person: "Jen Kramer", notes: "", status: "Active" },
+    { label: "BCA0003", type: "Phone", room: "Room 102", brand: "Cisco", model: "8841", serial: "MOCK-PHN-001", person: "Jen Kramer", notes: "", status: "Active" },
+    { label: "BCA0011", type: "Phone", room: "Room 200", brand: "Cisco", model: "8841", serial: "MOCK-PHN-002", person: "Aaron Cantrell", notes: "", status: "Active" },
+    { label: "BCA0015", type: "Stream Deck", room: "Room 200", brand: "Elgato", model: "Stream Deck MK.2", serial: "MOCK-SD-001", person: "Aaron Cantrell", notes: "", status: "Active" },
+    { label: "BCA0024", type: "TV", room: "Room 300", brand: "Samsung", model: "55\" QLED", serial: "MOCK-TV-001", person: "Denise Sloan", notes: "", status: "Active" },
+    { label: "BCA0054", type: "DocuCam", room: "Room 101", brand: "IPEVO", model: "V4K", serial: "MOCK-DC-001", person: "Dillon Jacobsma", notes: "", status: "Active" },
+    { label: "BCA0081", type: "Bulk Item", itemName: "Chairs", room: "", totalQuantity: "40", allocations: [{ room: "Room 102", quantity: "20" }, { room: "Room 200", quantity: "20" }], notes: "", status: "Active" },
+    {
+      label: "BCA0082", type: "Electrical Panel", room: "Storage Room", brand: "Square D", model: "QO142M200PC", serial: "MN-88213-SQD",
+      notes: "Main service panel, 200A. Feeds Building 200/300/400 sub-panels.", status: "Active",
+      panelSlotCount: 24, panelLayout: "two-column",
+      breakers: [
+        { id: "b-1", panelLabel: "BCA0082", slots: ["1"], poles: "1", mount: "full", ampRating: "", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c-1", breakerId: "b-1", label: "1", description: "", roomsServed: ["Room 101"], feedsPanelLabel: "" },
+        ] },
+        { id: "b-24-a", panelLabel: "BCA0082", slots: ["2"], poles: "1", mount: "quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-quad-1", circuits: [
+          { id: "c-2a", breakerId: "b-24-a", label: "2A", description: "", roomsServed: ["Room 101"], feedsPanelLabel: "" },
+        ] },
+        { id: "b-24-b", panelLabel: "BCA0082", slots: ["2"], poles: "1", mount: "quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-quad-1", circuits: [
+          { id: "c-2b", breakerId: "b-24-b", label: "2B", description: "", roomsServed: ["Room 102"], feedsPanelLabel: "" },
+        ] },
+        { id: "b-24-c", panelLabel: "BCA0082", slots: ["4"], poles: "1", mount: "quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-quad-1", circuits: [
+          { id: "c-4a", breakerId: "b-24-c", label: "4A", description: "", roomsServed: ["Kitchen"], feedsPanelLabel: "" },
+        ] },
+        { id: "b-24-d", panelLabel: "BCA0082", slots: ["4"], poles: "1", mount: "quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-quad-1", circuits: [] },
+        { id: "b-6-8", panelLabel: "BCA0082", slots: ["6", "8"], poles: "2", mount: "full", ampRating: "60", status: "Active", serial: "", installedDate: "", notes: "Feed to Room 300 sub-panel (BCA0084)", circuits: [
+          { id: "c-6-8", breakerId: "b-6-8", label: "6/8", description: "", roomsServed: [], feedsPanelLabel: "BCA0084" },
+        ] },
+        { id: "b-10-12", panelLabel: "BCA0082", slots: ["10", "12"], poles: "2", mount: "full", ampRating: "60", status: "Active", serial: "", installedDate: "", notes: "Feed to Room 400 sub-panel (BCA0085)", circuits: [
+          { id: "c-10-12", breakerId: "b-10-12", label: "10/12", description: "", roomsServed: [], feedsPanelLabel: "BCA0085" },
+        ] },
+        { id: "b-14-a", panelLabel: "BCA0082", slots: ["14"], poles: "1", mount: "tandem", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-tandem-14", circuits: [
+          { id: "c-14a", breakerId: "b-14-a", label: "14a", description: "", roomsServed: ["Kitchen"], feedsPanelLabel: "" },
+        ] },
+        { id: "b-14-b", panelLabel: "BCA0082", slots: ["14"], poles: "1", mount: "tandem", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-tandem-14", circuits: [] },
+        { id: "b-15-17", panelLabel: "BCA0082", slots: ["15", "17"], poles: "2", mount: "full", ampRating: "30", status: "Active", serial: "", installedDate: "", notes: "Electric water heater", circuits: [
+          { id: "c-15-17", breakerId: "b-15-17", label: "Water Heater", description: "", roomsServed: ["Storage Room"], feedsPanelLabel: "" },
+        ] },
+        { id: "b-16-18", panelLabel: "BCA0082", slots: ["16", "18"], poles: "2", mount: "full", ampRating: "50", status: "Active", serial: "", installedDate: "", notes: "Electric range/oven", circuits: [
+          { id: "c-16-18", breakerId: "b-16-18", label: "Range", description: "", roomsServed: ["Kitchen"], feedsPanelLabel: "" },
+        ] },
+        { id: "b-19-21", panelLabel: "BCA0082", slots: ["19", "21"], poles: "2", mount: "full", ampRating: "30", status: "Faulted", serial: "", installedDate: "", notes: "Dryer — tripping, needs service", circuits: [
+          { id: "c-19-21", breakerId: "b-19-21", label: "Dryer", description: "", roomsServed: ["Storage Room"], feedsPanelLabel: "" },
+        ] },
+        { id: "b-20-22", panelLabel: "BCA0082", slots: ["20", "22"], poles: "2", mount: "full", ampRating: "40", status: "Spare", serial: "", installedDate: "", notes: "Reserved for future HVAC condenser", circuits: [] },
+      ],
+    },
+    {
+      label: "BCA0083", type: "Electrical Panel", room: "Room 200", brand: "Square D", model: "QO112L125GRB", serial: "B200-SQD-4471",
+      notes: "Sub-panel fed from Main Distribution Panel (Storage Room), 125A main lug.", status: "Active",
+      panelSlotCount: 12, panelLayout: "two-column",
+      breakers: [
+        { id: "b83-1", panelLabel: "BCA0083", slots: ["1"], poles: "1", mount: "full", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c83-1", breakerId: "b83-1", label: "1", description: "", roomsServed: ["Room 200"], feedsPanelLabel: "" },
+        ] },
+      ],
+    },
+    {
+      label: "BCA0084", type: "Electrical Panel", room: "Room 300", brand: "Square D", model: "QO112L125GRB", serial: "B300-SQD-4472",
+      notes: "Sub-panel fed from Main Distribution Panel (Storage Room), 125A main lug.", status: "Active",
+      panelSlotCount: 12, panelLayout: "two-column",
+      breakers: [
+        { id: "b84-1", panelLabel: "BCA0084", slots: ["1"], poles: "1", mount: "full", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c84-1", breakerId: "b84-1", label: "1", description: "", roomsServed: ["Room 300"], feedsPanelLabel: "" },
+        ] },
+      ],
+    },
+    {
+      label: "BCA0085", type: "Electrical Panel", room: "Room 400", brand: "Square D", model: "QO116L125GRB", serial: "B400-SQD-4473",
+      notes: "Sub-panel fed from Main Distribution Panel (Storage Room), 125A main lug.", status: "Active",
+      panelSlotCount: 16, panelLayout: "two-column",
+      breakers: [
+        { id: "b85-1", panelLabel: "BCA0085", slots: ["1"], poles: "1", mount: "full", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c85-1", breakerId: "b85-1", label: "1", description: "", roomsServed: ["Room 400"], feedsPanelLabel: "" },
+        ] },
+      ],
+    },
+  ],
+  auditLog: [],
+};
 
 function AssetTracker() {
   const [assets, setAssets] = useState(null);
+  const [sandboxMode, setSandboxMode] = useState(() => {
+    try { return localStorage.getItem(SANDBOX_MODE_KEY) === "1"; } catch (e) { return false; }
+  });
   const [columns, setColumns] = useState(DEFAULT_COLUMNS);
   const [changeTypes, setChangeTypes] = useState(DEFAULT_CHANGE_TYPES);
   const [vendors, setVendors] = useState([]);
@@ -312,6 +426,8 @@ function AssetTracker() {
   const [movingCircuit, setMovingCircuit] = useState(null); // { breakerId, circuit } or null
   const [moveCircuitTarget, setMoveCircuitTarget] = useState("");
   const [moveCircuitError, setMoveCircuitError] = useState(null);
+  const [showPanelConfig, setShowPanelConfig] = useState(false);
+  const [highlightBreakerId, setHighlightBreakerId] = useState(null);
 
   const [currentUser, setCurrentUser] = useState(null);
   const [showNamePrompt, setShowNamePrompt] = useState(false);
@@ -345,24 +461,37 @@ function AssetTracker() {
   const [showColManager, setShowColManager] = useState(false);
   const [newColName, setNewColName] = useState("");
 
-  // Loads the full snapshot from the Sheet backend. Never falls back to placeholder
-  // data on failure — if the backend can't be reached, loadError is surfaced as a
-  // blocking screen (see below) rather than silently showing something that isn't
-  // the real inventory. Exposed as a named function (not inline in the effect) so
-  // the "Try again" button on that error screen can call it directly.
+  // Loads the full snapshot — either from the Sheet backend, or (sandboxMode)
+  // from localStorage/MOCK_SNAPSHOT, never touching the network. Never falls
+  // back to placeholder data on a real failure — if the backend can't be
+  // reached, loadError is surfaced as a blocking screen (see below) rather
+  // than silently showing something that isn't the real inventory. Exposed
+  // as a named function (not inline in the effect) so the "Try again" button
+  // on that error screen, and the sandbox toggle, can both call it directly.
   async function loadData() {
     setLoading(true);
     setLoadError(false);
     try {
-      const res = await fetch(SHEET_API_URL);
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      const data = await res.json();
+      let data;
+      if (sandboxMode) {
+        let stored = null;
+        try {
+          const raw = localStorage.getItem(SANDBOX_DATA_KEY);
+          if (raw) stored = JSON.parse(raw);
+        } catch (e) { /* corrupt/missing sandbox save — fall back to the fixture below */ }
+        data = stored || JSON.parse(JSON.stringify(MOCK_SNAPSHOT));
+      } else {
+        const res = await fetch(SHEET_API_URL);
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        data = await res.json();
+      }
       if (!data || !Array.isArray(data.assets)) throw new Error("Malformed response from backend");
 
       const loadedAssets = data.assets.map(a => ({ comments: [], changes: [], allocations: [], status: "Active", building: "", itemName: "", purchaseDate: "", warrantyUntil: "", ...a }));
       setAssets(loadedAssets);
       // No scriptVersion at all means an old backend that predates this check entirely —
-      // still a real mismatch, not a "nothing to compare" case.
+      // still a real mismatch, not a "nothing to compare" case. In sandbox mode the
+      // fixture always reports the current frontend version, so this never fires there.
       setBackendScriptVersion(data.scriptVersion || "(none reported — backend predates version tracking)");
       // Migrate column config: append any default columns added in newer app versions.
       let storedCols = data.columns && data.columns.length ? data.columns : DEFAULT_COLUMNS;
@@ -400,7 +529,20 @@ function AssetTracker() {
     }
   }
 
-  useEffect(() => { loadData(); }, []);
+  useEffect(() => { loadData(); }, [sandboxMode]);
+
+  function toggleSandboxMode() {
+    const next = !sandboxMode;
+    setSandboxMode(next);
+    try { localStorage.setItem(SANDBOX_MODE_KEY, next ? "1" : "0"); } catch (e) { /* non-fatal — just won't remember across reloads */ }
+  }
+
+  // Wipes sandbox edits back to the MOCK_SNAPSHOT fixture. Only relevant in
+  // sandbox mode — never touches the real backend either way.
+  function resetSandbox() {
+    try { localStorage.removeItem(SANDBOX_DATA_KEY); } catch (e) { /* non-fatal */ }
+    if (sandboxMode) loadData();
+  }
 
   useEffect(() => {
     try {
@@ -483,12 +625,25 @@ function AssetTracker() {
     setUsersList(nextUsersList);
     setBulkItemTypes(nextBulkItemTypes);
     setTypesList(nextTypesList);
+    const payload = {
+      assets: nextAssets, columns: nextColumns, changeTypes: nextChangeTypes,
+      vendors: nextVendors, auditLog: nextAuditLog, peripheralsList: nextPeripheralsList, usersList: nextUsersList,
+      bulkItemTypes: nextBulkItemTypes, typesList: nextTypesList, _dirty: dirty,
+    };
+    if (sandboxMode) {
+      // Mirror to localStorage so a refresh doesn't lose sandbox edits — but
+      // never touches SHEET_API_URL. scriptVersion is stamped fresh each save
+      // so the sandbox never shows a false "backend outdated" warning.
+      try {
+        localStorage.setItem(SANDBOX_DATA_KEY, JSON.stringify({ ...payload, scriptVersion: FRONTEND_SCRIPT_VERSION }));
+        setSaveError(false);
+      } catch (e) {
+        setSaveError(true);
+      }
+      return;
+    }
     try {
-      await writeSnapshot({
-        assets: nextAssets, columns: nextColumns, changeTypes: nextChangeTypes,
-        vendors: nextVendors, auditLog: nextAuditLog, peripheralsList: nextPeripheralsList, usersList: nextUsersList,
-        bulkItemTypes: nextBulkItemTypes, typesList: nextTypesList, _dirty: dirty,
-      });
+      await writeSnapshot(payload);
       setSaveError(false);
     } catch (e) {
       setSaveError(true);
@@ -1047,21 +1202,82 @@ function AssetTracker() {
     return (breaker.slots || []).join("/") || "—";
   }
 
+  // The Slots field's draft value is a string while the user is actively
+  // typing (onChange fires), but an edit draft starts as the stored
+  // breaker's array (`{...item}` in ChildEntityTable's startEdit) and stays
+  // an array if the user never touches that field — accept either shape
+  // rather than assuming .split() always works.
+  function parseSlotsInput(v) {
+    const raw = Array.isArray(v) ? v.join(",") : (v || "");
+    return raw.split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
+  }
+
   function updateBreakers(nextBreakers) {
     return assets.map(a => (a.label === selectedLabel ? { ...a, breakers: nextBreakers } : a));
   }
 
+  // Panel slot count/layout drive the visual diagram in the Breakers tab —
+  // stored as plain asset fields (like brand/model), not part of the
+  // breakers/circuits child tables, since they describe the panel itself.
+  function updatePanelConfig(slotCount, layout) {
+    if (!selectedAsset) return;
+    const original = selectedAsset;
+    const mk = (field, from, to) => ({
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: original.type,
+      action: "edited", field, from, to,
+    });
+    const entries = [];
+    if (String(original.panelSlotCount || "") !== String(slotCount || "")) entries.push(mk("Panel Slot Count", original.panelSlotCount || "—", slotCount || "—"));
+    if ((original.panelLayout || "") !== (layout || "")) entries.push(mk("Panel Layout", original.panelLayout || "—", layout || "—"));
+    const next = assets.map(a => (a.label === selectedLabel ? { ...a, panelSlotCount: slotCount, panelLayout: layout } : a));
+    persist(next, columns, changeTypes, vendors, entries.length ? logAudit(entries) : auditLog);
+  }
+
+  // A tandem or quad breaker is a GROUP of individual single-pole breakers
+  // (2 for tandem, 4 for quad — 2 per slot) defined together as one action,
+  // each with its own amp rating from the moment it's created — not a
+  // placeholder that only gets a real identity once a circuit is attached
+  // to it. Every row in the group shares a fresh groupId. Circuits attach
+  // to these rows exactly like any other breaker, as a separate later step.
   function addBreaker(draft) {
     if (!selectedAsset) return "No panel selected.";
-    const slots = (draft.slots || "").split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
+    const slots = parseSlotsInput(draft.slots);
     if (slots.length === 0) return "Enter at least one slot number.";
     const mount = draft.mount || "full";
     const existing = selectedAsset.breakers || [];
-    for (const s of slots) {
-      const sharing = existing.filter(b => (b.slots || []).includes(s));
-      if (sharing.length > 0 && (mount !== "tandem" || sharing.some(b => b.mount !== "tandem"))) {
-        return `Slot ${s} is already in use by a non-tandem breaker.`;
+
+    if (mount === "tandem" || mount === "quad") {
+      const expectedSlots = mount === "tandem" ? 1 : 2;
+      if (slots.length !== expectedSlots) return `A ${mount} breaker needs exactly ${expectedSlots} slot${expectedSlots > 1 ? "s" : ""}.`;
+      for (const s of slots) {
+        if (existing.some(b => (b.slots || []).includes(s))) return `Slot ${s} is already in use.`;
       }
+      const groupId = crypto.randomUUID();
+      const status = draft.status || "Active";
+      const notes = draft.notes || "";
+      const newBreakers = [];
+      slots.forEach((slot, slotIdx) => {
+        ["A", "B"].forEach(pos => {
+          const amp = draft[`ampRating_${slotIdx}_${pos}`] || "";
+          newBreakers.push({
+            id: crypto.randomUUID(), panelLabel: selectedAsset.label, slots: [slot],
+            poles: "1", mount, groupId,
+            ampRating: amp, status, serial: "", installedDate: "", notes,
+            circuits: [],
+          });
+        });
+      });
+      const entry = {
+        at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
+        action: "breaker_added", field: `Slot ${slots.join("/")}`,
+        to: `${mount} (${newBreakers.map(b => b.ampRating ? b.ampRating + "A" : "?A").join(" / ")})`,
+      };
+      persist(updateBreakers([...existing, ...newBreakers]), columns, changeTypes, vendors, logAudit([entry]));
+      return;
+    }
+
+    for (const s of slots) {
+      if (existing.some(b => (b.slots || []).includes(s))) return `Slot ${s} is already in use.`;
     }
     const breaker = {
       id: crypto.randomUUID(), panelLabel: selectedAsset.label, slots,
@@ -1073,27 +1289,38 @@ function AssetTracker() {
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
       action: "breaker_added", field: `Slot ${slotsLabel_(breaker)}`,
-      to: `${breaker.ampRating ? breaker.ampRating + "A" : "?A"}${mount === "tandem" ? " · tandem" : ""}`,
+      to: `${breaker.ampRating ? breaker.ampRating + "A" : "?A"}`,
     };
     persist(updateBreakers([...existing, breaker]), columns, changeTypes, vendors, logAudit([entry]));
   }
 
   function saveBreakerEdit(id, draft) {
     if (!selectedAsset) return "No panel selected.";
-    const slots = (draft.slots || "").split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
+    const slots = parseSlotsInput(draft.slots);
     if (slots.length === 0) return "Enter at least one slot number.";
     const mount = draft.mount || "full";
     const existing = selectedAsset.breakers || [];
     const original = existing.find(b => b.id === id);
     if (!original) return "Breaker not found.";
+    // Tandem/quad membership is set once, atomically, by Add Breaker (see
+    // above) — a single row can't be edited into or out of a group here,
+    // since that would leave the rest of the group (or the row itself)
+    // half-converted. Delete and re-add instead.
+    if (original.groupId && mount !== original.mount) {
+      return `This breaker is part of a ${original.mount} group — its mount can't be changed here. Delete it and add a new ${original.mount} instead.`;
+    }
+    if ((mount === "tandem" || mount === "quad") && !original.groupId) {
+      return `Use Add Breaker to create a new ${mount} — an existing breaker can't be converted into one here.`;
+    }
+    if (original.groupId && slots.length !== 1) return "A tandem/quad breaker occupies exactly one slot.";
     for (const s of slots) {
       const sharing = existing.filter(b => b.id !== id && (b.slots || []).includes(s));
-      if (sharing.length > 0 && (mount !== "tandem" || sharing.some(b => b.mount !== "tandem"))) {
-        return `Slot ${s} is already in use by a non-tandem breaker.`;
+      if (sharing.length > 0 && !(original.groupId && sharing.every(b => b.groupId === original.groupId))) {
+        return `Slot ${s} is already in use.`;
       }
     }
     const updated = {
-      ...original, slots, poles: draft.poles || "1", mount,
+      ...original, slots, poles: original.groupId ? "1" : (draft.poles || "1"), mount,
       ampRating: draft.ampRating || "", status: draft.status || "Active",
       serial: draft.serial || "", installedDate: draft.installedDate || "", notes: draft.notes || "",
     };
@@ -1967,13 +2194,55 @@ function AssetTracker() {
           )}
 
           {detailTab === "breakers" && selectedAsset.type === "Electrical Panel" && (
-            <ChildEntityTable
+            <>
+              {(() => {
+                const feed = assets
+                  .filter(a => a.type === "Electrical Panel")
+                  .flatMap(a => (a.breakers || []).map(b => ({ panel: a, breaker: b })))
+                  .flatMap(({ panel, breaker }) => (breaker.circuits || []).map(c => ({ panel, breaker, circuit: c })))
+                  .find(({ circuit }) => circuit.feedsPanelLabel === selectedAsset.label);
+                if (!feed) return null;
+                return (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 14px", marginBottom: 14, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, fontSize: 13, color: C.ink }}>
+                    <Zap size={14} color={C.accent} />
+                    Fed from <strong style={{ fontWeight: 700, color: C.brandDark }}>{feed.panel.label}</strong>, Slot {slotsLabel_(feed.breaker)}
+                  </div>
+                );
+              })()}
+              {(() => {
+                const slotCount = parseInt(selectedAsset.panelSlotCount, 10) || 0;
+                if (slotCount <= 0 || showPanelConfig) {
+                  return (
+                    <PanelConfigForm
+                      slotCount={selectedAsset.panelSlotCount}
+                      layout={selectedAsset.panelLayout}
+                      onSave={(count, lay) => { updatePanelConfig(count, lay); setShowPanelConfig(false); }}
+                      onCancel={slotCount > 0 ? () => setShowPanelConfig(false) : null}
+                    />
+                  );
+                }
+                return (
+                  <PanelDiagram
+                    slotCount={slotCount}
+                    layout={selectedAsset.panelLayout || "two-column"}
+                    breakers={selectedAsset.breakers || []}
+                    onReconfigure={() => setShowPanelConfig(true)}
+                    onSlotClick={id => {
+                      setHighlightBreakerId(id);
+                      const el = document.getElementById(`entity-row-${id}`);
+                      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+                      setTimeout(() => setHighlightBreakerId(prev => (prev === id ? null : prev)), 2000);
+                    }}
+                  />
+                );
+              })()}
+              <ChildEntityTable
+              highlightedId={highlightBreakerId}
               items={(selectedAsset.breakers || []).slice().sort((a, b) => (parseFloat((a.slots || [])[0]) || 0) - (parseFloat((b.slots || [])[0]) || 0))}
               fields={[
-                { key: "slots", label: "Slot(s)", placeholder: "e.g. 5 or 1,3" },
-                { key: "ampRating", label: "Amp Rating", type: "number", placeholder: "20" },
+                { key: "slots", label: "Slot(s)", placeholder: "e.g. 5 or 1,3 (tandem: 1 slot, quad: 2 slots)" },
                 { key: "poles", label: "Poles", type: "select", options: ["1", "2"] },
-                { key: "mount", label: "Mount", type: "select", options: ["full", "tandem"] },
+                { key: "mount", label: "Mount", type: "select", options: ["full", "tandem", "quad"] },
                 { key: "status", label: "Status", type: "select", options: ["Active", "Spare", "Faulted", "Retired"] },
                 { key: "serial", label: "Serial", placeholder: "optional" },
                 { key: "installedDate", label: "Installed", type: "date" },
@@ -1987,12 +2256,66 @@ function AssetTracker() {
               deleteConfirmMessage={item => `Delete the breaker at Slot ${slotsLabel_(item)}?`}
               addLabel="Add Breaker"
               emptyMessage="No breakers added yet."
+              renderCustomFields={(values, setValues, isAdd) => {
+                const mount = values.mount || "full";
+                const labelStyle = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent };
+                const inputStyle = { padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, maxWidth: 120 };
+                // Editing an existing row (or adding a plain "full" breaker) always
+                // means one row = one amp rating. Only the ADD flow for tandem/quad
+                // needs the multi-amp bulk-creation UI below, since that's the one
+                // moment several breakers are being defined at once.
+                if (!isAdd || mount === "full") {
+                  return (
+                    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      <span style={labelStyle}>Amp Rating</span>
+                      <input type="number" placeholder="20" value={values.ampRating || ""} onChange={e => setValues({ ...values, ampRating: e.target.value })} style={inputStyle} />
+                    </label>
+                  );
+                }
+                const slots = parseSlotsInput(values.slots);
+                if (mount === "tandem") {
+                  return (
+                    <div style={{ gridColumn: "1 / -1", display: "flex", gap: 10 }}>
+                      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <span style={labelStyle}>Amp Rating A</span>
+                        <input type="number" placeholder="20" value={values.ampRating_0_A || ""} onChange={e => setValues({ ...values, ampRating_0_A: e.target.value })} style={inputStyle} />
+                      </label>
+                      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <span style={labelStyle}>Amp Rating B</span>
+                        <input type="number" placeholder="20" value={values.ampRating_0_B || ""} onChange={e => setValues({ ...values, ampRating_0_B: e.target.value })} style={inputStyle} />
+                      </label>
+                    </div>
+                  );
+                }
+                if (mount === "quad") {
+                  if (slots.length < 2) {
+                    return <div style={{ gridColumn: "1 / -1", fontSize: 13, color: C.empty }}>Enter both slot numbers above to set each circuit's amp rating.</div>;
+                  }
+                  return (
+                    <div style={{ gridColumn: "1 / -1", display: "flex", flexWrap: "wrap", gap: 10 }}>
+                      {slots.slice(0, 2).map((slot, i) => (
+                        <div key={i} style={{ display: "flex", gap: 10 }}>
+                          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                            <span style={labelStyle}>Slot {slot} — A</span>
+                            <input type="number" placeholder="20" value={values[`ampRating_${i}_A`] || ""} onChange={e => setValues({ ...values, [`ampRating_${i}_A`]: e.target.value })} style={inputStyle} />
+                          </label>
+                          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                            <span style={labelStyle}>Slot {slot} — B</span>
+                            <input type="number" placeholder="20" value={values[`ampRating_${i}_B`] || ""} onChange={e => setValues({ ...values, [`ampRating_${i}_B`]: e.target.value })} style={inputStyle} />
+                          </label>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                }
+                return null;
+              }}
               renderSummary={breaker => (
                 <div>
                   <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
                     <span style={{ fontWeight: 700, fontSize: 13, color: C.brandDark }}>Slot {slotsLabel_(breaker)}</span>
                     <span style={{ fontSize: 13, color: C.muted }}>
-                      {breaker.ampRating ? `${breaker.ampRating}A` : "—"} · {breaker.poles === "2" ? "2-pole" : "1-pole"}{breaker.mount === "tandem" ? " · tandem" : ""}
+                      {breaker.ampRating ? `${breaker.ampRating}A` : "—"} · {breaker.poles === "2" ? "2-pole" : "1-pole"}{breaker.mount !== "full" ? ` · ${breaker.mount}` : ""}
                     </span>
                     <span style={{
                       fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase",
@@ -2105,7 +2428,8 @@ function AssetTracker() {
                   />
                 );
               }}
-            />
+              />
+            </>
           )}
 
           {detailTab === "maintenance" && (
@@ -2649,6 +2973,29 @@ function AssetTracker() {
       <div style={{ borderBottom: `2px solid ${C.brand}`, padding: "10px 20px", position: "sticky", top: 0, background: C.bg, zIndex: 10, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
         <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: C.brandDark }}>BCA Asset Tracker</h1>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <button
+            onClick={toggleSandboxMode}
+            title={sandboxMode
+              ? "Sandbox is ON — you're editing local fixture data, nothing is saved to the Google Sheet. Click to switch back to the real Sheet."
+              : "Click to switch to Sandbox mode — local fixture data, safe to experiment on, nothing saved to the Google Sheet."}
+            style={{
+              display: "flex", alignItems: "center", gap: 5, border: `1.5px solid ${sandboxMode ? C.accent : C.border}`,
+              background: sandboxMode ? C.accent : "transparent", color: sandboxMode ? "#fff" : C.muted,
+              borderRadius: 12, padding: "3px 10px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 700,
+            }}
+          >
+            <FlaskConical size={12} />
+            {sandboxMode ? "SANDBOX" : "Sandbox"}
+          </button>
+          {sandboxMode && (
+            <button
+              onClick={() => { if (confirm("Reset sandbox data back to the starting fixture? Your sandbox edits will be lost.")) resetSandbox(); }}
+              title="Reset sandbox data back to the starting fixture"
+              style={{ display: "flex", alignItems: "center", gap: 4, background: "none", border: "none", padding: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted }}
+            >
+              <RotateCcw size={12} /> Reset
+            </button>
+          )}
           <button
             onClick={() => { setNameInput(currentUser || ""); setShowNamePrompt(true); }}
             style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", padding: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: C.muted }}
@@ -3644,6 +3991,249 @@ function SelectBox({ value, onChange, options }) {
   );
 }
 
+// One-time (or reconfigure-on-demand) setup for a panel's physical slot
+// layout — total slot count plus a layout preset. Kept separate from the
+// generic asset Edit form since it's specific to how the Breakers tab draws
+// the diagram, not a general asset field a user would expect in Details.
+function PanelConfigForm({ slotCount, layout, onSave, onCancel }) {
+  const [count, setCount] = useState(slotCount || "");
+  const [lay, setLay] = useState(layout || "two-column");
+  const valid = count && parseInt(count, 10) > 0;
+  return (
+    <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14, marginBottom: 20, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)" }}>
+      <div style={{ fontSize: 13, color: C.muted, marginBottom: 10 }}>
+        {onCancel ? "Reconfigure this panel's slot layout." : "Set up this panel's slot layout to see a visual diagram of where breakers sit."}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Total Slots</span>
+          <input
+            type="number" min="1" value={count} onChange={e => setCount(e.target.value)} placeholder="e.g. 24"
+            style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+          />
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Layout</span>
+          <select
+            value={lay} onChange={e => setLay(e.target.value)}
+            style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, background: "#fff" }}
+          >
+            <option value="two-column">Two-column (odd left / even right)</option>
+            <option value="single-column">Single column</option>
+          </select>
+        </label>
+      </div>
+      <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+        {onCancel && (
+          <button onClick={onCancel} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
+            Cancel
+          </button>
+        )}
+        <button
+          onClick={() => onSave(parseInt(count, 10) || 0, lay)}
+          disabled={!valid}
+          style={{ padding: "8px 14px", background: valid ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+        >
+          Save layout
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Visual panel schedule — slots laid out per the panel's configured layout
+// (two-column odd-left/even-right, or a single column) rather than just a
+// flat breaker list. Slot numbers print outside the breaker cells, on the
+// side of the panel they'd physically be on (odd left / even right), the
+// way a real panel schedule reads — the cells themselves are freed up for
+// breaker or feed info via the toggle. A double-pole breaker's two slots
+// collapse into one tall cell spanning both rows in its column, still with
+// both individual slot numbers printed outside at their own row; a tandem
+// pair shares one cell split top/bottom. Clicking a slot scrolls the
+// matching row in the list below into view and briefly highlights it
+// (highlightedId on ChildEntityTable) — the diagram is a map onto that
+// list, not a replacement for its add/edit/delete actions.
+function PanelDiagram({ slotCount, layout, breakers, onReconfigure, onSlotClick }) {
+  const [infoMode, setInfoMode] = useState("breaker"); // "breaker" | "feeds"
+  const columns = layout === "single-column" ? 1 : 2;
+  const rowOf = n => (columns === 1 ? n : Math.ceil(n / 2));
+  const colOf = n => (columns === 1 ? 0 : (n % 2 === 1 ? 0 : 1));
+  // Grid tracks, left to right: [numLeft] [breaker col 0] [breaker col 1] [numRight]
+  // (single-column collapses to [num] [breaker]). Breaker col -> track, and
+  // the number track on that same side.
+  const breakerTrack = col => (columns === 1 ? 2 : col + 2);
+  const numberTrack = col => (columns === 1 ? 1 : (col === 0 ? 1 : 4));
+  const gridTemplateColumns = columns === 1 ? "28px 1fr" : "28px 1fr 1fr 28px";
+
+  const slotMap = {};
+  breakers.forEach(b => (b.slots || []).forEach(s => {
+    const n = parseInt(s, 10);
+    if (!n) return;
+    (slotMap[n] = slotMap[n] || []).push(b);
+  }));
+
+  const covered = new Set();
+  const cells = [];
+  for (let s = 1; s <= slotCount; s++) {
+    if (covered.has(s)) continue;
+    const here = slotMap[s] || [];
+    const col = colOf(s);
+    const row = rowOf(s);
+
+    if (here.length === 0) {
+      cells.push({ key: `spare-${s}`, col, row, rowSpan: 1, kind: "spare" });
+      continue;
+    }
+    if (here.length > 1) {
+      // 2 breakers sharing this slot: either a plain tandem pair (this is
+      // the whole group), or one slot of a quad — 2 breakers per slot, 2
+      // slots per quad, all 4 linked by a shared groupId. A quad renders as
+      // the exact same vertical-stack cell as a tandem, just taller (more
+      // breakers, spanning both its slots) — real panel hardware treats a
+      // quad as basically two tandem pairs sharing one body.
+      const groupId = here[0].groupId;
+      const isQuadGroup = groupId && here.every(b => b.mount === "quad" && b.groupId === groupId);
+      if (isQuadGroup) {
+        const groupBreakers = breakers.filter(b => b.groupId === groupId);
+        const groupSlots = [...new Set(groupBreakers.flatMap(b => (b.slots || []).map(x => parseInt(x, 10))))].sort((a, b2) => a - b2);
+        if (groupSlots[0] !== s) continue; // reached via the non-primary slot; primary already covers it
+        groupSlots.filter(x => x !== s).forEach(x => covered.add(x));
+        const rows = groupSlots.map(rowOf);
+        const orderedBreakers = groupSlots.flatMap(gs => groupBreakers.filter(b => (b.slots || []).includes(String(gs))));
+        cells.push({ key: `tandem-group-${groupId}`, col, row: Math.min(...rows), rowSpan: Math.max(...rows) - Math.min(...rows) + 1, kind: "tandem", breakers: orderedBreakers });
+        continue;
+      }
+      cells.push({ key: `tandem-${s}`, col, row, rowSpan: 1, kind: "tandem", breakers: here });
+      continue;
+    }
+    const breaker = here[0];
+    const slotNums = (breaker.slots || []).map(x => parseInt(x, 10)).filter(n => !isNaN(n));
+    if (slotNums.length >= 2 && Math.min(...slotNums) === s) {
+      slotNums.filter(x => x !== s).forEach(x => covered.add(x));
+      const rows = slotNums.map(rowOf);
+      cells.push({ key: `breaker-${breaker.id}`, col, row: Math.min(...rows), rowSpan: Math.max(...rows) - Math.min(...rows) + 1, kind: "breaker", breaker });
+    } else if (slotNums.length >= 2) {
+      continue; // non-primary slot of a double-pole breaker, already covered
+    } else {
+      cells.push({ key: `breaker-${breaker.id}`, col, row, rowSpan: 1, kind: "breaker", breaker });
+    }
+  }
+
+  // Slot numbers print independently of the breaker cells above — every
+  // slot gets its own number at its own row, even when a double-pole
+  // breaker's cell spans two of them.
+  const numbers = [];
+  for (let s = 1; s <= slotCount; s++) {
+    numbers.push({ key: `num-${s}`, slot: s, col: colOf(s), row: rowOf(s) });
+  }
+
+  function statusColor(status) {
+    if (status === "Faulted") return C.danger;
+    if (status === "Retired" || status === "Spare") return C.muted;
+    return C.success;
+  }
+
+  // What a cell shows in "feeds" mode — what the breaker's circuit(s)
+  // actually serve, rather than its own electrical spec.
+  function feedInfo(breaker) {
+    const circuits = breaker.circuits || [];
+    if (circuits.length === 0) return { primary: "—", secondary: "no circuits" };
+    if (circuits.length === 1) {
+      const c = circuits[0];
+      if (c.feedsPanelLabel) return { primary: `→ ${c.feedsPanelLabel}`, secondary: c.label };
+      return { primary: (c.roomsServed || []).join(", ") || "—", secondary: c.label };
+    }
+    return { primary: `${circuits.length} circuits`, secondary: circuits.map(c => c.label).join(", ") };
+  }
+  function breakerInfo(breaker) {
+    return { primary: breaker.ampRating ? `${breaker.ampRating}A` : "—", secondary: "" };
+  }
+  const cellInfo = infoMode === "feeds" ? feedInfo : breakerInfo;
+
+  const cellBase = {
+    borderRadius: 8, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+    cursor: "pointer", padding: "4px", gap: 2, background: "#fff", textAlign: "center", overflow: "hidden",
+  };
+
+  return (
+    <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14, marginBottom: 20, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
+        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>
+          Panel Layout — {slotCount} slots
+        </span>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ display: "flex", border: `1.5px solid ${C.border}`, borderRadius: 8, overflow: "hidden" }}>
+            {[["breaker", "Breaker"], ["feeds", "Feeds"]].map(([val, label]) => (
+              <button
+                key={val} type="button" onClick={() => setInfoMode(val)}
+                style={{ padding: "5px 10px", fontSize: 12, fontWeight: 600, border: "none", cursor: "pointer", background: infoMode === val ? C.brand : "#fff", color: infoMode === val ? "#fff" : C.ink }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <button onClick={onReconfigure} style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex", alignItems: "center", gap: 4, color: C.muted, fontSize: 12, fontWeight: 600 }}>
+            <Settings size={13} /> Reconfigure
+          </button>
+        </div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns, gridAutoRows: "44px", gap: 6, maxWidth: columns === 1 ? 260 : 520 }}>
+        {numbers.map(n => (
+          <div
+            key={n.key}
+            style={{
+              gridColumn: numberTrack(n.col), gridRow: n.row,
+              display: "flex", alignItems: "center",
+              justifyContent: columns === 1 ? "center" : (n.col === 0 ? "flex-end" : "flex-start"),
+              fontSize: 11, fontWeight: 700, color: C.muted, fontFamily: "'IBM Plex Mono', monospace",
+            }}
+          >
+            {n.slot}
+          </div>
+        ))}
+        {cells.map(cell => {
+          if (cell.kind === "spare") {
+            return (
+              <div key={cell.key} style={{ gridColumn: breakerTrack(cell.col), gridRow: `${cell.row} / span ${cell.rowSpan}`, border: `1.5px dashed ${C.border}`, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: C.placeholder }}>
+                spare
+              </div>
+            );
+          }
+          if (cell.kind === "tandem") {
+            return (
+              <div key={cell.key} style={{ gridColumn: breakerTrack(cell.col), gridRow: `${cell.row} / span ${cell.rowSpan}`, border: `1.5px solid ${C.border}`, borderRadius: 8, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+                {cell.breakers.map((b, i) => {
+                  const info = cellInfo(b);
+                  return (
+                    <button
+                      key={b.id} onClick={() => onSlotClick(b.id)} type="button"
+                      style={{ flex: 1, border: "none", borderTop: i > 0 ? `1px solid ${C.border}` : "none", background: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", cursor: "pointer", padding: "2px 4px", overflow: "hidden" }}
+                    >
+                      <span style={{ fontSize: 9, fontWeight: 700, color: statusColor(b.status) }}>{info.primary}</span>
+                      <span style={{ fontSize: 8, color: C.muted, whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden", maxWidth: "100%" }}>{info.secondary}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            );
+          }
+          const b = cell.breaker;
+          const info = cellInfo(b);
+          return (
+            <button
+              key={cell.key} onClick={() => onSlotClick(b.id)} type="button"
+              style={{ ...cellBase, gridColumn: breakerTrack(cell.col), gridRow: `${cell.row} / span ${cell.rowSpan}`, border: `1.5px solid ${statusColor(b.status)}` }}
+            >
+              <span style={{ fontSize: 11, fontWeight: 700, color: C.brandDark }}>{info.primary}</span>
+              <span style={{ fontSize: 9, color: C.muted, whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden", maxWidth: "100%" }}>{info.secondary}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // Generic list/add/edit/delete UI for a structured child entity (id + fields).
 // Built for Breakers and Circuits — validated against both real shapes in this
 // same pass, not designed speculatively for a single call site. Field-driven
@@ -3657,7 +4247,7 @@ function SelectBox({ value, onChange, options }) {
 function ChildEntityTable({
   items, fields, onAdd, onSave, onDelete, initialDraft,
   renderCustomFields, renderSummary, renderExpanded, customRowActions,
-  addLabel, emptyMessage, canDelete, deleteConfirmMessage,
+  addLabel, emptyMessage, canDelete, deleteConfirmMessage, highlightedId,
 }) {
   const [draft, setDraft] = useState(initialDraft);
   const [editingId, setEditingId] = useState(null);
@@ -3666,6 +4256,7 @@ function ChildEntityTable({
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [addError, setAddError] = useState(null);
   const [editError, setEditError] = useState(null);
+  const [addOpen, setAddOpen] = useState(false);
 
   function renderField(f, values, setValues) {
     // See dateOnly()'s comment: a date field may come back from the Sheet as a
@@ -3758,6 +4349,7 @@ function ChildEntityTable({
     if (error) { setAddError(error); return; }
     setAddError(null);
     setDraft(initialDraft);
+    setAddOpen(false);
   }
   function toggleExpanded(id) {
     setExpandedIds({ ...expandedIds, [id]: !expandedIds[id] });
@@ -3765,18 +4357,35 @@ function ChildEntityTable({
 
   return (
     <div>
-      <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)", marginBottom: 20 }}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
-          {fields.map(f => renderField(f, draft, setDraft))}
-          {renderCustomFields && renderCustomFields(draft, setDraft, true)}
+      {addOpen ? (
+        <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)", marginBottom: 20 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
+            {fields.map(f => renderField(f, draft, setDraft))}
+            {renderCustomFields && renderCustomFields(draft, setDraft, true)}
+          </div>
+          {addError && <div style={{ fontSize: 13, color: C.danger, marginBottom: 8 }}>{addError}</div>}
+          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+            <button
+              onClick={() => { setAddOpen(false); setAddError(null); setDraft(initialDraft); }}
+              style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}
+            >
+              Cancel
+            </button>
+            <button onClick={submitAdd} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>
+              {addLabel}
+            </button>
+          </div>
         </div>
-        {addError && <div style={{ fontSize: 13, color: C.danger, marginBottom: 8 }}>{addError}</div>}
-        <div style={{ display: "flex", justifyContent: "flex-end" }}>
-          <button onClick={submitAdd} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>
-            {addLabel}
+      ) : (
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 20 }}>
+          <button
+            onClick={() => setAddOpen(true)}
+            style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+          >
+            <Plus size={14} /> {addLabel}
           </button>
         </div>
-      </div>
+      )}
 
       {items.length === 0 ? (
         <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>{emptyMessage}</div>
@@ -3804,8 +4413,17 @@ function ChildEntityTable({
                 </div>
               );
             }
+            const isHighlighted = highlightedId === item.id;
             return (
-              <div key={item.id} style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px" }}>
+              <div
+                key={item.id}
+                id={`entity-row-${item.id}`}
+                style={{
+                  border: `1.5px solid ${isHighlighted ? C.brand : C.border}`, borderRadius: 10,
+                  background: isHighlighted ? C.brandLight || C.surface : C.surface, padding: "10px 14px",
+                  boxShadow: isHighlighted ? `0 0 0 3px ${C.brand}33` : "none", transition: "box-shadow 0.2s, border-color 0.2s",
+                }}
+              >
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
                     {renderExpanded && (

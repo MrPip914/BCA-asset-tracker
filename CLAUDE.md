@@ -27,6 +27,33 @@ outbound network requests to arbitrary domains, which is why this migration happ
   its tooltip) if the live backend doesn't match — the fast way to confirm a redeploy
   actually landed, instead of only finding out when a feature quietly fails to persist.
 
+## Local Sandbox mode
+
+A "Sandbox" pill in the top-right of the header (next to the name tag) toggles between
+the real Google Sheet and a local fixture (`MOCK_SNAPSHOT` in `index.html`) — added so
+UI iteration doesn't have to touch live data or wait on Apps Script redeploys/cold
+starts. OFF by default (talks to the real Sheet); the toggle state is remembered
+per-device via `localStorage` (`SANDBOX_MODE_KEY`).
+
+- **When ON**: `loadData()` reads `MOCK_SNAPSHOT` (or, after the first edit, the
+  saved-over copy in `localStorage` under `SANDBOX_DATA_KEY`) instead of fetching
+  `SHEET_API_URL`; `persist()` writes back to that same `localStorage` key instead of
+  POSTing to Apps Script. **No network call to the real backend happens at all while
+  Sandbox is ON** — safe to add/delete/break things freely. A "Reset" button next to
+  the pill wipes the `localStorage` copy back to the original `MOCK_SNAPSHOT` fixture.
+- **When OFF**: behaves exactly as before this existed — real fetch, real writes.
+- `MOCK_SNAPSHOT` is a trimmed, hand-maintained subset of the real inventory (not all
+  107 real assets — that would bloat the file for no benefit), but keeps the full
+  Electrical Panel/Breaker/Circuit structure intact since that's the area under active
+  development. Update it by hand (it's plain JS data) when you want the sandbox to
+  start from a different baseline, e.g. after a schema change, so new development has
+  fixture data that already matches the new shape instead of stale pre-change data.
+- Backend schema changes (a new `BREAKER_FIELDS`/`CIRCUIT_FIELDS`/`ASSET_FIELDS` entry
+  in `AssetTrackerSync.gs`) can be fully built and tried out in Sandbox mode — including
+  by Claude Code, which can flip the toggle via the same UI — without needing a redeploy
+  first. Only flip Sandbox OFF and redeploy once the feature is actually done, so a
+  schema change only needs *one* "paste + redeploy" instead of one per iteration.
+
 ## Architecture
 
 - **Top-level navigation**: `mainTab` ("assets" | "maintenance") switches the main page

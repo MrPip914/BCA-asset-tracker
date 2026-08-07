@@ -31,7 +31,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v3 (2026-08-01) — Fix date fields auto-converting to Sheets dates";
+const SCRIPT_VERSION = "v7 (2026-08-05) — Tandem/quad are now groups of individual Breaker rows (Breaker.groupId), not single-row+circuit-field hacks";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -51,13 +51,24 @@ const ASSET_FIELDS = [
   "label", "type", "itemName", "screenSize", "hostname", "room", "building",
   "brand", "model", "serial", "person", "peripherals", "notes",
   "totalQuantity", "purchaseDate", "warrantyUntil", "status",
+  "panelSlotCount", "panelLayout",
 ];
 
 // Breakers are scoped to a Panel asset (panelLabel); Circuits are scoped to a
 // Breaker (breakerId), not directly to the Panel — chain is Circuit -> Breaker
 // -> Panel. Both need a real id (not array position) since they get swapped/
 // moved and other records point at them.
-const BREAKER_FIELDS = ["id", "panelLabel", "slots", "poles", "mount", "ampRating", "status", "serial", "installedDate", "notes"];
+//
+// A "tandem" or "quad" breaker is a GROUP of individual single-pole Breaker
+// rows (2 for tandem, 4 for quad — 2 per slot), each with its own id,
+// ampRating, status, etc., created together and linked by a shared
+// "groupId" (blank for a plain "full" breaker, which needs no grouping).
+// This is deliberately the same shape as any other Breaker row — a tandem
+// or quad "half" is exactly as real a breaker as a standalone one, just one
+// that happens to share a slot with a sibling. Circuits attach to these
+// rows exactly like any other breaker (via breakerId) — no separate
+// per-circuit slot/amp bookkeeping needed.
+const BREAKER_FIELDS = ["id", "panelLabel", "slots", "poles", "mount", "ampRating", "status", "serial", "installedDate", "notes", "groupId"];
 const CIRCUIT_FIELDS = ["id", "breakerId", "label", "description", "roomsServed", "feedsPanelLabel"];
 
 function getSheet_(name) {
@@ -162,7 +173,7 @@ function doGet(e) {
           id: b.id, panelLabel: b.panelLabel,
           slots: b.slots ? String(b.slots).split(",").map(s => s.trim()) : [],
           poles: b.poles, mount: b.mount, ampRating: b.ampRating, status: b.status,
-          serial: b.serial, installedDate: b.installedDate, notes: b.notes,
+          serial: b.serial, installedDate: b.installedDate, notes: b.notes, groupId: b.groupId,
           circuits: circuitRows.filter(c => c.breakerId === b.id).map(c => ({
             id: c.id, breakerId: c.breakerId, label: c.label, description: c.description,
             roomsServed: c.roomsServed ? String(c.roomsServed).split(",").map(s => s.trim()) : [],
@@ -250,7 +261,7 @@ function doPost(e) {
             id: b.id, panelLabel: a.label,
             slots: (b.slots || []).join(","), poles: b.poles, mount: b.mount,
             ampRating: b.ampRating, status: b.status, serial: b.serial || "",
-            installedDate: b.installedDate || "", notes: b.notes || "",
+            installedDate: b.installedDate || "", notes: b.notes || "", groupId: b.groupId || "",
           });
           (b.circuits || []).forEach(c => circuitRows.push({
             id: c.id, breakerId: b.id, label: c.label, description: c.description || "",
