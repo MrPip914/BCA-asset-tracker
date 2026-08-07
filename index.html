@@ -262,8 +262,69 @@ const SHEET_API_URL = "https://script.google.com/macros/s/AKfycbzXaKRuCrTesxobxP
 // backend actually reports (data.scriptVersion) and flags a mismatch —
 // catches a stuck deployment (edited-but-not-redeployed) automatically
 // instead of it silently dropping data until someone happens to notice.
-const FRONTEND_SCRIPT_VERSION = "v7 (2026-08-05) — Tandem/quad are now groups of individual Breaker rows (Breaker.groupId), not single-row+circuit-field hacks";
+const FRONTEND_SCRIPT_VERSION = "v8 (2026-08-06) — Add BreakerTypes catalog; Breaker.slots+poles+mount replaced by Breaker.cells (half-slot addressing) + breakerTypeId";
 const emptyDraftFrom = columns => Object.fromEntries(columns.map(c => [c.key, ""]));
+
+// --- Breaker cell addressing -------------------------------------------------
+// See BREAKER_TYPES_ARCHITECTURE.md. Every physical slot has two halves,
+// addressed "Na"/"Nb" (e.g. "1a", "1b") — a Breaker's footprint is the set of
+// half-cells it occupies (Breaker.cells), not a list of whole slot numbers.
+// Poles are derived (count of distinct slots touched), never stored.
+function slotsFromCells(cells) {
+  const set = new Set((cells || []).map(c => c.slice(0, -1)));
+  return Array.from(set).sort((a, b) => parseFloat(a) - parseFloat(b));
+}
+function polesFromCells(cells) {
+  return slotsFromCells(cells).length || 1;
+}
+function cellsLabel_(breaker) {
+  return slotsFromCells(breaker.cells).join("/") || "—";
+}
+// Resolves a BreakerType member's RELATIVE cells (its own 1st/2nd/... slot,
+// e.g. "1a", "2b") onto real panel slots, given the absolute starting slot —
+// relative slot i -> startSlot + 2*(i-1), i.e. stacked 2 apart in one column,
+// the same convention already used for double-pole breakers today (section 4
+// of BREAKER_TYPES_ARCHITECTURE.md — a type's slots must stack in one column).
+function resolveRelativeCells(relativeCells, startSlot) {
+  return relativeCells.map(rc => {
+    const relSlot = parseInt(rc.slice(0, -1), 10);
+    const half = rc.slice(-1);
+    return `${startSlot + 2 * (relSlot - 1)}${half}`;
+  });
+}
+function resolveTypeSlots(slotSpan, startSlot) {
+  return Array.from({ length: slotSpan }, (_, i) => startSlot + 2 * i);
+}
+
+// Seeded so the catalog isn't empty on first use — covers every breaker
+// shape built or discussed while designing this: a plain single-pole, a
+// standard 240V double-pole, a tandem pair, a quad (two tandem pairs sharing
+// one 2-slot body), and the mixed/offset example (a 2-pole breaker straddling
+// half of each of its two slots, alongside two independent single-poles)
+// that motivated moving to cell-based addressing in the first place.
+const SEEDED_BREAKER_TYPES = [
+  { id: "type-single-pole", name: "Single-Pole", slotSpan: 1, members: [
+    { cells: ["1a", "1b"], ampRating: "20" },
+  ] },
+  { id: "type-double-pole", name: "Double-Pole (240V)", slotSpan: 2, members: [
+    { cells: ["1a", "1b", "2a", "2b"], ampRating: "20" },
+  ] },
+  { id: "type-tandem", name: "Tandem", slotSpan: 1, members: [
+    { cells: ["1a"], ampRating: "20" },
+    { cells: ["1b"], ampRating: "20" },
+  ] },
+  { id: "type-quad", name: "Quad", slotSpan: 2, members: [
+    { cells: ["1a"], ampRating: "20" },
+    { cells: ["1b"], ampRating: "20" },
+    { cells: ["2a"], ampRating: "20" },
+    { cells: ["2b"], ampRating: "20" },
+  ] },
+  { id: "type-split-double", name: "Split Double-Pole (15/30/15)", slotSpan: 2, members: [
+    { cells: ["1a"], ampRating: "15" },
+    { cells: ["1b", "2a"], ampRating: "30" },
+    { cells: ["2b"], ampRating: "15" },
+  ] },
+];
 
 // --- Local Sandbox mode -----------------------------------------------------
 // Lets you iterate on the UI without touching the live Google Sheet: loadData()
@@ -306,39 +367,44 @@ const MOCK_SNAPSHOT = {
       notes: "Main service panel, 200A. Feeds Building 200/300/400 sub-panels.", status: "Active",
       panelSlotCount: 24, panelLayout: "two-column",
       breakers: [
-        { id: "b-1", panelLabel: "BCA0082", slots: ["1"], poles: "1", mount: "full", ampRating: "", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+        { id: "b-1", panelLabel: "BCA0082", cells: ["1a", "1b"], breakerTypeId: "type-single-pole", ampRating: "", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
           { id: "c-1", breakerId: "b-1", label: "1", description: "", roomsServed: ["Room 101"], feedsPanelLabel: "" },
         ] },
-        { id: "b-24-a", panelLabel: "BCA0082", slots: ["2"], poles: "1", mount: "quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-quad-1", circuits: [
+        { id: "b-24-a", panelLabel: "BCA0082", cells: ["2a"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-quad-1", circuits: [
           { id: "c-2a", breakerId: "b-24-a", label: "2A", description: "", roomsServed: ["Room 101"], feedsPanelLabel: "" },
         ] },
-        { id: "b-24-b", panelLabel: "BCA0082", slots: ["2"], poles: "1", mount: "quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-quad-1", circuits: [
+        { id: "b-24-b", panelLabel: "BCA0082", cells: ["2b"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-quad-1", circuits: [
           { id: "c-2b", breakerId: "b-24-b", label: "2B", description: "", roomsServed: ["Room 102"], feedsPanelLabel: "" },
         ] },
-        { id: "b-24-c", panelLabel: "BCA0082", slots: ["4"], poles: "1", mount: "quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-quad-1", circuits: [
+        { id: "b-24-c", panelLabel: "BCA0082", cells: ["4a"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-quad-1", circuits: [
           { id: "c-4a", breakerId: "b-24-c", label: "4A", description: "", roomsServed: ["Kitchen"], feedsPanelLabel: "" },
         ] },
-        { id: "b-24-d", panelLabel: "BCA0082", slots: ["4"], poles: "1", mount: "quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-quad-1", circuits: [] },
-        { id: "b-6-8", panelLabel: "BCA0082", slots: ["6", "8"], poles: "2", mount: "full", ampRating: "60", status: "Active", serial: "", installedDate: "", notes: "Feed to Room 300 sub-panel (BCA0084)", circuits: [
+        { id: "b-24-d", panelLabel: "BCA0082", cells: ["4b"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-quad-1", circuits: [] },
+        { id: "b-6-8", panelLabel: "BCA0082", cells: ["6a", "6b", "8a", "8b"], breakerTypeId: "type-double-pole", ampRating: "60", status: "Active", serial: "", installedDate: "", notes: "Feed to Room 300 sub-panel (BCA0084)", circuits: [
           { id: "c-6-8", breakerId: "b-6-8", label: "6/8", description: "", roomsServed: [], feedsPanelLabel: "BCA0084" },
         ] },
-        { id: "b-10-12", panelLabel: "BCA0082", slots: ["10", "12"], poles: "2", mount: "full", ampRating: "60", status: "Active", serial: "", installedDate: "", notes: "Feed to Room 400 sub-panel (BCA0085)", circuits: [
+        { id: "b-9-11-a", panelLabel: "BCA0082", cells: ["9a"], breakerTypeId: "type-split-double", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-split-9", circuits: [] },
+        { id: "b-9-11-b", panelLabel: "BCA0082", cells: ["9b", "11a"], breakerTypeId: "type-split-double", ampRating: "30", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-split-9", circuits: [
+          { id: "c-9-11", breakerId: "b-9-11-b", label: "9/11", description: "", roomsServed: ["Storage Room"], feedsPanelLabel: "" },
+        ] },
+        { id: "b-9-11-c", panelLabel: "BCA0082", cells: ["11b"], breakerTypeId: "type-split-double", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-split-9", circuits: [] },
+        { id: "b-10-12", panelLabel: "BCA0082", cells: ["10a", "10b", "12a", "12b"], breakerTypeId: "type-double-pole", ampRating: "60", status: "Active", serial: "", installedDate: "", notes: "Feed to Room 400 sub-panel (BCA0085)", circuits: [
           { id: "c-10-12", breakerId: "b-10-12", label: "10/12", description: "", roomsServed: [], feedsPanelLabel: "BCA0085" },
         ] },
-        { id: "b-14-a", panelLabel: "BCA0082", slots: ["14"], poles: "1", mount: "tandem", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-tandem-14", circuits: [
+        { id: "b-14-a", panelLabel: "BCA0082", cells: ["14a"], breakerTypeId: "type-tandem", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-tandem-14", circuits: [
           { id: "c-14a", breakerId: "b-14-a", label: "14a", description: "", roomsServed: ["Kitchen"], feedsPanelLabel: "" },
         ] },
-        { id: "b-14-b", panelLabel: "BCA0082", slots: ["14"], poles: "1", mount: "tandem", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-tandem-14", circuits: [] },
-        { id: "b-15-17", panelLabel: "BCA0082", slots: ["15", "17"], poles: "2", mount: "full", ampRating: "30", status: "Active", serial: "", installedDate: "", notes: "Electric water heater", circuits: [
+        { id: "b-14-b", panelLabel: "BCA0082", cells: ["14b"], breakerTypeId: "type-tandem", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-tandem-14", circuits: [] },
+        { id: "b-15-17", panelLabel: "BCA0082", cells: ["15a", "15b", "17a", "17b"], breakerTypeId: "type-double-pole", ampRating: "30", status: "Active", serial: "", installedDate: "", notes: "Electric water heater", circuits: [
           { id: "c-15-17", breakerId: "b-15-17", label: "Water Heater", description: "", roomsServed: ["Storage Room"], feedsPanelLabel: "" },
         ] },
-        { id: "b-16-18", panelLabel: "BCA0082", slots: ["16", "18"], poles: "2", mount: "full", ampRating: "50", status: "Active", serial: "", installedDate: "", notes: "Electric range/oven", circuits: [
+        { id: "b-16-18", panelLabel: "BCA0082", cells: ["16a", "16b", "18a", "18b"], breakerTypeId: "type-double-pole", ampRating: "50", status: "Active", serial: "", installedDate: "", notes: "Electric range/oven", circuits: [
           { id: "c-16-18", breakerId: "b-16-18", label: "Range", description: "", roomsServed: ["Kitchen"], feedsPanelLabel: "" },
         ] },
-        { id: "b-19-21", panelLabel: "BCA0082", slots: ["19", "21"], poles: "2", mount: "full", ampRating: "30", status: "Faulted", serial: "", installedDate: "", notes: "Dryer — tripping, needs service", circuits: [
+        { id: "b-19-21", panelLabel: "BCA0082", cells: ["19a", "19b", "21a", "21b"], breakerTypeId: "type-double-pole", ampRating: "30", status: "Faulted", serial: "", installedDate: "", notes: "Dryer — tripping, needs service", circuits: [
           { id: "c-19-21", breakerId: "b-19-21", label: "Dryer", description: "", roomsServed: ["Storage Room"], feedsPanelLabel: "" },
         ] },
-        { id: "b-20-22", panelLabel: "BCA0082", slots: ["20", "22"], poles: "2", mount: "full", ampRating: "40", status: "Spare", serial: "", installedDate: "", notes: "Reserved for future HVAC condenser", circuits: [] },
+        { id: "b-20-22", panelLabel: "BCA0082", cells: ["20a", "20b", "22a", "22b"], breakerTypeId: "type-double-pole", ampRating: "40", status: "Spare", serial: "", installedDate: "", notes: "Reserved for future HVAC condenser", circuits: [] },
       ],
     },
     {
@@ -346,7 +412,7 @@ const MOCK_SNAPSHOT = {
       notes: "Sub-panel fed from Main Distribution Panel (Storage Room), 125A main lug.", status: "Active",
       panelSlotCount: 12, panelLayout: "two-column",
       breakers: [
-        { id: "b83-1", panelLabel: "BCA0083", slots: ["1"], poles: "1", mount: "full", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+        { id: "b83-1", panelLabel: "BCA0083", cells: ["1a", "1b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
           { id: "c83-1", breakerId: "b83-1", label: "1", description: "", roomsServed: ["Room 200"], feedsPanelLabel: "" },
         ] },
       ],
@@ -356,7 +422,7 @@ const MOCK_SNAPSHOT = {
       notes: "Sub-panel fed from Main Distribution Panel (Storage Room), 125A main lug.", status: "Active",
       panelSlotCount: 12, panelLayout: "two-column",
       breakers: [
-        { id: "b84-1", panelLabel: "BCA0084", slots: ["1"], poles: "1", mount: "full", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+        { id: "b84-1", panelLabel: "BCA0084", cells: ["1a", "1b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
           { id: "c84-1", breakerId: "b84-1", label: "1", description: "", roomsServed: ["Room 300"], feedsPanelLabel: "" },
         ] },
       ],
@@ -366,12 +432,13 @@ const MOCK_SNAPSHOT = {
       notes: "Sub-panel fed from Main Distribution Panel (Storage Room), 125A main lug.", status: "Active",
       panelSlotCount: 16, panelLayout: "two-column",
       breakers: [
-        { id: "b85-1", panelLabel: "BCA0085", slots: ["1"], poles: "1", mount: "full", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+        { id: "b85-1", panelLabel: "BCA0085", cells: ["1a", "1b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
           { id: "c85-1", breakerId: "b85-1", label: "1", description: "", roomsServed: ["Room 400"], feedsPanelLabel: "" },
         ] },
       ],
     },
   ],
+  breakerTypes: SEEDED_BREAKER_TYPES,
   auditLog: [],
 };
 
@@ -395,6 +462,13 @@ function AssetTracker() {
   const [typesList, setTypesList] = useState(TYPE_OPTIONS);
   const [showTypesManager, setShowTypesManager] = useState(false);
   const [newTypeName, setNewTypeName] = useState("");
+  const [breakerTypes, setBreakerTypes] = useState(SEEDED_BREAKER_TYPES);
+  const [showBreakerTypesManager, setShowBreakerTypesManager] = useState(false);
+  const [breakerTypeDraft, setBreakerTypeDraft] = useState(null); // null = list view; else { id, name, slotSpan, members }
+  const [currentMemberCells, setCurrentMemberCells] = useState([]);
+  const [currentMemberAmp, setCurrentMemberAmp] = useState("");
+  const [breakerTypeError, setBreakerTypeError] = useState(null);
+  const [confirmDeleteTypeId, setConfirmDeleteTypeId] = useState(null);
   const [auditLog, setAuditLog] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -427,7 +501,16 @@ function AssetTracker() {
   const [moveCircuitTarget, setMoveCircuitTarget] = useState("");
   const [moveCircuitError, setMoveCircuitError] = useState(null);
   const [showPanelConfig, setShowPanelConfig] = useState(false);
-  const [highlightBreakerId, setHighlightBreakerId] = useState(null);
+  const [openBreakerId, setOpenBreakerId] = useState(null); // clicked in the diagram — anchors the group (via groupId) shown in breakerDetailModal
+  const [memberAmpDrafts, setMemberAmpDrafts] = useState(null); // { [breakerId]: ampRating string } — the only per-member-editable field
+  const [editingMemberId, setEditingMemberId] = useState(null); // which member's amp rating is in edit mode, or null
+  const [instanceDraft, setInstanceDraft] = useState(null); // { serial, installedDate, notes } — shared by every member of the open group
+  const [editingInstance, setEditingInstance] = useState(false);
+  const [breakerModalError, setBreakerModalError] = useState(null);
+  const [confirmDeleteGroup, setConfirmDeleteGroup] = useState(false);
+  const [showAddBreakerForm, setShowAddBreakerForm] = useState(false);
+  const [addBreakerDraft, setAddBreakerDraft] = useState(null);
+  const [addBreakerError, setAddBreakerError] = useState(null);
 
   const [currentUser, setCurrentUser] = useState(null);
   const [showNamePrompt, setShowNamePrompt] = useState(false);
@@ -509,6 +592,7 @@ function AssetTracker() {
       setPeripheralsList(Array.isArray(data.peripheralsList) ? data.peripheralsList : DEFAULT_PERIPHERALS);
       setBulkItemTypes(Array.isArray(data.bulkItemTypes) ? data.bulkItemTypes : DEFAULT_BULK_ITEM_TYPES);
       setTypesList(Array.isArray(data.typesList) && data.typesList.length ? data.typesList : TYPE_OPTIONS);
+      setBreakerTypes(Array.isArray(data.breakerTypes) && data.breakerTypes.length ? data.breakerTypes : SEEDED_BREAKER_TYPES);
       if (Array.isArray(data.usersList) && data.usersList.length) {
         setUsersList(data.usersList);
       } else {
@@ -599,7 +683,7 @@ function AssetTracker() {
     return true;
   }
 
-  async function persist(nextAssets, nextColumns, nextChangeTypes = changeTypes, nextVendors = vendors, nextAuditLog = auditLog, nextPeripheralsList = peripheralsList, nextUsersList = usersList, nextBulkItemTypes = bulkItemTypes, nextTypesList = typesList) {
+  async function persist(nextAssets, nextColumns, nextChangeTypes = changeTypes, nextVendors = vendors, nextAuditLog = auditLog, nextPeripheralsList = peripheralsList, nextUsersList = usersList, nextBulkItemTypes = bulkItemTypes, nextTypesList = typesList, nextBreakerTypes = breakerTypes) {
     // Guard against ever writing over the Sheet before a real snapshot has been
     // loaded — the UI shouldn't be reachable in that state, but this keeps a
     // load-failure from being able to clobber live data no matter how it's triggered.
@@ -615,6 +699,7 @@ function AssetTracker() {
       config: nextColumns !== columns || nextChangeTypes !== changeTypes || nextVendors !== vendors
         || nextPeripheralsList !== peripheralsList || nextUsersList !== usersList || nextBulkItemTypes !== bulkItemTypes
         || nextTypesList !== typesList,
+      breakerTypes: nextBreakerTypes !== breakerTypes,
     };
     setAssets(nextAssets);
     setColumns(nextColumns);
@@ -625,10 +710,11 @@ function AssetTracker() {
     setUsersList(nextUsersList);
     setBulkItemTypes(nextBulkItemTypes);
     setTypesList(nextTypesList);
+    setBreakerTypes(nextBreakerTypes);
     const payload = {
       assets: nextAssets, columns: nextColumns, changeTypes: nextChangeTypes,
       vendors: nextVendors, auditLog: nextAuditLog, peripheralsList: nextPeripheralsList, usersList: nextUsersList,
-      bulkItemTypes: nextBulkItemTypes, typesList: nextTypesList, _dirty: dirty,
+      bulkItemTypes: nextBulkItemTypes, typesList: nextTypesList, breakerTypes: nextBreakerTypes, _dirty: dirty,
     };
     if (sandboxMode) {
       // Mirror to localStorage so a refresh doesn't lose sandbox edits — but
@@ -1199,17 +1285,7 @@ function AssetTracker() {
   // persist() is called fire-and-forget here, same as toggleColumnVisible/
   // addColumn/addChangeType etc. already do elsewhere in this file.
   function slotsLabel_(breaker) {
-    return (breaker.slots || []).join("/") || "—";
-  }
-
-  // The Slots field's draft value is a string while the user is actively
-  // typing (onChange fires), but an edit draft starts as the stored
-  // breaker's array (`{...item}` in ChildEntityTable's startEdit) and stays
-  // an array if the user never touches that field — accept either shape
-  // rather than assuming .split() always works.
-  function parseSlotsInput(v) {
-    const raw = Array.isArray(v) ? v.join(",") : (v || "");
-    return raw.split(/[,\s]+/).map(s => s.trim()).filter(Boolean);
+    return cellsLabel_(breaker);
   }
 
   function updateBreakers(nextBreakers) {
@@ -1233,134 +1309,123 @@ function AssetTracker() {
     persist(next, columns, changeTypes, vendors, entries.length ? logAudit(entries) : auditLog);
   }
 
-  // A tandem or quad breaker is a GROUP of individual single-pole breakers
-  // (2 for tandem, 4 for quad — 2 per slot) defined together as one action,
-  // each with its own amp rating from the moment it's created — not a
-  // placeholder that only gets a real identity once a circuit is attached
-  // to it. Every row in the group shares a fresh groupId. Circuits attach
-  // to these rows exactly like any other breaker, as a separate later step.
+  // Placing a breaker means placing a whole BreakerType instance at once — one
+  // Breaker row per type member (1 for Single-Pole/Double-Pole, 2 for Tandem,
+  // however many the type defines), each with its own amp rating from the
+  // moment it's created, linked by a fresh groupId. See
+  // BREAKER_TYPES_ARCHITECTURE.md section 4. Circuits attach to these rows
+  // exactly like any other breaker, as a separate later step — placing a type
+  // is never blocked on (or coupled to) adding circuits.
   function addBreaker(draft) {
     if (!selectedAsset) return "No panel selected.";
-    const slots = parseSlotsInput(draft.slots);
-    if (slots.length === 0) return "Enter at least one slot number.";
-    const mount = draft.mount || "full";
+    const type = breakerTypes.find(t => t.id === draft.breakerTypeId);
+    if (!type) return "Pick a breaker type.";
+    const startSlot = parseInt(draft.startSlot, 10);
+    if (!startSlot || startSlot < 1) return "Enter a starting slot.";
+    const panelSlotCount = parseInt(selectedAsset.panelSlotCount, 10) || 0;
+    const resolvedSlots = resolveTypeSlots(type.slotSpan, startSlot);
+    if (panelSlotCount && Math.max(...resolvedSlots) > panelSlotCount) {
+      return `Slot ${Math.max(...resolvedSlots)} is beyond this panel's ${panelSlotCount} slots.`;
+    }
     const existing = selectedAsset.breakers || [];
-
-    if (mount === "tandem" || mount === "quad") {
-      const expectedSlots = mount === "tandem" ? 1 : 2;
-      if (slots.length !== expectedSlots) return `A ${mount} breaker needs exactly ${expectedSlots} slot${expectedSlots > 1 ? "s" : ""}.`;
-      for (const s of slots) {
-        if (existing.some(b => (b.slots || []).includes(s))) return `Slot ${s} is already in use.`;
-      }
-      const groupId = crypto.randomUUID();
-      const status = draft.status || "Active";
-      const notes = draft.notes || "";
-      const newBreakers = [];
-      slots.forEach((slot, slotIdx) => {
-        ["A", "B"].forEach(pos => {
-          const amp = draft[`ampRating_${slotIdx}_${pos}`] || "";
-          newBreakers.push({
-            id: crypto.randomUUID(), panelLabel: selectedAsset.label, slots: [slot],
-            poles: "1", mount, groupId,
-            ampRating: amp, status, serial: "", installedDate: "", notes,
-            circuits: [],
-          });
-        });
-      });
-      const entry = {
-        at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
-        action: "breaker_added", field: `Slot ${slots.join("/")}`,
-        to: `${mount} (${newBreakers.map(b => b.ampRating ? b.ampRating + "A" : "?A").join(" / ")})`,
+    const takenCells = new Set(existing.flatMap(b => b.cells || []));
+    const groupId = crypto.randomUUID();
+    const status = draft.status || "Active";
+    const serial = draft.serial || "";
+    const installedDate = draft.installedDate || "";
+    const notes = draft.notes || "";
+    const newBreakers = type.members.map((member, i) => {
+      const cells = resolveRelativeCells(member.cells, startSlot);
+      return {
+        id: crypto.randomUUID(), panelLabel: selectedAsset.label, cells,
+        breakerTypeId: type.id, groupId,
+        ampRating: draft[`amp_${i}`] !== undefined && draft[`amp_${i}`] !== "" ? draft[`amp_${i}`] : member.ampRating,
+        status, serial, installedDate, notes,
+        circuits: [],
       };
-      persist(updateBreakers([...existing, ...newBreakers]), columns, changeTypes, vendors, logAudit([entry]));
-      return;
-    }
-
-    for (const s of slots) {
-      if (existing.some(b => (b.slots || []).includes(s))) return `Slot ${s} is already in use.`;
-    }
-    const breaker = {
-      id: crypto.randomUUID(), panelLabel: selectedAsset.label, slots,
-      poles: draft.poles || "1", mount,
-      ampRating: draft.ampRating || "", status: draft.status || "Active",
-      serial: draft.serial || "", installedDate: draft.installedDate || "", notes: draft.notes || "",
-      circuits: [],
-    };
+    });
+    const conflictCell = newBreakers.flatMap(b => b.cells).find(c => takenCells.has(c));
+    if (conflictCell) return `Slot ${conflictCell.slice(0, -1)} is already in use.`;
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
-      action: "breaker_added", field: `Slot ${slotsLabel_(breaker)}`,
-      to: `${breaker.ampRating ? breaker.ampRating + "A" : "?A"}`,
+      action: "breaker_added", field: `Slot ${resolvedSlots.join("/")}`,
+      to: `${type.name} (${newBreakers.map(b => b.ampRating ? b.ampRating + "A" : "?A").join(" / ")})`,
     };
-    persist(updateBreakers([...existing, breaker]), columns, changeTypes, vendors, logAudit([entry]));
+    persist(updateBreakers([...existing, ...newBreakers]), columns, changeTypes, vendors, logAudit([entry]));
   }
 
-  function saveBreakerEdit(id, draft) {
+  // Editing a placed breaker only ever touches its own row — cells, groupId,
+  // and breakerTypeId are set once at placement (addBreaker, above) and
+  // aren't editable here, since changing them could orphan sibling rows in
+  // the same group. Delete and re-add to change where/what a breaker is.
+  //
+  // Amp rating is the one spec that legitimately varies per breaker within a
+  // type instance (e.g. the 15/30/15 split double-pole) — everything else
+  // (serial, installed date, notes) describes the one physical unit, not the
+  // individual pole, so those live at the group level (saveBreakerInstanceDetails
+  // below) instead of here.
+  function saveBreakerAmp(id, ampRating) {
     if (!selectedAsset) return "No panel selected.";
-    const slots = parseSlotsInput(draft.slots);
-    if (slots.length === 0) return "Enter at least one slot number.";
-    const mount = draft.mount || "full";
     const existing = selectedAsset.breakers || [];
     const original = existing.find(b => b.id === id);
     if (!original) return "Breaker not found.";
-    // Tandem/quad membership is set once, atomically, by Add Breaker (see
-    // above) — a single row can't be edited into or out of a group here,
-    // since that would leave the rest of the group (or the row itself)
-    // half-converted. Delete and re-add instead.
-    if (original.groupId && mount !== original.mount) {
-      return `This breaker is part of a ${original.mount} group — its mount can't be changed here. Delete it and add a new ${original.mount} instead.`;
-    }
-    if ((mount === "tandem" || mount === "quad") && !original.groupId) {
-      return `Use Add Breaker to create a new ${mount} — an existing breaker can't be converted into one here.`;
-    }
-    if (original.groupId && slots.length !== 1) return "A tandem/quad breaker occupies exactly one slot.";
-    for (const s of slots) {
-      const sharing = existing.filter(b => b.id !== id && (b.slots || []).includes(s));
-      if (sharing.length > 0 && !(original.groupId && sharing.every(b => b.groupId === original.groupId))) {
-        return `Slot ${s} is already in use.`;
-      }
-    }
-    const updated = {
-      ...original, slots, poles: original.groupId ? "1" : (draft.poles || "1"), mount,
-      ampRating: draft.ampRating || "", status: draft.status || "Active",
-      serial: draft.serial || "", installedDate: draft.installedDate || "", notes: draft.notes || "",
+    const updated = { ...original, ampRating: ampRating || "" };
+    if ((original.ampRating || "") === updated.ampRating) return;
+    const entry = {
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
+      action: "breaker_edited", field: `Slot ${slotsLabel_(original)} — Amp Rating`, from: original.ampRating || "—", to: updated.ampRating || "—",
     };
+    const nextBreakers = existing.map(b => (b.id === id ? updated : b));
+    persist(updateBreakers(nextBreakers), columns, changeTypes, vendors, logAudit([entry]));
+  }
+
+  // Applies to every member of the group at once — a serial/install date/notes
+  // describe the physical breaker unit you bought and installed, not any one
+  // pole of it, so editing it here writes the same value to every row in the
+  // group rather than just the member that happened to be clicked.
+  function saveBreakerInstanceDetails(memberIds, groupSlotLabel, draft) {
+    if (!selectedAsset) return "No panel selected.";
+    const existing = selectedAsset.breakers || [];
+    const members = existing.filter(b => memberIds.includes(b.id));
+    if (members.length === 0) return "Breaker not found.";
+    const anchor = members[0];
+    const next = { serial: draft.serial || "", installedDate: draft.installedDate || "", notes: draft.notes || "" };
     const mk = (field, from, to) => ({
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
-      action: "breaker_edited", field: `Slot ${slotsLabel_(original)} — ${field}`, from, to,
+      action: "breaker_edited", field: `Slot ${groupSlotLabel} — ${field}`, from, to,
     });
     const entries = [];
-    if (slotsLabel_(original) !== slotsLabel_(updated)) entries.push(mk("Slots", slotsLabel_(original), slotsLabel_(updated)));
-    if ((original.poles || "") !== updated.poles) entries.push(mk("Poles", original.poles || "—", updated.poles));
-    if ((original.mount || "") !== updated.mount) entries.push(mk("Mount", original.mount || "—", updated.mount));
-    if ((original.ampRating || "") !== updated.ampRating) entries.push(mk("Amp Rating", original.ampRating || "—", updated.ampRating || "—"));
-    if ((original.status || "") !== updated.status) entries.push(mk("Status", original.status || "—", updated.status));
-    if ((original.serial || "") !== updated.serial) entries.push(mk("Serial", original.serial || "—", updated.serial || "—"));
-    if ((original.installedDate || "") !== updated.installedDate) {
-      entries.push(mk("Installed Date", formatDateOnly(original.installedDate) || "—", formatDateOnly(updated.installedDate) || "—"));
+    if ((anchor.serial || "") !== next.serial) entries.push(mk("Serial", anchor.serial || "—", next.serial || "—"));
+    if ((anchor.installedDate || "") !== next.installedDate) {
+      entries.push(mk("Installed Date", formatDateOnly(anchor.installedDate) || "—", formatDateOnly(next.installedDate) || "—"));
     }
-    if ((original.notes || "") !== updated.notes) entries.push(mk("Notes", original.notes || "—", updated.notes || "—"));
-    const nextBreakers = existing.map(b => (b.id === id ? updated : b));
+    if ((anchor.notes || "") !== next.notes) entries.push(mk("Notes", anchor.notes || "—", next.notes || "—"));
+    const nextBreakers = existing.map(b => (memberIds.includes(b.id) ? { ...b, ...next } : b));
     persist(updateBreakers(nextBreakers), columns, changeTypes, vendors, entries.length ? logAudit(entries) : auditLog);
   }
 
-  // Referential integrity (a breaker with circuits attached can't be deleted)
-  // is enforced here, client-side only — consistent with every other guard in
-  // this app (delete/archive confirmations etc.); nothing else validates
-  // server-side either, so this one check wouldn't close a real gap by moving.
-  function canDeleteBreaker(breaker) {
-    if ((breaker.circuits || []).length > 0) return "This breaker still has circuits attached — move or remove them first.";
+  // Referential integrity (a breaker unit with circuits attached can't be
+  // deleted) is enforced here, client-side only — consistent with every other
+  // guard in this app (delete/archive confirmations etc.); nothing else
+  // validates server-side either, so this one check wouldn't close a real gap
+  // by moving. Delete removes the whole group — a breaker-type instance is one
+  // physical unit, not N independently removable poles.
+  function canDeleteBreakerGroup(members) {
+    const withCircuits = members.filter(m => (m.circuits || []).length > 0);
+    if (withCircuits.length > 0) {
+      return `Still has circuits attached (${withCircuits.length} of ${members.length} breaker${members.length !== 1 ? "s" : ""} in this unit) — move or remove them first.`;
+    }
     return null;
   }
 
-  function deleteBreaker(id) {
-    if (!selectedAsset) return;
+  function deleteBreakerGroup(members, groupSlotLabel) {
+    if (!selectedAsset || members.length === 0) return;
+    const ids = new Set(members.map(m => m.id));
     const existing = selectedAsset.breakers || [];
-    const breaker = existing.find(b => b.id === id);
-    if (!breaker) return;
-    const nextBreakers = existing.filter(b => b.id !== id);
+    const nextBreakers = existing.filter(b => !ids.has(b.id));
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
-      action: "breaker_removed", field: `Slot ${slotsLabel_(breaker)}`,
+      action: "breaker_removed", field: `Slot ${groupSlotLabel}`,
     };
     persist(updateBreakers(nextBreakers), columns, changeTypes, vendors, logAudit([entry]));
   }
@@ -1609,6 +1674,97 @@ function AssetTracker() {
     persist(assets, columns, changeTypes, vendors, auditLog, peripheralsList, usersList, bulkItemTypes, typesList.filter(t => t !== name));
   }
 
+  // --- Breaker Types (catalog) ------------------------------------------------
+  // See BREAKER_TYPES_ARCHITECTURE.md. A type's cells use RELATIVE slot indices
+  // (its own 1st/2nd/... slot) — allCellsForSpan/saveBreakerType work entirely
+  // in that relative space; resolving onto real panel slots happens only at
+  // placement time (addBreakerFromType), not here.
+  function allCellsForSpan(slotSpan) {
+    const cells = [];
+    for (let i = 1; i <= slotSpan; i++) cells.push(`${i}a`, `${i}b`);
+    return cells;
+  }
+
+  function openAddBreakerType() {
+    setBreakerTypeDraft({ id: null, name: "", slotSpan: 1, members: [] });
+    setCurrentMemberCells([]);
+    setCurrentMemberAmp("");
+    setBreakerTypeError(null);
+  }
+  function openEditBreakerType(type) {
+    setBreakerTypeDraft({ ...type, members: type.members.map(m => ({ ...m })) });
+    setCurrentMemberCells([]);
+    setCurrentMemberAmp("");
+    setBreakerTypeError(null);
+  }
+  function cancelBreakerTypeDraft() {
+    setBreakerTypeDraft(null);
+    setCurrentMemberCells([]);
+    setCurrentMemberAmp("");
+    setBreakerTypeError(null);
+  }
+  function changeBreakerTypeSlotSpan(slotSpan) {
+    // Members are cleared on span change rather than trying to salvage cells
+    // that might now be out of range — simplest correct behavior, and slot
+    // span is normally the first thing set, before any member is defined.
+    setBreakerTypeDraft(d => ({ ...d, slotSpan, members: [] }));
+    setCurrentMemberCells([]);
+  }
+  function toggleBreakerTypeCell(cell) {
+    setCurrentMemberCells(prev => (prev.includes(cell) ? prev.filter(c => c !== cell) : [...prev, cell]));
+  }
+  function addBreakerTypeMember() {
+    if (currentMemberCells.length === 0) { setBreakerTypeError("Select at least one cell for this breaker."); return; }
+    if (!currentMemberAmp) { setBreakerTypeError("Enter an amp rating for this breaker."); return; }
+    setBreakerTypeDraft(d => ({ ...d, members: [...d.members, { cells: [...currentMemberCells].sort(), ampRating: currentMemberAmp }] }));
+    setCurrentMemberCells([]);
+    setCurrentMemberAmp("");
+    setBreakerTypeError(null);
+  }
+  function removeBreakerTypeMember(idx) {
+    setBreakerTypeDraft(d => ({ ...d, members: d.members.filter((_, i) => i !== idx) }));
+  }
+
+  function saveBreakerType() {
+    const draft = breakerTypeDraft;
+    const name = (draft.name || "").trim();
+    if (!name) { setBreakerTypeError("Enter a name."); return; }
+    if (draft.members.length === 0) { setBreakerTypeError("Add at least one breaker."); return; }
+    const allCells = allCellsForSpan(draft.slotSpan);
+    const usedCells = draft.members.flatMap(m => m.cells);
+    const missing = allCells.filter(c => !usedCells.includes(c));
+    if (missing.length > 0) { setBreakerTypeError(`Every cell must be assigned to a breaker — still unassigned: ${missing.join(", ")}.`); return; }
+    const isNew = !draft.id;
+    const savedType = { id: draft.id || crypto.randomUUID(), name, slotSpan: draft.slotSpan, members: draft.members };
+    const nextTypes = isNew ? [...breakerTypes, savedType] : breakerTypes.map(t => (t.id === savedType.id ? savedType : t));
+    persist(assets, columns, changeTypes, vendors, auditLog, peripheralsList, usersList, bulkItemTypes, typesList, nextTypes);
+    cancelBreakerTypeDraft();
+  }
+
+  // Blocks deletion if any breaker anywhere still references this type,
+  // listing exactly where (panel + slot) rather than just refusing — the
+  // architecture doc's breakerTypeId is display-only, but that doesn't mean
+  // deleting the type out from under placed breakers is harmless: the badge
+  // would go stale/blank, so it's still worth surfacing to fix first.
+  function findBreakerTypeUsages(typeId) {
+    const usages = [];
+    (assets || []).filter(a => a.type === "Electrical Panel").forEach(panel => {
+      (panel.breakers || []).filter(b => b.breakerTypeId === typeId).forEach(b => {
+        usages.push({ panelLabel: panel.label, slot: cellsLabel_(b) });
+      });
+    });
+    return usages;
+  }
+  function removeBreakerType(id) {
+    const usages = findBreakerTypeUsages(id);
+    if (usages.length > 0) {
+      const list = usages.map(u => `${u.panelLabel} Slot ${u.slot}`).join(", ");
+      setBreakerTypeError(`Can't delete — still used by: ${list}.`);
+      return;
+    }
+    persist(assets, columns, changeTypes, vendors, auditLog, peripheralsList, usersList, bulkItemTypes, typesList, breakerTypes.filter(t => t.id !== id));
+  }
+
   function exportToExcel() {
     const assetRows = assets.map(a => {
       const row = {};
@@ -1654,14 +1810,15 @@ function AssetTracker() {
     const circuitRows = [];
     assets.forEach(a => {
       (a.breakers || []).forEach(b => {
+        const breakerType = breakerTypes.find(t => t.id === b.breakerTypeId);
         breakerRows.push({
-          Panel: a.label, "Slot(s)": (b.slots || []).join("/"), "Amp Rating": b.ampRating || "",
-          Poles: b.poles || "", Mount: b.mount || "", Status: b.status || "", Serial: b.serial || "",
+          Panel: a.label, "Slot(s)": slotsFromCells(b.cells).join("/"), "Amp Rating": b.ampRating || "",
+          Poles: polesFromCells(b.cells), Type: breakerType ? breakerType.name : "", Status: b.status || "", Serial: b.serial || "",
           "Installed Date": b.installedDate || "", Notes: b.notes || "", Circuits: (b.circuits || []).length,
         });
         (b.circuits || []).forEach(c => {
           circuitRows.push({
-            Panel: a.label, "Slot(s)": (b.slots || []).join("/"), Circuit: c.label,
+            Panel: a.label, "Slot(s)": slotsFromCells(b.cells).join("/"), Circuit: c.label,
             Description: c.description || "",
             Serves: c.feedsPanelLabel ? `Feeds → ${c.feedsPanelLabel}` : (c.roomsServed || []).join(", "),
           });
@@ -1854,6 +2011,182 @@ function AssetTracker() {
     />
   );
 
+  // Bespoke (not ListManagerModal) since a BreakerType needs a richer editor —
+  // a visual half-cell grid to build each member's footprint — than a flat
+  // list of strings can express. List view and the add/edit form share one
+  // modal, toggled by whether breakerTypeDraft is set.
+  const breakerTypesManagerModal = showBreakerTypesManager && (
+    <div
+      onClick={() => { setShowBreakerTypesManager(false); cancelBreakerTypeDraft(); setConfirmDeleteTypeId(null); }}
+      style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 40, padding: 16 }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: breakerTypeDraft ? 480 : 380, maxHeight: "80vh", overflowY: "auto" }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>
+            {breakerTypeDraft ? (breakerTypeDraft.id ? "Edit Breaker Type" : "New Breaker Type") : "Manage Breaker Types"}
+          </div>
+          <button
+            onClick={() => { setShowBreakerTypesManager(false); cancelBreakerTypeDraft(); setConfirmDeleteTypeId(null); }}
+            className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        {breakerTypeError && <div style={{ fontSize: 13, color: C.danger, marginBottom: 12 }}>{breakerTypeError}</div>}
+
+        {!breakerTypeDraft ? (
+          <>
+            {breakerTypes.length === 0 && <div style={{ fontSize: 13, color: C.empty, marginBottom: 12 }}>No breaker types defined yet.</div>}
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
+              {breakerTypes.map(t => (
+                <div key={t.id} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: "8px 12px" }}>
+                  {confirmDeleteTypeId === t.id ? (
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ color: C.danger, fontSize: 13 }}>Delete "{t.name}"?</span>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button onClick={() => setConfirmDeleteTypeId(null)} style={{ padding: "3px 8px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12, color: C.ink }}>Cancel</button>
+                        <button
+                          onClick={() => { removeBreakerType(t.id); setConfirmDeleteTypeId(null); }}
+                          style={{ padding: "3px 8px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontSize: 12, fontWeight: 600 }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: 14, color: C.ink }}>{t.name}</div>
+                        <div style={{ fontSize: 12, color: C.muted }}>
+                          {t.slotSpan} slot{t.slotSpan !== 1 ? "s" : ""} · {t.members.length} breaker{t.members.length !== 1 ? "s" : ""} · {t.members.map(m => `${m.ampRating || "?"}A`).join(", ")}
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: 4 }}>
+                        <button onClick={() => openEditBreakerType(t)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }} aria-label={`Edit ${t.name}`}>
+                          <Pencil size={14} color={C.muted} />
+                        </button>
+                        <button onClick={() => { setBreakerTypeError(null); setConfirmDeleteTypeId(t.id); }} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }} aria-label={`Delete ${t.name}`}>
+                          <Trash2 size={14} color={C.danger} />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+            <button
+              onClick={openAddBreakerType}
+              style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600 }}
+            >
+              <Plus size={14} /> New Breaker Type
+            </button>
+          </>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Name</span>
+              <input
+                value={breakerTypeDraft.name}
+                onChange={e => setBreakerTypeDraft({ ...breakerTypeDraft, name: e.target.value })}
+                placeholder="e.g. Tandem"
+                style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+              />
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Slot Span</span>
+              <select
+                value={breakerTypeDraft.slotSpan}
+                onChange={e => changeBreakerTypeSlotSpan(parseInt(e.target.value, 10))}
+                style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, background: "#fff", maxWidth: 160 }}
+              >
+                <option value={1}>1 slot</option>
+                <option value={2}>2 slots</option>
+                <option value={3}>3 slots</option>
+              </select>
+            </label>
+
+            <div>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>
+                Click cells for the breaker you're defining
+              </span>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
+                {(() => {
+                  const takenSet = new Set(breakerTypeDraft.members.flatMap(m => m.cells));
+                  return Array.from({ length: breakerTypeDraft.slotSpan }, (_, i) => i + 1).map(slotIdx => (
+                    <div key={slotIdx} style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                      <span style={{ fontSize: 11, color: C.muted, width: 40 }}>Slot {slotIdx}</span>
+                      {["a", "b"].map(half => {
+                        const cell = `${slotIdx}${half}`;
+                        const taken = takenSet.has(cell);
+                        const selected = currentMemberCells.includes(cell);
+                        return (
+                          <button
+                            key={cell} type="button" disabled={taken}
+                            onClick={() => toggleBreakerTypeCell(cell)}
+                            style={{
+                              flex: 1, padding: "10px 0", borderRadius: 8, fontSize: 12, fontWeight: 700,
+                              border: `1.5px solid ${selected ? C.brand : C.border}`,
+                              background: taken ? C.bg : selected ? C.brand : "#fff",
+                              color: taken ? C.placeholder : selected ? "#fff" : C.ink,
+                              cursor: taken ? "not-allowed" : "pointer",
+                            }}
+                          >
+                            {cell}{taken ? " ✓" : ""}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ));
+                })()}
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 10, alignItems: "flex-end" }}>
+              <label style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1 }}>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Amp Rating (selected cells)</span>
+                <input
+                  type="number" placeholder="20" value={currentMemberAmp}
+                  onChange={e => setCurrentMemberAmp(e.target.value)}
+                  style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                />
+              </label>
+              <button onClick={addBreakerTypeMember} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 13, fontWeight: 600 }}>
+                Add Breaker
+              </button>
+            </div>
+
+            {breakerTypeDraft.members.length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Breakers in this type</span>
+                {breakerTypeDraft.members.map((m, i) => (
+                  <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", border: `1px solid ${C.border}`, borderRadius: 8, padding: "6px 10px", fontSize: 13 }}>
+                    <span>{m.cells.join("+")} · {m.ampRating}A · {new Set(m.cells.map(c => c.slice(0, -1))).size}-pole</span>
+                    <button onClick={() => removeBreakerTypeMember(i)} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4 }} aria-label="Remove breaker">
+                      <X size={13} color={C.placeholder} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", borderTop: `1px solid ${C.border}`, paddingTop: 14 }}>
+              <button onClick={cancelBreakerTypeDraft} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
+                Cancel
+              </button>
+              <button onClick={saveBreakerType} style={{ padding: "8px 14px", background: C.success, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>
+                Save Type
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
   // Fields to render in a form for the given type: common fields always,
   // type-restricted fields (hostname, screenSize) only when they apply.
   // Status is excluded — it's changed only via the Archive/Restore actions.
@@ -1906,6 +2239,7 @@ function AssetTracker() {
         {usersManagerModal}
         {bulkItemTypesManagerModal}
         {typesManagerModal}
+        {breakerTypesManagerModal}
         <div style={{ borderBottom: `2px solid ${C.brand}`, padding: "12px 20px", position: "sticky", top: 0, background: C.bg, zIndex: 10, display: "flex", alignItems: "center", gap: 10 }}>
           <button onClick={closeDetail} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.brandDark, display: "flex" }} aria-label="Back to list">
             <ArrowLeft size={20} />
@@ -2228,207 +2562,140 @@ function AssetTracker() {
                     breakers={selectedAsset.breakers || []}
                     onReconfigure={() => setShowPanelConfig(true)}
                     onSlotClick={id => {
-                      setHighlightBreakerId(id);
-                      const el = document.getElementById(`entity-row-${id}`);
-                      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
-                      setTimeout(() => setHighlightBreakerId(prev => (prev === id ? null : prev)), 2000);
+                      const list = selectedAsset.breakers || [];
+                      const b = list.find(x => x.id === id);
+                      if (!b) return;
+                      // A click anywhere in a group opens the whole group — every
+                      // breaker sharing this groupId, not just the one clicked —
+                      // since a group is one physical breaker-type instance (e.g.
+                      // a quad or split double-pole) even though it's several rows.
+                      const members = b.groupId ? list.filter(x => x.groupId === b.groupId) : [b];
+                      const ampDrafts = {};
+                      members.forEach(m => { ampDrafts[m.id] = m.ampRating || ""; });
+                      const anchor = members[0];
+                      setOpenBreakerId(id);
+                      setMemberAmpDrafts(ampDrafts);
+                      setEditingMemberId(null);
+                      setInstanceDraft({ serial: anchor.serial || "", installedDate: anchor.installedDate || "", notes: anchor.notes || "" });
+                      setEditingInstance(false);
+                      setBreakerModalError(null);
+                      setConfirmDeleteGroup(false);
                     }}
                   />
                 );
               })()}
-              <ChildEntityTable
-              highlightedId={highlightBreakerId}
-              items={(selectedAsset.breakers || []).slice().sort((a, b) => (parseFloat((a.slots || [])[0]) || 0) - (parseFloat((b.slots || [])[0]) || 0))}
-              fields={[
-                { key: "slots", label: "Slot(s)", placeholder: "e.g. 5 or 1,3 (tandem: 1 slot, quad: 2 slots)" },
-                { key: "poles", label: "Poles", type: "select", options: ["1", "2"] },
-                { key: "mount", label: "Mount", type: "select", options: ["full", "tandem", "quad"] },
-                { key: "status", label: "Status", type: "select", options: ["Active", "Spare", "Faulted", "Retired"] },
-                { key: "serial", label: "Serial", placeholder: "optional" },
-                { key: "installedDate", label: "Installed", type: "date" },
-                { key: "notes", label: "Notes", wide: true },
-              ]}
-              initialDraft={{ slots: "", ampRating: "", poles: "1", mount: "full", status: "Active", serial: "", installedDate: "", notes: "" }}
-              onAdd={addBreaker}
-              onSave={saveBreakerEdit}
-              onDelete={deleteBreaker}
-              canDelete={canDeleteBreaker}
-              deleteConfirmMessage={item => `Delete the breaker at Slot ${slotsLabel_(item)}?`}
-              addLabel="Add Breaker"
-              emptyMessage="No breakers added yet."
-              renderCustomFields={(values, setValues, isAdd) => {
-                const mount = values.mount || "full";
-                const labelStyle = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent };
-                const inputStyle = { padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, maxWidth: 120 };
-                // Editing an existing row (or adding a plain "full" breaker) always
-                // means one row = one amp rating. Only the ADD flow for tandem/quad
-                // needs the multi-amp bulk-creation UI below, since that's the one
-                // moment several breakers are being defined at once.
-                if (!isAdd || mount === "full") {
-                  return (
-                    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                      <span style={labelStyle}>Amp Rating</span>
-                      <input type="number" placeholder="20" value={values.ampRating || ""} onChange={e => setValues({ ...values, ampRating: e.target.value })} style={inputStyle} />
-                    </label>
-                  );
-                }
-                const slots = parseSlotsInput(values.slots);
-                if (mount === "tandem") {
-                  return (
-                    <div style={{ gridColumn: "1 / -1", display: "flex", gap: 10 }}>
-                      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                        <span style={labelStyle}>Amp Rating A</span>
-                        <input type="number" placeholder="20" value={values.ampRating_0_A || ""} onChange={e => setValues({ ...values, ampRating_0_A: e.target.value })} style={inputStyle} />
-                      </label>
-                      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                        <span style={labelStyle}>Amp Rating B</span>
-                        <input type="number" placeholder="20" value={values.ampRating_0_B || ""} onChange={e => setValues({ ...values, ampRating_0_B: e.target.value })} style={inputStyle} />
-                      </label>
-                    </div>
-                  );
-                }
-                if (mount === "quad") {
-                  if (slots.length < 2) {
-                    return <div style={{ gridColumn: "1 / -1", fontSize: 13, color: C.empty }}>Enter both slot numbers above to set each circuit's amp rating.</div>;
-                  }
-                  return (
-                    <div style={{ gridColumn: "1 / -1", display: "flex", flexWrap: "wrap", gap: 10 }}>
-                      {slots.slice(0, 2).map((slot, i) => (
-                        <div key={i} style={{ display: "flex", gap: 10 }}>
-                          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                            <span style={labelStyle}>Slot {slot} — A</span>
-                            <input type="number" placeholder="20" value={values[`ampRating_${i}_A`] || ""} onChange={e => setValues({ ...values, [`ampRating_${i}_A`]: e.target.value })} style={inputStyle} />
+              {!showAddBreakerForm ? (
+                <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 20 }}>
+                  <button
+                    onClick={() => {
+                      setAddBreakerDraft({ breakerTypeId: breakerTypes[0] ? breakerTypes[0].id : "", startSlot: "", status: "Active", serial: "", installedDate: "", notes: "" });
+                      setAddBreakerError(null);
+                      setShowAddBreakerForm(true);
+                    }}
+                    style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  >
+                    <Plus size={14} /> Add Breaker
+                  </button>
+                </div>
+              ) : (
+                <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)", marginBottom: 20 }}>
+                  {(() => {
+                    const labelStyle = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent };
+                    const inputStyle = { padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, maxWidth: 120 };
+                    const selectedType = breakerTypes.find(t => t.id === addBreakerDraft.breakerTypeId);
+                    return (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                        <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
+                          <label style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 180 }}>
+                            <span style={labelStyle}>Breaker Type</span>
+                            {breakerTypes.length === 0 ? (
+                              <div style={{ fontSize: 13, color: C.empty }}>No breaker types defined yet.</div>
+                            ) : (
+                              <select
+                                value={addBreakerDraft.breakerTypeId || ""}
+                                onChange={e => setAddBreakerDraft({ ...addBreakerDraft, breakerTypeId: e.target.value })}
+                                style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, background: "#fff" }}
+                              >
+                                {breakerTypes.map(t => (
+                                  <option key={t.id} value={t.id}>{t.name} — {t.slotSpan} slot{t.slotSpan !== 1 ? "s" : ""}, {t.members.length} breaker{t.members.length !== 1 ? "s" : ""}</option>
+                                ))}
+                              </select>
+                            )}
                           </label>
                           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                            <span style={labelStyle}>Slot {slot} — B</span>
-                            <input type="number" placeholder="20" value={values[`ampRating_${i}_B`] || ""} onChange={e => setValues({ ...values, [`ampRating_${i}_B`]: e.target.value })} style={inputStyle} />
+                            <span style={labelStyle}>Starting Slot</span>
+                            <input type="number" placeholder="e.g. 5" value={addBreakerDraft.startSlot || ""} onChange={e => setAddBreakerDraft({ ...addBreakerDraft, startSlot: e.target.value })} style={inputStyle} />
+                          </label>
+                          <button
+                            type="button" onClick={() => setShowBreakerTypesManager(true)}
+                            style={{ display: "flex", alignItems: "center", gap: 4, background: "none", border: "none", padding: "8px 0", color: C.accent, fontSize: 12, fontWeight: 600 }}
+                          >
+                            <Settings size={13} /> Manage types
+                          </button>
+                        </div>
+                        {selectedType && (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                            <span style={labelStyle}>Amp rating per breaker (from type — editable)</span>
+                            {selectedType.members.map((m, i) => (
+                              <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                                <span style={{ fontSize: 13, color: C.muted }}>
+                                  {m.cells.join("+")} · {new Set(m.cells.map(c => c.slice(0, -1))).size}-pole
+                                </span>
+                                <input
+                                  type="number" placeholder={m.ampRating}
+                                  value={addBreakerDraft[`amp_${i}`] !== undefined ? addBreakerDraft[`amp_${i}`] : m.ampRating}
+                                  onChange={e => setAddBreakerDraft({ ...addBreakerDraft, [`amp_${i}`]: e.target.value })}
+                                  style={{ ...inputStyle, maxWidth: 90 }}
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
+                          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                            <span style={labelStyle}>Status</span>
+                            <select
+                              value={addBreakerDraft.status}
+                              onChange={e => setAddBreakerDraft({ ...addBreakerDraft, status: e.target.value })}
+                              style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, background: "#fff" }}
+                            >
+                              {["Active", "Spare", "Faulted", "Retired"].map(s => <option key={s} value={s}>{s}</option>)}
+                            </select>
+                          </label>
+                          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                            <span style={labelStyle}>Serial</span>
+                            <input value={addBreakerDraft.serial} onChange={e => setAddBreakerDraft({ ...addBreakerDraft, serial: e.target.value })} placeholder="optional" style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }} />
+                          </label>
+                          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                            <span style={labelStyle}>Installed</span>
+                            <input type="date" value={addBreakerDraft.installedDate} onChange={e => setAddBreakerDraft({ ...addBreakerDraft, installedDate: e.target.value })} style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }} />
+                          </label>
+                          <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
+                            <span style={labelStyle}>Notes</span>
+                            <input value={addBreakerDraft.notes} onChange={e => setAddBreakerDraft({ ...addBreakerDraft, notes: e.target.value })} style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }} />
                           </label>
                         </div>
-                      ))}
-                    </div>
-                  );
-                }
-                return null;
-              }}
-              renderSummary={breaker => (
-                <div>
-                  <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
-                    <span style={{ fontWeight: 700, fontSize: 13, color: C.brandDark }}>Slot {slotsLabel_(breaker)}</span>
-                    <span style={{ fontSize: 13, color: C.muted }}>
-                      {breaker.ampRating ? `${breaker.ampRating}A` : "—"} · {breaker.poles === "2" ? "2-pole" : "1-pole"}{breaker.mount !== "full" ? ` · ${breaker.mount}` : ""}
-                    </span>
-                    <span style={{
-                      fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase",
-                      color: breaker.status === "Faulted" ? C.danger : breaker.status === "Retired" ? C.muted : C.success,
-                    }}>
-                      {breaker.status || "Active"}
-                    </span>
-                  </div>
-                  {(breaker.serial || breaker.installedDate) && (
-                    <div style={{ fontSize: 12, color: C.placeholder, marginTop: 2 }}>
-                      {breaker.serial ? `Serial: ${breaker.serial}` : ""}{breaker.serial && breaker.installedDate ? " · " : ""}
-                      {breaker.installedDate ? `Installed ${formatDateOnly(breaker.installedDate)}` : ""}
-                    </div>
-                  )}
+                        {addBreakerError && <div style={{ fontSize: 13, color: C.danger }}>{addBreakerError}</div>}
+                        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                          <button onClick={() => { setShowAddBreakerForm(false); setAddBreakerError(null); }} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
+                            Cancel
+                          </button>
+                          <button
+                            onClick={() => {
+                              const err = addBreaker(addBreakerDraft);
+                              if (err) setAddBreakerError(err);
+                              else { setShowAddBreakerForm(false); setAddBreakerError(null); }
+                            }}
+                            style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                          >
+                            Add Breaker
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
-              customRowActions={breaker => (
-                <button onClick={() => openSwapBreaker(breaker)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Swap breaker at Slot ${slotsLabel_(breaker)}`}>
-                  <Repeat size={14} color={C.muted} />
-                </button>
-              )}
-              renderExpanded={breaker => {
-                const otherPanelLabels = assets.filter(a => a.type === "Electrical Panel" && a.label !== selectedAsset.label).map(a => a.label);
-                function renderCircuitTargetFields(values, setValues) {
-                  const mode = values.feedsPanelLabel ? "subpanel" : (values._mode || "rooms");
-                  const roomsSelected = values.roomsServed || [];
-                  return (
-                    <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 8 }}>
-                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Serves</span>
-                      <div style={{ display: "flex", gap: 6 }}>
-                        <button
-                          type="button"
-                          onClick={() => setValues({ ...values, _mode: "rooms", feedsPanelLabel: "" })}
-                          style={{ flex: 1, padding: "7px 10px", background: mode === "rooms" ? C.brand : "transparent", color: mode === "rooms" ? "#fff" : C.ink, border: `1.5px solid ${mode === "rooms" ? C.brand : C.border}`, borderRadius: 10, fontSize: 13, fontWeight: 600 }}
-                        >
-                          Serves rooms
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setValues({ ...values, _mode: "subpanel", roomsServed: [] })}
-                          style={{ flex: 1, padding: "7px 10px", background: mode === "subpanel" ? C.brand : "transparent", color: mode === "subpanel" ? "#fff" : C.ink, border: `1.5px solid ${mode === "subpanel" ? C.brand : C.border}`, borderRadius: 10, fontSize: 13, fontWeight: 600 }}
-                        >
-                          Feeds sub-panel
-                        </button>
-                      </div>
-                      {mode === "rooms" ? (
-                        roomAssetNames.length === 0 ? (
-                          <div style={{ fontSize: 13, color: C.empty }}>No Room assets yet.</div>
-                        ) : (
-                          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                            {roomAssetNames.map(room => {
-                              const active = roomsSelected.includes(room);
-                              return (
-                                <button
-                                  key={room}
-                                  type="button"
-                                  onClick={() => setValues({ ...values, roomsServed: active ? roomsSelected.filter(r => r !== room) : [...roomsSelected, room] })}
-                                  style={{ padding: "6px 12px", borderRadius: 14, fontSize: 13, fontWeight: active ? 600 : 500, border: `1.5px solid ${active ? C.brand : C.border}`, background: active ? C.brand : "#fff", color: active ? "#fff" : C.ink }}
-                                >
-                                  {room}
-                                </button>
-                              );
-                            })}
-                          </div>
-                        )
-                      ) : otherPanelLabels.length === 0 ? (
-                        <div style={{ fontSize: 13, color: C.empty }}>No other Electrical Panel assets yet.</div>
-                      ) : (
-                        <select
-                          value={values.feedsPanelLabel || ""}
-                          onChange={e => setValues({ ...values, feedsPanelLabel: e.target.value })}
-                          style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, background: "#fff" }}
-                        >
-                          <option value="">Select a panel…</option>
-                          {otherPanelLabels.map(p => <option key={p} value={p}>{p}</option>)}
-                        </select>
-                      )}
-                    </div>
-                  );
-                }
-                return (
-                  <ChildEntityTable
-                    items={breaker.circuits || []}
-                    fields={[
-                      { key: "label", label: "Label", placeholder: "e.g. Circuit 14" },
-                      { key: "description", label: "Description", placeholder: "What does this feed?", wide: true },
-                    ]}
-                    initialDraft={{ label: "", description: "", roomsServed: [], feedsPanelLabel: "" }}
-                    onAdd={draft => addCircuit(breaker.id, draft)}
-                    onSave={(id, draft) => saveCircuitEdit(breaker.id, id, draft)}
-                    onDelete={id => deleteCircuit(breaker.id, id)}
-                    addLabel="Add Circuit"
-                    emptyMessage="No circuits on this breaker yet."
-                    renderCustomFields={renderCircuitTargetFields}
-                    deleteConfirmMessage={circuit => `Delete circuit "${circuit.label}"?`}
-                    renderSummary={circuit => (
-                      <div>
-                        <div style={{ fontWeight: 600, fontSize: 13, color: C.ink }}>{circuit.label}</div>
-                        <div style={{ fontSize: 12, color: C.muted }}>
-                          {circuit.feedsPanelLabel ? `Feeds → ${circuit.feedsPanelLabel}` : (circuit.roomsServed || []).length ? `Serves ${circuit.roomsServed.join(", ")}` : "—"}
-                          {circuit.description ? ` · ${circuit.description}` : ""}
-                        </div>
-                      </div>
-                    )}
-                    customRowActions={circuit => (
-                      <button onClick={() => openMoveCircuit(breaker.id, circuit)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Move circuit ${circuit.label}`}>
-                        <ArrowLeftRight size={14} color={C.muted} />
-                      </button>
-                    )}
-                  />
-                );
-              }}
-              />
             </>
           )}
 
@@ -2851,6 +3118,269 @@ function AssetTracker() {
           </div>
         )}
 
+        {openBreakerId && memberAmpDrafts && instanceDraft && (() => {
+          const allBreakers = selectedAsset.breakers || [];
+          const clicked = allBreakers.find(b => b.id === openBreakerId);
+          if (!clicked) return null;
+          // A group is one physical breaker-type instance (tandem/quad/split
+          // double-pole/...) even though it's several Breaker rows sharing a
+          // groupId — the modal shows every member, not just the one clicked,
+          // same as the diagram already renders them as one visual cell.
+          const members = [...(clicked.groupId ? allBreakers.filter(b => b.groupId === clicked.groupId) : [clicked])].sort((b1, b2) => {
+            const s1 = Math.min(...slotsFromCells(b1.cells).map(Number));
+            const s2 = Math.min(...slotsFromCells(b2.cells).map(Number));
+            return s1 - s2;
+          });
+          const anchor = members[0];
+          const memberIds = members.map(m => m.id);
+          const breakerType = breakerTypes.find(t => t.id === anchor.breakerTypeId);
+          const groupSlotLabel = [...new Set(members.flatMap(m => slotsFromCells(m.cells)))].sort((a, b) => parseFloat(a) - parseFloat(b)).join("/") || "—";
+          const otherPanelLabels = assets.filter(a => a.type === "Electrical Panel" && a.label !== selectedAsset.label).map(a => a.label);
+          const labelStyle = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent };
+          const inputStyle = { padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink };
+          const closeModal = () => {
+            setOpenBreakerId(null); setMemberAmpDrafts(null); setEditingMemberId(null);
+            setInstanceDraft(null); setEditingInstance(false); setBreakerModalError(null); setConfirmDeleteGroup(false);
+          };
+          function renderCircuitTargetFields(values, setValues) {
+            const mode = values.feedsPanelLabel ? "subpanel" : (values._mode || "rooms");
+            const roomsSelected = values.roomsServed || [];
+            return (
+              <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 8 }}>
+                <span style={labelStyle}>Serves</span>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button
+                    type="button"
+                    onClick={() => setValues({ ...values, _mode: "rooms", feedsPanelLabel: "" })}
+                    style={{ flex: 1, padding: "7px 10px", background: mode === "rooms" ? C.brand : "transparent", color: mode === "rooms" ? "#fff" : C.ink, border: `1.5px solid ${mode === "rooms" ? C.brand : C.border}`, borderRadius: 10, fontSize: 13, fontWeight: 600 }}
+                  >
+                    Serves rooms
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setValues({ ...values, _mode: "subpanel", roomsServed: [] })}
+                    style={{ flex: 1, padding: "7px 10px", background: mode === "subpanel" ? C.brand : "transparent", color: mode === "subpanel" ? "#fff" : C.ink, border: `1.5px solid ${mode === "subpanel" ? C.brand : C.border}`, borderRadius: 10, fontSize: 13, fontWeight: 600 }}
+                  >
+                    Feeds sub-panel
+                  </button>
+                </div>
+                {mode === "rooms" ? (
+                  roomAssetNames.length === 0 ? (
+                    <div style={{ fontSize: 13, color: C.empty }}>No Room assets yet.</div>
+                  ) : (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {roomAssetNames.map(room => {
+                        const active = roomsSelected.includes(room);
+                        return (
+                          <button
+                            key={room}
+                            type="button"
+                            onClick={() => setValues({ ...values, roomsServed: active ? roomsSelected.filter(r => r !== room) : [...roomsSelected, room] })}
+                            style={{ padding: "6px 12px", borderRadius: 14, fontSize: 13, fontWeight: active ? 600 : 500, border: `1.5px solid ${active ? C.brand : C.border}`, background: active ? C.brand : "#fff", color: active ? "#fff" : C.ink }}
+                          >
+                            {room}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )
+                ) : otherPanelLabels.length === 0 ? (
+                  <div style={{ fontSize: 13, color: C.empty }}>No other Electrical Panel assets yet.</div>
+                ) : (
+                  <select
+                    value={values.feedsPanelLabel || ""}
+                    onChange={e => setValues({ ...values, feedsPanelLabel: e.target.value })}
+                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, background: "#fff" }}
+                  >
+                    <option value="">Select a panel…</option>
+                    {otherPanelLabels.map(p => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                )}
+              </div>
+            );
+          }
+          return (
+            <div onClick={closeModal} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
+              <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 520, maxHeight: "85vh", overflowY: "auto" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 16, color: C.brandDark }}>Slot {groupSlotLabel}</div>
+                    {breakerType && <div style={{ fontSize: 12, color: C.muted }}>{breakerType.name} — {members.length} breaker{members.length !== 1 ? "s" : ""}</div>}
+                  </div>
+                  <button onClick={closeModal} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+                </div>
+
+                {/* Instance-level details — serial/installed/notes describe the one
+                    physical unit, so they're edited once here and applied to every
+                    member row, not repeated per breaker. Delete removes the whole
+                    unit for the same reason. */}
+                <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 14, marginBottom: 14, background: "#fff" }}>
+                  {editingInstance ? (
+                    <>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 10, marginBottom: 12 }}>
+                        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          <span style={labelStyle}>Serial</span>
+                          <input value={instanceDraft.serial} onChange={e => setInstanceDraft({ ...instanceDraft, serial: e.target.value })} placeholder="optional" style={inputStyle} />
+                        </label>
+                        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          <span style={labelStyle}>Installed</span>
+                          <input type="date" value={dateOnly(instanceDraft.installedDate)} onChange={e => setInstanceDraft({ ...instanceDraft, installedDate: e.target.value })} style={inputStyle} />
+                        </label>
+                        <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
+                          <span style={labelStyle}>Notes</span>
+                          <input value={instanceDraft.notes} onChange={e => setInstanceDraft({ ...instanceDraft, notes: e.target.value })} style={inputStyle} />
+                        </label>
+                      </div>
+                      <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                        <button
+                          onClick={() => { setInstanceDraft({ serial: anchor.serial || "", installedDate: anchor.installedDate || "", notes: anchor.notes || "" }); setEditingInstance(false); }}
+                          style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          onClick={() => { saveBreakerInstanceDetails(memberIds, groupSlotLabel, instanceDraft); setEditingInstance(false); }}
+                          style={{ padding: "8px 14px", background: C.success, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                        >
+                          Save
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 16 }}>
+                        <div>
+                          <div style={labelStyle}>Serial</div>
+                          <div style={{ fontSize: 13, color: C.ink }}>{anchor.serial || "—"}</div>
+                        </div>
+                        <div>
+                          <div style={labelStyle}>Installed</div>
+                          <div style={{ fontSize: 13, color: C.ink }}>{formatDateOnly(anchor.installedDate) || "—"}</div>
+                        </div>
+                        <div>
+                          <div style={labelStyle}>Notes</div>
+                          <div style={{ fontSize: 13, color: C.ink }}>{anchor.notes || "—"}</div>
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
+                        <button onClick={() => setEditingInstance(true)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label="Edit">
+                          <Pencil size={14} color={C.muted} />
+                        </button>
+                        {!confirmDeleteGroup && (
+                          <button onClick={() => { setBreakerModalError(null); setConfirmDeleteGroup(true); }} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label="Delete">
+                            <Trash2 size={14} color={C.danger} />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {confirmDeleteGroup && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
+                      <span style={{ fontSize: 13, color: C.danger }}>Delete this breaker unit?</span>
+                      <button onClick={() => setConfirmDeleteGroup(false)} style={{ padding: "8px 12px", background: "transparent", border: `1.5px solid ${C.border}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
+                        Cancel
+                      </button>
+                      <button
+                        onClick={() => {
+                          const reason = canDeleteBreakerGroup(members);
+                          if (reason) { setBreakerModalError(reason); setConfirmDeleteGroup(false); return; }
+                          deleteBreakerGroup(members, groupSlotLabel);
+                          closeModal();
+                        }}
+                        style={{ padding: "8px 12px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  )}
+
+                  {breakerModalError && <div style={{ fontSize: 13, color: C.danger, marginTop: 10 }}>{breakerModalError}</div>}
+                </div>
+
+                {members.map((member, idx) => {
+                  const ampDraft = memberAmpDrafts[member.id];
+                  if (ampDraft === undefined) return null;
+                  const isEditingAmp = editingMemberId === member.id;
+                  return (
+                    <div key={member.id} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 14, marginBottom: 14, background: "#fff" }}>
+                      {members.length > 1 && (
+                        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.muted, marginBottom: 10 }}>
+                          Breaker {idx + 1} — Slot {slotsLabel_(member)}
+                        </div>
+                      )}
+
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+                        {isEditingAmp ? (
+                          <div style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
+                            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                              <span style={labelStyle}>Amp Rating</span>
+                              <input type="number" value={ampDraft} onChange={e => setMemberAmpDrafts({ ...memberAmpDrafts, [member.id]: e.target.value })} style={{ ...inputStyle, width: 100 }} />
+                            </label>
+                            <button
+                              onClick={() => { setMemberAmpDrafts({ ...memberAmpDrafts, [member.id]: member.ampRating || "" }); setEditingMemberId(null); }}
+                              style={{ padding: "8px 12px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              onClick={() => { saveBreakerAmp(member.id, ampDraft); setEditingMemberId(null); }}
+                              style={{ padding: "8px 12px", background: C.success, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                            >
+                              Save
+                            </button>
+                          </div>
+                        ) : (
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={labelStyle}>Amp Rating</span>
+                            <span style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>{member.ampRating ? `${member.ampRating}A` : "—"}</span>
+                            <button onClick={() => setEditingMemberId(member.id)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label="Edit amp rating">
+                              <Pencil size={14} color={C.muted} />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 12 }}>
+                        <div style={{ ...labelStyle, marginBottom: 8 }}>Circuits</div>
+                        <ChildEntityTable
+                          items={member.circuits || []}
+                          fields={[
+                            { key: "label", label: "Label", placeholder: "e.g. Circuit 14" },
+                            { key: "description", label: "Description", placeholder: "What does this feed?", wide: true },
+                          ]}
+                          initialDraft={{ label: "", description: "", roomsServed: [], feedsPanelLabel: "" }}
+                          onAdd={draft2 => addCircuit(member.id, draft2)}
+                          onSave={(id, draft2) => saveCircuitEdit(member.id, id, draft2)}
+                          onDelete={id => deleteCircuit(member.id, id)}
+                          addLabel="Add Circuit"
+                          emptyMessage="No circuits on this breaker yet."
+                          renderCustomFields={renderCircuitTargetFields}
+                          deleteConfirmMessage={circuit => `Delete circuit "${circuit.label}"?`}
+                          renderSummary={circuit => (
+                            <div>
+                              <div style={{ fontWeight: 600, fontSize: 13, color: C.ink }}>{circuit.label}</div>
+                              <div style={{ fontSize: 12, color: C.muted }}>
+                                {circuit.feedsPanelLabel ? `Feeds → ${circuit.feedsPanelLabel}` : (circuit.roomsServed || []).length ? `Serves ${circuit.roomsServed.join(", ")}` : "—"}
+                                {circuit.description ? ` · ${circuit.description}` : ""}
+                              </div>
+                            </div>
+                          )}
+                          customRowActions={circuit => (
+                            <button onClick={() => openMoveCircuit(member.id, circuit)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Move circuit ${circuit.label}`}>
+                              <ArrowLeftRight size={14} color={C.muted} />
+                            </button>
+                          )}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })()}
+
         {swappingBreaker && (
           <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
             <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 340 }}>
@@ -2968,6 +3498,7 @@ function AssetTracker() {
       {usersManagerModal}
       {bulkItemTypesManagerModal}
       {typesManagerModal}
+      {breakerTypesManagerModal}
 
       {/* Slim header */}
       <div style={{ borderBottom: `2px solid ${C.brand}`, padding: "10px 20px", position: "sticky", top: 0, background: C.bg, zIndex: 10, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
@@ -4049,10 +4580,10 @@ function PanelConfigForm({ slotCount, layout, onSave, onCancel }) {
 // breaker or feed info via the toggle. A double-pole breaker's two slots
 // collapse into one tall cell spanning both rows in its column, still with
 // both individual slot numbers printed outside at their own row; a tandem
-// pair shares one cell split top/bottom. Clicking a slot scrolls the
-// matching row in the list below into view and briefly highlights it
-// (highlightedId on ChildEntityTable) — the diagram is a map onto that
-// list, not a replacement for its add/edit/delete actions.
+// pair shares one cell split top/bottom. Clicking a breaker opens that
+// specific breaker's detail modal (edit fields + its circuits) — the
+// diagram IS the entry point for a breaker's detail, not a map onto a
+// separate list.
 function PanelDiagram({ slotCount, layout, breakers, onReconfigure, onSlotClick }) {
   const [infoMode, setInfoMode] = useState("breaker"); // "breaker" | "feeds"
   const columns = layout === "single-column" ? 1 : 2;
@@ -4065,8 +4596,11 @@ function PanelDiagram({ slotCount, layout, breakers, onReconfigure, onSlotClick 
   const numberTrack = col => (columns === 1 ? 1 : (col === 0 ? 1 : 4));
   const gridTemplateColumns = columns === 1 ? "28px 1fr" : "28px 1fr 1fr 28px";
 
+  // Every slot a breaker touches is derived from its cells (see
+  // BREAKER_TYPES_ARCHITECTURE.md) — slotMap is just "which breakers touch
+  // this slot at all," used below to find the group anchored there.
   const slotMap = {};
-  breakers.forEach(b => (b.slots || []).forEach(s => {
+  breakers.forEach(b => slotsFromCells(b.cells).forEach(s => {
     const n = parseInt(s, 10);
     if (!n) return;
     (slotMap[n] = slotMap[n] || []).push(b);
@@ -4084,38 +4618,32 @@ function PanelDiagram({ slotCount, layout, breakers, onReconfigure, onSlotClick 
       cells.push({ key: `spare-${s}`, col, row, rowSpan: 1, kind: "spare" });
       continue;
     }
-    if (here.length > 1) {
-      // 2 breakers sharing this slot: either a plain tandem pair (this is
-      // the whole group), or one slot of a quad — 2 breakers per slot, 2
-      // slots per quad, all 4 linked by a shared groupId. A quad renders as
-      // the exact same vertical-stack cell as a tandem, just taller (more
-      // breakers, spanning both its slots) — real panel hardware treats a
-      // quad as basically two tandem pairs sharing one body.
-      const groupId = here[0].groupId;
-      const isQuadGroup = groupId && here.every(b => b.mount === "quad" && b.groupId === groupId);
-      if (isQuadGroup) {
-        const groupBreakers = breakers.filter(b => b.groupId === groupId);
-        const groupSlots = [...new Set(groupBreakers.flatMap(b => (b.slots || []).map(x => parseInt(x, 10))))].sort((a, b2) => a - b2);
-        if (groupSlots[0] !== s) continue; // reached via the non-primary slot; primary already covers it
-        groupSlots.filter(x => x !== s).forEach(x => covered.add(x));
-        const rows = groupSlots.map(rowOf);
-        const orderedBreakers = groupSlots.flatMap(gs => groupBreakers.filter(b => (b.slots || []).includes(String(gs))));
-        cells.push({ key: `tandem-group-${groupId}`, col, row: Math.min(...rows), rowSpan: Math.max(...rows) - Math.min(...rows) + 1, kind: "tandem", breakers: orderedBreakers });
-        continue;
-      }
-      cells.push({ key: `tandem-${s}`, col, row, rowSpan: 1, kind: "tandem", breakers: here });
-      continue;
-    }
-    const breaker = here[0];
-    const slotNums = (breaker.slots || []).map(x => parseInt(x, 10)).filter(n => !isNaN(n));
-    if (slotNums.length >= 2 && Math.min(...slotNums) === s) {
-      slotNums.filter(x => x !== s).forEach(x => covered.add(x));
-      const rows = slotNums.map(rowOf);
-      cells.push({ key: `breaker-${breaker.id}`, col, row: Math.min(...rows), rowSpan: Math.max(...rows) - Math.min(...rows) + 1, kind: "breaker", breaker });
-    } else if (slotNums.length >= 2) {
-      continue; // non-primary slot of a double-pole breaker, already covered
+    // Every breaker placed via Add Breaker carries a groupId (even a lone
+    // single-pole/double-pole — a "group" of one) — so grouping is always
+    // just "every breaker sharing this groupId," regardless of how many
+    // slots or members it has. A group of >1 renders as a vertical stack
+    // (the same cell shape whether it's a tandem, quad, or any custom
+    // BreakerType); a group of 1 renders as the plain single cell.
+    const groupId = here[0].groupId;
+    const groupBreakers = groupId ? breakers.filter(b => b.groupId === groupId) : [here[0]];
+    const groupSlots = [...new Set(groupBreakers.flatMap(b => slotsFromCells(b.cells).map(x => parseInt(x, 10))))].sort((a, b2) => a - b2);
+    if (groupSlots[0] !== s) continue; // reached via a non-primary slot; the primary slot already covers it
+    groupSlots.filter(x => x !== s).forEach(x => covered.add(x));
+    const rows = groupSlots.map(rowOf);
+    const rowSpan = Math.max(...rows) - Math.min(...rows) + 1;
+    if (groupBreakers.length > 1) {
+      // Sort each breaker ONCE by its own minimum slot — not by bucketing
+      // "which slots does this breaker touch" (a breaker spanning 2 slots,
+      // like the middle breaker of a split double-pole, would then get
+      // listed once per slot it touches and render as a duplicate box).
+      const orderedBreakers = [...groupBreakers].sort((b1, b2) => {
+        const s1 = Math.min(...slotsFromCells(b1.cells).map(Number));
+        const s2 = Math.min(...slotsFromCells(b2.cells).map(Number));
+        return s1 - s2;
+      });
+      cells.push({ key: `group-${groupId}`, col, row: Math.min(...rows), rowSpan, kind: "tandem", breakers: orderedBreakers });
     } else {
-      cells.push({ key: `breaker-${breaker.id}`, col, row, rowSpan: 1, kind: "breaker", breaker });
+      cells.push({ key: `breaker-${groupBreakers[0].id}`, col, row: Math.min(...rows), rowSpan, kind: "breaker", breaker: groupBreakers[0] });
     }
   }
 
@@ -4130,6 +4658,17 @@ function PanelDiagram({ slotCount, layout, breakers, onReconfigure, onSlotClick 
   function statusColor(status) {
     if (status === "Faulted") return C.danger;
     if (status === "Retired" || status === "Spare") return C.muted;
+    return C.success;
+  }
+  // The outer box of a breaker-type placement (whether it's a single
+  // breaker or a multi-member group) is always outlined by ONE status
+  // color for the whole group, not per-member — a group's members are
+  // almost always placed together with the same status, and the individual
+  // breakers inside are already distinguished by the lighter divider lines
+  // between them, not by each having its own outline color.
+  function groupStatusColor(breakersInGroup) {
+    if (breakersInGroup.some(b => b.status === "Faulted")) return C.danger;
+    if (breakersInGroup.every(b => b.status === "Retired" || b.status === "Spare")) return C.muted;
     return C.success;
   }
 
@@ -4201,7 +4740,7 @@ function PanelDiagram({ slotCount, layout, breakers, onReconfigure, onSlotClick 
           }
           if (cell.kind === "tandem") {
             return (
-              <div key={cell.key} style={{ gridColumn: breakerTrack(cell.col), gridRow: `${cell.row} / span ${cell.rowSpan}`, border: `1.5px solid ${C.border}`, borderRadius: 8, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+              <div key={cell.key} style={{ gridColumn: breakerTrack(cell.col), gridRow: `${cell.row} / span ${cell.rowSpan}`, border: `1.5px solid ${groupStatusColor(cell.breakers)}`, borderRadius: 8, overflow: "hidden", display: "flex", flexDirection: "column" }}>
                 {cell.breakers.map((b, i) => {
                   const info = cellInfo(b);
                   return (

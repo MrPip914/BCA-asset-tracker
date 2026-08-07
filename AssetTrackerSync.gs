@@ -21,7 +21,7 @@
  * "rewrite everything" — the original behavior, kept as the safe fallback.
  *
  * Tabs created automatically on first run: Assets, Comments, Changes,
- * Allocations, Maintenance, Breakers, Circuits, AuditLog, Config.
+ * Allocations, Maintenance, Breakers, Circuits, BreakerTypes, AuditLog, Config.
  */
 
 // Bump this (number + short description) any time this file changes, so a
@@ -31,7 +31,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v7 (2026-08-05) — Tandem/quad are now groups of individual Breaker rows (Breaker.groupId), not single-row+circuit-field hacks";
+const SCRIPT_VERSION = "v8 (2026-08-06) — Add BreakerTypes catalog; Breaker.slots+poles+mount replaced by Breaker.cells (half-slot addressing) + breakerTypeId";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -41,6 +41,7 @@ const SHEET_NAMES = {
   maintenance: "Maintenance",
   breakers: "Breakers",
   circuits: "Circuits",
+  breakerTypes: "BreakerTypes",
   audit: "AuditLog",
   config: "Config",
 };
@@ -59,17 +60,35 @@ const ASSET_FIELDS = [
 // -> Panel. Both need a real id (not array position) since they get swapped/
 // moved and other records point at them.
 //
-// A "tandem" or "quad" breaker is a GROUP of individual single-pole Breaker
-// rows (2 for tandem, 4 for quad — 2 per slot), each with its own id,
-// ampRating, status, etc., created together and linked by a shared
-// "groupId" (blank for a plain "full" breaker, which needs no grouping).
-// This is deliberately the same shape as any other Breaker row — a tandem
-// or quad "half" is exactly as real a breaker as a standalone one, just one
-// that happens to share a slot with a sibling. Circuits attach to these
-// rows exactly like any other breaker (via breakerId) — no separate
-// per-circuit slot/amp bookkeeping needed.
-const BREAKER_FIELDS = ["id", "panelLabel", "slots", "poles", "mount", "ampRating", "status", "serial", "installedDate", "notes", "groupId"];
+// Every physical slot has two halves, addressed "Na"/"Nb" (e.g. "1a", "1b") —
+// a Breaker's footprint is the set of half-cells it occupies, not a list of
+// whole slot numbers. A basic single-pole breaker in slot 1 is cells
+// ["1a","1b"]; a double-pole across slots 1/3 is ["1a","1b","3a","3b"]; a
+// tandem pair is two breaker rows, cells ["1a"] and ["1b"]. Poles are NOT
+// stored — derived from the count of distinct slots a breaker's cells touch
+// (see BREAKER_TYPES_ARCHITECTURE.md section 2). This one addressing scheme
+// covers every breaker shape (single, double-pole, tandem, quad, and mixed
+// offset configurations) without a separate "mount" enum.
+//
+// A multi-breaker unit (tandem, quad, or any BreakerType with >1 member) is a
+// GROUP of individual Breaker rows, each with its own id, cells, ampRating,
+// status, etc., created together and linked by a shared "groupId" (blank for
+// a standalone breaker not placed from a multi-member type). Circuits attach
+// to these rows exactly like any other breaker (via breakerId) — no separate
+// per-circuit bookkeeping needed.
+//
+// "breakerTypeId" records which BreakerTypes catalog entry a breaker was
+// placed from, for display only (e.g. a "Tandem" badge) — not a live link;
+// editing a placed breaker never touches the type or its sibling rows.
+const BREAKER_FIELDS = ["id", "panelLabel", "cells", "ampRating", "status", "serial", "installedDate", "notes", "groupId", "breakerTypeId"];
 const CIRCUIT_FIELDS = ["id", "breakerId", "label", "description", "roomsServed", "feedsPanelLabel"];
+// A user-defined catalog of reusable breaker configurations — see
+// BREAKER_TYPES_ARCHITECTURE.md. "members" is a JSON-encoded array of
+// { cells, ampRating }, where cells use RELATIVE slot indices (a type's own
+// 1st/2nd/... slot, not real panel slot numbers) — resolved to absolute
+// cells at placement time in the frontend. Global/shared across all panels,
+// not scoped to any one asset — its own flat tab, like Breakers/Circuits.
+const BREAKER_TYPE_FIELDS = ["id", "name", "slotSpan", "members"];
 
 function getSheet_(name) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -144,6 +163,7 @@ function doGet(e) {
     ]);
     const breakerRows = readTable_(SHEET_NAMES.breakers, BREAKER_FIELDS);
     const circuitRows = readTable_(SHEET_NAMES.circuits, CIRCUIT_FIELDS);
+    const breakerTypeRows = readTable_(SHEET_NAMES.breakerTypes, BREAKER_TYPE_FIELDS);
     const auditRows = readTable_(SHEET_NAMES.audit, [
       "assetLabel", "assetType", "action", "field", "from", "to",
       "room", "quantity", "previousQuantity", "note", "at", "by",
@@ -171,9 +191,10 @@ function doGet(e) {
         // it's just an empty array for anything that isn't a panel.
         breakers: breakerRows.filter(b => b.panelLabel === label).map(b => ({
           id: b.id, panelLabel: b.panelLabel,
-          slots: b.slots ? String(b.slots).split(",").map(s => s.trim()) : [],
-          poles: b.poles, mount: b.mount, ampRating: b.ampRating, status: b.status,
-          serial: b.serial, installedDate: b.installedDate, notes: b.notes, groupId: b.groupId,
+          cells: b.cells ? String(b.cells).split(",").map(s => s.trim()) : [],
+          ampRating: b.ampRating, status: b.status,
+          serial: b.serial, installedDate: b.installedDate, notes: b.notes,
+          groupId: b.groupId, breakerTypeId: b.breakerTypeId,
           circuits: circuitRows.filter(c => c.breakerId === b.id).map(c => ({
             id: c.id, breakerId: c.breakerId, label: c.label, description: c.description,
             roomsServed: c.roomsServed ? String(c.roomsServed).split(",").map(s => s.trim()) : [],
@@ -192,10 +213,16 @@ function doGet(e) {
       at: r.at, by: r.by,
     }));
 
+    const breakerTypes = breakerTypeRows.map(t => ({
+      id: t.id, name: t.name, slotSpan: t.slotSpan,
+      members: t.members ? JSON.parse(t.members) : [],
+    }));
+
     const payload = {
       scriptVersion: SCRIPT_VERSION,
       assets,
       auditLog,
+      breakerTypes,
       columns: config.columns || null,
       changeTypes: config.changeTypes || null,
       vendors: config.vendors || null,
@@ -231,7 +258,7 @@ function doPost(e) {
     // in index.html — computed there by reference-equality against its current
     // state). Missing/absent _dirty (an older client, or a direct API call)
     // means "rewrite everything" — the safe default, same as before this existed.
-    const dirty = body._dirty || { assets: true, config: true };
+    const dirty = body._dirty || { assets: true, config: true, breakerTypes: true };
 
     if (dirty.assets) {
       // Assets tab: flat fields only.
@@ -259,9 +286,10 @@ function doPost(e) {
         (a.breakers || []).forEach(b => {
           breakerRows.push({
             id: b.id, panelLabel: a.label,
-            slots: (b.slots || []).join(","), poles: b.poles, mount: b.mount,
+            cells: (b.cells || []).join(","),
             ampRating: b.ampRating, status: b.status, serial: b.serial || "",
-            installedDate: b.installedDate || "", notes: b.notes || "", groupId: b.groupId || "",
+            installedDate: b.installedDate || "", notes: b.notes || "",
+            groupId: b.groupId || "", breakerTypeId: b.breakerTypeId || "",
           });
           (b.circuits || []).forEach(c => circuitRows.push({
             id: c.id, breakerId: b.id, label: c.label, description: c.description || "",
@@ -300,6 +328,13 @@ function doPost(e) {
         { key: "bulkItemTypes", value: JSON.stringify(body.bulkItemTypes || []) },
         { key: "typesList", value: JSON.stringify(body.typesList || []) },
       ]);
+    }
+
+    if (dirty.breakerTypes) {
+      const breakerTypeRows = (body.breakerTypes || []).map(t => ({
+        id: t.id, name: t.name, slotSpan: t.slotSpan, members: JSON.stringify(t.members || []),
+      }));
+      writeTable_(SHEET_NAMES.breakerTypes, BREAKER_TYPE_FIELDS, breakerTypeRows);
     }
 
     return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(ContentService.MimeType.JSON);

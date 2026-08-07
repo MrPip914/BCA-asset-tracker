@@ -185,17 +185,50 @@ Assets themselves (don't appear in the main list, no independent archive) but ge
 `crypto.randomUUID()` id, since they get swapped/moved and other records point at them —
 array position can't serve as identity once things move.
 
-- A Breaker's `slots` is an explicit array of slot numbers (not a single position + inferred
-  second slot) — the one representation that covers single-pole (`["5"]`), double-pole/
-  240V (`["1","3"]` — stacked rows in the same column, not adjacent numbers), and tandem
-  (two breakers both listing the same slot, `mount: "tandem"` on both) without a special-cased
-  inference rule. A slot may be shared by more than one breaker only if every breaker sharing
-  it is `mount: "tandem"` — enforced client-side in `addBreaker`/`saveBreakerEdit`.
-- **Swap Breaker** (`openSwapBreaker`/`submitSwapBreaker`) is a distinct action from the
-  generic edit, for the common case of physically replacing a breaker — logs `breaker_swapped`
-  with old/new serial. It keeps the same `id` and slot(s). The generic edit form can also
-  touch serial/ampRating/installedDate (logged as `breaker_edited` field diffs); Swap is the
-  recommended path for a physical replacement, not the only way to change those fields.
+- A Breaker's footprint is `cells` — half-slot addresses like `["1a","1b"]`, not a list of
+  whole slot numbers — see `BREAKER_TYPES_ARCHITECTURE.md` for the full reasoning. Poles are
+  derived (`polesFromCells()` — count of distinct slots touched), never stored. This one
+  addressing scheme covers single-pole, double-pole/240V, tandem, quad, and mixed/offset
+  configurations without a `mount` enum (removed).
+- **BreakerType** is a user-managed catalog (gear icon in the Add Breaker form → "Manage
+  types") of reusable breaker configurations — a name, a slot span, and a list of members
+  (relative cells + amp rating). Placing one via Add Breaker creates one real Breaker row per
+  member atomically, all linked by a fresh `groupId`, with the type's amp ratings as editable
+  starting values — not a live link; editing a placed breaker afterward never touches the type
+  or its sibling rows. `breakerTypeId` on a Breaker is for display only (the type name badge).
+  Seeded with 5 entries (`SEEDED_BREAKER_TYPES`): Single-Pole, Double-Pole (240V), Tandem,
+  Quad, and Split Double-Pole (15/30/15) — a 2-pole breaker offset by half a slot from two
+  independent single-poles, the case that motivated moving to cell addressing at all. Deleting
+  a type in use is blocked, listing every panel+slot still referencing it
+  (`findBreakerTypeUsages()`).
+- A multi-member placement (tandem, quad, or any type with >1 member) is a GROUP of individual
+  Breaker rows sharing a `groupId` — every breaker placed via Add Breaker gets one, even a
+  lone single-pole (a "group" of one), so the panel diagram's grouping logic never needs to
+  special-case mount/count. Editing an existing breaker never changes its cells/groupId/
+  breakerTypeId (delete and re-add instead) — only Add Breaker creates groups.
+- **Circuits are associated with a specific Breaker, not a slot** — clicking any member of a
+  group in the diagram opens one modal for the whole group (every Breaker row sharing that
+  `groupId`), since a breaker-type instance like a quad or split double-pole is one physical
+  unit even though it's several rows. A single breaker can hold multiple circuits.
+- Within that modal, fields are split by what they actually describe: **Amp Rating** is
+  per-member (the one spec that legitimately varies within a unit, e.g. the 15/30/15 split
+  double-pole) with its own pencil-to-edit control (`saveBreakerAmp`); **Serial/Installed
+  Date/Notes** describe the one physical unit you bought and installed, so they're edited once
+  at the group level and written to every member row (`saveBreakerInstanceDetails`) rather than
+  repeated per pole. `Status` was removed from the UI entirely (not useful in practice) — old
+  values on existing data are untouched, just no longer editable. All fields are read-only by
+  default with a pencil icon to enter edit mode (Save/Cancel), not an always-open form.
+- **Delete removes the whole group at once** (`deleteBreakerGroup`/`canDeleteBreakerGroup`),
+  not one member at a time — a breaker-type instance is one physical unit, not N independently
+  removable poles. Blocked if any member still has circuits, naming how many
+  (`"Still has circuits attached (1 of 3 breakers in this unit)"`).
+- **Swap Breaker** (`openSwapBreaker`/`submitSwapBreaker`) still exists but its trigger button
+  was removed from the breaker modal for now (per explicit request) — the functions and the
+  swap modal are dead code until it's reconnected. If re-adding it, keep in mind Swap was
+  designed as a single-breaker action (old serial/ampRating/installedDate on one row); the
+  group-level instance-details edit above already covers the serial/installed-date case for a
+  whole unit, so Swap's future role, if any, needs rethinking rather than just re-wiring the
+  old button.
 - A Circuit's `Circuit.feedsPanelLabel` marks it as feeding a downstream sub-panel instead of
   serving rooms directly (`roomsServed`) — mutually exclusive, enforced in `addCircuit`/
   `saveCircuitEdit`. A panel's "fed from" info is never stored on the Panel itself — it's
@@ -286,6 +319,14 @@ When you do:
 
 ## Known constraints / things to watch
 
+- **Backend is behind the frontend as of this writing**: `index.html`/`AssetTrackerSync.gs`
+  are at v8 (BreakerTypes catalog, `Breaker.cells`), but the live deployed backend is still
+  v6 — needs a fresh Apps Script redeploy before BreakerType placements will actually persist.
+  The live BCA0082–85 panel data also still uses the pre-v7 shape (`slots`/`poles`/`mount`,
+  no `cells`) — it'll need rebuilding via the new Add Breaker flow after redeploying, same as
+  the tandem/quad rebuild after the v7 redeploy. Check `backendScriptVersion` in the UI (or
+  the "Backend outdated" header warning) to see what's actually live before assuming any of
+  this works against the real Sheet — Sandbox mode is unaffected either way.
 - No auth beyond the cosmetic name tag — anyone with the deployed URL can read/write
   everything. Fine for internal school use with a private link; not a public-facing
   security model.
