@@ -525,6 +525,7 @@ function AssetTracker() {
   const [editingInstance, setEditingInstance] = useState(false);
   const [breakerModalError, setBreakerModalError] = useState(null);
   const [confirmDeleteGroup, setConfirmDeleteGroup] = useState(false);
+  const [addingCircuitFor, setAddingCircuitFor] = useState(null); // breaker id whose "add circuit" form is open, or null
   const [showAddBreakerForm, setShowAddBreakerForm] = useState(false);
   const [addBreakerDraft, setAddBreakerDraft] = useState(null);
   const [addBreakerError, setAddBreakerError] = useState(null);
@@ -1333,16 +1334,19 @@ function AssetTracker() {
   // BREAKER_TYPES_ARCHITECTURE.md section 4. Circuits attach to these rows
   // exactly like any other breaker, as a separate later step — placing a type
   // is never blocked on (or coupled to) adding circuits.
+  // Returns { error } on failure, or { newBreakers } (the freshly created rows,
+  // all sharing one groupId) on success — the caller uses those rows to jump
+  // straight into the breaker detail modal without waiting on a state refetch.
   function addBreaker(draft) {
-    if (!selectedAsset) return "No panel selected.";
+    if (!selectedAsset) return { error: "No panel selected." };
     const type = breakerTypes.find(t => t.id === draft.breakerTypeId);
-    if (!type) return "Pick a breaker type.";
+    if (!type) return { error: "Pick a breaker type." };
     const startSlot = parseInt(draft.startSlot, 10);
-    if (!startSlot || startSlot < 1) return "Enter a starting slot.";
+    if (!startSlot || startSlot < 1) return { error: "Enter a starting slot." };
     const panelSlotCount = parseInt(selectedAsset.panelSlotCount, 10) || 0;
     const resolvedSlots = resolveTypeSlots(type.slotSpan, startSlot);
     if (panelSlotCount && Math.max(...resolvedSlots) > panelSlotCount) {
-      return `Slot ${Math.max(...resolvedSlots)} is beyond this panel's ${panelSlotCount} slots.`;
+      return { error: `Slot ${Math.max(...resolvedSlots)} is beyond this panel's ${panelSlotCount} slots.` };
     }
     const existing = selectedAsset.breakers || [];
     const takenCells = new Set(existing.flatMap(b => b.cells || []));
@@ -1362,13 +1366,31 @@ function AssetTracker() {
       };
     });
     const conflictCell = newBreakers.flatMap(b => b.cells).find(c => takenCells.has(c));
-    if (conflictCell) return `Slot ${conflictCell.slice(0, -1)} is already in use.`;
+    if (conflictCell) return { error: `Slot ${conflictCell.slice(0, -1)} is already in use.` };
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
       action: "breaker_added", field: `Slot ${resolvedSlots.join("/")}`,
       to: `${type.name} (${newBreakers.map(b => b.ampRating ? b.ampRating + "A" : "?A").join(" / ")})`,
     };
     persist(updateBreakers([...existing, ...newBreakers]), columns, changeTypes, vendors, logAudit([entry]));
+    return { newBreakers };
+  }
+
+  // Shared by clicking an existing breaker in the diagram and by a successful
+  // Add Breaker submit — both need to seed the same per-member/instance drafts
+  // for the group the given breaker belongs to.
+  function openBreakerModal(anchorId, members) {
+    const ampDrafts = {};
+    members.forEach(m => { ampDrafts[m.id] = m.ampRating || ""; });
+    const anchor = members.find(m => m.id === anchorId) || members[0];
+    setOpenBreakerId(anchorId);
+    setMemberAmpDrafts(ampDrafts);
+    setEditingMemberId(null);
+    setInstanceDraft({ serial: anchor.serial || "", installedDate: anchor.installedDate || "", notes: anchor.notes || "" });
+    setEditingInstance(false);
+    setBreakerModalError(null);
+    setConfirmDeleteGroup(false);
+    setAddingCircuitFor(null);
   }
 
   // Editing a placed breaker only ever touches its own row — cells, groupId,
@@ -2587,40 +2609,28 @@ function AssetTracker() {
                       // since a group is one physical breaker-type instance (e.g.
                       // a quad or split double-pole) even though it's several rows.
                       const members = b.groupId ? list.filter(x => x.groupId === b.groupId) : [b];
-                      const ampDrafts = {};
-                      members.forEach(m => { ampDrafts[m.id] = m.ampRating || ""; });
-                      const anchor = members[0];
-                      setOpenBreakerId(id);
-                      setMemberAmpDrafts(ampDrafts);
-                      setEditingMemberId(null);
-                      setInstanceDraft({ serial: anchor.serial || "", installedDate: anchor.installedDate || "", notes: anchor.notes || "" });
-                      setEditingInstance(false);
-                      setBreakerModalError(null);
-                      setConfirmDeleteGroup(false);
+                      openBreakerModal(id, members);
+                    }}
+                    onSpareClick={slot => {
+                      setAddBreakerDraft({ breakerTypeId: breakerTypes[0] ? breakerTypes[0].id : "", startSlot: String(slot), status: "Active", serial: "", installedDate: "", notes: "" });
+                      setAddBreakerError(null);
+                      setShowAddBreakerForm(true);
                     }}
                   />
                 );
               })()}
-              {!showAddBreakerForm ? (
-                <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 20 }}>
-                  <button
-                    onClick={() => {
-                      setAddBreakerDraft({ breakerTypeId: breakerTypes[0] ? breakerTypes[0].id : "", startSlot: "", status: "Active", serial: "", installedDate: "", notes: "" });
-                      setAddBreakerError(null);
-                      setShowAddBreakerForm(true);
-                    }}
-                    style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
-                  >
-                    <Plus size={14} /> Add Breaker
-                  </button>
-                </div>
-              ) : (
-                <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)", marginBottom: 20 }}>
-                  {(() => {
-                    const labelStyle = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent };
-                    const inputStyle = { padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, maxWidth: 120 };
-                    const selectedType = breakerTypes.find(t => t.id === addBreakerDraft.breakerTypeId);
-                    return (
+              {showAddBreakerForm && (() => {
+                const closeAddBreakerForm = () => { setShowAddBreakerForm(false); setAddBreakerError(null); };
+                const labelStyle = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent };
+                const inputStyle = { padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, maxWidth: 120 };
+                const selectedType = breakerTypes.find(t => t.id === addBreakerDraft.breakerTypeId);
+                return (
+                  <div onClick={closeAddBreakerForm} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
+                    <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 480, maxHeight: "85vh", overflowY: "auto" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
+                        <div style={{ fontWeight: 700, fontSize: 16, color: C.brandDark }}>Add Breaker</div>
+                        <button onClick={closeAddBreakerForm} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+                      </div>
                       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                         <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
                           <label style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 180 }}>
@@ -2694,14 +2704,16 @@ function AssetTracker() {
                         </div>
                         {addBreakerError && <div style={{ fontSize: 13, color: C.danger }}>{addBreakerError}</div>}
                         <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-                          <button onClick={() => { setShowAddBreakerForm(false); setAddBreakerError(null); }} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
+                          <button onClick={closeAddBreakerForm} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
                             Cancel
                           </button>
                           <button
                             onClick={() => {
-                              const err = addBreaker(addBreakerDraft);
-                              if (err) setAddBreakerError(err);
-                              else { setShowAddBreakerForm(false); setAddBreakerError(null); }
+                              const result = addBreaker(addBreakerDraft);
+                              if (result.error) { setAddBreakerError(result.error); return; }
+                              setShowAddBreakerForm(false);
+                              setAddBreakerError(null);
+                              openBreakerModal(result.newBreakers[0].id, result.newBreakers);
                             }}
                             style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                           >
@@ -2709,10 +2721,10 @@ function AssetTracker() {
                           </button>
                         </div>
                       </div>
-                    );
-                  })()}
-                </div>
-              )}
+                    </div>
+                  </div>
+                );
+              })()}
             </>
           )}
 
@@ -3158,6 +3170,7 @@ function AssetTracker() {
           const closeModal = () => {
             setOpenBreakerId(null); setMemberAmpDrafts(null); setEditingMemberId(null);
             setInstanceDraft(null); setEditingInstance(false); setBreakerModalError(null); setConfirmDeleteGroup(false);
+            setAddingCircuitFor(null);
           };
           function renderCircuitTargetFields(values, setValues) {
             const mode = values.feedsPanelLabel ? "subpanel" : (values._mode || "rooms");
@@ -3323,7 +3336,7 @@ function AssetTracker() {
                     <div key={member.id} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 14, marginBottom: 14, background: "#fff" }}>
                       <div style={{ display: "flex", alignItems: "center", justifyContent: members.length > 1 ? "space-between" : "flex-end", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
                         {members.length > 1 && (
-                          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.muted }}>
+                          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: C.ink }}>
                             Breaker {idx + 1} — Slot {slotsLabel_(member)}
                           </div>
                         )}
@@ -3358,7 +3371,17 @@ function AssetTracker() {
                       </div>
 
                       <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 12 }}>
-                        <div style={{ ...labelStyle, marginBottom: 8 }}>Circuits</div>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                          <div style={labelStyle}>Circuits</div>
+                          <button
+                            onClick={() => setAddingCircuitFor(addingCircuitFor === member.id ? null : member.id)}
+                            className="icon-btn"
+                            style={{ background: "none", border: "none", padding: 2, borderRadius: 4, display: "flex" }}
+                            aria-label="Add circuit"
+                          >
+                            <Plus size={14} color={C.muted} />
+                          </button>
+                        </div>
                         <ChildEntityTable
                           items={member.circuits || []}
                           fields={[
@@ -3370,7 +3393,9 @@ function AssetTracker() {
                           onSave={(id, draft2) => saveCircuitEdit(member.id, id, draft2)}
                           onDelete={id => deleteCircuit(member.id, id)}
                           addLabel="Add Circuit"
-                          hideAddButton={!isEditingAmp}
+                          hideAddButton
+                          addOpen={addingCircuitFor === member.id}
+                          onAddOpenChange={open => setAddingCircuitFor(open ? member.id : null)}
                           emptyMessage="No circuits on this breaker yet."
                           renderCustomFields={renderCircuitTargetFields}
                           deleteConfirmMessage={circuit => `Delete circuit "${circuit.label}"?`}
@@ -4601,7 +4626,7 @@ function PanelConfigForm({ slotCount, layout, onSave, onCancel }) {
 // specific breaker's detail modal (edit fields + its circuits) — the
 // diagram IS the entry point for a breaker's detail, not a map onto a
 // separate list.
-function PanelDiagram({ slotCount, layout, breakers, onReconfigure, onSlotClick }) {
+function PanelDiagram({ slotCount, layout, breakers, onReconfigure, onSlotClick, onSpareClick }) {
   const [infoMode, setInfoMode] = useState("breaker"); // "breaker" | "feeds"
   const columns = layout === "single-column" ? 1 : 2;
   const rowOf = n => (columns === 1 ? n : Math.ceil(n / 2));
@@ -4632,7 +4657,7 @@ function PanelDiagram({ slotCount, layout, breakers, onReconfigure, onSlotClick 
     const row = rowOf(s);
 
     if (here.length === 0) {
-      cells.push({ key: `spare-${s}`, col, row, rowSpan: 1, kind: "spare" });
+      cells.push({ key: `spare-${s}`, col, row, rowSpan: 1, kind: "spare", slot: s });
       continue;
     }
     // Every breaker placed via Add Breaker carries a groupId (even a lone
@@ -4750,9 +4775,12 @@ function PanelDiagram({ slotCount, layout, breakers, onReconfigure, onSlotClick 
         {cells.map(cell => {
           if (cell.kind === "spare") {
             return (
-              <div key={cell.key} style={{ gridColumn: breakerTrack(cell.col), gridRow: `${cell.row} / span ${cell.rowSpan}`, border: `1.5px dashed ${C.border}`, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: C.placeholder }}>
+              <button
+                key={cell.key} type="button" onClick={() => onSpareClick(cell.slot)}
+                style={{ gridColumn: breakerTrack(cell.col), gridRow: `${cell.row} / span ${cell.rowSpan}`, border: `1.5px dashed ${C.border}`, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: C.placeholder, background: "none", cursor: "pointer" }}
+              >
                 spare
-              </div>
+              </button>
             );
           }
           if (cell.kind === "tandem") {
@@ -4804,6 +4832,7 @@ function ChildEntityTable({
   items, fields, onAdd, onSave, onDelete, initialDraft,
   renderCustomFields, renderSummary, renderExpanded, customRowActions,
   addLabel, emptyMessage, canDelete, deleteConfirmMessage, highlightedId, hideAddButton,
+  addOpen: addOpenProp, onAddOpenChange,
 }) {
   const [draft, setDraft] = useState(initialDraft);
   const [editingId, setEditingId] = useState(null);
@@ -4812,7 +4841,13 @@ function ChildEntityTable({
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [addError, setAddError] = useState(null);
   const [editError, setEditError] = useState(null);
-  const [addOpen, setAddOpen] = useState(false);
+  // "Add" open state is normally internal, but a caller that wants its own
+  // trigger button elsewhere on the page (e.g. a compact "+" next to a
+  // section header instead of this component's own full-width button) can
+  // control it externally by passing addOpen/onAddOpenChange.
+  const [uncontrolledAddOpen, setUncontrolledAddOpen] = useState(false);
+  const addOpen = addOpenProp !== undefined ? addOpenProp : uncontrolledAddOpen;
+  const setAddOpen = onAddOpenChange || setUncontrolledAddOpen;
 
   function renderField(f, values, setValues) {
     // See dateOnly()'s comment: a date field may come back from the Sheet as a
@@ -4913,7 +4948,7 @@ function ChildEntityTable({
 
   return (
     <div>
-      {hideAddButton ? null : addOpen ? (
+      {addOpen ? (
         <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)", marginBottom: 20 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
             {fields.map(f => renderField(f, draft, setDraft))}
@@ -4932,7 +4967,7 @@ function ChildEntityTable({
             </button>
           </div>
         </div>
-      ) : (
+      ) : hideAddButton ? null : (
         <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 20 }}>
           <button
             onClick={() => setAddOpen(true)}
