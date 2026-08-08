@@ -217,12 +217,29 @@ function describeAudit(entry) {
   // their field/from/to are already in the "X changed from A to B" shape.
   return `${entry.field} changed from "${entry.from || "—"}" to "${entry.to || "—"}"`;
 }
+// Every asset already has a stable, unique `label` — Room/Building references
+// elsewhere in the app store that label (an id), not the mutable display
+// name, so renaming a Room/Building is a normal single-asset edit with
+// nothing else to keep in sync. These resolve an id back to the current
+// display name at render time; a dangling id (its Room/Building was deleted)
+// resolves to "" rather than throwing.
+function roomNameFor(roomId, assets) {
+  if (!roomId) return "";
+  const room = assets.find(a => a.type === "Room" && a.label === roomId);
+  return room ? room.room || "" : "";
+}
+function buildingNameFor(buildingId, assets) {
+  if (!buildingId) return "";
+  const building = assets.find(a => a.type === "Building" && a.label === buildingId);
+  return building ? building.building || "" : "";
+}
+
 // Follows a non-Room asset's Room link to that Room's own Building link.
 // Rooms and Buildings store their building directly and don't need this.
 function inferBuilding(asset, assets) {
-  if (!asset || !asset.room) return "";
-  const roomAsset = assets.find(a => a.type === "Room" && a.room === asset.room);
-  return roomAsset ? roomAsset.building || "" : "";
+  if (!asset || !asset.roomId) return "";
+  const roomAsset = assets.find(a => a.type === "Room" && a.label === asset.roomId);
+  return roomAsset ? buildingNameFor(roomAsset.buildingId, assets) : "";
 }
 
 // Buckets the read-only detail view's fields into labeled sections instead of
@@ -262,7 +279,7 @@ const SHEET_API_URL = "https://script.google.com/macros/s/AKfycbzXaKRuCrTesxobxP
 // backend actually reports (data.scriptVersion) and flags a mismatch —
 // catches a stuck deployment (edited-but-not-redeployed) automatically
 // instead of it silently dropping data until someone happens to notice.
-const FRONTEND_SCRIPT_VERSION = "v8 (2026-08-06) — Add BreakerTypes catalog; Breaker.slots+poles+mount replaced by Breaker.cells (half-slot addressing) + breakerTypeId";
+const FRONTEND_SCRIPT_VERSION = "v9 (2026-08-07) — Room/Building references switched from name strings to stable ids (roomId/buildingId/allocations[].roomId/Circuit.roomsServedIds); asset.room/building now only hold a Room/Building asset's own name";
 const emptyDraftFrom = columns => Object.fromEntries(columns.map(c => [c.key, ""]));
 
 // --- Breaker cell addressing -------------------------------------------------
@@ -361,96 +378,97 @@ const SANDBOX_DATA_KEY = "asset-tracker-sandbox-data";
 const MOCK_SNAPSHOT = {
   scriptVersion: FRONTEND_SCRIPT_VERSION,
   assets: [
-    { label: "BCB0001", type: "Building", building: "Building 100", room: "", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
-    { label: "BCB0002", type: "Building", building: "Building 200", room: "", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
-    { label: "BCB0003", type: "Building", building: "Building 300", room: "", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
-    { label: "BCB0004", type: "Building", building: "Building 400", room: "", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
-    { label: "BCR0006", type: "Room", room: "Room 102", building: "Building 100", person: "Jen Kramer", notes: "", status: "Active" },
-    { label: "BCR0008", type: "Room", room: "Room 200", building: "Building 200", person: "Aaron Cantrell", notes: "", status: "Active" },
-    { label: "BCR0011", type: "Room", room: "Room 300", building: "Building 300", person: "Denise Sloan", notes: "", status: "Active" },
-    { label: "BCR0014", type: "Room", room: "Room 400", building: "Building 400", person: "Kelly Mackinga", notes: "", status: "Active" },
-    { label: "BCR0002", type: "Room", room: "Kitchen", building: "Building 100", person: "Multiple teachers", notes: "", status: "Active" },
-    { label: "BCR0018", type: "Room", room: "Storage Room", building: "Building 100", person: "", notes: "", status: "Active" },
-    { label: "BCA0001", type: "Computer", room: "Room 102", brand: "Dell", model: "OptiPlex 7010", serial: "MOCK-CMP-001", person: "Jen Kramer", peripherals: "Keyboard, Mouse", notes: "", status: "Active" },
-    { label: "BCA0002", type: "Monitor", room: "Room 102", brand: "Dell", model: "P2419H", serial: "MOCK-MON-001", person: "Jen Kramer", notes: "", status: "Active" },
-    { label: "BCA0003", type: "Phone", room: "Room 102", brand: "Cisco", model: "8841", serial: "MOCK-PHN-001", person: "Jen Kramer", notes: "", status: "Active" },
-    { label: "BCA0011", type: "Phone", room: "Room 200", brand: "Cisco", model: "8841", serial: "MOCK-PHN-002", person: "Aaron Cantrell", notes: "", status: "Active" },
-    { label: "BCA0015", type: "Stream Deck", room: "Room 200", brand: "Elgato", model: "Stream Deck MK.2", serial: "MOCK-SD-001", person: "Aaron Cantrell", notes: "", status: "Active" },
-    { label: "BCA0024", type: "TV", room: "Room 300", brand: "Samsung", model: "55\" QLED", serial: "MOCK-TV-001", person: "Denise Sloan", notes: "", status: "Active" },
-    { label: "BCA0054", type: "DocuCam", room: "Room 101", brand: "IPEVO", model: "V4K", serial: "MOCK-DC-001", person: "Dillon Jacobsma", notes: "", status: "Active" },
-    { label: "BCA0081", type: "Bulk Item", itemName: "Chairs", room: "", totalQuantity: "40", allocations: [{ room: "Room 102", quantity: "20" }, { room: "Room 200", quantity: "20" }], notes: "", status: "Active" },
+    { label: "BCB0001", type: "Building", building: "Building 100", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    { label: "BCB0002", type: "Building", building: "Building 200", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    { label: "BCB0003", type: "Building", building: "Building 300", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    { label: "BCB0004", type: "Building", building: "Building 400", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    { label: "BCR0006", type: "Room", room: "Room 102", buildingId: "BCB0001", person: "Jen Kramer", notes: "", status: "Active" },
+    { label: "BCR0008", type: "Room", room: "Room 200", buildingId: "BCB0002", person: "Aaron Cantrell", notes: "", status: "Active" },
+    { label: "BCR0011", type: "Room", room: "Room 300", buildingId: "BCB0003", person: "Denise Sloan", notes: "", status: "Active" },
+    { label: "BCR0014", type: "Room", room: "Room 400", buildingId: "BCB0004", person: "Kelly Mackinga", notes: "", status: "Active" },
+    { label: "BCR0002", type: "Room", room: "Kitchen", buildingId: "BCB0001", person: "Multiple teachers", notes: "", status: "Active" },
+    { label: "BCR0018", type: "Room", room: "Storage Room", buildingId: "BCB0001", person: "", notes: "", status: "Active" },
+    { label: "BCR0020", type: "Room", room: "Room 101", buildingId: "BCB0001", person: "Dillon Jacobsma", notes: "", status: "Active" },
+    { label: "BCA0001", type: "Computer", roomId: "BCR0006", brand: "Dell", model: "OptiPlex 7010", serial: "MOCK-CMP-001", person: "Jen Kramer", peripherals: "Keyboard, Mouse", notes: "", status: "Active" },
+    { label: "BCA0002", type: "Monitor", roomId: "BCR0006", brand: "Dell", model: "P2419H", serial: "MOCK-MON-001", person: "Jen Kramer", notes: "", status: "Active" },
+    { label: "BCA0003", type: "Phone", roomId: "BCR0006", brand: "Cisco", model: "8841", serial: "MOCK-PHN-001", person: "Jen Kramer", notes: "", status: "Active" },
+    { label: "BCA0011", type: "Phone", roomId: "BCR0008", brand: "Cisco", model: "8841", serial: "MOCK-PHN-002", person: "Aaron Cantrell", notes: "", status: "Active" },
+    { label: "BCA0015", type: "Stream Deck", roomId: "BCR0008", brand: "Elgato", model: "Stream Deck MK.2", serial: "MOCK-SD-001", person: "Aaron Cantrell", notes: "", status: "Active" },
+    { label: "BCA0024", type: "TV", roomId: "BCR0011", brand: "Samsung", model: "55\" QLED", serial: "MOCK-TV-001", person: "Denise Sloan", notes: "", status: "Active" },
+    { label: "BCA0054", type: "DocuCam", roomId: "BCR0020", brand: "IPEVO", model: "V4K", serial: "MOCK-DC-001", person: "Dillon Jacobsma", notes: "", status: "Active" },
+    { label: "BCA0081", type: "Bulk Item", itemName: "Chairs", totalQuantity: "40", allocations: [{ roomId: "BCR0006", quantity: "20" }, { roomId: "BCR0008", quantity: "20" }], notes: "", status: "Active" },
     {
-      label: "BCA0082", type: "Electrical Panel", room: "Storage Room", brand: "Square D", model: "QO142M200PC", serial: "MN-88213-SQD",
+      label: "BCA0082", type: "Electrical Panel", roomId: "BCR0018", brand: "Square D", model: "QO142M200PC", serial: "MN-88213-SQD",
       notes: "Main service panel, 200A. Feeds Building 200/300/400 sub-panels.", status: "Active",
       panelSlotCount: 24, panelLayout: "two-column",
       breakers: [
         { id: "b-1", panelLabel: "BCA0082", cells: ["1a", "1b"], breakerTypeId: "type-single-pole", ampRating: "", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
-          { id: "c-1", breakerId: "b-1", label: "1", description: "", roomsServed: ["Room 101"], feedsPanelLabel: "" },
+          { id: "c-1", breakerId: "b-1", label: "1", description: "", roomsServedIds: ["BCR0020"], feedsPanelLabel: "" },
         ] },
         { id: "b-24-a", panelLabel: "BCA0082", cells: ["2a"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-quad-1", circuits: [
-          { id: "c-2a", breakerId: "b-24-a", label: "2A", description: "", roomsServed: ["Room 101"], feedsPanelLabel: "" },
+          { id: "c-2a", breakerId: "b-24-a", label: "2A", description: "", roomsServedIds: ["BCR0020"], feedsPanelLabel: "" },
         ] },
         { id: "b-24-b", panelLabel: "BCA0082", cells: ["2b"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-quad-1", circuits: [
-          { id: "c-2b", breakerId: "b-24-b", label: "2B", description: "", roomsServed: ["Room 102"], feedsPanelLabel: "" },
+          { id: "c-2b", breakerId: "b-24-b", label: "2B", description: "", roomsServedIds: ["BCR0006"], feedsPanelLabel: "" },
         ] },
         { id: "b-24-c", panelLabel: "BCA0082", cells: ["4a"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-quad-1", circuits: [
-          { id: "c-4a", breakerId: "b-24-c", label: "4A", description: "", roomsServed: ["Kitchen"], feedsPanelLabel: "" },
+          { id: "c-4a", breakerId: "b-24-c", label: "4A", description: "", roomsServedIds: ["BCR0002"], feedsPanelLabel: "" },
         ] },
         { id: "b-24-d", panelLabel: "BCA0082", cells: ["4b"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-quad-1", circuits: [] },
         { id: "b-6-8", panelLabel: "BCA0082", cells: ["6a", "6b", "8a", "8b"], breakerTypeId: "type-double-pole", ampRating: "60", status: "Active", serial: "", installedDate: "", notes: "Feed to Room 300 sub-panel (BCA0084)", circuits: [
-          { id: "c-6-8", breakerId: "b-6-8", label: "6/8", description: "", roomsServed: [], feedsPanelLabel: "BCA0084" },
+          { id: "c-6-8", breakerId: "b-6-8", label: "6/8", description: "", roomsServedIds: [], feedsPanelLabel: "BCA0084" },
         ] },
         { id: "b-9-11-a", panelLabel: "BCA0082", cells: ["9a"], breakerTypeId: "type-split-double", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-split-9", circuits: [] },
         { id: "b-9-11-b", panelLabel: "BCA0082", cells: ["9b", "11a"], breakerTypeId: "type-split-double", ampRating: "30", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-split-9", circuits: [
-          { id: "c-9-11", breakerId: "b-9-11-b", label: "9/11", description: "", roomsServed: ["Storage Room"], feedsPanelLabel: "" },
+          { id: "c-9-11", breakerId: "b-9-11-b", label: "9/11", description: "", roomsServedIds: ["BCR0018"], feedsPanelLabel: "" },
         ] },
         { id: "b-9-11-c", panelLabel: "BCA0082", cells: ["11b"], breakerTypeId: "type-split-double", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-split-9", circuits: [] },
         { id: "b-10-12", panelLabel: "BCA0082", cells: ["10a", "10b", "12a", "12b"], breakerTypeId: "type-double-pole", ampRating: "60", status: "Active", serial: "", installedDate: "", notes: "Feed to Room 400 sub-panel (BCA0085)", circuits: [
-          { id: "c-10-12", breakerId: "b-10-12", label: "10/12", description: "", roomsServed: [], feedsPanelLabel: "BCA0085" },
+          { id: "c-10-12", breakerId: "b-10-12", label: "10/12", description: "", roomsServedIds: [], feedsPanelLabel: "BCA0085" },
         ] },
         { id: "b-14-a", panelLabel: "BCA0082", cells: ["14a"], breakerTypeId: "type-tandem", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-tandem-14", circuits: [
-          { id: "c-14a", breakerId: "b-14-a", label: "14a", description: "", roomsServed: ["Kitchen"], feedsPanelLabel: "" },
+          { id: "c-14a", breakerId: "b-14-a", label: "14a", description: "", roomsServedIds: ["BCR0002"], feedsPanelLabel: "" },
         ] },
         { id: "b-14-b", panelLabel: "BCA0082", cells: ["14b"], breakerTypeId: "type-tandem", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-tandem-14", circuits: [] },
         { id: "b-15-17", panelLabel: "BCA0082", cells: ["15a", "15b", "17a", "17b"], breakerTypeId: "type-double-pole", ampRating: "30", status: "Active", serial: "", installedDate: "", notes: "Electric water heater", circuits: [
-          { id: "c-15-17", breakerId: "b-15-17", label: "Water Heater", description: "", roomsServed: ["Storage Room"], feedsPanelLabel: "" },
+          { id: "c-15-17", breakerId: "b-15-17", label: "Water Heater", description: "", roomsServedIds: ["BCR0018"], feedsPanelLabel: "" },
         ] },
         { id: "b-16-18", panelLabel: "BCA0082", cells: ["16a", "16b", "18a", "18b"], breakerTypeId: "type-double-pole", ampRating: "50", status: "Active", serial: "", installedDate: "", notes: "Electric range/oven", circuits: [
-          { id: "c-16-18", breakerId: "b-16-18", label: "Range", description: "", roomsServed: ["Kitchen"], feedsPanelLabel: "" },
+          { id: "c-16-18", breakerId: "b-16-18", label: "Range", description: "", roomsServedIds: ["BCR0002"], feedsPanelLabel: "" },
         ] },
         { id: "b-19-21", panelLabel: "BCA0082", cells: ["19a", "19b", "21a", "21b"], breakerTypeId: "type-double-pole", ampRating: "30", status: "Faulted", serial: "", installedDate: "", notes: "Dryer — tripping, needs service", circuits: [
-          { id: "c-19-21", breakerId: "b-19-21", label: "Dryer", description: "", roomsServed: ["Storage Room"], feedsPanelLabel: "" },
+          { id: "c-19-21", breakerId: "b-19-21", label: "Dryer", description: "", roomsServedIds: ["BCR0018"], feedsPanelLabel: "" },
         ] },
         { id: "b-20-22", panelLabel: "BCA0082", cells: ["20a", "20b", "22a", "22b"], breakerTypeId: "type-double-pole", ampRating: "40", status: "Spare", serial: "", installedDate: "", notes: "Reserved for future HVAC condenser", circuits: [] },
       ],
     },
     {
-      label: "BCA0083", type: "Electrical Panel", room: "Room 200", brand: "Square D", model: "QO112L125GRB", serial: "B200-SQD-4471",
+      label: "BCA0083", type: "Electrical Panel", roomId: "BCR0008", brand: "Square D", model: "QO112L125GRB", serial: "B200-SQD-4471",
       notes: "Sub-panel fed from Main Distribution Panel (Storage Room), 125A main lug.", status: "Active",
       panelSlotCount: 12, panelLayout: "two-column",
       breakers: [
         { id: "b83-1", panelLabel: "BCA0083", cells: ["1a", "1b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
-          { id: "c83-1", breakerId: "b83-1", label: "1", description: "", roomsServed: ["Room 200"], feedsPanelLabel: "" },
+          { id: "c83-1", breakerId: "b83-1", label: "1", description: "", roomsServedIds: ["BCR0008"], feedsPanelLabel: "" },
         ] },
       ],
     },
     {
-      label: "BCA0084", type: "Electrical Panel", room: "Room 300", brand: "Square D", model: "QO112L125GRB", serial: "B300-SQD-4472",
+      label: "BCA0084", type: "Electrical Panel", roomId: "BCR0011", brand: "Square D", model: "QO112L125GRB", serial: "B300-SQD-4472",
       notes: "Sub-panel fed from Main Distribution Panel (Storage Room), 125A main lug.", status: "Active",
       panelSlotCount: 12, panelLayout: "two-column",
       breakers: [
         { id: "b84-1", panelLabel: "BCA0084", cells: ["1a", "1b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
-          { id: "c84-1", breakerId: "b84-1", label: "1", description: "", roomsServed: ["Room 300"], feedsPanelLabel: "" },
+          { id: "c84-1", breakerId: "b84-1", label: "1", description: "", roomsServedIds: ["BCR0011"], feedsPanelLabel: "" },
         ] },
       ],
     },
     {
-      label: "BCA0085", type: "Electrical Panel", room: "Room 400", brand: "Square D", model: "QO116L125GRB", serial: "B400-SQD-4473",
+      label: "BCA0085", type: "Electrical Panel", roomId: "BCR0014", brand: "Square D", model: "QO116L125GRB", serial: "B400-SQD-4473",
       notes: "Sub-panel fed from Main Distribution Panel (Storage Room), 125A main lug.", status: "Active",
       panelSlotCount: 16, panelLayout: "two-column",
       breakers: [
         { id: "b85-1", panelLabel: "BCA0085", cells: ["1a", "1b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
-          { id: "c85-1", breakerId: "b85-1", label: "1", description: "", roomsServed: ["Room 400"], feedsPanelLabel: "" },
+          { id: "c85-1", breakerId: "b85-1", label: "1", description: "", roomsServedIds: ["BCR0014"], feedsPanelLabel: "" },
         ] },
       ],
     },
@@ -504,7 +522,7 @@ function AssetTracker() {
   const [showVendorManager, setShowVendorManager] = useState(false);
   const [newChangeTypeName, setNewChangeTypeName] = useState("");
   const [newVendorName, setNewVendorName] = useState("");
-  const [allocationDraft, setAllocationDraft] = useState({ room: "", quantity: "" });
+  const [allocationDraft, setAllocationDraft] = useState({ roomId: "", quantity: "" });
   const [allocationError, setAllocationError] = useState("");
   const [confirmAllocationRemove, setConfirmAllocationRemove] = useState(null);
   const [maintenanceDraft, setMaintenanceDraft] = useState({ task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
@@ -536,7 +554,7 @@ function AssetTracker() {
   const [columnVisibility, setColumnVisibility] = useState({}); // { [columnKey]: boolean } — per-device override, see COLUMN_VISIBILITY_STORAGE_KEY
 
   const [query, setQuery] = useState("");
-  const [roomFilter, setRoomFilter] = useState("All rooms");
+  const [roomFilter, setRoomFilter] = useState(""); // "" = All rooms; otherwise a Room asset's label (id)
   const [typeFilter, setTypeFilter] = useState("All types");
   const [userFilter, setUserFilter] = useState("All users");
   const [statusFilter, setStatusFilter] = useState("Active");
@@ -758,11 +776,20 @@ function AssetTracker() {
     return [...auditLog, ...entries];
   }
 
-  const rooms = useMemo(() => {
-    if (!assets) return [];
-    const set = new Set(assets.map(a => a.room).filter(Boolean));
-    return ["All rooms", ...Array.from(set).sort()];
-  }, [assets]);
+  // Rooms as recognized by an actual Room asset — used to power the linked
+  // Room dropdown on every other asset type, the Room filter, and sorting.
+  // Every reference elsewhere in the app stores the Room asset's stable
+  // `label`, not this display name, so renaming a Room needs no cascade.
+  const roomAssets = useMemo(() => (assets || []).filter(a => a.type === "Room"), [assets]);
+  // Buildings as recognized by an actual Building asset — powers the linked
+  // Building dropdown on Room assets, same id-based reasoning as rooms above.
+  const buildingAssets = useMemo(() => (assets || []).filter(a => a.type === "Building"), [assets]);
+  const roomAssetNames = useMemo(() => Array.from(new Set(roomAssets.map(r => r.room).filter(Boolean))).sort(), [roomAssets]);
+  const buildingAssetNames = useMemo(() => Array.from(new Set(buildingAssets.map(b => b.building).filter(Boolean))).sort(), [buildingAssets]);
+
+  const rooms = useMemo(() => (
+    ["", ...roomAssets.map(r => r.label).sort((x, y) => roomNameFor(x, assets).localeCompare(roomNameFor(y, assets)))]
+  ), [roomAssets, assets]);
 
   const types = useMemo(() => {
     if (!assets) return [];
@@ -772,38 +799,30 @@ function AssetTracker() {
 
   const users = useMemo(() => ["All users", ...usersList], [usersList]);
 
-  // Rooms as recognized by an actual Room asset — used to power the linked
-  // Room dropdown on every other asset type.
-  const roomAssetNames = useMemo(() => {
-    if (!assets) return [];
-    const set = new Set(assets.filter(a => a.type === "Room").map(a => a.room).filter(Boolean));
-    return Array.from(set).sort();
-  }, [assets]);
-
-  // Buildings as recognized by an actual Building asset — powers the linked
-  // Building dropdown on Room assets.
-  const buildingAssetNames = useMemo(() => {
-    if (!assets) return [];
-    const set = new Set(assets.filter(a => a.type === "Building").map(a => a.building).filter(Boolean));
-    return Array.from(set).sort();
-  }, [assets]);
-
   const filtered = useMemo(() => {
     if (!assets) return [];
     const q = query.trim().toLowerCase();
     const list = assets.filter(a => {
-      if (roomFilter !== "All rooms" && a.room !== roomFilter) return false;
+      if (roomFilter && a.roomId !== roomFilter) return false;
       if (typeFilter !== "All types" && (a.type || "Other") !== typeFilter) return false;
       if (userFilter !== "All users" && !(a.person || "").split("/").map(s => s.trim()).includes(userFilter)) return false;
       if (statusFilter !== "All statuses" && (a.status || "Active") !== statusFilter) return false;
       if (!q) return true;
+      const roomName = roomNameFor(a.roomId, assets);
+      const buildingName = fieldAppliesTo("building", a.type) ? buildingNameFor(a.buildingId, assets) : inferBuilding(a, assets);
+      if (roomName.toLowerCase().includes(q) || buildingName.toLowerCase().includes(q)) return true;
       return Object.values(a).some(v => typeof v === "string" && v.toLowerCase().includes(q));
     });
     if (sortConfig) {
       const { key, dir } = sortConfig;
       const mult = dir === "desc" ? -1 : 1;
+      const sortValue = x => {
+        if (key === "room") return roomNameFor(x.roomId, assets);
+        if (key === "building") return fieldAppliesTo("building", x.type) ? buildingNameFor(x.buildingId, assets) : inferBuilding(x, assets);
+        return (x[key] || "").toString();
+      };
       list.sort((x, y) => {
-        const xv = (x[key] || "").toString(), yv = (y[key] || "").toString();
+        const xv = sortValue(x), yv = sortValue(y);
         const xn = parseFloat(xv), yn = parseFloat(yv);
         if (!isNaN(xn) && !isNaN(yn) && xv.trim() !== "" && yv.trim() !== "") return (xn - yn) * mult;
         return xv.localeCompare(yv, undefined, { numeric: true, sensitivity: "base" }) * mult;
@@ -868,7 +887,7 @@ function AssetTracker() {
       if (maintenanceFrequencyFilter !== "All frequencies" && r.item.frequencyLabel !== maintenanceFrequencyFilter) return false;
       if (maintenanceOwnerFilter !== "All owners" && r.item.owner !== maintenanceOwnerFilter) return false;
       if (!q) return true;
-      return [r.item.task, r.item.owner, r.asset.label, r.asset.room, r.asset.type]
+      return [r.item.task, r.item.owner, r.asset.label, roomNameFor(r.asset.roomId, assets), r.asset.type]
         .some(v => (v || "").toLowerCase().includes(q));
     });
     if (maintenanceSortConfig) {
@@ -897,7 +916,7 @@ function AssetTracker() {
 
   const filterConfigs = {
     type: { label: "Type", value: typeFilter, setValue: setTypeFilter, options: types },
-    room: { label: "Room", value: roomFilter, setValue: setRoomFilter, options: rooms },
+    room: { label: "Room", value: roomFilter, setValue: setRoomFilter, options: rooms, labelForOption: id => (id ? roomNameFor(id, assets) : "All rooms") },
     person: { label: "User", value: userFilter, setValue: setUserFilter, options: users },
     status: { label: "Status", value: statusFilter, setValue: setStatusFilter, options: STATUS_FILTER_OPTIONS },
   };
@@ -915,7 +934,7 @@ function AssetTracker() {
     setConfirmCommentDelete(null);
     setConfirmChangeDelete(null);
     setConfirmArchive(null);
-    setAllocationDraft({ room: "", quantity: "" });
+    setAllocationDraft({ roomId: "", quantity: "" });
     setAllocationError("");
     setConfirmAllocationRemove(null);
     setMaintenanceDraft({ task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
@@ -966,50 +985,28 @@ function AssetTracker() {
     } else {
       const original = selectedAsset;
       const editEntries = [];
+      // roomId/buildingId hold a stable label (id), not the display name — a
+      // Room/Building asset's own name field is edited like any other field
+      // (below), and every OTHER asset just holds that id, so renaming needs
+      // no cascade: nothing else has to change, and lookups pick up the new
+      // name automatically. Diff display still needs to resolve ids to names.
       Object.keys(draft).forEach(key => {
         if (key === "comments" || key === "changes" || key === "allocations") return;
         const oldVal = original[key] || "";
         const newVal = draft[key] || "";
         if (oldVal === newVal) return;
-        const fieldLabel = columns.find(c => c.key === key)?.label || key;
+        const isRoomIdField = key === "roomId";
+        const isBuildingIdField = key === "buildingId";
+        const fieldLabel = isRoomIdField ? "Room" : isBuildingIdField ? "Building" : (columns.find(c => c.key === key)?.label || key);
+        const from = isRoomIdField ? roomNameFor(oldVal, assets) : isBuildingIdField ? buildingNameFor(oldVal, assets) : oldVal;
+        const to = isRoomIdField ? roomNameFor(newVal, assets) : isBuildingIdField ? buildingNameFor(newVal, assets) : newVal;
         editEntries.push({
           at: new Date().toISOString(), by: currentUser || "", assetLabel: original.label,
-          assetType: draft.type || original.type, action: "edited", field: fieldLabel, from: oldVal, to: newVal,
+          assetType: draft.type || original.type, action: "edited", field: fieldLabel, from, to,
         });
       });
 
-      // Rename cascades: keep name-based links consistent across the inventory.
-      const roomRenamed = original.type === "Room" && draft.room && draft.room !== original.room;
-      const buildingRenamed = original.type === "Building" && draft.building && draft.building !== original.building;
-
-      const next = assets.map(a => {
-        if (a.label === selectedLabel) return { ...a, ...draft };
-        let updated = a;
-        if (roomRenamed) {
-          if (updated.room === original.room) updated = { ...updated, room: draft.room };
-          if ((updated.allocations || []).some(al => al.room === original.room)) {
-            updated = { ...updated, allocations: updated.allocations.map(al => (al.room === original.room ? { ...al, room: draft.room } : al)) };
-          }
-        }
-        if (buildingRenamed && updated.building === original.building) {
-          updated = { ...updated, building: draft.building };
-        }
-        return updated;
-      });
-      if (roomRenamed) {
-        editEntries.push({
-          at: new Date().toISOString(), by: currentUser || "", assetLabel: original.label,
-          assetType: "Room", action: "edited", field: "Room rename cascade",
-          from: original.room, to: `${draft.room} (updated on all linked assets)`,
-        });
-      }
-      if (buildingRenamed) {
-        editEntries.push({
-          at: new Date().toISOString(), by: currentUser || "", assetLabel: original.label,
-          assetType: "Building", action: "edited", field: "Building rename cascade",
-          from: original.building, to: `${draft.building} (updated on all linked rooms)`,
-        });
-      }
+      const next = assets.map(a => (a.label === selectedLabel ? { ...a, ...draft } : a));
       if (editNote.trim()) {
         editEntries.push({
           at: new Date().toISOString(), by: currentUser || "", assetLabel: original.label,
@@ -1020,6 +1017,31 @@ function AssetTracker() {
       setDetailEditing(false);
       setEditNote("");
     }
+  }
+
+  // Referential integrity for permanent delete — a Room/Building is
+  // referenced by id from other assets' roomId/buildingId, Bulk Item
+  // allocations, and Circuit.roomsServedIds, so deleting one out from under
+  // those would leave a dangling id. Client-side only, same as every other
+  // delete guard in this app (canDeleteBreakerGroup, findBreakerTypeUsages).
+  function canDeleteAsset(asset) {
+    if (asset.type === "Room") {
+      const refs = [];
+      assets.forEach(a => {
+        if (a.label === asset.label) return;
+        if (a.roomId === asset.label) refs.push(a.label);
+        (a.allocations || []).forEach(al => { if (al.roomId === asset.label) refs.push(`${a.label} (allocation)`); });
+        (a.breakers || []).forEach(b => (b.circuits || []).forEach(c => {
+          if ((c.roomsServedIds || []).includes(asset.label)) refs.push(`${a.label} Slot ${slotsLabel_(b)} (circuit "${c.label}")`);
+        }));
+      });
+      if (refs.length > 0) return `Still referenced by: ${refs.join(", ")}.`;
+    }
+    if (asset.type === "Building") {
+      const refs = assets.filter(a => a.type === "Room" && a.buildingId === asset.label).map(a => a.label);
+      if (refs.length > 0) return `Still referenced by: ${refs.join(", ")}.`;
+    }
+    return null;
   }
 
   async function doDelete(label) {
@@ -1093,20 +1115,21 @@ function AssetTracker() {
     setReassignTarget("");
   }
 
-  async function moveFilteredTo(newRoom) {
-    if (!newRoom) return;
+  async function moveFilteredTo(newRoomId) {
+    if (!newRoomId) return;
     const targets = new Set(filtered.filter(a => a.type !== "Room" && a.type !== "Building" && a.type !== "Bulk Item").map(a => a.label));
     const entries = [];
+    const newRoomName = roomNameFor(newRoomId, assets);
     const next = assets.map(a => {
-      if (!targets.has(a.label) || a.room === newRoom) return a;
+      if (!targets.has(a.label) || a.roomId === newRoomId) return a;
       entries.push({
         at: new Date().toISOString(), by: currentUser || "", assetLabel: a.label,
-        assetType: a.type, action: "edited", field: "Room", from: a.room || "", to: newRoom,
+        assetType: a.type, action: "edited", field: "Room", from: roomNameFor(a.roomId, assets) || "", to: newRoomName,
       });
-      return { ...a, room: newRoom };
+      return { ...a, roomId: newRoomId };
     });
     await persist(next, columns, changeTypes, vendors, entries.length ? logAudit(entries) : auditLog);
-    setRoomFilter(newRoom);
+    setRoomFilter(newRoomId);
     setMoveTarget("");
   }
 
@@ -1161,15 +1184,15 @@ function AssetTracker() {
 
   async function saveAllocation() {
     if (!selectedAsset) return;
-    const room = allocationDraft.room;
+    const roomId = allocationDraft.roomId;
     const qty = parseFloat(allocationDraft.quantity);
-    if (!room || !qty || qty <= 0) {
+    if (!roomId || !qty || qty <= 0) {
       setAllocationError("Pick a room and a quantity greater than 0.");
       return;
     }
     const existing = selectedAsset.allocations || [];
-    const existingForRoom = existing.find(a => a.room === room);
-    const otherRoomsTotal = existing.filter(a => a.room !== room).reduce((sum, a) => sum + (parseFloat(a.quantity) || 0), 0);
+    const existingForRoom = existing.find(a => a.roomId === roomId);
+    const otherRoomsTotal = existing.filter(a => a.roomId !== roomId).reduce((sum, a) => sum + (parseFloat(a.quantity) || 0), 0);
     const totalQty = parseFloat(selectedAsset.totalQuantity) || 0;
     if (otherRoomsTotal + qty > totalQty) {
       setAllocationError(`Only ${totalQty - otherRoomsTotal} available to assign here.`);
@@ -1177,26 +1200,26 @@ function AssetTracker() {
     }
     setAllocationError("");
     const nextAllocations = existingForRoom
-      ? existing.map(a => (a.room === room ? { ...a, quantity: qty } : a))
-      : [...existing, { room, quantity: qty }];
+      ? existing.map(a => (a.roomId === roomId ? { ...a, quantity: qty } : a))
+      : [...existing, { roomId, quantity: qty }];
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel,
-      assetType: selectedAsset.type, action: "allocated", room, quantity: qty,
+      assetType: selectedAsset.type, action: "allocated", room: roomNameFor(roomId, assets), quantity: qty,
       previousQuantity: existingForRoom ? existingForRoom.quantity : null,
     };
     const next = assets.map(a => (a.label === selectedLabel ? { ...a, allocations: nextAllocations } : a));
     await persist(next, columns, changeTypes, vendors, logAudit([entry]));
-    setAllocationDraft({ room: "", quantity: "" });
+    setAllocationDraft({ roomId: "", quantity: "" });
   }
 
-  async function removeAllocation(room) {
+  async function removeAllocation(roomId) {
     if (!selectedAsset) return;
     const existing = selectedAsset.allocations || [];
-    const existingForRoom = existing.find(a => a.room === room);
-    const nextAllocations = existing.filter(a => a.room !== room);
+    const existingForRoom = existing.find(a => a.roomId === roomId);
+    const nextAllocations = existing.filter(a => a.roomId !== roomId);
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel,
-      assetType: selectedAsset.type, action: "unallocated", room, quantity: existingForRoom ? existingForRoom.quantity : 0,
+      assetType: selectedAsset.type, action: "unallocated", room: roomNameFor(roomId, assets), quantity: existingForRoom ? existingForRoom.quantity : 0,
     };
     const next = assets.map(a => (a.label === selectedLabel ? { ...a, allocations: nextAllocations } : a));
     await persist(next, columns, changeTypes, vendors, logAudit([entry]));
@@ -1498,22 +1521,22 @@ function AssetTracker() {
   function addCircuit(breakerId, draft) {
     if (!selectedAsset) return "No panel selected.";
     if (!draft.label || !draft.label.trim()) return "Enter a circuit label.";
-    const roomsServed = draft.roomsServed || [];
+    const roomsServedIds = draft.roomsServedIds || [];
     const feedsPanelLabel = draft.feedsPanelLabel || "";
-    if (roomsServed.length === 0 && !feedsPanelLabel) return "Pick either rooms served or a sub-panel this circuit feeds.";
-    if (roomsServed.length > 0 && feedsPanelLabel) return "A circuit can serve rooms or feed a sub-panel, not both.";
+    if (roomsServedIds.length === 0 && !feedsPanelLabel) return "Pick either rooms served or a sub-panel this circuit feeds.";
+    if (roomsServedIds.length > 0 && feedsPanelLabel) return "A circuit can serve rooms or feed a sub-panel, not both.";
     const existing = selectedAsset.breakers || [];
     const breaker = existing.find(b => b.id === breakerId);
     if (!breaker) return "Breaker not found.";
     const circuit = {
       id: crypto.randomUUID(), breakerId, label: draft.label.trim(), description: (draft.description || "").trim(),
-      roomsServed, feedsPanelLabel,
+      roomsServedIds, feedsPanelLabel,
     };
     const nextBreakers = existing.map(b => (b.id === breakerId ? { ...b, circuits: [...(b.circuits || []), circuit] } : b));
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
       action: "circuit_added", field: circuit.label,
-      to: feedsPanelLabel ? `Feeds ${feedsPanelLabel}` : `Serves ${roomsServed.join(", ")}`,
+      to: feedsPanelLabel ? `Feeds ${feedsPanelLabel}` : `Serves ${roomsServedIds.map(id => roomNameFor(id, assets)).join(", ")}`,
     };
     persist(updateBreakers(nextBreakers), columns, changeTypes, vendors, logAudit([entry]));
   }
@@ -1521,16 +1544,16 @@ function AssetTracker() {
   function saveCircuitEdit(breakerId, id, draft) {
     if (!selectedAsset) return "No panel selected.";
     if (!draft.label || !draft.label.trim()) return "Enter a circuit label.";
-    const roomsServed = draft.roomsServed || [];
+    const roomsServedIds = draft.roomsServedIds || [];
     const feedsPanelLabel = draft.feedsPanelLabel || "";
-    if (roomsServed.length === 0 && !feedsPanelLabel) return "Pick either rooms served or a sub-panel this circuit feeds.";
-    if (roomsServed.length > 0 && feedsPanelLabel) return "A circuit can serve rooms or feed a sub-panel, not both.";
+    if (roomsServedIds.length === 0 && !feedsPanelLabel) return "Pick either rooms served or a sub-panel this circuit feeds.";
+    if (roomsServedIds.length > 0 && feedsPanelLabel) return "A circuit can serve rooms or feed a sub-panel, not both.";
     const existing = selectedAsset.breakers || [];
     const breaker = existing.find(b => b.id === breakerId);
     if (!breaker) return "Breaker not found.";
     const original = (breaker.circuits || []).find(c => c.id === id);
     if (!original) return "Circuit not found.";
-    const updated = { ...original, label: draft.label.trim(), description: (draft.description || "").trim(), roomsServed, feedsPanelLabel };
+    const updated = { ...original, label: draft.label.trim(), description: (draft.description || "").trim(), roomsServedIds, feedsPanelLabel };
     const mk = (field, from, to) => ({
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
       action: "circuit_edited", field: `${original.label} — ${field}`, from, to,
@@ -1538,8 +1561,10 @@ function AssetTracker() {
     const entries = [];
     if (original.label !== updated.label) entries.push(mk("Label", original.label, updated.label));
     if ((original.description || "") !== updated.description) entries.push(mk("Description", original.description || "—", updated.description || "—"));
-    if ((original.roomsServed || []).join(",") !== roomsServed.join(",")) {
-      entries.push(mk("Rooms served", (original.roomsServed || []).join(", ") || "—", roomsServed.join(", ") || "—"));
+    if ((original.roomsServedIds || []).join(",") !== roomsServedIds.join(",")) {
+      const fromNames = (original.roomsServedIds || []).map(rid => roomNameFor(rid, assets)).join(", ");
+      const toNames = roomsServedIds.map(rid => roomNameFor(rid, assets)).join(", ");
+      entries.push(mk("Rooms served", fromNames || "—", toNames || "—"));
     }
     if ((original.feedsPanelLabel || "") !== feedsPanelLabel) entries.push(mk("Feeds sub-panel", original.feedsPanelLabel || "—", feedsPanelLabel || "—"));
     const nextBreakers = existing.map(b => (b.id === breakerId ? { ...b, circuits: (b.circuits || []).map(c => (c.id === id ? updated : c)) } : b));
@@ -1805,9 +1830,19 @@ function AssetTracker() {
   }
 
   function exportToExcel() {
+    // Room/Building are stored as ids everywhere except on the Room/Building
+    // asset's own name field — resolve to a display name for export the same
+    // way the UI does, rather than dumping raw label ids into the sheet.
+    const displayRoom = a => (a.type === "Room" ? (a.room || "") : roomNameFor(a.roomId, assets));
+    const displayBuilding = a => (a.type === "Building" ? (a.building || "") : buildingNameFor(a.buildingId, assets));
     const assetRows = assets.map(a => {
       const row = {};
-      columns.forEach(c => { row[c.label] = fieldAppliesTo(c.key, a.type) ? (a[c.key] || "") : ""; });
+      columns.forEach(c => {
+        if (!fieldAppliesTo(c.key, a.type)) { row[c.label] = ""; return; }
+        if (c.key === "room") { row[c.label] = displayRoom(a); return; }
+        if (c.key === "building") { row[c.label] = displayBuilding(a); return; }
+        row[c.label] = a[c.key] || "";
+      });
       row["Comments logged"] = (a.comments || []).length;
       row["Changes logged"] = (a.changes || []).length;
       row["Total cost logged"] = (a.changes || []).reduce((sum, c) => sum + (parseFloat(c.cost) || 0), 0);
@@ -1820,14 +1855,14 @@ function AssetTracker() {
     const commentRows = [];
     assets.forEach(a => {
       (a.comments || []).forEach(cm => {
-        commentRows.push({ "Asset ID": a.label, Type: a.type, Room: a.room, When: formatWhen(cm.at), Comment: cm.text, "Logged by": cm.by || "" });
+        commentRows.push({ "Asset ID": a.label, Type: a.type, Room: displayRoom(a), When: formatWhen(cm.at), Comment: cm.text, "Logged by": cm.by || "" });
       });
     });
     const changeRows = [];
     assets.forEach(a => {
       (a.changes || []).forEach(ch => {
         changeRows.push({
-          "Asset ID": a.label, Type: a.type, Room: a.room, When: formatWhen(ch.at),
+          "Asset ID": a.label, Type: a.type, Room: displayRoom(a), When: formatWhen(ch.at),
           "Change type": ch.changeType, Vendor: ch.vendor, Cost: parseFloat(ch.cost) || "", Note: ch.note,
           "Logged by": ch.by || "",
         });
@@ -1836,7 +1871,7 @@ function AssetTracker() {
     const allocationRows = [];
     assets.forEach(a => {
       (a.allocations || []).forEach(al => {
-        allocationRows.push({ "Asset ID": a.label, Item: a.type === "Bulk Item" ? (a.notes || a.label) : a.label, Room: al.room, Quantity: al.quantity });
+        allocationRows.push({ "Asset ID": a.label, Item: a.type === "Bulk Item" ? (a.notes || a.label) : a.label, Room: roomNameFor(al.roomId, assets), Quantity: al.quantity });
       });
     });
 
@@ -1859,7 +1894,7 @@ function AssetTracker() {
           circuitRows.push({
             Panel: a.label, "Slot(s)": slotsFromCells(b.cells).join("/"), Circuit: c.label,
             Description: c.description || "",
-            Serves: c.feedsPanelLabel ? `Feeds → ${c.feedsPanelLabel}` : (c.roomsServed || []).join(", "),
+            Serves: c.feedsPanelLabel ? `Feeds → ${c.feedsPanelLabel}` : (c.roomsServedIds || []).map(id => roomNameFor(id, assets)).join(", "),
           });
         });
       });
@@ -2259,14 +2294,14 @@ function AssetTracker() {
     const isPlace = selectedAsset.type === "Room" || selectedAsset.type === "Building";
     let contentDevices = [], contentRooms = [], contentAllocations = [];
     if (selectedAsset.type === "Room") {
-      contentDevices = assets.filter(a => a.type !== "Room" && a.type !== "Building" && a.type !== "Bulk Item" && a.room === selectedAsset.room);
+      contentDevices = assets.filter(a => a.type !== "Room" && a.type !== "Building" && a.type !== "Bulk Item" && a.roomId === selectedAsset.label);
       contentAllocations = assets
         .filter(a => a.type === "Bulk Item")
-        .flatMap(b => (b.allocations || []).filter(al => al.room === selectedAsset.room).map(al => ({ bulk: b, quantity: al.quantity })));
+        .flatMap(b => (b.allocations || []).filter(al => al.roomId === selectedAsset.label).map(al => ({ bulk: b, quantity: al.quantity })));
     } else if (selectedAsset.type === "Building") {
-      contentRooms = assets.filter(a => a.type === "Room" && a.building === selectedAsset.building);
-      const roomNames = new Set(contentRooms.map(r => r.room));
-      contentDevices = assets.filter(a => a.type !== "Room" && a.type !== "Building" && a.type !== "Bulk Item" && roomNames.has(a.room));
+      contentRooms = assets.filter(a => a.type === "Room" && a.buildingId === selectedAsset.label);
+      const roomIds = new Set(contentRooms.map(r => r.label));
+      contentDevices = assets.filter(a => a.type !== "Room" && a.type !== "Building" && a.type !== "Bulk Item" && roomIds.has(a.roomId));
     }
     const contentsCount = contentDevices.length + contentRooms.length + contentAllocations.length;
 
@@ -2319,15 +2354,16 @@ function AssetTracker() {
         <div style={{ padding: "18px 20px 60px", maxWidth: 720, margin: "0 auto" }}>
           {detailTab === "details" && selectedAsset.type === "Room" && (() => {
             // Computed, not stored — same pattern as a sub-panel's "Fed from"
-            // banner: a circuit's roomsServed already names this room, so the
-            // reverse link (which breaker feeds this room) is found by
-            // searching every panel's circuits rather than duplicating the
-            // relationship as a stored field that could drift out of sync.
+            // banner: a circuit's roomsServedIds already names this room by
+            // its stable id, so the reverse link (which breaker feeds this
+            // room) is found by searching every panel's circuits rather than
+            // duplicating the relationship as a stored field that could
+            // drift out of sync.
             const feeds = assets
               .filter(a => a.type === "Electrical Panel")
               .flatMap(panel => (panel.breakers || []).map(breaker => ({ panel, breaker })))
               .flatMap(({ panel, breaker }) => (breaker.circuits || [])
-                .filter(c => (c.roomsServed || []).includes(selectedAsset.room))
+                .filter(c => (c.roomsServedIds || []).includes(selectedAsset.label))
                 .map(circuit => ({ panel, breaker, circuit })));
             if (feeds.length === 0) return null;
             return (
@@ -2362,7 +2398,16 @@ function AssetTracker() {
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "14px 20px" }}>
                     {group.columns.map(c => (
-                      <Detail key={c.key} label={c.label} value={selectedAsset[c.key]} wide={c.key === "notes"} />
+                      <Detail
+                        key={c.key}
+                        label={c.label}
+                        value={
+                          c.key === "room" && selectedAsset.type !== "Room" ? roomNameFor(selectedAsset.roomId, assets)
+                          : c.key === "building" && selectedAsset.type === "Room" ? buildingNameFor(selectedAsset.buildingId, assets)
+                          : selectedAsset[c.key]
+                        }
+                        wide={c.key === "notes"}
+                      />
                     ))}
                     {group.title === "Location & Assignment" && inheritedBuilding && (
                       <Detail label="Building (via Room)" value={inheritedBuilding} italic />
@@ -2414,9 +2459,9 @@ function AssetTracker() {
                   c.key === "type" ? (
                     <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v })} typeOptions={typesList} onManage={() => setShowTypesManager(true)} />
                   ) : c.key === "room" && draft.type !== "Room" ? (
-                    <RoomField key={c.key} value={draft.room || ""} onChange={v => setDraft({ ...draft, room: v })} roomOptions={roomAssetNames} />
+                    <RoomField key={c.key} value={draft.roomId || ""} onChange={v => setDraft({ ...draft, roomId: v })} rooms={roomAssets} />
                   ) : c.key === "building" && draft.type !== "Building" ? (
-                    <BuildingField key={c.key} value={draft.building || ""} onChange={v => setDraft({ ...draft, building: v })} buildingOptions={buildingAssetNames} />
+                    <BuildingField key={c.key} value={draft.buildingId || ""} onChange={v => setDraft({ ...draft, buildingId: v })} buildings={buildingAssets} />
                   ) : c.key === "person" ? (
                     <UserField
                       key={c.key}
@@ -2511,7 +2556,7 @@ function AssetTracker() {
                       <button key={d.label} onClick={() => openDetail(d)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
                         <DIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
                         <span style={{ fontSize: 14, color: C.ink, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {d.type}{d.brand ? ` · ${d.brand}` : ""}{selectedAsset.type === "Building" && d.room ? ` · ${d.room}` : ""}
+                          {d.type}{d.brand ? ` · ${d.brand}` : ""}{selectedAsset.type === "Building" && d.roomId ? ` · ${roomNameFor(d.roomId, assets)}` : ""}
                         </span>
                         <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.accent }}>{d.label}</span>
                         <ChevronRight size={14} style={{ color: C.placeholder }} />
@@ -2550,13 +2595,13 @@ function AssetTracker() {
               <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)", marginBottom: 20 }}>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
                   <RoomField
-                    value={allocationDraft.room}
+                    value={allocationDraft.roomId}
                     onChange={v => {
-                      const existing = (selectedAsset.allocations || []).find(a => a.room === v);
-                      setAllocationDraft({ room: v, quantity: existing ? String(existing.quantity) : "" });
+                      const existing = (selectedAsset.allocations || []).find(a => a.roomId === v);
+                      setAllocationDraft({ roomId: v, quantity: existing ? String(existing.quantity) : "" });
                       setAllocationError("");
                     }}
-                    roomOptions={roomAssetNames}
+                    rooms={roomAssets}
                   />
                   <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Quantity</span>
@@ -2574,8 +2619,8 @@ function AssetTracker() {
                 <div style={{ display: "flex", justifyContent: "flex-end" }}>
                   <button
                     onClick={saveAllocation}
-                    disabled={!allocationDraft.room || !allocationDraft.quantity}
-                    style={{ padding: "8px 14px", background: (allocationDraft.room && allocationDraft.quantity) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                    disabled={!allocationDraft.roomId || !allocationDraft.quantity}
+                    style={{ padding: "8px 14px", background: (allocationDraft.roomId && allocationDraft.quantity) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                   >
                     Assign
                   </button>
@@ -2587,11 +2632,11 @@ function AssetTracker() {
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   {(selectedAsset.allocations || []).map(a => (
-                    <div key={a.room} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "9px 14px" }}>
-                      <div style={{ fontSize: 14, color: C.ink }}>{a.room}</div>
+                    <div key={a.roomId} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "9px 14px" }}>
+                      <div style={{ fontSize: 14, color: C.ink }}>{roomNameFor(a.roomId, assets)}</div>
                       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                         <span style={{ fontWeight: 600, color: C.brandDark }}>{a.quantity}</span>
-                        <button onClick={() => setConfirmAllocationRemove(a.room)} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4 }} aria-label={`Remove allocation for ${a.room}`}>
+                        <button onClick={() => setConfirmAllocationRemove(a.roomId)} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4 }} aria-label={`Remove allocation for ${roomNameFor(a.roomId, assets)}`}>
                           <X size={14} color={C.placeholder} />
                         </button>
                       </div>
@@ -2635,6 +2680,7 @@ function AssetTracker() {
                     slotCount={slotCount}
                     layout={selectedAsset.panelLayout || "two-column"}
                     breakers={selectedAsset.breakers || []}
+                    allAssets={assets}
                     onReconfigure={() => setShowPanelConfig(true)}
                     onSlotClick={id => {
                       const list = selectedAsset.breakers || [];
@@ -3085,18 +3131,34 @@ function AssetTracker() {
           )}
         </div>
 
-        {confirmDelete && (
-          <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20 }}>
-            <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 340 }}>
-              <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Permanently delete {confirmDelete}?</div>
-              <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>This erases it from the inventory entirely — including its comments and change log. Unlike archiving, this cannot be recovered.</div>
-              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-                <button onClick={() => setConfirmDelete(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
-                <button onClick={() => doDelete(confirmDelete)} style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Permanently delete</button>
+        {confirmDelete && (() => {
+          const assetToDelete = assets.find(a => a.label === confirmDelete);
+          const blockReason = assetToDelete ? canDeleteAsset(assetToDelete) : null;
+          return (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20 }}>
+              <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 340 }}>
+                {blockReason ? (
+                  <>
+                    <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Can't delete {confirmDelete}</div>
+                    <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>{blockReason}</div>
+                    <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                      <button onClick={() => setConfirmDelete(null)} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>OK</button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Permanently delete {confirmDelete}?</div>
+                    <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>This erases it from the inventory entirely — including its comments and change log. Unlike archiving, this cannot be recovered.</div>
+                    <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                      <button onClick={() => setConfirmDelete(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                      <button onClick={() => doDelete(confirmDelete)} style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Permanently delete</button>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {confirmArchive && (
           <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20 }}>
@@ -3150,7 +3212,7 @@ function AssetTracker() {
         {confirmAllocationRemove !== null && (
           <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20 }}>
             <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 340 }}>
-              <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Remove allocation for {confirmAllocationRemove}?</div>
+              <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Remove allocation for {roomNameFor(confirmAllocationRemove, assets)}?</div>
               <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>That quantity returns to the available pool. This can't be undone.</div>
               <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
                 <button onClick={() => setConfirmAllocationRemove(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
@@ -3210,7 +3272,7 @@ function AssetTracker() {
           };
           function renderCircuitTargetFields(values, setValues) {
             const mode = values.feedsPanelLabel ? "subpanel" : (values._mode || "rooms");
-            const roomsSelected = values.roomsServed || [];
+            const roomsSelected = values.roomsServedIds || [];
             return (
               <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 8 }}>
                 <span style={labelStyle}>Serves</span>
@@ -3224,27 +3286,27 @@ function AssetTracker() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => setValues({ ...values, _mode: "subpanel", roomsServed: [] })}
+                    onClick={() => setValues({ ...values, _mode: "subpanel", roomsServedIds: [] })}
                     style={{ flex: 1, padding: "7px 10px", background: mode === "subpanel" ? C.brand : "transparent", color: mode === "subpanel" ? "#fff" : C.ink, border: `1.5px solid ${mode === "subpanel" ? C.brand : C.border}`, borderRadius: 10, fontSize: 13, fontWeight: 600 }}
                   >
                     Feeds sub-panel
                   </button>
                 </div>
                 {mode === "rooms" ? (
-                  roomAssetNames.length === 0 ? (
+                  roomAssets.length === 0 ? (
                     <div style={{ fontSize: 13, color: C.empty }}>No Room assets yet.</div>
                   ) : (
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                      {roomAssetNames.map(room => {
-                        const active = roomsSelected.includes(room);
+                      {roomAssets.map(room => {
+                        const active = roomsSelected.includes(room.label);
                         return (
                           <button
-                            key={room}
+                            key={room.label}
                             type="button"
-                            onClick={() => setValues({ ...values, roomsServed: active ? roomsSelected.filter(r => r !== room) : [...roomsSelected, room] })}
+                            onClick={() => setValues({ ...values, roomsServedIds: active ? roomsSelected.filter(r => r !== room.label) : [...roomsSelected, room.label] })}
                             style={{ padding: "6px 12px", borderRadius: 14, fontSize: 13, fontWeight: active ? 600 : 500, border: `1.5px solid ${active ? C.brand : C.border}`, background: active ? C.brand : "#fff", color: active ? "#fff" : C.ink }}
                           >
-                            {room}
+                            {room.room}
                           </button>
                         );
                       })}
@@ -3424,7 +3486,7 @@ function AssetTracker() {
                             { key: "label", label: "Label", placeholder: "e.g. Circuit 14" },
                             { key: "description", label: "Description", placeholder: "What does this feed?", wide: true },
                           ]}
-                          initialDraft={{ label: "", description: "", roomsServed: [], feedsPanelLabel: "" }}
+                          initialDraft={{ label: "", description: "", roomsServedIds: [], feedsPanelLabel: "" }}
                           onAdd={draft2 => addCircuit(member.id, draft2)}
                           onSave={(id, draft2) => saveCircuitEdit(member.id, id, draft2)}
                           onDelete={id => deleteCircuit(member.id, id)}
@@ -3439,7 +3501,7 @@ function AssetTracker() {
                             <div>
                               <div style={{ fontWeight: 600, fontSize: 13, color: C.ink }}>{circuit.label}</div>
                               <div style={{ fontSize: 12, color: C.muted }}>
-                                {circuit.feedsPanelLabel ? `Feeds → ${circuit.feedsPanelLabel}` : (circuit.roomsServed || []).length ? `Serves ${circuit.roomsServed.join(", ")}` : "—"}
+                                {circuit.feedsPanelLabel ? `Feeds → ${circuit.feedsPanelLabel}` : (circuit.roomsServedIds || []).length ? `Serves ${circuit.roomsServedIds.map(id => roomNameFor(id, assets)).join(", ")}` : "—"}
                                 {circuit.description ? ` · ${circuit.description}` : ""}
                               </div>
                             </div>
@@ -3802,9 +3864,9 @@ function AssetTracker() {
                 c.key === "type" ? (
                   <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v })} typeOptions={typesList} onManage={() => setShowTypesManager(true)} />
                 ) : c.key === "room" && draft.type !== "Room" ? (
-                  <RoomField key={c.key} value={draft.room || ""} onChange={v => setDraft({ ...draft, room: v })} roomOptions={roomAssetNames} />
+                  <RoomField key={c.key} value={draft.roomId || ""} onChange={v => setDraft({ ...draft, roomId: v })} rooms={roomAssets} />
                 ) : c.key === "building" && draft.type !== "Building" ? (
-                  <BuildingField key={c.key} value={draft.building || ""} onChange={v => setDraft({ ...draft, building: v })} buildingOptions={buildingAssetNames} />
+                  <BuildingField key={c.key} value={draft.buildingId || ""} onChange={v => setDraft({ ...draft, buildingId: v })} buildings={buildingAssets} />
                 ) : c.key === "person" ? (
                   <UserField
                     key={c.key}
@@ -3877,16 +3939,16 @@ function AssetTracker() {
           </div>
         )}
 
-        {roomFilter !== "All rooms" && filtered.length > 0 && (
+        {roomFilter && filtered.length > 0 && (
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", border: `1.5px solid ${C.brand}`, borderRadius: 10, background: C.surface, padding: "10px 14px", marginBottom: 10, fontSize: 13 }}>
-            <span style={{ color: C.muted }}>Move {filtered.filter(a => a.type !== "Room" && a.type !== "Building" && a.type !== "Bulk Item").length} filtered device(s) from <b style={{ color: C.brandDark }}>{roomFilter}</b> to:</span>
+            <span style={{ color: C.muted }}>Move {filtered.filter(a => a.type !== "Room" && a.type !== "Building" && a.type !== "Bulk Item").length} filtered device(s) from <b style={{ color: C.brandDark }}>{roomNameFor(roomFilter, assets)}</b> to:</span>
             <select
               value={moveTarget}
               onChange={e => setMoveTarget(e.target.value)}
               style={{ padding: "6px 10px", border: `1.5px solid ${C.border}`, fontSize: 13, borderRadius: 10, color: C.ink, background: "#fff", flex: "1 1 140px", maxWidth: 220 }}
             >
               <option value="">Select a room…</option>
-              {roomAssetNames.filter(r => r !== roomFilter).map(r => <option key={r} value={r}>{r}</option>)}
+              {roomAssets.filter(r => r.label !== roomFilter).map(r => <option key={r.label} value={r.label}>{r.room}</option>)}
             </select>
             <button
               onClick={() => moveFilteredTo(moveTarget)}
@@ -3934,6 +3996,7 @@ function AssetTracker() {
                   const isTypeCol = c.key === "type";
                   const Icon = isTypeCol ? iconFor(a.type) : null;
                   const applies = fieldAppliesTo(c.key, a.type);
+                  const isRoomCol = c.key === "room" && a.type !== "Room" && applies;
                   const isInferredBuilding = c.key === "building" && !applies;
                   const inferredValue = isInferredBuilding ? inferBuilding(a, assets) : "";
                   return (
@@ -3967,6 +4030,8 @@ function AssetTracker() {
                         a.building || "Building"
                       ) : isTypeCol && a.type === "Room" ? (
                         a.room || "Room"
+                      ) : isRoomCol ? (
+                        roomNameFor(a.roomId, assets) || "—"
                       ) : (
                         applies ? (a[c.key] || "—") : isInferredBuilding ? (inferredValue || "") : ""
                       )}
@@ -4195,15 +4260,24 @@ function TypeField({ value, onChange, typeOptions, onManage }) {
   );
 }
 
-function RoomField({ value, onChange, roomOptions }) {
+// `value` is a Room asset's stable `label` (id), not its display name — same
+// reasoning as roomNameFor/buildingNameFor: storing the id instead of the
+// mutable name means renaming a Room needs no cascade elsewhere.
+function RoomField({ value, onChange, rooms }) {
   const [open, setOpen] = useState(false);
-  const options = !value || roomOptions.includes(value) ? roomOptions : [value, ...roomOptions];
+  const placeholder = rooms.length ? "Select a room…" : "No Room assets yet";
+  const nameForId = id => {
+    if (!id) return placeholder;
+    const room = rooms.find(r => r.label === id);
+    return room ? room.room : "(deleted room)";
+  };
+  const ids = rooms.map(r => r.label);
+  const options = !value || ids.includes(value) ? ids : [value, ...ids];
   const withClear = ["", ...options];
-  const placeholder = roomOptions.length ? "Select a room…" : "No Room assets yet";
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Room</span>
-      <PickerTrigger value={value} placeholder={placeholder} onClick={() => setOpen(true)} ariaLabel="Select room" />
+      <PickerTrigger value={value ? nameForId(value) : ""} placeholder={placeholder} onClick={() => setOpen(true)} ariaLabel="Select room" />
       {open && (
         <SelectionModal
           title="Select room"
@@ -4211,22 +4285,28 @@ function RoomField({ value, onChange, roomOptions }) {
           value={value || ""}
           onChange={onChange}
           onClose={() => setOpen(false)}
-          labelForOption={o => o || placeholder}
+          labelForOption={nameForId}
         />
       )}
     </label>
   );
 }
 
-function BuildingField({ value, onChange, buildingOptions }) {
+function BuildingField({ value, onChange, buildings }) {
   const [open, setOpen] = useState(false);
-  const options = !value || buildingOptions.includes(value) ? buildingOptions : [value, ...buildingOptions];
+  const placeholder = buildings.length ? "Select a building…" : "No Building assets yet";
+  const nameForId = id => {
+    if (!id) return placeholder;
+    const building = buildings.find(b => b.label === id);
+    return building ? building.building : "(deleted building)";
+  };
+  const ids = buildings.map(b => b.label);
+  const options = !value || ids.includes(value) ? ids : [value, ...ids];
   const withClear = ["", ...options];
-  const placeholder = buildingOptions.length ? "Select a building…" : "No Building assets yet";
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Building</span>
-      <PickerTrigger value={value} placeholder={placeholder} onClick={() => setOpen(true)} ariaLabel="Select building" />
+      <PickerTrigger value={value ? nameForId(value) : ""} placeholder={placeholder} onClick={() => setOpen(true)} ariaLabel="Select building" />
       {open && (
         <SelectionModal
           title="Select building"
@@ -4234,7 +4314,7 @@ function BuildingField({ value, onChange, buildingOptions }) {
           value={value || ""}
           onChange={onChange}
           onClose={() => setOpen(false)}
-          labelForOption={o => o || placeholder}
+          labelForOption={nameForId}
         />
       )}
     </label>
@@ -4662,7 +4742,7 @@ function PanelConfigForm({ slotCount, layout, onSave, onCancel }) {
 // specific breaker's detail modal (edit fields + its circuits) — the
 // diagram IS the entry point for a breaker's detail, not a map onto a
 // separate list.
-function PanelDiagram({ slotCount, layout, breakers, onReconfigure, onSlotClick, onSpareClick }) {
+function PanelDiagram({ slotCount, layout, breakers, allAssets, onReconfigure, onSlotClick, onSpareClick }) {
   const [infoMode, setInfoMode] = useState("breaker"); // "breaker" | "feeds"
   const columns = layout === "single-column" ? 1 : 2;
   const rowOf = n => (columns === 1 ? n : Math.ceil(n / 2));
@@ -4756,9 +4836,9 @@ function PanelDiagram({ slotCount, layout, breakers, onReconfigure, onSlotClick,
   function feedInfo(breaker) {
     const circuits = breaker.circuits || [];
     if (circuits.length === 0) return { primary: "—", secondary: "no circuits" };
-    const rooms = [...new Set(circuits.flatMap(c => c.roomsServed || []))];
+    const roomIds = [...new Set(circuits.flatMap(c => c.roomsServedIds || []))];
     const subPanels = [...new Set(circuits.filter(c => c.feedsPanelLabel).map(c => c.feedsPanelLabel))];
-    const parts = [...rooms, ...subPanels.map(p => `→ ${p}`)];
+    const parts = [...roomIds.map(id => roomNameFor(id, allAssets)), ...subPanels.map(p => `→ ${p}`)];
     return { primary: parts.join(", ") || "—", secondary: "" };
   }
   function breakerInfo(breaker) {

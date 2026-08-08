@@ -152,9 +152,34 @@ item, visually matching the column-filter popup (`activeFilterCol`) rather than 
 native dropdown chrome. `PickerTrigger` is the button that opens it, styled like the old
 `<select>` so form layouts didn't need to change.
 
-Rooms link to Buildings (`building` field, dropdown of existing Building assets); devices
-link to Rooms (`room` field, dropdown of existing Room assets); a device's building is
-inferred transitively through its Room (see `inferBuilding()`), not stored directly.
+Rooms link to Buildings, and devices link to Rooms, by **stable id** (the target Room/
+Building asset's own `label`, e.g. `BCR0002`) — `Room.buildingId`, everything else's
+`roomId`, `allocations[].roomId`, `Circuit.roomsServedIds` — not by the target's display
+name. `roomNameFor()`/`buildingNameFor()` resolve an id back to the current name at render
+time; a device's building is inferred transitively through its Room (see `inferBuilding()`,
+which now follows `roomId` → that Room's `buildingId`), not stored directly. `Room.room`/
+`Building.building` remain the *own* display name of that Room/Building asset — the one
+field that's genuinely a plain string, since a Room doesn't reference itself.
+
+This is deliberate hardening, not the original design: earlier, everything stored the
+target's display *name*, kept in sync by a rename cascade in the edit-save handler that
+walked every asset and rewrote matching `.room`/`.building`/`allocations[].room` strings.
+That cascade had a real gap — it never reached into
+`panel.breakers[].circuits[].roomsServed` (nested inside Electrical Panel assets), so
+renaming a Room silently orphaned the panel diagram's "Feeds" view and a Room's "Fed by"
+banner. Switching every reference to an id removes the whole cascade requirement:
+renaming a Room/Building is now a normal single-asset field edit with nothing else to
+keep in sync, since every reference already holds the id, not the stale name. Deleting a
+Room/Building that's still referenced is blocked (`canDeleteAsset()`, wired into the
+`confirmDelete` modal) the same way Breaker Type deletion is blocked when still in use
+(`canDeleteBreakerGroup`/`findBreakerTypeUsages`) — client-side only, consistent with
+every other delete guard in this app.
+
+`RoomField`/`BuildingField` (~line 4229) take the id-valued asset list (`rooms`/
+`buildings` — i.e. `roomAssets`/`buildingAssets`) directly rather than an array of name
+strings, and resolve the id to a name for display (`PickerTrigger`, `SelectionModal`'s
+`labelForOption`) while storing the id on change. A dangling id (its Room/Building was
+deleted) resolves to `"(deleted room)"`/`"(deleted building)"` rather than throwing.
 
 Every asset carries: `comments` (freeform notes), `changes` (structured: type/vendor/
 cost/note — its own managed lists, editable via gear-icon "manage" buttons), and is
@@ -320,13 +345,19 @@ When you do:
 ## Known constraints / things to watch
 
 - **Backend is behind the frontend as of this writing**: `index.html`/`AssetTrackerSync.gs`
-  are at v8 (BreakerTypes catalog, `Breaker.cells`), but the live deployed backend is still
-  v6 — needs a fresh Apps Script redeploy before BreakerType placements will actually persist.
-  The live BCA0082–85 panel data also still uses the pre-v7 shape (`slots`/`poles`/`mount`,
-  no `cells`) — it'll need rebuilding via the new Add Breaker flow after redeploying, same as
-  the tandem/quad rebuild after the v7 redeploy. Check `backendScriptVersion` in the UI (or
-  the "Backend outdated" header warning) to see what's actually live before assuming any of
-  this works against the real Sheet — Sandbox mode is unaffected either way.
+  are at v9 (Room/Building references switched to stable ids — `roomId`/`buildingId`/
+  `allocations[].roomId`/`Circuit.roomsServedIds` — plus everything through v8's
+  BreakerTypes catalog and `Breaker.cells`), but the live deployed backend is still v6 —
+  needs a fresh Apps Script redeploy before any of v7–v9's changes actually persist. The
+  live BCA0082–85 panel data still uses the pre-v7 shape (`slots`/`poles`/`mount`, no
+  `cells`), and every live asset's `.room`/`.building` are still plain name strings, not
+  ids — both need rebuilding via the UI after redeploying (breakers via Add Breaker, same
+  as the tandem/quad rebuild after v7; Room/Building links by re-picking each asset's Room/
+  Building field once, which now writes the id). No separate migration script — this is a
+  small live dataset, hand-rebuilding through the UI is simpler than one-off migration code.
+  Check `backendScriptVersion` in the UI (or the "Backend outdated" header warning) to see
+  what's actually live before assuming any of this works against the real Sheet — Sandbox
+  mode is unaffected either way.
 - No auth beyond the cosmetic name tag — anyone with the deployed URL can read/write
   everything. Fine for internal school use with a private link; not a public-facing
   security model.

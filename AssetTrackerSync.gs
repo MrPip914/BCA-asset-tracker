@@ -31,7 +31,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v8 (2026-08-06) — Add BreakerTypes catalog; Breaker.slots+poles+mount replaced by Breaker.cells (half-slot addressing) + breakerTypeId";
+const SCRIPT_VERSION = "v9 (2026-08-07) — Room/Building references switched from name strings to stable ids (roomId/buildingId/allocations[].roomId/Circuit.roomsServedIds); asset.room/building now only hold a Room/Building asset's own name";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -48,8 +48,13 @@ const SHEET_NAMES = {
 
 // Flat fields stored directly as Asset columns (everything except the
 // per-asset arrays, which live in their own tabs keyed by asset label).
+// "room"/"building" hold a Room/Building asset's own display name (only
+// meaningful on that asset's own row). Every OTHER asset that's located in a
+// room, or a Room that belongs to a building, points at it via roomId/
+// buildingId — the referenced asset's stable `label`, not its mutable name —
+// so renaming a Room/Building needs no cascade across other rows.
 const ASSET_FIELDS = [
-  "label", "type", "itemName", "screenSize", "hostname", "room", "building",
+  "label", "type", "itemName", "screenSize", "hostname", "room", "building", "roomId", "buildingId",
   "brand", "model", "serial", "person", "peripherals", "notes",
   "totalQuantity", "purchaseDate", "warrantyUntil", "status",
   "panelSlotCount", "panelLayout",
@@ -181,7 +186,7 @@ function doGet(e) {
         changes: changeRows.filter(c => c.assetLabel === label).map(c => ({
           changeType: c.changeType, vendor: c.vendor, cost: c.cost, note: c.note, at: c.at, by: c.by,
         })),
-        allocations: allocationRows.filter(al => al.assetLabel === label).map(al => ({ room: al.room, quantity: al.quantity })),
+        allocations: allocationRows.filter(al => al.assetLabel === label).map(al => ({ roomId: al.room, quantity: al.quantity })),
         maintenanceItems: maintenanceRows.filter(m => m.assetLabel === label).map(m => ({
           task: m.task, frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
           lastPerformed: m.lastPerformed, owner: m.owner, at: m.at, by: m.by,
@@ -197,7 +202,7 @@ function doGet(e) {
           groupId: b.groupId, breakerTypeId: b.breakerTypeId,
           circuits: circuitRows.filter(c => c.breakerId === b.id).map(c => ({
             id: c.id, breakerId: c.breakerId, label: c.label, description: c.description,
-            roomsServed: c.roomsServed ? String(c.roomsServed).split(",").map(s => s.trim()) : [],
+            roomsServedIds: c.roomsServed ? String(c.roomsServed).split(",").map(s => s.trim()) : [],
             feedsPanelLabel: c.feedsPanelLabel,
           })),
         })),
@@ -276,7 +281,7 @@ function doPost(e) {
         (a.changes || []).forEach(c => changeRows.push({
           assetLabel: a.label, changeType: c.changeType, vendor: c.vendor || "", cost: c.cost || "", note: c.note || "", at: c.at, by: c.by || "",
         }));
-        (a.allocations || []).forEach(al => allocationRows.push({ assetLabel: a.label, room: al.room, quantity: al.quantity }));
+        (a.allocations || []).forEach(al => allocationRows.push({ assetLabel: a.label, room: al.roomId, quantity: al.quantity }));
         (a.maintenanceItems || []).forEach(m => maintenanceRows.push({
           assetLabel: a.label, task: m.task, frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
           lastPerformed: m.lastPerformed || "", owner: m.owner || "", at: m.at, by: m.by || "",
@@ -293,7 +298,7 @@ function doPost(e) {
           });
           (b.circuits || []).forEach(c => circuitRows.push({
             id: c.id, breakerId: b.id, label: c.label, description: c.description || "",
-            roomsServed: (c.roomsServed || []).join(","), feedsPanelLabel: c.feedsPanelLabel || "",
+            roomsServed: (c.roomsServedIds || []).join(","), feedsPanelLabel: c.feedsPanelLabel || "",
           }));
         });
       });
