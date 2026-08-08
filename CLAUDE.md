@@ -181,6 +181,19 @@ strings, and resolve the id to a name for display (`PickerTrigger`, `SelectionMo
 `labelForOption`) while storing the id on change. A dangling id (its Room/Building was
 deleted) resolves to `"(deleted room)"`/`"(deleted building)"` rather than throwing.
 
+**Every asset's own `label` (its Asset ID, e.g. `BCA0082`) is the one field the whole app
+treats as a stable, unique identifier** — `Breaker.panelLabel`, `Circuit.feedsPanelLabel`,
+the `roomId`/`buildingId` references above, and the global `auditLog`'s `assetLabel`
+matching all assume it never changes. It's therefore excluded from `editFormColumns`
+(`formColumnsFor(draft.type).filter(c => c.key !== "label")`, ~line 2290) — editable only
+in the *add* form (`addFormColumns`, unfiltered), where nothing references it yet. Before
+this exclusion existed, the generic edit form rendered "Asset ID" as an ordinary text
+field with no protection at all — renaming an existing asset there silently orphaned its
+own audit history (new entries are logged against the *old* label at save time, via
+`original.label`) and desynced `selectedLabel` from `assets` (kicking the user back to the
+list view on save), the same failure mode the Room/Building hardening above was built to
+eliminate — found by auditing the codebase for other name-vs-id gaps after that fix.
+
 Every asset carries: `comments` (freeform notes), `changes` (structured: type/vendor/
 cost/note — its own managed lists, editable via gear-icon "manage" buttons), and is
 covered by a global `auditLog` that automatically records creates/edits/archives/
