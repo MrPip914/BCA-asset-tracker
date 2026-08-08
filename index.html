@@ -242,6 +242,18 @@ function inferBuilding(asset, assets) {
   return roomAsset ? buildingNameFor(roomAsset.buildingId, assets) : "";
 }
 
+// Same "direct field, or inferred via Room" logic as inferBuilding above, but
+// returns the Building asset's id instead of its display name — used for
+// filtering/sorting by building, where matching on a stable id (not a name
+// that could theoretically collide or change) is what's actually wanted.
+function effectiveBuildingId(asset, assets) {
+  if (!asset) return "";
+  if (fieldAppliesTo("building", asset.type)) return asset.buildingId || "";
+  if (!asset.roomId) return "";
+  const roomAsset = assets.find(a => a.type === "Room" && a.label === asset.roomId);
+  return roomAsset ? roomAsset.buildingId || "" : "";
+}
+
 // Buckets the read-only detail view's fields into labeled sections instead of
 // one flat list. Any column not named here (custom user-added columns) falls
 // into a trailing "Custom Fields" group rather than being dropped.
@@ -555,6 +567,7 @@ function AssetTracker() {
 
   const [query, setQuery] = useState("");
   const [roomFilter, setRoomFilter] = useState(""); // "" = All rooms; otherwise a Room asset's label (id)
+  const [buildingFilter, setBuildingFilter] = useState(""); // "" = All buildings; otherwise a Building asset's label (id)
   const [typeFilter, setTypeFilter] = useState("All types");
   const [userFilter, setUserFilter] = useState("All users");
   const [statusFilter, setStatusFilter] = useState("Active");
@@ -806,6 +819,10 @@ function AssetTracker() {
     ["", ...roomAssets.map(r => r.label).sort((x, y) => roomNameFor(x, assets).localeCompare(roomNameFor(y, assets)))]
   ), [roomAssets, assets]);
 
+  const buildings = useMemo(() => (
+    ["", ...buildingAssets.map(b => b.label).sort((x, y) => buildingNameFor(x, assets).localeCompare(buildingNameFor(y, assets)))]
+  ), [buildingAssets, assets]);
+
   const types = useMemo(() => {
     if (!assets) return [];
     const set = new Set(assets.map(a => a.type || "Other"));
@@ -819,6 +836,7 @@ function AssetTracker() {
     const q = query.trim().toLowerCase();
     const list = assets.filter(a => {
       if (roomFilter && a.roomId !== roomFilter) return false;
+      if (buildingFilter && effectiveBuildingId(a, assets) !== buildingFilter) return false;
       if (typeFilter !== "All types" && (a.type || "Other") !== typeFilter) return false;
       if (userFilter !== "All users" && !(a.person || "").split("/").map(s => s.trim()).includes(userFilter)) return false;
       if (statusFilter !== "All statuses" && (a.status || "Active") !== statusFilter) return false;
@@ -844,7 +862,7 @@ function AssetTracker() {
       });
     }
     return list;
-  }, [assets, query, roomFilter, typeFilter, userFilter, statusFilter, sortConfig]);
+  }, [assets, query, roomFilter, buildingFilter, typeFilter, userFilter, statusFilter, sortConfig]);
 
   // Flattened across every active asset's maintenanceItems, for the site-wide
   // Maintenance tab — archived assets are excluded, matching the default Active
@@ -932,6 +950,7 @@ function AssetTracker() {
   const filterConfigs = {
     type: { label: "Type", value: typeFilter, setValue: setTypeFilter, options: types },
     room: { label: "Room", value: roomFilter, setValue: setRoomFilter, options: rooms, labelForOption: id => (id ? roomNameFor(id, assets) : "All rooms") },
+    building: { label: "Building", value: buildingFilter, setValue: setBuildingFilter, options: buildings, labelForOption: id => (id ? buildingNameFor(id, assets) : "All buildings") },
     person: { label: "User", value: userFilter, setValue: setUserFilter, options: users },
     status: { label: "Status", value: statusFilter, setValue: setStatusFilter, options: STATUS_FILTER_OPTIONS },
   };
