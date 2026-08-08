@@ -62,14 +62,38 @@ per-device via `localStorage` (`SANDBOX_MODE_KEY`).
   Both live inside the same `view === "list"` screen; opening an asset (either tab) still
   goes through `openDetail()` into `view === "detail"`, and `openDetail(asset, "maintenance")`
   jumps straight to that asset's Maintenance sub-tab — used by the overview's row click.
-- **State**: the whole app is one component (`AssetTracker`) holding all state — assets,
-  managed lists (change types, vendors, peripherals, users), audit log, column config.
+- **State**: the whole app is one component (`AssetTracker`, ~3700 lines) holding all
+  state — assets, managed lists (change types, vendors, peripherals, users), audit log,
+  column config. This is a known architectural weak point (see "Component size" below),
+  not an endorsement — it's evolved this large rather than being designed this way, and
+  splitting more of its render tree out the way `BreakersTabContent` was pulled out is
+  the natural next step whenever a tab gets touched again.
+- **Related state lives in one object, not parallel `useState`s**, wherever it's opened/
+  closed together — e.g. `breakerModal` (anchor id, per-member amp drafts, instance
+  draft, editing flags, error, all in one object, `null` when closed) instead of 8
+  separate states. This isn't just tidiness: before this consolidation, `openDetail()`
+  (which runs every time you navigate to a different asset) didn't reset any of the
+  breaker-modal or Add-Breaker-form state, since resetting 8+ scattered setters is easy
+  to forget one of — which is exactly what happened. Grouping into one object made
+  `openDetail()`'s reset trivial (`setBreakerModal(null)`) and structurally harder to
+  regress. `swapModal`, `moveCircuitModal`, and `addBreakerDraft` (its own `error` field
+  instead of a 4th parallel state) follow the same shape. `allocationDraft` folds its
+  error in too. Maintenance's add/edit/delete state was *not* consolidated — it's three
+  genuinely different sub-flows (new item, editing an existing one by index, confirming
+  a delete), not one thing with parallel copies, so merging it would add complexity
+  rather than remove it.
 - **Persistence model**: the app keeps its full state in memory and, on every change,
   sends the ENTIRE state as one JSON snapshot to the Apps Script backend (`persist()` ->
   `writeSnapshot()` -> `fetch(SHEET_API_URL, { method: "POST", ... })`). On load, it does
   one GET to the same URL and reconstructs everything (`useEffect` near the top of the
-  component). No per-field diffing on the client — but `persist()` does compute which
-  *domains* changed (`_dirty: { assets, config }`), via plain reference-equality against
+  component). `persist(nextAssets, overrides)` takes an *options object* for everything
+  besides assets (`{ columns, changeTypes, vendors, auditLog, peripheralsList, usersList,
+  bulkItemTypes, typesList, breakerTypes }`) — each defaults to the current state, so a
+  call site only names whichever domain it's actually changing (most calls are just
+  `persist(next, { auditLog: logAudit([entry]) })`) instead of re-passing every other
+  domain unchanged, which is what a 10-positional-argument signature demanded before.
+  No per-field diffing on the client — but `persist()` does compute which *domains*
+  changed (`_dirty: { assets, config }`), via plain reference-equality against
   current state (every call site already either passes a domain through untouched or a
   freshly computed value, so this needs no per-call-site bookkeeping). `AssetTrackerSync.gs`'s
   `doPost` uses that to skip rewriting the Assets/Comments/Changes/Allocations/Maintenance
@@ -106,6 +130,15 @@ per-device via `localStorage` (`SANDBOX_MODE_KEY`).
   a Circuit's rooms-served-vs-feeds-sub-panel toggle. Actions that aren't a generic field edit
   (Swap Breaker, Move Circuit) live outside the component via `customRowActions`, which opens
   the caller's own dedicated modal.
+- **Component size**: `AssetTracker` is still a god-component (state, handlers, and most tab
+  content all live in it) — a byproduct of the app growing feature-by-feature with no build
+  step to make splitting files free. `BreakersTabContent` (the Breakers detail-tab's whole
+  render: "Fed from" banner, panel config/diagram toggle, Add Breaker form) was pulled out as
+  a top-level component taking only the props it touches, as a first cut proving the pattern
+  works with zero build-step cost — plain JS/JSX reorganization within `index.html`, nothing
+  else changes. Not all tabs have been split out this way yet; do the same extraction for
+  another tab's content next time that tab needs real changes, rather than a dedicated
+  refactor pass.
 - **Main-page toolbar is intentionally minimal, on both top-level tabs**: on Assets,
   Columns/Export/Add Asset live in a hamburger menu (`showToolbarMenu`) anchored top-right of
   the Assets/Maintenance tab row rather than as always-visible buttons; on Maintenance, the

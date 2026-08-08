@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
@@ -522,31 +522,31 @@ function AssetTracker() {
   const [showVendorManager, setShowVendorManager] = useState(false);
   const [newChangeTypeName, setNewChangeTypeName] = useState("");
   const [newVendorName, setNewVendorName] = useState("");
-  const [allocationDraft, setAllocationDraft] = useState({ roomId: "", quantity: "" });
-  const [allocationError, setAllocationError] = useState("");
+  const [allocationDraft, setAllocationDraft] = useState({ roomId: "", quantity: "", error: "" });
   const [confirmAllocationRemove, setConfirmAllocationRemove] = useState(null);
   const [maintenanceDraft, setMaintenanceDraft] = useState({ task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
   const [editingMaintenanceIdx, setEditingMaintenanceIdx] = useState(null);
   const [maintenanceEditDraft, setMaintenanceEditDraft] = useState(null);
   const [confirmMaintenanceDelete, setConfirmMaintenanceDelete] = useState(null);
-  const [swappingBreaker, setSwappingBreaker] = useState(null); // breaker object or null
-  const [swapDraft, setSwapDraft] = useState({ serial: "", ampRating: "", installedDate: "" });
-  const [swapError, setSwapError] = useState(null);
-  const [movingCircuit, setMovingCircuit] = useState(null); // { breakerId, circuit } or null
-  const [moveCircuitTarget, setMoveCircuitTarget] = useState("");
-  const [moveCircuitError, setMoveCircuitError] = useState(null);
+  // null when closed; otherwise { breaker, draft: { serial, ampRating, installedDate }, error }
+  const [swapModal, setSwapModal] = useState(null);
+  // null when closed; otherwise { breakerId, circuit, target, error }
+  const [moveCircuitModal, setMoveCircuitModal] = useState(null);
   const [showPanelConfig, setShowPanelConfig] = useState(false);
-  const [openBreakerId, setOpenBreakerId] = useState(null); // clicked in the diagram — anchors the group (via groupId) shown in breakerDetailModal
-  const [memberAmpDrafts, setMemberAmpDrafts] = useState(null); // { [breakerId]: ampRating string } — the only per-member-editable field
-  const [editingMemberId, setEditingMemberId] = useState(null); // which member's amp rating is in edit mode, or null
-  const [instanceDraft, setInstanceDraft] = useState(null); // { serial, installedDate, notes } — shared by every member of the open group
-  const [editingInstance, setEditingInstance] = useState(false);
-  const [breakerModalError, setBreakerModalError] = useState(null);
-  const [confirmDeleteGroup, setConfirmDeleteGroup] = useState(false);
-  const [addingCircuitFor, setAddingCircuitFor] = useState(null); // breaker id whose "add circuit" form is open, or null
-  const [showAddBreakerForm, setShowAddBreakerForm] = useState(false);
+  // Everything the breaker detail modal needs, as one object instead of 8
+  // parallel useStates — null when the modal is closed. Grouping these means
+  // closing/resetting the modal is one setBreakerModal(null) instead of 8
+  // separate setters that are easy to forget (openDetail() didn't reset any
+  // of these before this consolidation, so navigating to a different asset
+  // while the modal was open left it holding a stale breaker id).
+  // Shape when open: { anchorId, memberAmpDrafts: { [breakerId]: ampRating },
+  // editingMemberId, instanceDraft: { serial, installedDate, notes },
+  // editingInstance, error, confirmDeleteGroup, addingCircuitFor }.
+  const [breakerModal, setBreakerModal] = useState(null);
+  // null when closed — replaces a separate showAddBreakerForm boolean, since
+  // the draft only ever exists while the form is open anyway. `error` lives
+  // on the draft itself rather than a 4th parallel state.
   const [addBreakerDraft, setAddBreakerDraft] = useState(null);
-  const [addBreakerError, setAddBreakerError] = useState(null);
 
   const [currentUser, setCurrentUser] = useState(null);
   const [showNamePrompt, setShowNamePrompt] = useState(false);
@@ -719,7 +719,22 @@ function AssetTracker() {
     return true;
   }
 
-  async function persist(nextAssets, nextColumns, nextChangeTypes = changeTypes, nextVendors = vendors, nextAuditLog = auditLog, nextPeripheralsList = peripheralsList, nextUsersList = usersList, nextBulkItemTypes = bulkItemTypes, nextTypesList = typesList, nextBreakerTypes = breakerTypes) {
+  // `overrides` only needs to name whichever domains actually changed — every
+  // other domain defaults to its current state, so a call that's only adding
+  // an audit entry (the overwhelming majority) is just `persist(next, { auditLog })`
+  // instead of re-passing columns/changeTypes/vendors unchanged every time.
+  async function persist(nextAssets, overrides = {}) {
+    const {
+      columns: nextColumns = columns,
+      changeTypes: nextChangeTypes = changeTypes,
+      vendors: nextVendors = vendors,
+      auditLog: nextAuditLog = auditLog,
+      peripheralsList: nextPeripheralsList = peripheralsList,
+      usersList: nextUsersList = usersList,
+      bulkItemTypes: nextBulkItemTypes = bulkItemTypes,
+      typesList: nextTypesList = typesList,
+      breakerTypes: nextBreakerTypes = breakerTypes,
+    } = overrides;
     // Guard against ever writing over the Sheet before a real snapshot has been
     // loaded — the UI shouldn't be reachable in that state, but this keeps a
     // load-failure from being able to clobber live data no matter how it's triggered.
@@ -934,19 +949,16 @@ function AssetTracker() {
     setConfirmCommentDelete(null);
     setConfirmChangeDelete(null);
     setConfirmArchive(null);
-    setAllocationDraft({ roomId: "", quantity: "" });
-    setAllocationError("");
+    setAllocationDraft({ roomId: "", quantity: "", error: "" });
     setConfirmAllocationRemove(null);
     setMaintenanceDraft({ task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
     setEditingMaintenanceIdx(null);
     setMaintenanceEditDraft(null);
     setConfirmMaintenanceDelete(null);
-    setSwappingBreaker(null);
-    setSwapDraft({ serial: "", ampRating: "", installedDate: "" });
-    setSwapError(null);
-    setMovingCircuit(null);
-    setMoveCircuitTarget("");
-    setMoveCircuitError(null);
+    setSwapModal(null);
+    setMoveCircuitModal(null);
+    setBreakerModal(null);
+    setAddBreakerDraft(null);
   }
 
   function closeDetail() {
@@ -980,7 +992,7 @@ function AssetTracker() {
         at: new Date().toISOString(), by: currentUser || "", assetLabel: draft.label,
         assetType: draft.type, action: "created",
       };
-      await persist([...assets, { comments: [], changes: [], allocations: [], ...draft }], columns, changeTypes, vendors, logAudit([createdEntry]));
+      await persist([...assets, { comments: [], changes: [], allocations: [], ...draft }], { auditLog: logAudit([createdEntry]) });
       cancelAdd();
     } else {
       const original = selectedAsset;
@@ -1013,7 +1025,7 @@ function AssetTracker() {
           assetType: draft.type || original.type, action: "noted", note: editNote.trim(),
         });
       }
-      await persist(next, columns, changeTypes, vendors, editEntries.length ? logAudit(editEntries) : auditLog);
+      await persist(next, { auditLog: editEntries.length ? logAudit(editEntries) : auditLog });
       setDetailEditing(false);
       setEditNote("");
     }
@@ -1050,7 +1062,7 @@ function AssetTracker() {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: label,
       assetType: asset ? asset.type : "", action: "deleted",
     };
-    await persist(assets.filter(a => a.label !== label), columns, changeTypes, vendors, logAudit([deletedEntry]));
+    await persist(assets.filter(a => a.label !== label), { auditLog: logAudit([deletedEntry]) });
     setConfirmDelete(null);
     if (selectedLabel === label) closeDetail();
   }
@@ -1062,7 +1074,7 @@ function AssetTracker() {
       assetType: asset ? asset.type : "", action: "archived",
     };
     const next = assets.map(a => (a.label === label ? { ...a, status: "Archived" } : a));
-    await persist(next, columns, changeTypes, vendors, logAudit([entry]));
+    await persist(next, { auditLog: logAudit([entry]) });
     setConfirmArchive(null);
   }
 
@@ -1073,7 +1085,7 @@ function AssetTracker() {
       assetType: asset ? asset.type : "", action: "restored",
     };
     const next = assets.map(a => (a.label === label ? { ...a, status: "Active" } : a));
-    await persist(next, columns, changeTypes, vendors, logAudit([entry]));
+    await persist(next, { auditLog: logAudit([entry]) });
   }
 
   async function duplicateAsset(source) {
@@ -1093,7 +1105,7 @@ function AssetTracker() {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: nextLabel,
       assetType: copy.type, action: "created",
     };
-    await persist([...assets, copy], columns, changeTypes, vendors, logAudit([entry]));
+    await persist([...assets, copy], { auditLog: logAudit([entry]) });
     openDetail(copy);
   }
 
@@ -1110,7 +1122,7 @@ function AssetTracker() {
       });
       return { ...a, person: newUser };
     });
-    await persist(next, columns, changeTypes, vendors, entries.length ? logAudit(entries) : auditLog);
+    await persist(next, { auditLog: entries.length ? logAudit(entries) : auditLog });
     setUserFilter(newUser);
     setReassignTarget("");
   }
@@ -1128,7 +1140,7 @@ function AssetTracker() {
       });
       return { ...a, roomId: newRoomId };
     });
-    await persist(next, columns, changeTypes, vendors, entries.length ? logAudit(entries) : auditLog);
+    await persist(next, { auditLog: entries.length ? logAudit(entries) : auditLog });
     setRoomFilter(newRoomId);
     setMoveTarget("");
   }
@@ -1137,7 +1149,7 @@ function AssetTracker() {
     if (!commentDraft.trim() || !selectedAsset) return;
     const comment = { text: commentDraft.trim(), at: new Date().toISOString(), by: currentUser || "" };
     const next = assets.map(a => (a.label === selectedLabel ? { ...a, comments: [...(a.comments || []), comment] } : a));
-    await persist(next, columns);
+    await persist(next, { columns });
     setCommentDraft("");
   }
 
@@ -1147,7 +1159,7 @@ function AssetTracker() {
       const comments = (a.comments || []).filter((_, i) => i !== idx);
       return { ...a, comments };
     });
-    await persist(next, columns);
+    await persist(next, { columns });
   }
 
   async function addChange() {
@@ -1161,7 +1173,7 @@ function AssetTracker() {
       by: currentUser || "",
     };
     const next = assets.map(a => (a.label === selectedLabel ? { ...a, changes: [...(a.changes || []), entry] } : a));
-    await persist(next, columns);
+    await persist(next, { columns });
     setChangeDraft({ changeType: "", vendor: "", cost: "", note: "" });
   }
 
@@ -1171,7 +1183,7 @@ function AssetTracker() {
       const changes = (a.changes || []).filter((_, i) => i !== idx);
       return { ...a, changes };
     });
-    await persist(next, columns);
+    await persist(next, { columns });
   }
 
   function getAllocatedTotal(asset) {
@@ -1187,7 +1199,7 @@ function AssetTracker() {
     const roomId = allocationDraft.roomId;
     const qty = parseFloat(allocationDraft.quantity);
     if (!roomId || !qty || qty <= 0) {
-      setAllocationError("Pick a room and a quantity greater than 0.");
+      setAllocationDraft({ ...allocationDraft, error: "Pick a room and a quantity greater than 0." });
       return;
     }
     const existing = selectedAsset.allocations || [];
@@ -1195,10 +1207,9 @@ function AssetTracker() {
     const otherRoomsTotal = existing.filter(a => a.roomId !== roomId).reduce((sum, a) => sum + (parseFloat(a.quantity) || 0), 0);
     const totalQty = parseFloat(selectedAsset.totalQuantity) || 0;
     if (otherRoomsTotal + qty > totalQty) {
-      setAllocationError(`Only ${totalQty - otherRoomsTotal} available to assign here.`);
+      setAllocationDraft({ ...allocationDraft, error: `Only ${totalQty - otherRoomsTotal} available to assign here.` });
       return;
     }
-    setAllocationError("");
     const nextAllocations = existingForRoom
       ? existing.map(a => (a.roomId === roomId ? { ...a, quantity: qty } : a))
       : [...existing, { roomId, quantity: qty }];
@@ -1208,8 +1219,8 @@ function AssetTracker() {
       previousQuantity: existingForRoom ? existingForRoom.quantity : null,
     };
     const next = assets.map(a => (a.label === selectedLabel ? { ...a, allocations: nextAllocations } : a));
-    await persist(next, columns, changeTypes, vendors, logAudit([entry]));
-    setAllocationDraft({ roomId: "", quantity: "" });
+    await persist(next, { auditLog: logAudit([entry]) });
+    setAllocationDraft({ roomId: "", quantity: "", error: "" });
   }
 
   async function removeAllocation(roomId) {
@@ -1222,7 +1233,7 @@ function AssetTracker() {
       assetType: selectedAsset.type, action: "unallocated", room: roomNameFor(roomId, assets), quantity: existingForRoom ? existingForRoom.quantity : 0,
     };
     const next = assets.map(a => (a.label === selectedLabel ? { ...a, allocations: nextAllocations } : a));
-    await persist(next, columns, changeTypes, vendors, logAudit([entry]));
+    await persist(next, { auditLog: logAudit([entry]) });
     setConfirmAllocationRemove(null);
   }
 
@@ -1241,7 +1252,7 @@ function AssetTracker() {
       by: currentUser || "",
     };
     const next = assets.map(a => (a.label === selectedLabel ? { ...a, maintenanceItems: [...(a.maintenanceItems || []), item] } : a));
-    await persist(next, columns);
+    await persist(next, { columns });
     setMaintenanceDraft({ task: "", frequency: freq.label, lastPerformed: "", owner: "" });
   }
 
@@ -1285,7 +1296,7 @@ function AssetTracker() {
     }
     const nextItems = items.map((it, i) => (i === idx ? updated : it));
     const next = assets.map(a => (a.label === selectedLabel ? { ...a, maintenanceItems: nextItems } : a));
-    await persist(next, columns, changeTypes, vendors, entries.length ? logAudit(entries) : auditLog);
+    await persist(next, { auditLog: entries.length ? logAudit(entries) : auditLog });
     cancelEditMaintenance();
   }
 
@@ -1301,7 +1312,7 @@ function AssetTracker() {
       action: "maintenance_completed", field: item.task,
       from: item.lastPerformed ? formatDateOnly(item.lastPerformed) : "never", to: formatDateOnly(today),
     };
-    await persist(next, columns, changeTypes, vendors, logAudit([entry]));
+    await persist(next, { auditLog: logAudit([entry]) });
   }
 
   async function deleteMaintenanceItem(idx) {
@@ -1314,7 +1325,7 @@ function AssetTracker() {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel,
       assetType: selectedAsset.type, action: "maintenance_removed", field: item.task,
     };
-    await persist(next, columns, changeTypes, vendors, logAudit([entry]));
+    await persist(next, { auditLog: logAudit([entry]) });
     setConfirmMaintenanceDelete(null);
   }
 
@@ -1347,7 +1358,7 @@ function AssetTracker() {
     if (String(original.panelSlotCount || "") !== String(slotCount || "")) entries.push(mk("Panel Slot Count", original.panelSlotCount || "—", slotCount || "—"));
     if ((original.panelLayout || "") !== (layout || "")) entries.push(mk("Panel Layout", original.panelLayout || "—", layout || "—"));
     const next = assets.map(a => (a.label === selectedLabel ? { ...a, panelSlotCount: slotCount, panelLayout: layout } : a));
-    persist(next, columns, changeTypes, vendors, entries.length ? logAudit(entries) : auditLog);
+    persist(next, { auditLog: entries.length ? logAudit(entries) : auditLog });
   }
 
   // Placing a breaker means placing a whole BreakerType instance at once — one
@@ -1395,7 +1406,7 @@ function AssetTracker() {
       action: "breaker_added", field: `Slot ${resolvedSlots.join("/")}`,
       to: `${type.name} (${newBreakers.map(b => b.ampRating ? b.ampRating + "A" : "?A").join(" / ")})`,
     };
-    persist(updateBreakers([...existing, ...newBreakers]), columns, changeTypes, vendors, logAudit([entry]));
+    persist(updateBreakers([...existing, ...newBreakers]), { auditLog: logAudit([entry]) });
     return { newBreakers };
   }
 
@@ -1406,14 +1417,16 @@ function AssetTracker() {
     const ampDrafts = {};
     members.forEach(m => { ampDrafts[m.id] = m.ampRating || ""; });
     const anchor = members.find(m => m.id === anchorId) || members[0];
-    setOpenBreakerId(anchorId);
-    setMemberAmpDrafts(ampDrafts);
-    setEditingMemberId(null);
-    setInstanceDraft({ serial: anchor.serial || "", installedDate: anchor.installedDate || "", notes: anchor.notes || "" });
-    setEditingInstance(false);
-    setBreakerModalError(null);
-    setConfirmDeleteGroup(false);
-    setAddingCircuitFor(null);
+    setBreakerModal({
+      anchorId,
+      memberAmpDrafts: ampDrafts,
+      editingMemberId: null,
+      instanceDraft: { serial: anchor.serial || "", installedDate: anchor.installedDate || "", notes: anchor.notes || "" },
+      editingInstance: false,
+      error: null,
+      confirmDeleteGroup: false,
+      addingCircuitFor: null,
+    });
   }
 
   // Editing a placed breaker only ever touches its own row — cells, groupId,
@@ -1438,7 +1451,7 @@ function AssetTracker() {
       action: "breaker_edited", field: `Slot ${slotsLabel_(original)} — Amp Rating`, from: original.ampRating || "—", to: updated.ampRating || "—",
     };
     const nextBreakers = existing.map(b => (b.id === id ? updated : b));
-    persist(updateBreakers(nextBreakers), columns, changeTypes, vendors, logAudit([entry]));
+    persist(updateBreakers(nextBreakers), { auditLog: logAudit([entry]) });
   }
 
   // Applies to every member of the group at once — a serial/install date/notes
@@ -1463,7 +1476,7 @@ function AssetTracker() {
     }
     if ((anchor.notes || "") !== next.notes) entries.push(mk("Notes", anchor.notes || "—", next.notes || "—"));
     const nextBreakers = existing.map(b => (memberIds.includes(b.id) ? { ...b, ...next } : b));
-    persist(updateBreakers(nextBreakers), columns, changeTypes, vendors, entries.length ? logAudit(entries) : auditLog);
+    persist(updateBreakers(nextBreakers), { auditLog: entries.length ? logAudit(entries) : auditLog });
   }
 
   // Referential integrity (a breaker unit with circuits attached can't be
@@ -1489,33 +1502,35 @@ function AssetTracker() {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
       action: "breaker_removed", field: `Slot ${groupSlotLabel}`,
     };
-    persist(updateBreakers(nextBreakers), columns, changeTypes, vendors, logAudit([entry]));
+    persist(updateBreakers(nextBreakers), { auditLog: logAudit([entry]) });
   }
 
   // Swap is deliberately separate from the generic edit above — it's the only
   // way to change serial/ampRating/installedDate, keeping "replaced the
   // physical unit" distinct from "corrected a typo" in the audit trail.
   function openSwapBreaker(breaker) {
-    setSwappingBreaker(breaker);
-    setSwapDraft({ serial: breaker.serial || "", ampRating: breaker.ampRating || "", installedDate: dateOnly(breaker.installedDate) });
-    setSwapError(null);
+    setSwapModal({
+      breaker,
+      draft: { serial: breaker.serial || "", ampRating: breaker.ampRating || "", installedDate: dateOnly(breaker.installedDate) },
+      error: null,
+    });
   }
 
   function submitSwapBreaker() {
-    if (!selectedAsset || !swappingBreaker) return;
+    if (!selectedAsset || !swapModal) return;
     const existing = selectedAsset.breakers || [];
-    const original = existing.find(b => b.id === swappingBreaker.id);
-    if (!original) { setSwapError("Breaker not found."); return; }
-    const updated = { ...original, serial: swapDraft.serial || "", ampRating: swapDraft.ampRating || "", installedDate: swapDraft.installedDate || "" };
+    const original = existing.find(b => b.id === swapModal.breaker.id);
+    if (!original) { setSwapModal({ ...swapModal, error: "Breaker not found." }); return; }
+    const { draft } = swapModal;
+    const updated = { ...original, serial: draft.serial || "", ampRating: draft.ampRating || "", installedDate: draft.installedDate || "" };
     const nextBreakers = existing.map(b => (b.id === original.id ? updated : b));
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
       action: "breaker_swapped", field: `Slot ${slotsLabel_(original)}`,
       from: original.serial || "—", to: updated.serial || "—",
     };
-    persist(updateBreakers(nextBreakers), columns, changeTypes, vendors, logAudit([entry]));
-    setSwappingBreaker(null);
-    setSwapError(null);
+    persist(updateBreakers(nextBreakers), { auditLog: logAudit([entry]) });
+    setSwapModal(null);
   }
 
   function addCircuit(breakerId, draft) {
@@ -1538,7 +1553,7 @@ function AssetTracker() {
       action: "circuit_added", field: circuit.label,
       to: feedsPanelLabel ? `Feeds ${feedsPanelLabel}` : `Serves ${roomsServedIds.map(id => roomNameFor(id, assets)).join(", ")}`,
     };
-    persist(updateBreakers(nextBreakers), columns, changeTypes, vendors, logAudit([entry]));
+    persist(updateBreakers(nextBreakers), { auditLog: logAudit([entry]) });
   }
 
   function saveCircuitEdit(breakerId, id, draft) {
@@ -1568,7 +1583,7 @@ function AssetTracker() {
     }
     if ((original.feedsPanelLabel || "") !== feedsPanelLabel) entries.push(mk("Feeds sub-panel", original.feedsPanelLabel || "—", feedsPanelLabel || "—"));
     const nextBreakers = existing.map(b => (b.id === breakerId ? { ...b, circuits: (b.circuits || []).map(c => (c.id === id ? updated : c)) } : b));
-    persist(updateBreakers(nextBreakers), columns, changeTypes, vendors, entries.length ? logAudit(entries) : auditLog);
+    persist(updateBreakers(nextBreakers), { auditLog: entries.length ? logAudit(entries) : auditLog });
   }
 
   function deleteCircuit(breakerId, id) {
@@ -1583,27 +1598,26 @@ function AssetTracker() {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
       action: "circuit_removed", field: circuit.label,
     };
-    persist(updateBreakers(nextBreakers), columns, changeTypes, vendors, logAudit([entry]));
+    persist(updateBreakers(nextBreakers), { auditLog: logAudit([entry]) });
   }
 
   // Same-panel only for this pass — moving a circuit to a different Panel
   // asset would mean mutating two assets atomically, deferred as a follow-up.
   function openMoveCircuit(breakerId, circuit) {
-    setMovingCircuit({ breakerId, circuit });
-    setMoveCircuitTarget("");
-    setMoveCircuitError(null);
+    setMoveCircuitModal({ breakerId, circuit, target: "", error: null });
   }
 
   function submitMoveCircuit() {
-    if (!selectedAsset || !movingCircuit) return;
-    if (!moveCircuitTarget) { setMoveCircuitError("Pick a destination breaker."); return; }
-    if (moveCircuitTarget === movingCircuit.breakerId) { setMoveCircuitError("That's already this circuit's breaker."); return; }
+    if (!selectedAsset || !moveCircuitModal) return;
+    const { breakerId, circuit: movingCircuitRef, target } = moveCircuitModal;
+    if (!target) { setMoveCircuitModal({ ...moveCircuitModal, error: "Pick a destination breaker." }); return; }
+    if (target === breakerId) { setMoveCircuitModal({ ...moveCircuitModal, error: "That's already this circuit's breaker." }); return; }
     const existing = selectedAsset.breakers || [];
-    const fromBreaker = existing.find(b => b.id === movingCircuit.breakerId);
-    const toBreaker = existing.find(b => b.id === moveCircuitTarget);
-    if (!fromBreaker || !toBreaker) { setMoveCircuitError("Breaker not found."); return; }
-    const circuit = (fromBreaker.circuits || []).find(c => c.id === movingCircuit.circuit.id);
-    if (!circuit) { setMoveCircuitError("Circuit not found."); return; }
+    const fromBreaker = existing.find(b => b.id === breakerId);
+    const toBreaker = existing.find(b => b.id === target);
+    if (!fromBreaker || !toBreaker) { setMoveCircuitModal({ ...moveCircuitModal, error: "Breaker not found." }); return; }
+    const circuit = (fromBreaker.circuits || []).find(c => c.id === movingCircuitRef.id);
+    if (!circuit) { setMoveCircuitModal({ ...moveCircuitModal, error: "Circuit not found." }); return; }
     const movedCircuit = { ...circuit, breakerId: toBreaker.id };
     const nextBreakers = existing.map(b => {
       if (b.id === fromBreaker.id) return { ...b, circuits: (b.circuits || []).filter(c => c.id !== circuit.id) };
@@ -1615,10 +1629,8 @@ function AssetTracker() {
       action: "circuit_reassigned", field: circuit.label,
       from: `Slot ${slotsLabel_(fromBreaker)}`, to: `Slot ${slotsLabel_(toBreaker)}`,
     };
-    persist(updateBreakers(nextBreakers), columns, changeTypes, vendors, logAudit([entry]));
-    setMovingCircuit(null);
-    setMoveCircuitTarget("");
-    setMoveCircuitError(null);
+    persist(updateBreakers(nextBreakers), { auditLog: logAudit([entry]) });
+    setMoveCircuitModal(null);
   }
 
   // Local-only — no persist() call. Column show/hide is a per-device viewing
@@ -1642,7 +1654,7 @@ function AssetTracker() {
     while (columns.some(c => c.key === key)) key = slugify(newColName) + "_" + i++;
     const nextColumns = [...columns, { key, label: newColName.trim(), width: 160, visible: true, custom: true }];
     const nextAssets = assets.map(a => ({ ...a, [key]: "" }));
-    persist(nextAssets, nextColumns);
+    persist(nextAssets, { columns: nextColumns });
     setNewColName("");
   }
 
@@ -1653,67 +1665,67 @@ function AssetTracker() {
       delete copy[key];
       return copy;
     });
-    persist(nextAssets, nextColumns);
+    persist(nextAssets, { columns: nextColumns });
     setConfirmDeleteCol(null);
   }
 
   function addChangeType() {
     const name = newChangeTypeName.trim();
     if (!name || changeTypes.includes(name)) return;
-    persist(assets, columns, [...changeTypes, name], vendors);
+    persist(assets, { changeTypes: [...changeTypes, name] });
     setNewChangeTypeName("");
   }
 
   function removeChangeType(name) {
-    persist(assets, columns, changeTypes.filter(t => t !== name), vendors);
+    persist(assets, { changeTypes: changeTypes.filter(t => t !== name) });
   }
 
   function addVendor() {
     const name = newVendorName.trim();
     if (!name || vendors.includes(name)) return;
-    persist(assets, columns, changeTypes, [...vendors, name]);
+    persist(assets, { vendors: [...vendors, name] });
     setNewVendorName("");
   }
 
   function removeVendor(name) {
-    persist(assets, columns, changeTypes, vendors.filter(v => v !== name));
+    persist(assets, { vendors: vendors.filter(v => v !== name) });
   }
 
   function addPeripheral() {
     const name = newPeripheralName.trim();
     if (!name || peripheralsList.includes(name)) return;
-    persist(assets, columns, changeTypes, vendors, auditLog, [...peripheralsList, name]);
+    persist(assets, { peripheralsList: [...peripheralsList, name] });
     setNewPeripheralName("");
   }
 
   function removePeripheral(name) {
-    persist(assets, columns, changeTypes, vendors, auditLog, peripheralsList.filter(p => p !== name));
+    persist(assets, { peripheralsList: peripheralsList.filter(p => p !== name) });
   }
 
   function addUser() {
     const name = newUserName.trim();
     if (!name || usersList.includes(name)) return;
-    persist(assets, columns, changeTypes, vendors, auditLog, peripheralsList, [...usersList, name].sort());
+    persist(assets, { usersList: [...usersList, name].sort() });
     setNewUserName("");
   }
 
   // Removing a user only takes them off the pick list — assets already assigned
   // to them keep that value until someone reassigns them.
   function removeUser(name) {
-    persist(assets, columns, changeTypes, vendors, auditLog, peripheralsList, usersList.filter(u => u !== name));
+    persist(assets, { usersList: usersList.filter(u => u !== name) });
   }
 
   function addBulkItemType() {
     const name = newBulkItemTypeName.trim();
     if (!name || bulkItemTypes.includes(name)) return;
-    persist(assets, columns, changeTypes, vendors, auditLog, peripheralsList, usersList, [...bulkItemTypes, name].sort());
+    persist(assets, { bulkItemTypes: [...bulkItemTypes, name].sort() });
     setNewBulkItemTypeName("");
   }
 
   // Removing a sub-type only takes it off the pick list — bulk items already
   // using that value keep it until someone edits them.
   function removeBulkItemType(name) {
-    persist(assets, columns, changeTypes, vendors, auditLog, peripheralsList, usersList, bulkItemTypes.filter(t => t !== name));
+    persist(assets, { bulkItemTypes: bulkItemTypes.filter(t => t !== name) });
   }
 
   function addType() {
@@ -1725,7 +1737,7 @@ function AssetTracker() {
     const nextTypesList = otherIdx === -1
       ? [...typesList, name]
       : [...typesList.slice(0, otherIdx), name, ...typesList.slice(otherIdx)];
-    persist(assets, columns, changeTypes, vendors, auditLog, peripheralsList, usersList, bulkItemTypes, nextTypesList);
+    persist(assets, { typesList: nextTypesList });
     setNewTypeName("");
   }
 
@@ -1735,7 +1747,7 @@ function AssetTracker() {
   // elsewhere (field-exclusion rules, Contents/Allocations/Breakers tabs).
   function removeType(name) {
     if (LOCKED_TYPES.includes(name)) return;
-    persist(assets, columns, changeTypes, vendors, auditLog, peripheralsList, usersList, bulkItemTypes, typesList.filter(t => t !== name));
+    persist(assets, { typesList: typesList.filter(t => t !== name) });
   }
 
   // --- Breaker Types (catalog) ------------------------------------------------
@@ -1801,7 +1813,7 @@ function AssetTracker() {
     const isNew = !draft.id;
     const savedType = { id: draft.id || crypto.randomUUID(), name, slotSpan: draft.slotSpan, members: draft.members };
     const nextTypes = isNew ? [...breakerTypes, savedType] : breakerTypes.map(t => (t.id === savedType.id ? savedType : t));
-    persist(assets, columns, changeTypes, vendors, auditLog, peripheralsList, usersList, bulkItemTypes, typesList, nextTypes);
+    persist(assets, { breakerTypes: nextTypes });
     cancelBreakerTypeDraft();
   }
 
@@ -1826,7 +1838,7 @@ function AssetTracker() {
       setBreakerTypeError(`Can't delete — still used by: ${list}.`);
       return;
     }
-    persist(assets, columns, changeTypes, vendors, auditLog, peripheralsList, usersList, bulkItemTypes, typesList, breakerTypes.filter(t => t.id !== id));
+    persist(assets, { breakerTypes: breakerTypes.filter(t => t.id !== id) });
   }
 
   function exportToExcel() {
@@ -2605,8 +2617,7 @@ function AssetTracker() {
                     value={allocationDraft.roomId}
                     onChange={v => {
                       const existing = (selectedAsset.allocations || []).find(a => a.roomId === v);
-                      setAllocationDraft({ roomId: v, quantity: existing ? String(existing.quantity) : "" });
-                      setAllocationError("");
+                      setAllocationDraft({ roomId: v, quantity: existing ? String(existing.quantity) : "", error: "" });
                     }}
                     rooms={roomAssets}
                   />
@@ -2616,13 +2627,13 @@ function AssetTracker() {
                       type="number"
                       inputMode="numeric"
                       value={allocationDraft.quantity}
-                      onChange={e => { setAllocationDraft({ ...allocationDraft, quantity: e.target.value }); setAllocationError(""); }}
+                      onChange={e => setAllocationDraft({ ...allocationDraft, quantity: e.target.value, error: "" })}
                       placeholder="0"
                       style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
                     />
                   </label>
                 </div>
-                {allocationError && <div style={{ fontSize: 13, color: C.danger, marginBottom: 8 }}>{allocationError}</div>}
+                {allocationDraft.error && <div style={{ fontSize: 13, color: C.danger, marginBottom: 8 }}>{allocationDraft.error}</div>}
                 <div style={{ display: "flex", justifyContent: "flex-end" }}>
                   <button
                     onClick={saveAllocation}
@@ -2655,166 +2666,19 @@ function AssetTracker() {
           )}
 
           {detailTab === "breakers" && selectedAsset.type === "Electrical Panel" && (
-            <>
-              {(() => {
-                const feed = assets
-                  .filter(a => a.type === "Electrical Panel")
-                  .flatMap(a => (a.breakers || []).map(b => ({ panel: a, breaker: b })))
-                  .flatMap(({ panel, breaker }) => (breaker.circuits || []).map(c => ({ panel, breaker, circuit: c })))
-                  .find(({ circuit }) => circuit.feedsPanelLabel === selectedAsset.label);
-                if (!feed) return null;
-                return (
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 14px", marginBottom: 14, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, fontSize: 13, color: C.ink }}>
-                    <Zap size={14} color={C.accent} />
-                    Fed from <strong style={{ fontWeight: 700, color: C.brandDark }}>{feed.panel.label}</strong>, Slot {slotsLabel_(feed.breaker)}
-                  </div>
-                );
-              })()}
-              {(() => {
-                const slotCount = parseInt(selectedAsset.panelSlotCount, 10) || 0;
-                if (slotCount <= 0 || showPanelConfig) {
-                  return (
-                    <PanelConfigForm
-                      slotCount={selectedAsset.panelSlotCount}
-                      layout={selectedAsset.panelLayout}
-                      onSave={(count, lay) => { updatePanelConfig(count, lay); setShowPanelConfig(false); }}
-                      onCancel={slotCount > 0 ? () => setShowPanelConfig(false) : null}
-                    />
-                  );
-                }
-                return (
-                  <PanelDiagram
-                    slotCount={slotCount}
-                    layout={selectedAsset.panelLayout || "two-column"}
-                    breakers={selectedAsset.breakers || []}
-                    allAssets={assets}
-                    onReconfigure={() => setShowPanelConfig(true)}
-                    onSlotClick={id => {
-                      const list = selectedAsset.breakers || [];
-                      const b = list.find(x => x.id === id);
-                      if (!b) return;
-                      // A click anywhere in a group opens the whole group — every
-                      // breaker sharing this groupId, not just the one clicked —
-                      // since a group is one physical breaker-type instance (e.g.
-                      // a quad or split double-pole) even though it's several rows.
-                      const members = b.groupId ? list.filter(x => x.groupId === b.groupId) : [b];
-                      openBreakerModal(id, members);
-                    }}
-                    onSpareClick={slot => {
-                      setAddBreakerDraft({ breakerTypeId: breakerTypes[0] ? breakerTypes[0].id : "", startSlot: String(slot), status: "Active", serial: "", installedDate: "", notes: "" });
-                      setAddBreakerError(null);
-                      setShowAddBreakerForm(true);
-                    }}
-                  />
-                );
-              })()}
-              {showAddBreakerForm && (() => {
-                const closeAddBreakerForm = () => { setShowAddBreakerForm(false); setAddBreakerError(null); };
-                const labelStyle = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent };
-                const inputStyle = { padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, maxWidth: 120 };
-                const selectedType = breakerTypes.find(t => t.id === addBreakerDraft.breakerTypeId);
-                return (
-                  <div onClick={closeAddBreakerForm} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
-                    <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 480, maxHeight: "85vh", overflowY: "auto" }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
-                        <div style={{ fontWeight: 700, fontSize: 16, color: C.brandDark }}>Add Breaker</div>
-                        <button onClick={closeAddBreakerForm} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
-                      </div>
-                      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                        <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
-                          <label style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 180 }}>
-                            <span style={labelStyle}>Breaker Type</span>
-                            {breakerTypes.length === 0 ? (
-                              <div style={{ fontSize: 13, color: C.empty }}>No breaker types defined yet.</div>
-                            ) : (
-                              <select
-                                value={addBreakerDraft.breakerTypeId || ""}
-                                onChange={e => setAddBreakerDraft({ ...addBreakerDraft, breakerTypeId: e.target.value })}
-                                style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, background: "#fff" }}
-                              >
-                                {breakerTypes.map(t => (
-                                  <option key={t.id} value={t.id}>{t.name} — {t.slotSpan} slot{t.slotSpan !== 1 ? "s" : ""}, {t.members.length} breaker{t.members.length !== 1 ? "s" : ""}</option>
-                                ))}
-                              </select>
-                            )}
-                          </label>
-                          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                            <span style={labelStyle}>Starting Slot</span>
-                            <input type="number" placeholder="e.g. 5" value={addBreakerDraft.startSlot || ""} onChange={e => setAddBreakerDraft({ ...addBreakerDraft, startSlot: e.target.value })} style={inputStyle} />
-                          </label>
-                          <button
-                            type="button" onClick={() => setShowBreakerTypesManager(true)}
-                            style={{ display: "flex", alignItems: "center", gap: 4, background: "none", border: "none", padding: "8px 0", color: C.accent, fontSize: 12, fontWeight: 600 }}
-                          >
-                            <Settings size={13} /> Manage types
-                          </button>
-                        </div>
-                        {selectedType && (
-                          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                            <span style={labelStyle}>Amp rating per breaker (from type — editable)</span>
-                            {selectedType.members.map((m, i) => (
-                              <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
-                                <span style={{ fontSize: 13, color: C.muted }}>
-                                  {m.cells.join("+")} · {new Set(m.cells.map(c => c.slice(0, -1))).size}-pole
-                                </span>
-                                <input
-                                  type="number" placeholder={m.ampRating}
-                                  value={addBreakerDraft[`amp_${i}`] !== undefined ? addBreakerDraft[`amp_${i}`] : m.ampRating}
-                                  onChange={e => setAddBreakerDraft({ ...addBreakerDraft, [`amp_${i}`]: e.target.value })}
-                                  style={{ ...inputStyle, maxWidth: 90 }}
-                                />
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
-                          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                            <span style={labelStyle}>Status</span>
-                            <select
-                              value={addBreakerDraft.status}
-                              onChange={e => setAddBreakerDraft({ ...addBreakerDraft, status: e.target.value })}
-                              style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, background: "#fff" }}
-                            >
-                              {["Active", "Spare", "Faulted", "Retired"].map(s => <option key={s} value={s}>{s}</option>)}
-                            </select>
-                          </label>
-                          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                            <span style={labelStyle}>Serial</span>
-                            <input value={addBreakerDraft.serial} onChange={e => setAddBreakerDraft({ ...addBreakerDraft, serial: e.target.value })} placeholder="optional" style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }} />
-                          </label>
-                          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                            <span style={labelStyle}>Installed</span>
-                            <input type="date" value={addBreakerDraft.installedDate} onChange={e => setAddBreakerDraft({ ...addBreakerDraft, installedDate: e.target.value })} style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }} />
-                          </label>
-                          <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
-                            <span style={labelStyle}>Notes</span>
-                            <input value={addBreakerDraft.notes} onChange={e => setAddBreakerDraft({ ...addBreakerDraft, notes: e.target.value })} style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }} />
-                          </label>
-                        </div>
-                        {addBreakerError && <div style={{ fontSize: 13, color: C.danger }}>{addBreakerError}</div>}
-                        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-                          <button onClick={closeAddBreakerForm} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
-                            Cancel
-                          </button>
-                          <button
-                            onClick={() => {
-                              const result = addBreaker(addBreakerDraft);
-                              if (result.error) { setAddBreakerError(result.error); return; }
-                              setShowAddBreakerForm(false);
-                              setAddBreakerError(null);
-                              openBreakerModal(result.newBreakers[0].id, result.newBreakers);
-                            }}
-                            style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
-                          >
-                            Add Breaker
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })()}
-            </>
+            <BreakersTabContent
+              selectedAsset={selectedAsset}
+              assets={assets}
+              breakerTypes={breakerTypes}
+              showPanelConfig={showPanelConfig}
+              setShowPanelConfig={setShowPanelConfig}
+              updatePanelConfig={updatePanelConfig}
+              openBreakerModal={openBreakerModal}
+              addBreakerDraft={addBreakerDraft}
+              setAddBreakerDraft={setAddBreakerDraft}
+              setShowBreakerTypesManager={setShowBreakerTypesManager}
+              addBreaker={addBreaker}
+            />
           )}
 
           {detailTab === "maintenance" && (
@@ -3252,10 +3116,15 @@ function AssetTracker() {
           </div>
         )}
 
-        {openBreakerId && memberAmpDrafts && instanceDraft && (() => {
+        {breakerModal && (() => {
           const allBreakers = selectedAsset.breakers || [];
-          const clicked = allBreakers.find(b => b.id === openBreakerId);
+          const clicked = allBreakers.find(b => b.id === breakerModal.anchorId);
           if (!clicked) return null;
+          // Local aliases so the rest of this block (unchanged below) can keep
+          // reading `instanceDraft`/`editingInstance`/etc. directly — only the
+          // setters (further down) need to go through setBreakerModal now.
+          const { memberAmpDrafts, editingMemberId, instanceDraft, editingInstance, error: breakerModalError, confirmDeleteGroup, addingCircuitFor } = breakerModal;
+          const patchBreakerModal = patch => setBreakerModal({ ...breakerModal, ...patch });
           // A group is one physical breaker-type instance (tandem/quad/split
           // double-pole/...) even though it's several Breaker rows sharing a
           // groupId — the modal shows every member, not just the one clicked,
@@ -3272,11 +3141,7 @@ function AssetTracker() {
           const otherPanelLabels = assets.filter(a => a.type === "Electrical Panel" && a.label !== selectedAsset.label).map(a => a.label);
           const labelStyle = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent };
           const inputStyle = { padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink };
-          const closeModal = () => {
-            setOpenBreakerId(null); setMemberAmpDrafts(null); setEditingMemberId(null);
-            setInstanceDraft(null); setEditingInstance(false); setBreakerModalError(null); setConfirmDeleteGroup(false);
-            setAddingCircuitFor(null);
-          };
+          const closeModal = () => setBreakerModal(null);
           function renderCircuitTargetFields(values, setValues) {
             const mode = values.feedsPanelLabel ? "subpanel" : (values._mode || "rooms");
             const roomsSelected = values.roomsServedIds || [];
@@ -3355,26 +3220,26 @@ function AssetTracker() {
                       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 10, marginBottom: 12 }}>
                         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                           <span style={labelStyle}>Serial</span>
-                          <input value={instanceDraft.serial} onChange={e => setInstanceDraft({ ...instanceDraft, serial: e.target.value })} placeholder="optional" style={inputStyle} />
+                          <input value={instanceDraft.serial} onChange={e => patchBreakerModal({ instanceDraft: { ...instanceDraft, serial: e.target.value } })} placeholder="optional" style={inputStyle} />
                         </label>
                         <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                           <span style={labelStyle}>Installed</span>
-                          <input type="date" value={dateOnly(instanceDraft.installedDate)} onChange={e => setInstanceDraft({ ...instanceDraft, installedDate: e.target.value })} style={inputStyle} />
+                          <input type="date" value={dateOnly(instanceDraft.installedDate)} onChange={e => patchBreakerModal({ instanceDraft: { ...instanceDraft, installedDate: e.target.value } })} style={inputStyle} />
                         </label>
                         <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
                           <span style={labelStyle}>Notes</span>
-                          <input value={instanceDraft.notes} onChange={e => setInstanceDraft({ ...instanceDraft, notes: e.target.value })} style={inputStyle} />
+                          <input value={instanceDraft.notes} onChange={e => patchBreakerModal({ instanceDraft: { ...instanceDraft, notes: e.target.value } })} style={inputStyle} />
                         </label>
                       </div>
                       <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
                         <button
-                          onClick={() => { setInstanceDraft({ serial: anchor.serial || "", installedDate: anchor.installedDate || "", notes: anchor.notes || "" }); setEditingInstance(false); }}
+                          onClick={() => patchBreakerModal({ instanceDraft: { serial: anchor.serial || "", installedDate: anchor.installedDate || "", notes: anchor.notes || "" }, editingInstance: false })}
                           style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}
                         >
                           Cancel
                         </button>
                         <button
-                          onClick={() => { saveBreakerInstanceDetails(memberIds, groupSlotLabel, instanceDraft); setEditingInstance(false); }}
+                          onClick={() => { saveBreakerInstanceDetails(memberIds, groupSlotLabel, instanceDraft); patchBreakerModal({ editingInstance: false }); }}
                           style={{ padding: "8px 14px", background: C.success, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                         >
                           Save
@@ -3398,11 +3263,11 @@ function AssetTracker() {
                         </div>
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
-                        <button onClick={() => setEditingInstance(true)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label="Edit">
+                        <button onClick={() => patchBreakerModal({ editingInstance: true })} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label="Edit">
                           <Pencil size={14} color={C.muted} />
                         </button>
                         {!confirmDeleteGroup && (
-                          <button onClick={() => { setBreakerModalError(null); setConfirmDeleteGroup(true); }} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label="Delete">
+                          <button onClick={() => patchBreakerModal({ error: null, confirmDeleteGroup: true })} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label="Delete">
                             <Trash2 size={14} color={C.danger} />
                           </button>
                         )}
@@ -3413,13 +3278,13 @@ function AssetTracker() {
                   {confirmDeleteGroup && (
                     <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
                       <span style={{ fontSize: 13, color: C.danger }}>Delete this breaker unit?</span>
-                      <button onClick={() => setConfirmDeleteGroup(false)} style={{ padding: "8px 12px", background: "transparent", border: `1.5px solid ${C.border}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
+                      <button onClick={() => patchBreakerModal({ confirmDeleteGroup: false })} style={{ padding: "8px 12px", background: "transparent", border: `1.5px solid ${C.border}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
                         Cancel
                       </button>
                       <button
                         onClick={() => {
                           const reason = canDeleteBreakerGroup(members);
-                          if (reason) { setBreakerModalError(reason); setConfirmDeleteGroup(false); return; }
+                          if (reason) { patchBreakerModal({ error: reason, confirmDeleteGroup: false }); return; }
                           deleteBreakerGroup(members, groupSlotLabel);
                           closeModal();
                         }}
@@ -3449,16 +3314,16 @@ function AssetTracker() {
                           <div style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
                             <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                               <span style={labelStyle}>Amp Rating</span>
-                              <input type="number" value={ampDraft} onChange={e => setMemberAmpDrafts({ ...memberAmpDrafts, [member.id]: e.target.value })} style={{ ...inputStyle, width: 100 }} />
+                              <input type="number" value={ampDraft} onChange={e => patchBreakerModal({ memberAmpDrafts: { ...memberAmpDrafts, [member.id]: e.target.value } })} style={{ ...inputStyle, width: 100 }} />
                             </label>
                             <button
-                              onClick={() => { setMemberAmpDrafts({ ...memberAmpDrafts, [member.id]: member.ampRating || "" }); setEditingMemberId(null); }}
+                              onClick={() => patchBreakerModal({ memberAmpDrafts: { ...memberAmpDrafts, [member.id]: member.ampRating || "" }, editingMemberId: null })}
                               style={{ padding: "8px 12px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}
                             >
                               Cancel
                             </button>
                             <button
-                              onClick={() => { saveBreakerAmp(member.id, ampDraft); setEditingMemberId(null); }}
+                              onClick={() => { saveBreakerAmp(member.id, ampDraft); patchBreakerModal({ editingMemberId: null }); }}
                               style={{ padding: "8px 12px", background: C.success, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                             >
                               Save
@@ -3468,7 +3333,7 @@ function AssetTracker() {
                           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                             <span style={labelStyle}>Amp Rating</span>
                             <span style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>{member.ampRating ? `${member.ampRating}A` : "—"}</span>
-                            <button onClick={() => setEditingMemberId(member.id)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label="Edit amp rating">
+                            <button onClick={() => patchBreakerModal({ editingMemberId: member.id })} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label="Edit amp rating">
                               <Pencil size={14} color={C.muted} />
                             </button>
                           </div>
@@ -3479,7 +3344,7 @@ function AssetTracker() {
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
                           <div style={labelStyle}>Circuits</div>
                           <button
-                            onClick={() => setAddingCircuitFor(addingCircuitFor === member.id ? null : member.id)}
+                            onClick={() => patchBreakerModal({ addingCircuitFor: addingCircuitFor === member.id ? null : member.id })}
                             className="icon-btn"
                             style={{ background: "none", border: "none", padding: 2, borderRadius: 4, display: "flex" }}
                             aria-label="Add circuit"
@@ -3500,7 +3365,7 @@ function AssetTracker() {
                           addLabel="Add Circuit"
                           hideAddButton
                           addOpen={addingCircuitFor === member.id}
-                          onAddOpenChange={open => setAddingCircuitFor(open ? member.id : null)}
+                          onAddOpenChange={open => patchBreakerModal({ addingCircuitFor: open ? member.id : null })}
                           emptyMessage="No circuits on this breaker yet."
                           renderCustomFields={renderCircuitTargetFields}
                           deleteConfirmMessage={circuit => `Delete circuit "${circuit.label}"?`}
@@ -3528,10 +3393,10 @@ function AssetTracker() {
           );
         })()}
 
-        {swappingBreaker && (
+        {swapModal && (
           <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
             <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 340 }}>
-              <div style={{ fontWeight: 700, marginBottom: 4, color: C.brandDark }}>Swap breaker at Slot {slotsLabel_(swappingBreaker)}</div>
+              <div style={{ fontWeight: 700, marginBottom: 4, color: C.brandDark }}>Swap breaker at Slot {slotsLabel_(swapModal.breaker)}</div>
               <div style={{ fontSize: 13, color: C.muted, marginBottom: 14 }}>
                 Keeps the same slot(s) and id — logged as a physical replacement, separate from a field edit.
               </div>
@@ -3539,8 +3404,8 @@ function AssetTracker() {
                 <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                   <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>New Serial</span>
                   <input
-                    value={swapDraft.serial}
-                    onChange={e => setSwapDraft({ ...swapDraft, serial: e.target.value })}
+                    value={swapModal.draft.serial}
+                    onChange={e => setSwapModal({ ...swapModal, draft: { ...swapModal.draft, serial: e.target.value } })}
                     style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
                   />
                 </label>
@@ -3548,8 +3413,8 @@ function AssetTracker() {
                   <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Amp Rating</span>
                   <input
                     type="number"
-                    value={swapDraft.ampRating}
-                    onChange={e => setSwapDraft({ ...swapDraft, ampRating: e.target.value })}
+                    value={swapModal.draft.ampRating}
+                    onChange={e => setSwapModal({ ...swapModal, draft: { ...swapModal.draft, ampRating: e.target.value } })}
                     style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
                   />
                 </label>
@@ -3557,15 +3422,15 @@ function AssetTracker() {
                   <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Installed Date</span>
                   <input
                     type="date"
-                    value={swapDraft.installedDate}
-                    onChange={e => setSwapDraft({ ...swapDraft, installedDate: e.target.value })}
+                    value={swapModal.draft.installedDate}
+                    onChange={e => setSwapModal({ ...swapModal, draft: { ...swapModal.draft, installedDate: e.target.value } })}
                     style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
                   />
                 </label>
               </div>
-              {swapError && <div style={{ fontSize: 13, color: C.danger, marginBottom: 12 }}>{swapError}</div>}
+              {swapModal.error && <div style={{ fontSize: 13, color: C.danger, marginBottom: 12 }}>{swapModal.error}</div>}
               <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-                <button onClick={() => { setSwappingBreaker(null); setSwapError(null); }} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
+                <button onClick={() => setSwapModal(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
                   Cancel
                 </button>
                 <button onClick={submitSwapBreaker} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>
@@ -3576,24 +3441,24 @@ function AssetTracker() {
           </div>
         )}
 
-        {movingCircuit && (
+        {moveCircuitModal && (
           <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
             <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 340 }}>
-              <div style={{ fontWeight: 700, marginBottom: 4, color: C.brandDark }}>Move circuit "{movingCircuit.circuit.label}"</div>
+              <div style={{ fontWeight: 700, marginBottom: 4, color: C.brandDark }}>Move circuit "{moveCircuitModal.circuit.label}"</div>
               <div style={{ fontSize: 13, color: C.muted, marginBottom: 14 }}>Choose a different breaker on this panel.</div>
               <select
-                value={moveCircuitTarget}
-                onChange={e => setMoveCircuitTarget(e.target.value)}
+                value={moveCircuitModal.target}
+                onChange={e => setMoveCircuitModal({ ...moveCircuitModal, target: e.target.value })}
                 style={{ width: "100%", padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, background: "#fff", marginBottom: 12 }}
               >
                 <option value="">Select a breaker…</option>
-                {(selectedAsset.breakers || []).filter(b => b.id !== movingCircuit.breakerId).map(b => (
+                {(selectedAsset.breakers || []).filter(b => b.id !== moveCircuitModal.breakerId).map(b => (
                   <option key={b.id} value={b.id}>Slot {slotsLabel_(b)}</option>
                 ))}
               </select>
-              {moveCircuitError && <div style={{ fontSize: 13, color: C.danger, marginBottom: 12 }}>{moveCircuitError}</div>}
+              {moveCircuitModal.error && <div style={{ fontSize: 13, color: C.danger, marginBottom: 12 }}>{moveCircuitModal.error}</div>}
               <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-                <button onClick={() => { setMovingCircuit(null); setMoveCircuitError(null); }} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
+                <button onClick={() => setMoveCircuitModal(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
                   Cancel
                 </button>
                 <button onClick={submitMoveCircuit} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>
@@ -4684,6 +4549,172 @@ function SelectBox({ value, onChange, options }) {
     >
       {options.map(o => <option key={o} value={o}>{o}</option>)}
     </select>
+  );
+}
+
+// Everything the Breakers tab shows besides the breaker-detail/swap/move-
+// circuit modals (those stay in AssetTracker since they're reachable from
+// other tabs too, e.g. a Room's "Fed by" link jumps straight into one) —
+// the "Fed from" banner, the panel diagram itself, and the Add Breaker form.
+// Pulled out of AssetTracker's ~3700-line body as the first cut at breaking
+// that component up; the props list is exactly what this piece touches.
+function BreakersTabContent({
+  selectedAsset, assets, breakerTypes, showPanelConfig, setShowPanelConfig,
+  updatePanelConfig, openBreakerModal, addBreakerDraft, setAddBreakerDraft,
+  setShowBreakerTypesManager, addBreaker,
+}) {
+  const feed = assets
+    .filter(a => a.type === "Electrical Panel")
+    .flatMap(a => (a.breakers || []).map(b => ({ panel: a, breaker: b })))
+    .flatMap(({ panel, breaker }) => (breaker.circuits || []).map(c => ({ panel, breaker, circuit: c })))
+    .find(({ circuit }) => circuit.feedsPanelLabel === selectedAsset.label);
+
+  const slotCount = parseInt(selectedAsset.panelSlotCount, 10) || 0;
+  const labelStyle = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent };
+  const inputStyle = { padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, maxWidth: 120 };
+  const selectedType = addBreakerDraft ? breakerTypes.find(t => t.id === addBreakerDraft.breakerTypeId) : null;
+  const closeAddBreakerForm = () => setAddBreakerDraft(null);
+
+  return (
+    <>
+      {feed && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 14px", marginBottom: 14, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, fontSize: 13, color: C.ink }}>
+          <Zap size={14} color={C.accent} />
+          Fed from <strong style={{ fontWeight: 700, color: C.brandDark }}>{feed.panel.label}</strong>, Slot {cellsLabel_(feed.breaker)}
+        </div>
+      )}
+
+      {slotCount <= 0 || showPanelConfig ? (
+        <PanelConfigForm
+          slotCount={selectedAsset.panelSlotCount}
+          layout={selectedAsset.panelLayout}
+          onSave={(count, lay) => { updatePanelConfig(count, lay); setShowPanelConfig(false); }}
+          onCancel={slotCount > 0 ? () => setShowPanelConfig(false) : null}
+        />
+      ) : (
+        <PanelDiagram
+          slotCount={slotCount}
+          layout={selectedAsset.panelLayout || "two-column"}
+          breakers={selectedAsset.breakers || []}
+          allAssets={assets}
+          onReconfigure={() => setShowPanelConfig(true)}
+          onSlotClick={id => {
+            const list = selectedAsset.breakers || [];
+            const b = list.find(x => x.id === id);
+            if (!b) return;
+            // A click anywhere in a group opens the whole group — every
+            // breaker sharing this groupId, not just the one clicked —
+            // since a group is one physical breaker-type instance (e.g.
+            // a quad or split double-pole) even though it's several rows.
+            const members = b.groupId ? list.filter(x => x.groupId === b.groupId) : [b];
+            openBreakerModal(id, members);
+          }}
+          onSpareClick={slot => {
+            setAddBreakerDraft({ breakerTypeId: breakerTypes[0] ? breakerTypes[0].id : "", startSlot: String(slot), status: "Active", serial: "", installedDate: "", notes: "", error: null });
+          }}
+        />
+      )}
+
+      {addBreakerDraft && (
+        <div onClick={closeAddBreakerForm} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 480, maxHeight: "85vh", overflowY: "auto" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
+              <div style={{ fontWeight: 700, fontSize: 16, color: C.brandDark }}>Add Breaker</div>
+              <button onClick={closeAddBreakerForm} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
+                <label style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 180 }}>
+                  <span style={labelStyle}>Breaker Type</span>
+                  {breakerTypes.length === 0 ? (
+                    <div style={{ fontSize: 13, color: C.empty }}>No breaker types defined yet.</div>
+                  ) : (
+                    <select
+                      value={addBreakerDraft.breakerTypeId || ""}
+                      onChange={e => setAddBreakerDraft({ ...addBreakerDraft, breakerTypeId: e.target.value })}
+                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, background: "#fff" }}
+                    >
+                      {breakerTypes.map(t => (
+                        <option key={t.id} value={t.id}>{t.name} — {t.slotSpan} slot{t.slotSpan !== 1 ? "s" : ""}, {t.members.length} breaker{t.members.length !== 1 ? "s" : ""}</option>
+                      ))}
+                    </select>
+                  )}
+                </label>
+                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={labelStyle}>Starting Slot</span>
+                  <input type="number" placeholder="e.g. 5" value={addBreakerDraft.startSlot || ""} onChange={e => setAddBreakerDraft({ ...addBreakerDraft, startSlot: e.target.value })} style={inputStyle} />
+                </label>
+                <button
+                  type="button" onClick={() => setShowBreakerTypesManager(true)}
+                  style={{ display: "flex", alignItems: "center", gap: 4, background: "none", border: "none", padding: "8px 0", color: C.accent, fontSize: 12, fontWeight: 600 }}
+                >
+                  <Settings size={13} /> Manage types
+                </button>
+              </div>
+              {selectedType && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  <span style={labelStyle}>Amp rating per breaker (from type — editable)</span>
+                  {selectedType.members.map((m, i) => (
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                      <span style={{ fontSize: 13, color: C.muted }}>
+                        {m.cells.join("+")} · {new Set(m.cells.map(c => c.slice(0, -1))).size}-pole
+                      </span>
+                      <input
+                        type="number" placeholder={m.ampRating}
+                        value={addBreakerDraft[`amp_${i}`] !== undefined ? addBreakerDraft[`amp_${i}`] : m.ampRating}
+                        onChange={e => setAddBreakerDraft({ ...addBreakerDraft, [`amp_${i}`]: e.target.value })}
+                        style={{ ...inputStyle, maxWidth: 90 }}
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
+                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={labelStyle}>Status</span>
+                  <select
+                    value={addBreakerDraft.status}
+                    onChange={e => setAddBreakerDraft({ ...addBreakerDraft, status: e.target.value })}
+                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, background: "#fff" }}
+                  >
+                    {["Active", "Spare", "Faulted", "Retired"].map(s => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </label>
+                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={labelStyle}>Serial</span>
+                  <input value={addBreakerDraft.serial} onChange={e => setAddBreakerDraft({ ...addBreakerDraft, serial: e.target.value })} placeholder="optional" style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }} />
+                </label>
+                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={labelStyle}>Installed</span>
+                  <input type="date" value={addBreakerDraft.installedDate} onChange={e => setAddBreakerDraft({ ...addBreakerDraft, installedDate: e.target.value })} style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }} />
+                </label>
+                <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
+                  <span style={labelStyle}>Notes</span>
+                  <input value={addBreakerDraft.notes} onChange={e => setAddBreakerDraft({ ...addBreakerDraft, notes: e.target.value })} style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }} />
+                </label>
+              </div>
+              {addBreakerDraft.error && <div style={{ fontSize: 13, color: C.danger }}>{addBreakerDraft.error}</div>}
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                <button onClick={closeAddBreakerForm} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    const result = addBreaker(addBreakerDraft);
+                    if (result.error) { setAddBreakerDraft({ ...addBreakerDraft, error: result.error }); return; }
+                    setAddBreakerDraft(null);
+                    openBreakerModal(result.newBreakers[0].id, result.newBreakers);
+                  }}
+                  style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                >
+                  Add Breaker
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
