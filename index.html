@@ -1713,6 +1713,7 @@ function AssetTracker() {
       anchorId,
       memberAmpDrafts: ampDrafts,
       editingMemberId: null,
+      activeMemberId: null,
       instanceDraft: { serial: anchor.serial || "", installedDate: anchor.installedDate || "", notes: anchor.notes || "" },
       editingInstance: false,
       error: null,
@@ -3398,7 +3399,7 @@ function AssetTracker() {
           // Local aliases so the rest of this block (unchanged below) can keep
           // reading `instanceDraft`/`editingInstance`/etc. directly — only the
           // setters (further down) need to go through setBreakerModal now.
-          const { memberAmpDrafts, editingMemberId, instanceDraft, editingInstance, error: breakerModalError, confirmDeleteGroup, addingCircuitFor } = breakerModal;
+          const { memberAmpDrafts, editingMemberId, activeMemberId, instanceDraft, editingInstance, error: breakerModalError, confirmDeleteGroup, addingCircuitFor } = breakerModal;
           const patchBreakerModal = patch => setBreakerModal({ ...breakerModal, ...patch });
           // A group is one physical breaker-type instance (tandem/quad/split
           // double-pole/...) even though it's several Breaker rows sharing a
@@ -3583,9 +3584,10 @@ function AssetTracker() {
                   const ampDraft = memberAmpDrafts[member.id];
                   if (ampDraft === undefined) return null;
                   const isEditingAmp = editingMemberId === member.id;
+                  const isActive = activeMemberId === member.id;
                   return (
                     <div key={member.id} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 14, marginBottom: 14, background: "#fff" }}>
-                      <div style={{ display: "flex", alignItems: "center", justifyContent: members.length > 1 ? "space-between" : "flex-end", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: members.length > 1 ? "space-between" : "flex-end", flexWrap: "wrap", gap: 8, marginBottom: isActive ? 14 : 0 }}>
                         {members.length > 1 && (
                           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: C.ink }}>
                             Breaker {idx + 1} — Slot {slotsLabel_(member)}
@@ -3614,58 +3616,90 @@ function AssetTracker() {
                           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                             <span style={labelStyle}>Amp Rating</span>
                             <span style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>{member.ampRating ? `${member.ampRating}A` : "—"}</span>
-                            <button onClick={() => patchBreakerModal({ editingMemberId: member.id })} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label="Edit amp rating">
-                              <Pencil size={14} color={C.muted} />
+                            {isActive && (
+                              <button onClick={() => patchBreakerModal({ editingMemberId: member.id })} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label="Edit amp rating">
+                                <Pencil size={14} color={C.muted} />
+                              </button>
+                            )}
+                            <button
+                              onClick={() => patchBreakerModal({
+                                activeMemberId: isActive ? null : member.id,
+                                editingMemberId: null,
+                                addingCircuitFor: null,
+                              })}
+                              className="icon-btn"
+                              style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }}
+                              aria-label={isActive ? "Done editing breaker" : "Edit breaker"}
+                            >
+                              {isActive ? <Check size={14} color={C.success} /> : <Pencil size={14} color={C.muted} />}
                             </button>
                           </div>
                         )}
                       </div>
 
-                      <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 12 }}>
-                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-                          <div style={labelStyle}>Circuits</div>
-                          <button
-                            onClick={() => patchBreakerModal({ addingCircuitFor: addingCircuitFor === member.id ? null : member.id })}
-                            className="icon-btn"
-                            style={{ background: "none", border: "none", padding: 2, borderRadius: 4, display: "flex" }}
-                            aria-label="Add circuit"
-                          >
-                            <Plus size={14} color={C.muted} />
-                          </button>
-                        </div>
-                        <ChildEntityTable
-                          items={member.circuits || []}
-                          fields={[
-                            { key: "label", label: "Label", placeholder: "e.g. Circuit 14" },
-                            { key: "description", label: "Description", placeholder: "What does this feed?", wide: true },
-                          ]}
-                          initialDraft={{ label: "", description: "", roomsServedIds: [], feedsPanelLabel: "" }}
-                          onAdd={draft2 => addCircuit(member.id, draft2)}
-                          onSave={(id, draft2) => saveCircuitEdit(member.id, id, draft2)}
-                          onDelete={id => deleteCircuit(member.id, id)}
-                          addLabel="Add Circuit"
-                          hideAddButton
-                          addOpen={addingCircuitFor === member.id}
-                          onAddOpenChange={open => patchBreakerModal({ addingCircuitFor: open ? member.id : null })}
-                          emptyMessage="No circuits on this breaker yet."
-                          renderCustomFields={renderCircuitTargetFields}
-                          deleteConfirmMessage={circuit => `Delete circuit "${circuit.label}"?`}
-                          renderSummary={circuit => (
-                            <div>
-                              <div style={{ fontWeight: 600, fontSize: 13, color: C.ink }}>{circuit.label}</div>
-                              <div style={{ fontSize: 12, color: C.muted }}>
-                                {circuit.feedsPanelLabel ? `Feeds → ${circuit.feedsPanelLabel}` : (circuit.roomsServedIds || []).length ? `Serves ${circuit.roomsServedIds.map(id => roomNameFor(id, assets)).join(", ")}` : "—"}
-                                {circuit.description ? ` · ${circuit.description}` : ""}
-                              </div>
-                            </div>
-                          )}
-                          customRowActions={circuit => (
-                            <button onClick={() => openMoveCircuit(member.id, circuit)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Move circuit ${circuit.label}`}>
-                              <ArrowLeftRight size={14} color={C.muted} />
+                      {isActive && (
+                        <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 12 }}>
+                          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                            <div style={labelStyle}>Circuits</div>
+                            <button
+                              onClick={() => patchBreakerModal({ addingCircuitFor: addingCircuitFor === member.id ? null : member.id })}
+                              className="icon-btn"
+                              style={{ background: "none", border: "none", padding: 2, borderRadius: 4, display: "flex" }}
+                              aria-label="Add circuit"
+                            >
+                              <Plus size={14} color={C.muted} />
                             </button>
-                          )}
-                        />
-                      </div>
+                          </div>
+                          <ChildEntityTable
+                            items={member.circuits || []}
+                            fields={[
+                              { key: "label", label: "Label", placeholder: "e.g. Circuit 14" },
+                              { key: "description", label: "Description", placeholder: "What does this feed?", wide: true },
+                            ]}
+                            initialDraft={{ label: "", description: "", roomsServedIds: [], feedsPanelLabel: "" }}
+                            onAdd={draft2 => addCircuit(member.id, draft2)}
+                            onSave={(id, draft2) => saveCircuitEdit(member.id, id, draft2)}
+                            onDelete={id => deleteCircuit(member.id, id)}
+                            addLabel="Add Circuit"
+                            hideAddButton
+                            addOpen={addingCircuitFor === member.id}
+                            onAddOpenChange={open => patchBreakerModal({ addingCircuitFor: open ? member.id : null })}
+                            emptyMessage="No circuits on this breaker yet."
+                            renderCustomFields={renderCircuitTargetFields}
+                            deleteConfirmMessage={circuit => `Delete circuit "${circuit.label}"?`}
+                            renderSummary={circuit => (
+                              <div>
+                                <div style={{ fontWeight: 600, fontSize: 13, color: C.ink }}>{circuit.label}</div>
+                                <div style={{ fontSize: 12, color: C.muted }}>
+                                  {circuit.feedsPanelLabel ? `Feeds → ${circuit.feedsPanelLabel}` : (circuit.roomsServedIds || []).length ? `Serves ${circuit.roomsServedIds.map(id => roomNameFor(id, assets)).join(", ")}` : "—"}
+                                  {circuit.description ? ` · ${circuit.description}` : ""}
+                                </div>
+                              </div>
+                            )}
+                            customRowActions={circuit => (
+                              <button onClick={() => openMoveCircuit(member.id, circuit)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Move circuit ${circuit.label}`}>
+                                <ArrowLeftRight size={14} color={C.muted} />
+                              </button>
+                            )}
+                          />
+                        </div>
+                      )}
+                      {!isActive && (member.circuits || []).length > 0 && (
+                        <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 14, paddingTop: 12 }}>
+                          <div style={{ ...labelStyle, marginBottom: 8 }}>Circuits</div>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                            {(member.circuits || []).map(circuit => (
+                              <div key={circuit.id}>
+                                <div style={{ fontWeight: 600, fontSize: 13, color: C.ink }}>{circuit.label}</div>
+                                <div style={{ fontSize: 12, color: C.muted }}>
+                                  {circuit.feedsPanelLabel ? `Feeds → ${circuit.feedsPanelLabel}` : (circuit.roomsServedIds || []).length ? `Serves ${circuit.roomsServedIds.map(id => roomNameFor(id, assets)).join(", ")}` : "—"}
+                                  {circuit.description ? ` · ${circuit.description}` : ""}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
