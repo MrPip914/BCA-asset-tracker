@@ -161,6 +161,13 @@ per-device via `localStorage` (`SANDBOX_MODE_KEY`).
   `"due-soon"` but shows "Due soon", via `MAINTENANCE_STATUS_FILTER_OPTIONS`). Maintenance's
   default (unsorted) view is always due-soonest-first with never-performed items pinned to the
   top; picking an explicit column sort overrides that until cleared.
+- **Edit affordance convention**: every "edit this record" trigger is an icon-only pencil
+  (`<Pencil size={14} color={C.muted}/>`, `aria-label="Edit ..."`), positioned at the trailing
+  edge of the row/section it edits, alongside that row's other icon actions (delete, etc.) —
+  e.g. the Breaker Type manager row, a breaker instance/member row, a Circuit row, a Maintenance
+  item's header row. The one exception is the Asset Detail page's primary "Edit" button (opens
+  the full edit form) — it keeps a text label since it's a page-level action sitting next to
+  other labeled buttons (Duplicate/Archive/Delete), not a per-row list action.
 
 ## Data model
 
@@ -179,11 +186,21 @@ are distributed across rooms via their own `allocations` array rather than a sin
 than freeform text, so it stays consistent — and the list view's Type column shows a Bulk Item's
 sub-type plus a small "BULK" badge instead of the literal "Bulk Item" for every row.
 
-The Type/Room/Building fields use a custom modal picker (`SelectionModal`) instead of a native
-`<select>` — a centered card with a scrollable option list and a checkmark on the selected
-item, visually matching the column-filter popup (`activeFilterCol`) rather than the browser's
-native dropdown chrome. `PickerTrigger` is the button that opens it, styled like the old
-`<select>` so form layouts didn't need to change.
+**No native `<select>` appears anywhere in the app** — every single-select field uses the same
+custom modal picker (`SelectionModal`) instead: a centered card with a scrollable option list
+and a checkmark on the selected item, visually matching the column-filter popup
+(`activeFilterCol`) rather than the browser's native dropdown chrome. `PickerTrigger` is the
+button that opens it, styled like the old `<select>` so form layouts didn't need to change.
+`TypeField`/`RoomField`/`BuildingField` are bespoke wrappers (id-based, with "(deleted room)"-
+style dangling-reference handling); everything else — Frequency, Change Type, Vendor, Bulk Item
+Sub-Type, Breaker Type, breaker Status, panel Layout, the Move Circuit/Add Breaker/toolbar
+bulk-action pickers, and `ChildEntityTable`'s generic `type: "select"` field — goes through the
+generic `PickerField` component (same `PickerTrigger` + `SelectionModal`, parameterized by
+`options`/`labelForOption`/`onManage`). Pass `hideLabel` when the field already has its own
+label elsewhere (e.g. an outer flex-row `<label>`, or a mode-toggle button pair like the
+Circuit form's Serves-rooms/Feeds-sub-panel picker) so `PickerField` renders just the trigger,
+not a second redundant header. `UserField`/`PeripheralsField` are deliberately NOT `PickerField`
+— they're multi-select chip-toggle groups, a different interaction from a single-select dropdown.
 
 Rooms link to Buildings, and devices link to Rooms, by **stable id** (the target Room/
 Building asset's own `label`, e.g. `BCR0002`) — `Room.buildingId`, everything else's
