@@ -52,7 +52,7 @@ const DEFAULT_BULK_ITEM_TYPES = [];
 // Known types, used for the Type dropdown and for icons. Managed via the gear icon
 // on the Type field (persisted as Config's `typesList`) — this array is only the
 // starter/fallback set for a brand-new sheet.
-const TYPE_OPTIONS = ["Computer", "Monitor", "Phone", "TV", "DocuCam", "Stream Deck", "Room", "Building", "Bulk Item", "Electrical Panel", "Other"];
+const TYPE_OPTIONS = ["Computer", "Monitor", "Phone", "TV", "DocuCam", "Stream Deck", "Mini Split", "Condenser", "Room", "Building", "Bulk Item", "Electrical Panel", "Other"];
 // These four have deep structural dependencies elsewhere (field-exclusion rules,
 // Contents/Allocations/Breakers tabs, inferBuilding()) — removing them from the
 // type list would break those, so the manager UI won't allow it.
@@ -76,7 +76,10 @@ const MAINTENANCE_FREQUENCIES = [
 const TYPE_ONLY_FIELDS = {
   hostname: ["Computer"],
   screenSize: ["Monitor", "TV"],
-  building: ["Room", "Building"], // Room links to a building; Building uses it as its own name
+  // Room links to a building; Building uses it as its own name; Condenser (outdoor
+  // unit) sits outside any one Room, so it links directly to a Building too instead
+  // of inferring one transitively through a Room the way every other device does.
+  building: ["Room", "Building", "Condenser"],
   totalQuantity: ["Bulk Item"],
   itemName: ["Bulk Item"], // Bulk Item's sub-type — picked from the managed bulkItemTypes list (e.g. "Folding Chair", "Cafeteria Table")
 };
@@ -90,11 +93,15 @@ const BULK_ITEM_EXCLUDED_FIELDS = ["hostname", "screenSize", "peripherals", "ser
 // An Electrical Panel is otherwise device-like (real brand/model/serial, purchase
 // date, warranty, room placement) — it just doesn't have peripherals like a computer.
 const ELECTRICAL_PANEL_EXCLUDED_FIELDS = ["peripherals"];
+// A Condenser links directly to a Building (see TYPE_ONLY_FIELDS.building above),
+// so it has no Room field of its own to exclude that one thing.
+const CONDENSER_EXCLUDED_FIELDS = ["room"];
 function fieldAppliesTo(key, type) {
   if (type === "Room" && ROOM_EXCLUDED_FIELDS.includes(key)) return false;
   if (type === "Building" && BUILDING_EXCLUDED_FIELDS.includes(key)) return false;
   if (type === "Bulk Item" && BULK_ITEM_EXCLUDED_FIELDS.includes(key)) return false;
   if (type === "Electrical Panel" && ELECTRICAL_PANEL_EXCLUDED_FIELDS.includes(key)) return false;
+  if (type === "Condenser" && CONDENSER_EXCLUDED_FIELDS.includes(key)) return false;
   const restriction = TYPE_ONLY_FIELDS[key];
   if (!restriction) return true; // common field, applies to every type
   return restriction.includes(type);
@@ -409,81 +416,345 @@ const MOCK_SNAPSHOT = {
     { label: "BCA0024", type: "TV", roomId: "BCR0011", brand: "Samsung", model: "55\" QLED", serial: "MOCK-TV-001", person: "Denise Sloan", notes: "", status: "Active" },
     { label: "BCA0054", type: "DocuCam", roomId: "BCR0020", brand: "IPEVO", model: "V4K", serial: "MOCK-DC-001", person: "Dillon Jacobsma", notes: "", status: "Active" },
     { label: "BCA0081", type: "Bulk Item", itemName: "Chairs", totalQuantity: "40", allocations: [{ roomId: "BCR0006", quantity: "20" }, { roomId: "BCR0008", quantity: "20" }], notes: "", status: "Active" },
+    // Every panel below follows the same design: mostly single-pole breakers
+    // feeding room outlet/lighting circuits, plus exactly one of each other
+    // BreakerType (Tandem, Quad, Split Double-Pole) for catalog variety, one
+    // double-pole feeding a large appliance, and one double-pole feeding a
+    // sub-panel — BCA0082's two sub-panel feeds are real (BCA0084/BCA0085);
+    // the small sub-panels' sub-panel feeds point at plausible-but-nonexistent
+    // future panel labels (BCA0100+), described as reserved/not yet installed.
     {
       label: "BCA0082", type: "Electrical Panel", roomId: "BCR0018", brand: "Square D", model: "QO142M200PC", serial: "MN-88213-SQD",
       notes: "Main service panel, 200A. Feeds Building 200/300/400 sub-panels.", status: "Active",
       panelSlotCount: 24, panelLayout: "two-column",
       breakers: [
-        { id: "b-1", panelLabel: "BCA0082", cells: ["1a", "1b"], breakerTypeId: "type-single-pole", ampRating: "", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
-          { id: "c-1", breakerId: "b-1", label: "1", description: "", roomsServedIds: ["BCR0020"], feedsPanelLabel: "" },
+        { id: "b82-1", panelLabel: "BCA0082", cells: ["1a", "1b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c82-1", breakerId: "b82-1", label: "1", description: "Outlets", roomsServedIds: ["BCR0020"], feedsPanelLabel: "" },
         ] },
-        { id: "b-24-a", panelLabel: "BCA0082", cells: ["2a"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-quad-1", circuits: [
-          { id: "c-2a", breakerId: "b-24-a", label: "2A", description: "", roomsServedIds: ["BCR0020"], feedsPanelLabel: "" },
+        { id: "b82-2", panelLabel: "BCA0082", cells: ["2a", "2b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c82-2", breakerId: "b82-2", label: "2", description: "Outlets", roomsServedIds: ["BCR0006"], feedsPanelLabel: "" },
         ] },
-        { id: "b-24-b", panelLabel: "BCA0082", cells: ["2b"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-quad-1", circuits: [
-          { id: "c-2b", breakerId: "b-24-b", label: "2B", description: "", roomsServedIds: ["BCR0006"], feedsPanelLabel: "" },
+        { id: "b82-3", panelLabel: "BCA0082", cells: ["3a", "3b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c82-3", breakerId: "b82-3", label: "3", description: "Outlets", roomsServedIds: ["BCR0002"], feedsPanelLabel: "" },
         ] },
-        { id: "b-24-c", panelLabel: "BCA0082", cells: ["4a"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-quad-1", circuits: [
-          { id: "c-4a", breakerId: "b-24-c", label: "4A", description: "", roomsServedIds: ["BCR0002"], feedsPanelLabel: "" },
+        { id: "b82-4", panelLabel: "BCA0082", cells: ["4a", "4b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c82-4", breakerId: "b82-4", label: "4", description: "Outlets", roomsServedIds: ["BCR0018"], feedsPanelLabel: "" },
         ] },
-        { id: "b-24-d", panelLabel: "BCA0082", cells: ["4b"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-quad-1", circuits: [] },
-        { id: "b-6-8", panelLabel: "BCA0082", cells: ["6a", "6b", "8a", "8b"], breakerTypeId: "type-double-pole", ampRating: "60", status: "Active", serial: "", installedDate: "", notes: "Feed to Room 300 sub-panel (BCA0084)", circuits: [
-          { id: "c-6-8", breakerId: "b-6-8", label: "6/8", description: "", roomsServedIds: [], feedsPanelLabel: "BCA0084" },
+        { id: "b82-5", panelLabel: "BCA0082", cells: ["5a", "5b"], breakerTypeId: "type-single-pole", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c82-5", breakerId: "b82-5", label: "5", description: "Lighting", roomsServedIds: ["BCR0020"], feedsPanelLabel: "" },
         ] },
-        { id: "b-9-11-a", panelLabel: "BCA0082", cells: ["9a"], breakerTypeId: "type-split-double", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-split-9", circuits: [] },
-        { id: "b-9-11-b", panelLabel: "BCA0082", cells: ["9b", "11a"], breakerTypeId: "type-split-double", ampRating: "30", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-split-9", circuits: [
-          { id: "c-9-11", breakerId: "b-9-11-b", label: "9/11", description: "", roomsServedIds: ["BCR0018"], feedsPanelLabel: "" },
+        { id: "b82-6", panelLabel: "BCA0082", cells: ["6a", "6b"], breakerTypeId: "type-single-pole", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c82-6", breakerId: "b82-6", label: "6", description: "Lighting", roomsServedIds: ["BCR0006"], feedsPanelLabel: "" },
         ] },
-        { id: "b-9-11-c", panelLabel: "BCA0082", cells: ["11b"], breakerTypeId: "type-split-double", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-split-9", circuits: [] },
-        { id: "b-10-12", panelLabel: "BCA0082", cells: ["10a", "10b", "12a", "12b"], breakerTypeId: "type-double-pole", ampRating: "60", status: "Active", serial: "", installedDate: "", notes: "Feed to Room 400 sub-panel (BCA0085)", circuits: [
-          { id: "c-10-12", breakerId: "b-10-12", label: "10/12", description: "", roomsServedIds: [], feedsPanelLabel: "BCA0085" },
+        { id: "b82-7", panelLabel: "BCA0082", cells: ["7a", "7b"], breakerTypeId: "type-single-pole", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c82-7", breakerId: "b82-7", label: "7", description: "Lighting", roomsServedIds: ["BCR0002"], feedsPanelLabel: "" },
         ] },
-        { id: "b-14-a", panelLabel: "BCA0082", cells: ["14a"], breakerTypeId: "type-tandem", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-tandem-14", circuits: [
-          { id: "c-14a", breakerId: "b-14-a", label: "14a", description: "", roomsServedIds: ["BCR0002"], feedsPanelLabel: "" },
+        { id: "b82-8a", panelLabel: "BCA0082", cells: ["8a"], breakerTypeId: "type-tandem", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp82-tandem-8", circuits: [
+          { id: "c82-8a", breakerId: "b82-8a", label: "8A", description: "Lighting", roomsServedIds: ["BCR0018"], feedsPanelLabel: "" },
         ] },
-        { id: "b-14-b", panelLabel: "BCA0082", cells: ["14b"], breakerTypeId: "type-tandem", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp-tandem-14", circuits: [] },
-        { id: "b-15-17", panelLabel: "BCA0082", cells: ["15a", "15b", "17a", "17b"], breakerTypeId: "type-double-pole", ampRating: "30", status: "Active", serial: "", installedDate: "", notes: "Electric water heater", circuits: [
-          { id: "c-15-17", breakerId: "b-15-17", label: "Water Heater", description: "", roomsServedIds: ["BCR0018"], feedsPanelLabel: "" },
+        { id: "b82-8b", panelLabel: "BCA0082", cells: ["8b"], breakerTypeId: "type-tandem", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp82-tandem-8", circuits: [
+          { id: "c82-8b", breakerId: "b82-8b", label: "8B", description: "Exterior lighting", roomsServedIds: ["BCR0018"], feedsPanelLabel: "" },
         ] },
-        { id: "b-16-18", panelLabel: "BCA0082", cells: ["16a", "16b", "18a", "18b"], breakerTypeId: "type-double-pole", ampRating: "50", status: "Active", serial: "", installedDate: "", notes: "Electric range/oven", circuits: [
-          { id: "c-16-18", breakerId: "b-16-18", label: "Range", description: "", roomsServedIds: ["BCR0002"], feedsPanelLabel: "" },
+        { id: "b82-9a", panelLabel: "BCA0082", cells: ["9a"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp82-quad-9", circuits: [
+          { id: "c82-9a", breakerId: "b82-9a", label: "9A", description: "Outlets", roomsServedIds: ["BCR0020"], feedsPanelLabel: "" },
         ] },
-        { id: "b-19-21", panelLabel: "BCA0082", cells: ["19a", "19b", "21a", "21b"], breakerTypeId: "type-double-pole", ampRating: "30", status: "Faulted", serial: "", installedDate: "", notes: "Dryer — tripping, needs service", circuits: [
-          { id: "c-19-21", breakerId: "b-19-21", label: "Dryer", description: "", roomsServedIds: ["BCR0018"], feedsPanelLabel: "" },
+        { id: "b82-9b", panelLabel: "BCA0082", cells: ["9b"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp82-quad-9", circuits: [
+          { id: "c82-9b", breakerId: "b82-9b", label: "9B", description: "Outlets", roomsServedIds: ["BCR0006"], feedsPanelLabel: "" },
         ] },
-        { id: "b-20-22", panelLabel: "BCA0082", cells: ["20a", "20b", "22a", "22b"], breakerTypeId: "type-double-pole", ampRating: "40", status: "Spare", serial: "", installedDate: "", notes: "Reserved for future HVAC condenser", circuits: [] },
+        { id: "b82-11a", panelLabel: "BCA0082", cells: ["11a"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp82-quad-9", circuits: [
+          { id: "c82-11a", breakerId: "b82-11a", label: "11A", description: "Outlets", roomsServedIds: ["BCR0002"], feedsPanelLabel: "" },
+        ] },
+        { id: "b82-11b", panelLabel: "BCA0082", cells: ["11b"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp82-quad-9", circuits: [
+          { id: "c82-11b", breakerId: "b82-11b", label: "11B", description: "Outlets", roomsServedIds: ["BCR0018"], feedsPanelLabel: "" },
+        ] },
+        { id: "b82-10", panelLabel: "BCA0082", cells: ["10a", "10b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c82-10", breakerId: "b82-10", label: "10", description: "Outlets", roomsServedIds: ["BCR0020"], feedsPanelLabel: "" },
+        ] },
+        { id: "b82-12", panelLabel: "BCA0082", cells: ["12a", "12b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c82-12", breakerId: "b82-12", label: "12", description: "Outlets", roomsServedIds: ["BCR0002"], feedsPanelLabel: "" },
+        ] },
+        { id: "b82-13a", panelLabel: "BCA0082", cells: ["13a"], breakerTypeId: "type-split-double", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp82-split-13", circuits: [
+          { id: "c82-13a", breakerId: "b82-13a", label: "13A", description: "Garbage disposal", roomsServedIds: ["BCR0002"], feedsPanelLabel: "" },
+        ] },
+        { id: "b82-13b-15a", panelLabel: "BCA0082", cells: ["13b", "15a"], breakerTypeId: "type-split-double", ampRating: "30", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp82-split-13", circuits: [
+          { id: "c82-13b-15a", breakerId: "b82-13b-15a", label: "13B/15A", description: "Microwave", roomsServedIds: ["BCR0002"], feedsPanelLabel: "" },
+        ] },
+        { id: "b82-15b", panelLabel: "BCA0082", cells: ["15b"], breakerTypeId: "type-split-double", ampRating: "15", status: "Spare", serial: "", installedDate: "", notes: "", groupId: "grp82-split-13", circuits: [] },
+        { id: "b82-14", panelLabel: "BCA0082", cells: ["14a", "14b"], breakerTypeId: "type-single-pole", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c82-14", breakerId: "b82-14", label: "14", description: "Lighting", roomsServedIds: ["BCR0018"], feedsPanelLabel: "" },
+        ] },
+        { id: "b82-16-18", panelLabel: "BCA0082", cells: ["16a", "16b", "18a", "18b"], breakerTypeId: "type-double-pole", ampRating: "50", status: "Active", serial: "", installedDate: "", notes: "Electric range/oven", circuits: [
+          { id: "c82-16-18", breakerId: "b82-16-18", label: "16/18", description: "Range/Oven", roomsServedIds: ["BCR0002"], feedsPanelLabel: "" },
+        ] },
+        { id: "b82-17", panelLabel: "BCA0082", cells: ["17a", "17b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c82-17", breakerId: "b82-17", label: "17", description: "Outlets", roomsServedIds: ["BCR0006"], feedsPanelLabel: "" },
+        ] },
+        { id: "b82-19-21", panelLabel: "BCA0082", cells: ["19a", "19b", "21a", "21b"], breakerTypeId: "type-double-pole", ampRating: "60", status: "Active", serial: "", installedDate: "", notes: "Feed to Room 300 sub-panel (BCA0084)", circuits: [
+          { id: "c82-19-21", breakerId: "b82-19-21", label: "19/21", description: "", roomsServedIds: [], feedsPanelLabel: "BCA0084" },
+        ] },
+        { id: "b82-20", panelLabel: "BCA0082", cells: ["20a", "20b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c82-20", breakerId: "b82-20", label: "20", description: "Outlets", roomsServedIds: ["BCR0018"], feedsPanelLabel: "" },
+        ] },
+        { id: "b82-22-24", panelLabel: "BCA0082", cells: ["22a", "22b", "24a", "24b"], breakerTypeId: "type-double-pole", ampRating: "60", status: "Active", serial: "", installedDate: "", notes: "Feed to Room 400 sub-panel (BCA0085)", circuits: [
+          { id: "c82-22-24", breakerId: "b82-22-24", label: "22/24", description: "", roomsServedIds: [], feedsPanelLabel: "BCA0085" },
+        ] },
+        { id: "b82-23", panelLabel: "BCA0082", cells: ["23a", "23b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c82-23", breakerId: "b82-23", label: "23", description: "Outlets", roomsServedIds: ["BCR0020"], feedsPanelLabel: "" },
+        ] },
       ],
     },
     {
       label: "BCA0083", type: "Electrical Panel", roomId: "BCR0008", brand: "Square D", model: "QO112L125GRB", serial: "B200-SQD-4471",
       notes: "Sub-panel fed from Main Distribution Panel (Storage Room), 125A main lug.", status: "Active",
-      panelSlotCount: 12, panelLayout: "two-column",
+      panelSlotCount: 20, panelLayout: "two-column",
       breakers: [
         { id: "b83-1", panelLabel: "BCA0083", cells: ["1a", "1b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
-          { id: "c83-1", breakerId: "b83-1", label: "1", description: "", roomsServedIds: ["BCR0008"], feedsPanelLabel: "" },
+          { id: "c83-1", breakerId: "b83-1", label: "1", description: "Outlets", roomsServedIds: ["BCR0008"], feedsPanelLabel: "" },
+        ] },
+        { id: "b83-2", panelLabel: "BCA0083", cells: ["2a", "2b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c83-2", breakerId: "b83-2", label: "2", description: "Outlets", roomsServedIds: ["BCR0008"], feedsPanelLabel: "" },
+        ] },
+        { id: "b83-3", panelLabel: "BCA0083", cells: ["3a", "3b"], breakerTypeId: "type-single-pole", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c83-3", breakerId: "b83-3", label: "3", description: "Lighting", roomsServedIds: ["BCR0008"], feedsPanelLabel: "" },
+        ] },
+        { id: "b83-4a", panelLabel: "BCA0083", cells: ["4a"], breakerTypeId: "type-tandem", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp83-tandem-4", circuits: [
+          { id: "c83-4a", breakerId: "b83-4a", label: "4A", description: "Exterior lighting", roomsServedIds: ["BCR0008"], feedsPanelLabel: "" },
+        ] },
+        { id: "b83-4b", panelLabel: "BCA0083", cells: ["4b"], breakerTypeId: "type-tandem", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp83-tandem-4", circuits: [
+          { id: "c83-4b", breakerId: "b83-4b", label: "4B", description: "Closet light", roomsServedIds: ["BCR0008"], feedsPanelLabel: "" },
+        ] },
+        { id: "b83-5", panelLabel: "BCA0083", cells: ["5a", "5b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c83-5", breakerId: "b83-5", label: "5", description: "Outlets", roomsServedIds: ["BCR0008"], feedsPanelLabel: "" },
+        ] },
+        { id: "b83-6a", panelLabel: "BCA0083", cells: ["6a"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp83-quad-6", circuits: [
+          { id: "c83-6a", breakerId: "b83-6a", label: "6A", description: "Outlets", roomsServedIds: ["BCR0008"], feedsPanelLabel: "" },
+        ] },
+        { id: "b83-6b", panelLabel: "BCA0083", cells: ["6b"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp83-quad-6", circuits: [
+          { id: "c83-6b", breakerId: "b83-6b", label: "6B", description: "Outlets", roomsServedIds: ["BCR0008"], feedsPanelLabel: "" },
+        ] },
+        { id: "b83-8a", panelLabel: "BCA0083", cells: ["8a"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp83-quad-6", circuits: [
+          { id: "c83-8a", breakerId: "b83-8a", label: "8A", description: "Outlets", roomsServedIds: ["BCR0008"], feedsPanelLabel: "" },
+        ] },
+        { id: "b83-8b", panelLabel: "BCA0083", cells: ["8b"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp83-quad-6", circuits: [
+          { id: "c83-8b", breakerId: "b83-8b", label: "8B", description: "Outlets", roomsServedIds: ["BCR0008"], feedsPanelLabel: "" },
+        ] },
+        { id: "b83-7", panelLabel: "BCA0083", cells: ["7a", "7b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c83-7", breakerId: "b83-7", label: "7", description: "Outlets", roomsServedIds: ["BCR0008"], feedsPanelLabel: "" },
+        ] },
+        { id: "b83-9a", panelLabel: "BCA0083", cells: ["9a"], breakerTypeId: "type-split-double", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp83-split-9", circuits: [
+          { id: "c83-9a", breakerId: "b83-9a", label: "9A", description: "Garbage disposal", roomsServedIds: ["BCR0008"], feedsPanelLabel: "" },
+        ] },
+        { id: "b83-9b-11a", panelLabel: "BCA0083", cells: ["9b", "11a"], breakerTypeId: "type-split-double", ampRating: "30", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp83-split-9", circuits: [
+          { id: "c83-9b-11a", breakerId: "b83-9b-11a", label: "9B/11A", description: "Microwave", roomsServedIds: ["BCR0008"], feedsPanelLabel: "" },
+        ] },
+        { id: "b83-11b", panelLabel: "BCA0083", cells: ["11b"], breakerTypeId: "type-split-double", ampRating: "15", status: "Spare", serial: "", installedDate: "", notes: "", groupId: "grp83-split-9", circuits: [] },
+        { id: "b83-10", panelLabel: "BCA0083", cells: ["10a", "10b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c83-10", breakerId: "b83-10", label: "10", description: "Outlets", roomsServedIds: ["BCR0008"], feedsPanelLabel: "" },
+        ] },
+        { id: "b83-12-14", panelLabel: "BCA0083", cells: ["12a", "12b", "14a", "14b"], breakerTypeId: "type-double-pole", ampRating: "30", status: "Active", serial: "", installedDate: "", notes: "Electric water heater", circuits: [
+          { id: "c83-12-14", breakerId: "b83-12-14", label: "12/14", description: "Water Heater", roomsServedIds: ["BCR0008"], feedsPanelLabel: "" },
+        ] },
+        { id: "b83-13", panelLabel: "BCA0083", cells: ["13a", "13b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c83-13", breakerId: "b83-13", label: "13", description: "Outlets", roomsServedIds: ["BCR0008"], feedsPanelLabel: "" },
+        ] },
+        { id: "b83-15-17", panelLabel: "BCA0083", cells: ["15a", "15b", "17a", "17b"], breakerTypeId: "type-double-pole", ampRating: "60", status: "Active", serial: "", installedDate: "", notes: "Reserved feed for a future garage sub-panel (not yet installed).", circuits: [
+          { id: "c83-15-17", breakerId: "b83-15-17", label: "15/17", description: "", roomsServedIds: [], feedsPanelLabel: "BCA0100" },
+        ] },
+        { id: "b83-16", panelLabel: "BCA0083", cells: ["16a", "16b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c83-16", breakerId: "b83-16", label: "16", description: "Outlets", roomsServedIds: ["BCR0008"], feedsPanelLabel: "" },
+        ] },
+        { id: "b83-18", panelLabel: "BCA0083", cells: ["18a", "18b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c83-18", breakerId: "b83-18", label: "18", description: "Outlets", roomsServedIds: ["BCR0008"], feedsPanelLabel: "" },
+        ] },
+        { id: "b83-19", panelLabel: "BCA0083", cells: ["19a", "19b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c83-19", breakerId: "b83-19", label: "19", description: "Outlets", roomsServedIds: ["BCR0008"], feedsPanelLabel: "" },
         ] },
       ],
     },
     {
       label: "BCA0084", type: "Electrical Panel", roomId: "BCR0011", brand: "Square D", model: "QO112L125GRB", serial: "B300-SQD-4472",
       notes: "Sub-panel fed from Main Distribution Panel (Storage Room), 125A main lug.", status: "Active",
-      panelSlotCount: 12, panelLayout: "two-column",
+      panelSlotCount: 20, panelLayout: "two-column",
       breakers: [
         { id: "b84-1", panelLabel: "BCA0084", cells: ["1a", "1b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
-          { id: "c84-1", breakerId: "b84-1", label: "1", description: "", roomsServedIds: ["BCR0011"], feedsPanelLabel: "" },
+          { id: "c84-1", breakerId: "b84-1", label: "1", description: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "" },
+        ] },
+        { id: "b84-2", panelLabel: "BCA0084", cells: ["2a", "2b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c84-2", breakerId: "b84-2", label: "2", description: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "" },
+        ] },
+        { id: "b84-3", panelLabel: "BCA0084", cells: ["3a", "3b"], breakerTypeId: "type-single-pole", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c84-3", breakerId: "b84-3", label: "3", description: "Lighting", roomsServedIds: ["BCR0011"], feedsPanelLabel: "" },
+        ] },
+        { id: "b84-4a", panelLabel: "BCA0084", cells: ["4a"], breakerTypeId: "type-tandem", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-tandem-4", circuits: [
+          { id: "c84-4a", breakerId: "b84-4a", label: "4A", description: "Exterior lighting", roomsServedIds: ["BCR0011"], feedsPanelLabel: "" },
+        ] },
+        { id: "b84-4b", panelLabel: "BCA0084", cells: ["4b"], breakerTypeId: "type-tandem", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-tandem-4", circuits: [
+          { id: "c84-4b", breakerId: "b84-4b", label: "4B", description: "Closet light", roomsServedIds: ["BCR0011"], feedsPanelLabel: "" },
+        ] },
+        { id: "b84-5", panelLabel: "BCA0084", cells: ["5a", "5b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c84-5", breakerId: "b84-5", label: "5", description: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "" },
+        ] },
+        { id: "b84-6a", panelLabel: "BCA0084", cells: ["6a"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-quad-6", circuits: [
+          { id: "c84-6a", breakerId: "b84-6a", label: "6A", description: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "" },
+        ] },
+        { id: "b84-6b", panelLabel: "BCA0084", cells: ["6b"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-quad-6", circuits: [
+          { id: "c84-6b", breakerId: "b84-6b", label: "6B", description: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "" },
+        ] },
+        { id: "b84-8a", panelLabel: "BCA0084", cells: ["8a"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-quad-6", circuits: [
+          { id: "c84-8a", breakerId: "b84-8a", label: "8A", description: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "" },
+        ] },
+        { id: "b84-8b", panelLabel: "BCA0084", cells: ["8b"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-quad-6", circuits: [
+          { id: "c84-8b", breakerId: "b84-8b", label: "8B", description: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "" },
+        ] },
+        { id: "b84-7", panelLabel: "BCA0084", cells: ["7a", "7b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c84-7", breakerId: "b84-7", label: "7", description: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "" },
+        ] },
+        { id: "b84-9a", panelLabel: "BCA0084", cells: ["9a"], breakerTypeId: "type-split-double", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-split-9", circuits: [
+          { id: "c84-9a", breakerId: "b84-9a", label: "9A", description: "Garbage disposal", roomsServedIds: ["BCR0011"], feedsPanelLabel: "" },
+        ] },
+        { id: "b84-9b-11a", panelLabel: "BCA0084", cells: ["9b", "11a"], breakerTypeId: "type-split-double", ampRating: "30", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-split-9", circuits: [
+          { id: "c84-9b-11a", breakerId: "b84-9b-11a", label: "9B/11A", description: "Microwave", roomsServedIds: ["BCR0011"], feedsPanelLabel: "" },
+        ] },
+        { id: "b84-11b", panelLabel: "BCA0084", cells: ["11b"], breakerTypeId: "type-split-double", ampRating: "15", status: "Spare", serial: "", installedDate: "", notes: "", groupId: "grp84-split-9", circuits: [] },
+        { id: "b84-10", panelLabel: "BCA0084", cells: ["10a", "10b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c84-10", breakerId: "b84-10", label: "10", description: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "" },
+        ] },
+        { id: "b84-12-14", panelLabel: "BCA0084", cells: ["12a", "12b", "14a", "14b"], breakerTypeId: "type-double-pole", ampRating: "30", status: "Active", serial: "", installedDate: "", notes: "Electric dryer", circuits: [
+          { id: "c84-12-14", breakerId: "b84-12-14", label: "12/14", description: "Dryer", roomsServedIds: ["BCR0011"], feedsPanelLabel: "" },
+        ] },
+        { id: "b84-13", panelLabel: "BCA0084", cells: ["13a", "13b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c84-13", breakerId: "b84-13", label: "13", description: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "" },
+        ] },
+        { id: "b84-15-17", panelLabel: "BCA0084", cells: ["15a", "15b", "17a", "17b"], breakerTypeId: "type-double-pole", ampRating: "60", status: "Active", serial: "", installedDate: "", notes: "Reserved feed for a future shed sub-panel (not yet installed).", circuits: [
+          { id: "c84-15-17", breakerId: "b84-15-17", label: "15/17", description: "", roomsServedIds: [], feedsPanelLabel: "BCA0101" },
+        ] },
+        { id: "b84-16", panelLabel: "BCA0084", cells: ["16a", "16b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c84-16", breakerId: "b84-16", label: "16", description: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "" },
+        ] },
+        { id: "b84-18", panelLabel: "BCA0084", cells: ["18a", "18b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c84-18", breakerId: "b84-18", label: "18", description: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "" },
+        ] },
+        { id: "b84-19", panelLabel: "BCA0084", cells: ["19a", "19b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c84-19", breakerId: "b84-19", label: "19", description: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "" },
         ] },
       ],
     },
     {
       label: "BCA0085", type: "Electrical Panel", roomId: "BCR0014", brand: "Square D", model: "QO116L125GRB", serial: "B400-SQD-4473",
       notes: "Sub-panel fed from Main Distribution Panel (Storage Room), 125A main lug.", status: "Active",
-      panelSlotCount: 16, panelLayout: "two-column",
+      panelSlotCount: 20, panelLayout: "two-column",
       breakers: [
         { id: "b85-1", panelLabel: "BCA0085", cells: ["1a", "1b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
-          { id: "c85-1", breakerId: "b85-1", label: "1", description: "", roomsServedIds: ["BCR0014"], feedsPanelLabel: "" },
+          { id: "c85-1", breakerId: "b85-1", label: "1", description: "Outlets", roomsServedIds: ["BCR0014"], feedsPanelLabel: "" },
+        ] },
+        { id: "b85-2", panelLabel: "BCA0085", cells: ["2a", "2b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c85-2", breakerId: "b85-2", label: "2", description: "Outlets", roomsServedIds: ["BCR0014"], feedsPanelLabel: "" },
+        ] },
+        { id: "b85-3", panelLabel: "BCA0085", cells: ["3a", "3b"], breakerTypeId: "type-single-pole", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c85-3", breakerId: "b85-3", label: "3", description: "Lighting", roomsServedIds: ["BCR0014"], feedsPanelLabel: "" },
+        ] },
+        { id: "b85-4a", panelLabel: "BCA0085", cells: ["4a"], breakerTypeId: "type-tandem", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp85-tandem-4", circuits: [
+          { id: "c85-4a", breakerId: "b85-4a", label: "4A", description: "Exterior lighting", roomsServedIds: ["BCR0014"], feedsPanelLabel: "" },
+        ] },
+        { id: "b85-4b", panelLabel: "BCA0085", cells: ["4b"], breakerTypeId: "type-tandem", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp85-tandem-4", circuits: [
+          { id: "c85-4b", breakerId: "b85-4b", label: "4B", description: "Closet light", roomsServedIds: ["BCR0014"], feedsPanelLabel: "" },
+        ] },
+        { id: "b85-5", panelLabel: "BCA0085", cells: ["5a", "5b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c85-5", breakerId: "b85-5", label: "5", description: "Outlets", roomsServedIds: ["BCR0014"], feedsPanelLabel: "" },
+        ] },
+        { id: "b85-6a", panelLabel: "BCA0085", cells: ["6a"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp85-quad-6", circuits: [
+          { id: "c85-6a", breakerId: "b85-6a", label: "6A", description: "Outlets", roomsServedIds: ["BCR0014"], feedsPanelLabel: "" },
+        ] },
+        { id: "b85-6b", panelLabel: "BCA0085", cells: ["6b"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp85-quad-6", circuits: [
+          { id: "c85-6b", breakerId: "b85-6b", label: "6B", description: "Outlets", roomsServedIds: ["BCR0014"], feedsPanelLabel: "" },
+        ] },
+        { id: "b85-8a", panelLabel: "BCA0085", cells: ["8a"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp85-quad-6", circuits: [
+          { id: "c85-8a", breakerId: "b85-8a", label: "8A", description: "Outlets", roomsServedIds: ["BCR0014"], feedsPanelLabel: "" },
+        ] },
+        { id: "b85-8b", panelLabel: "BCA0085", cells: ["8b"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp85-quad-6", circuits: [
+          { id: "c85-8b", breakerId: "b85-8b", label: "8B", description: "Outlets", roomsServedIds: ["BCR0014"], feedsPanelLabel: "" },
+        ] },
+        { id: "b85-7", panelLabel: "BCA0085", cells: ["7a", "7b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c85-7", breakerId: "b85-7", label: "7", description: "Outlets", roomsServedIds: ["BCR0014"], feedsPanelLabel: "" },
+        ] },
+        { id: "b85-9a", panelLabel: "BCA0085", cells: ["9a"], breakerTypeId: "type-split-double", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp85-split-9", circuits: [
+          { id: "c85-9a", breakerId: "b85-9a", label: "9A", description: "Garbage disposal", roomsServedIds: ["BCR0014"], feedsPanelLabel: "" },
+        ] },
+        { id: "b85-9b-11a", panelLabel: "BCA0085", cells: ["9b", "11a"], breakerTypeId: "type-split-double", ampRating: "30", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp85-split-9", circuits: [
+          { id: "c85-9b-11a", breakerId: "b85-9b-11a", label: "9B/11A", description: "Microwave", roomsServedIds: ["BCR0014"], feedsPanelLabel: "" },
+        ] },
+        { id: "b85-11b", panelLabel: "BCA0085", cells: ["11b"], breakerTypeId: "type-split-double", ampRating: "15", status: "Spare", serial: "", installedDate: "", notes: "", groupId: "grp85-split-9", circuits: [] },
+        { id: "b85-10", panelLabel: "BCA0085", cells: ["10a", "10b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c85-10", breakerId: "b85-10", label: "10", description: "Outlets", roomsServedIds: ["BCR0014"], feedsPanelLabel: "" },
+        ] },
+        { id: "b85-12-14", panelLabel: "BCA0085", cells: ["12a", "12b", "14a", "14b"], breakerTypeId: "type-double-pole", ampRating: "40", status: "Active", serial: "", installedDate: "", notes: "EV charger", circuits: [
+          { id: "c85-12-14", breakerId: "b85-12-14", label: "12/14", description: "EV Charger", roomsServedIds: ["BCR0014"], feedsPanelLabel: "" },
+        ] },
+        { id: "b85-13", panelLabel: "BCA0085", cells: ["13a", "13b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c85-13", breakerId: "b85-13", label: "13", description: "Outlets", roomsServedIds: ["BCR0014"], feedsPanelLabel: "" },
+        ] },
+        { id: "b85-15-17", panelLabel: "BCA0085", cells: ["15a", "15b", "17a", "17b"], breakerTypeId: "type-double-pole", ampRating: "60", status: "Active", serial: "", installedDate: "", notes: "Reserved feed for a future greenhouse sub-panel (not yet installed).", circuits: [
+          { id: "c85-15-17", breakerId: "b85-15-17", label: "15/17", description: "", roomsServedIds: [], feedsPanelLabel: "BCA0102" },
+        ] },
+        { id: "b85-16", panelLabel: "BCA0085", cells: ["16a", "16b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c85-16", breakerId: "b85-16", label: "16", description: "Outlets", roomsServedIds: ["BCR0014"], feedsPanelLabel: "" },
+        ] },
+        { id: "b85-18", panelLabel: "BCA0085", cells: ["18a", "18b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c85-18", breakerId: "b85-18", label: "18", description: "Outlets", roomsServedIds: ["BCR0014"], feedsPanelLabel: "" },
+        ] },
+        { id: "b85-19", panelLabel: "BCA0085", cells: ["19a", "19b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+          { id: "c85-19", breakerId: "b85-19", label: "19", description: "Outlets", roomsServedIds: ["BCR0014"], feedsPanelLabel: "" },
         ] },
       ],
     },
+    // Mitsubishi mini-split indoor units — one per Room, linked via roomId like any
+    // other device. Maintenance items mirror the real-world service schedule: filter
+    // cleaning is a monthly DIY task, coil cleaning is an annual pro-service task.
+    { label: "BCA0086", type: "Mini Split", roomId: "BCR0006", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
+      { task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "", owner: "", at: "", by: "" },
+      { task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
+    ] },
+    { label: "BCA0087", type: "Mini Split", roomId: "BCR0008", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
+      { task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "", owner: "", at: "", by: "" },
+      { task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
+    ] },
+    { label: "BCA0088", type: "Mini Split", roomId: "BCR0011", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
+      { task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "", owner: "", at: "", by: "" },
+      { task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
+    ] },
+    { label: "BCA0089", type: "Mini Split", roomId: "BCR0014", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
+      { task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "", owner: "", at: "", by: "" },
+      { task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
+    ] },
+    { label: "BCA0090", type: "Mini Split", roomId: "BCR0002", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
+      { task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "", owner: "", at: "", by: "" },
+      { task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
+    ] },
+    { label: "BCA0091", type: "Mini Split", roomId: "BCR0018", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
+      { task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "", owner: "", at: "", by: "" },
+      { task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
+    ] },
+    { label: "BCA0092", type: "Mini Split", roomId: "BCR0020", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
+      { task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "", owner: "", at: "", by: "" },
+      { task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
+    ] },
+    // Mitsubishi outdoor condenser/compressor units — one per Building, linked
+    // directly via buildingId (see CONDENSER_EXCLUDED_FIELDS/fieldAppliesTo) since
+    // an outdoor unit sits outside any one Room. Building 100 has 4 indoor zones
+    // (Room 102, Kitchen, Storage Room, Room 101), so it gets a 4-zone outdoor
+    // unit; the others each have a single zone.
+    { label: "BCA0093", type: "Condenser", buildingId: "BCB0001", brand: "Mitsubishi", model: "MXZ-4C36NAHZ", serial: "", notes: "Outdoor condenser/compressor, 4-zone multi-split.", status: "Active", maintenanceItems: [
+      { task: "Inspection / cleaning", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
+    ] },
+    { label: "BCA0094", type: "Condenser", buildingId: "BCB0002", brand: "Mitsubishi", model: "MUZ-GL15NA", serial: "", notes: "Outdoor condenser/compressor, single-zone.", status: "Active", maintenanceItems: [
+      { task: "Inspection / cleaning", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
+    ] },
+    { label: "BCA0095", type: "Condenser", buildingId: "BCB0003", brand: "Mitsubishi", model: "MUZ-GL15NA", serial: "", notes: "Outdoor condenser/compressor, single-zone.", status: "Active", maintenanceItems: [
+      { task: "Inspection / cleaning", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
+    ] },
+    { label: "BCA0096", type: "Condenser", buildingId: "BCB0004", brand: "Mitsubishi", model: "MUZ-GL15NA", serial: "", notes: "Outdoor condenser/compressor, single-zone.", status: "Active", maintenanceItems: [
+      { task: "Inspection / cleaning", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
+    ] },
   ],
   breakerTypes: SEEDED_BREAKER_TYPES,
   auditLog: [],
@@ -2401,7 +2672,7 @@ function AssetTracker() {
                         label={c.label}
                         value={
                           c.key === "room" && selectedAsset.type !== "Room" ? roomNameFor(selectedAsset.roomId, assets)
-                          : c.key === "building" && selectedAsset.type === "Room" ? buildingNameFor(selectedAsset.buildingId, assets)
+                          : c.key === "building" && selectedAsset.type !== "Building" && fieldAppliesTo("building", selectedAsset.type) ? buildingNameFor(selectedAsset.buildingId, assets)
                           : selectedAsset[c.key]
                         }
                         wide={c.key === "notes"}
@@ -3892,6 +4163,7 @@ function AssetTracker() {
                   const Icon = isTypeCol ? iconFor(a.type) : null;
                   const applies = fieldAppliesTo(c.key, a.type);
                   const isRoomCol = c.key === "room" && a.type !== "Room" && applies;
+                  const isBuildingCol = c.key === "building" && applies && a.type !== "Building";
                   const isInferredBuilding = c.key === "building" && !applies;
                   const inferredValue = isInferredBuilding ? inferBuilding(a, assets) : "";
                   return (
@@ -3927,6 +4199,8 @@ function AssetTracker() {
                         a.room || "Room"
                       ) : isRoomCol ? (
                         roomNameFor(a.roomId, assets) || "—"
+                      ) : isBuildingCol ? (
+                        buildingNameFor(a.buildingId, assets) || "—"
                       ) : (
                         applies ? (a[c.key] || "—") : isInferredBuilding ? (inferredValue || "") : ""
                       )}

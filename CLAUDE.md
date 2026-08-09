@@ -211,6 +211,23 @@ which now follows `roomId` → that Room's `buildingId`), not stored directly. `
 `Building.building` remain the *own* display name of that Room/Building asset — the one
 field that's genuinely a plain string, since a Room doesn't reference itself.
 
+**"Condenser" is the one non-Room/Building type that links to a Building directly** (a
+`buildingId` field of its own) instead of inferring one through a Room — it's an outdoor
+unit that doesn't sit inside any particular Room. Added to `TYPE_ONLY_FIELDS.building`
+alongside Room/Building, with `room` excluded via `CONDENSER_EXCLUDED_FIELDS` so it doesn't
+also get a Room field. This is a second, generally-useful linkage pattern, not a one-off
+hack — reuse it (add the type to `TYPE_ONLY_FIELDS.building`, exclude `room` for it) for any
+future type that attaches to a Building as a whole rather than to one Room. Two rendering
+sites had to learn to resolve a *direct* `buildingId` for a non-Room type, since previously
+only Room ever had one: the read-only Detail view's building special-case (was hardcoded to
+`selectedAsset.type === "Room"`, now any type where `fieldAppliesTo("building", type)` and
+type isn't itself `"Building"`) and the list-row cell renderer (new `isBuildingCol` branch
+resolving via `buildingNameFor(a.buildingId, assets)`, alongside the existing `isRoomCol`/
+`isInferredBuilding` branches) — the latter was also silently blank for Room rows before
+this fix, since the generic fallback path read the non-existent `a.building` field instead
+of resolving `a.buildingId`. Sort/filter/search and `exportToExcel`'s `displayBuilding`
+already resolved a direct `buildingId` correctly for any type, so they needed no changes.
+
 This is deliberate hardening, not the original design: earlier, everything stored the
 target's display *name*, kept in sync by a rename cascade in the edit-save handler that
 walked every asset and rewrote matching `.room`/`.building`/`allocations[].room` strings.
@@ -421,6 +438,12 @@ When you do:
   Check `backendScriptVersion` in the UI (or the "Backend outdated" header warning) to see
   what's actually live before assuming any of this works against the real Sheet — Sandbox
   mode is unaffected either way.
+- **Mitsubishi mini-split/condenser sample data exists in Sandbox only, not the live Sheet
+  yet**: one "Mini Split" indoor unit per Room and one "Condenser" outdoor unit per Building,
+  each with seeded maintenance items (Monthly filter clean + Annual coil clean for Mini
+  Splits; Annual inspection/cleaning for Condensers). Deliberately not added to the live
+  Sheet yet since it's blocked on the same pending backend redeploy above — once that's
+  done, add the same assets/types there by hand through the UI, matching `MOCK_SNAPSHOT`.
 - No auth beyond the cosmetic name tag — anyone with the deployed URL can read/write
   everything. Fine for internal school use with a private link; not a public-facing
   security model.
