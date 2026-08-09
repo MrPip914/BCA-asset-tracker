@@ -1228,14 +1228,16 @@ function AssetTracker() {
 
   const selectedAsset = assets ? assets.find(a => a.label === selectedLabel) : null;
 
-  function openDetail(asset, initialTab = "details") {
+  function openDetail(asset, initialTab) {
     setSelectedLabel(asset.label);
     setView("detail");
     setDetailEditing(false);
     setEditNote("");
     setCommentDraft("");
     setChangeDraft({ changeType: "", vendor: "", cost: "", note: "" });
-    setDetailTab(initialTab);
+    // Electrical Panels open straight to Breakers — that's the tab worth
+    // seeing first for a panel, not the mostly-empty generic Details fields.
+    setDetailTab(initialTab || (asset.type === "Electrical Panel" ? "breakers" : "details"));
     setConfirmCommentDelete(null);
     setConfirmChangeDelete(null);
     setConfirmArchive(null);
@@ -3479,17 +3481,21 @@ function AssetTracker() {
               <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 520, maxHeight: "85vh", overflowY: "auto" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
                   <div>
-                    <div style={{ fontWeight: 700, fontSize: 16, color: C.brandDark }}>Slot {groupSlotLabel}</div>
-                    {breakerType && <div style={{ fontSize: 12, color: C.muted }}>{breakerType.name} — {members.length} breaker{members.length !== 1 ? "s" : ""}</div>}
+                    {breakerType && <div style={{ fontWeight: 700, fontSize: 16, color: C.brandDark }}>{breakerType.name}</div>}
+                    <div style={{ fontSize: 12, color: C.muted }}>Slot {groupSlotLabel}{breakerType ? ` — ${members.length} breaker${members.length !== 1 ? "s" : ""}` : ""}</div>
                   </div>
                   <button onClick={closeModal} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
                 </div>
 
                 {/* Instance-level details — serial/installed/notes describe the one
                     physical unit, so they're edited once here and applied to every
-                    member row, not repeated per breaker. Delete removes the whole
-                    unit for the same reason. */}
-                <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 14, marginBottom: 14, background: "#fff" }}>
+                    member row, not repeated per breaker. Deliberately not wrapped in
+                    a bordered box like the breaker member rows below, so it reads as
+                    plain metadata about this slot rather than a breaker of its own.
+                    Delete removes the whole unit for the same reason it's edited here
+                    — and only appears once editing, so it's not a stray action sitting
+                    next to Edit in the read-only view. */}
+                <div style={{ marginBottom: 14 }}>
                   {editingInstance ? (
                     <>
                       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 10, marginBottom: 12 }}>
@@ -3506,19 +3512,26 @@ function AssetTracker() {
                           <input value={instanceDraft.notes} onChange={e => patchBreakerModal({ instanceDraft: { ...instanceDraft, notes: e.target.value } })} style={inputStyle} />
                         </label>
                       </div>
-                      <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-                        <button
-                          onClick={() => patchBreakerModal({ instanceDraft: { serial: anchor.serial || "", installedDate: anchor.installedDate || "", notes: anchor.notes || "" }, editingInstance: false })}
-                          style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          onClick={() => { saveBreakerInstanceDetails(memberIds, groupSlotLabel, instanceDraft); patchBreakerModal({ editingInstance: false }); }}
-                          style={{ padding: "8px 14px", background: C.success, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
-                        >
-                          Save
-                        </button>
+                      <div style={{ display: "flex", gap: 10, justifyContent: "space-between" }}>
+                        {!confirmDeleteGroup && (
+                          <button onClick={() => patchBreakerModal({ error: null, confirmDeleteGroup: true, editingInstance: false })} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label="Delete">
+                            <Trash2 size={14} color={C.danger} />
+                          </button>
+                        )}
+                        <div style={{ display: "flex", gap: 10, marginLeft: "auto" }}>
+                          <button
+                            onClick={() => patchBreakerModal({ instanceDraft: { serial: anchor.serial || "", installedDate: anchor.installedDate || "", notes: anchor.notes || "" }, editingInstance: false })}
+                            style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            onClick={() => { saveBreakerInstanceDetails(memberIds, groupSlotLabel, instanceDraft); patchBreakerModal({ editingInstance: false }); }}
+                            style={{ padding: "8px 14px", background: C.success, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                          >
+                            Save
+                          </button>
+                        </div>
                       </div>
                     </>
                   ) : (
@@ -3537,16 +3550,9 @@ function AssetTracker() {
                           <div style={{ fontSize: 13, color: C.ink }}>{anchor.notes || "—"}</div>
                         </div>
                       </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
-                        <button onClick={() => patchBreakerModal({ editingInstance: true })} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label="Edit">
-                          <Pencil size={14} color={C.muted} />
-                        </button>
-                        {!confirmDeleteGroup && (
-                          <button onClick={() => patchBreakerModal({ error: null, confirmDeleteGroup: true })} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label="Delete">
-                            <Trash2 size={14} color={C.danger} />
-                          </button>
-                        )}
-                      </div>
+                      <button onClick={() => patchBreakerModal({ editingInstance: true })} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex", flexShrink: 0 }} aria-label="Edit">
+                        <Pencil size={14} color={C.muted} />
+                      </button>
                     </div>
                   )}
 
