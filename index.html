@@ -34,7 +34,7 @@
 <script type="text/babel" data-type="module" data-presets="react">
 import ReactDOM from "react-dom/client";
 
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import * as XLSX from "xlsx";
 import {
   Search, Plus, X, Pencil, Trash2, Save, ChevronRight, ChevronDown, ArrowLeft, MessageSquare,
@@ -934,6 +934,23 @@ function AssetTracker() {
   }
 
   useEffect(() => { loadData(); }, [sandboxMode]);
+
+  // Consumes a shared deep link (?asset=BCA0082&tab=breakers) once, on the
+  // first load where assets are actually available — jumps straight to that
+  // asset/tab instead of the list view. Guarded by a ref (not an empty-deps
+  // effect) since `assets` starts null and only becomes usable after loadData()
+  // resolves; a plain [] effect would run too early and find nothing to match.
+  const urlDeepLinkAppliedRef = useRef(false);
+  useEffect(() => {
+    if (!assets || urlDeepLinkAppliedRef.current) return;
+    urlDeepLinkAppliedRef.current = true;
+    const params = new URLSearchParams(window.location.search);
+    const assetLabel = params.get("asset");
+    if (!assetLabel) return;
+    const target = assets.find(a => a.label === assetLabel);
+    if (!target) return;
+    openDetail(target, params.get("tab") || undefined);
+  }, [assets]);
 
   function toggleSandboxMode() {
     const next = !sandboxMode;
@@ -4961,6 +4978,7 @@ function BreakersTabContent({
           layout={selectedAsset.panelLayout || "two-column"}
           breakers={selectedAsset.breakers || []}
           allAssets={assets}
+          panelLabel={selectedAsset.label}
           onReconfigure={() => setShowPanelConfig(true)}
           onSlotClick={id => {
             const list = selectedAsset.breakers || [];
@@ -5142,8 +5160,34 @@ function PanelConfigForm({ slotCount, layout, onSave, onCancel }) {
 // specific breaker's detail modal (edit fields + its circuits) — the
 // diagram IS the entry point for a breaker's detail, not a map onto a
 // separate list.
-function PanelDiagram({ slotCount, layout, breakers, allAssets, onReconfigure, onSlotClick, onSpareClick }) {
+function fallbackCopyToClipboard(text, onCopied) {
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand("copy"); onCopied(); } catch (e) { /* clipboard unavailable — give up silently */ }
+  document.body.removeChild(ta);
+}
+
+function PanelDiagram({ slotCount, layout, breakers, allAssets, panelLabel, onReconfigure, onSlotClick, onSpareClick }) {
   const [infoMode, setInfoMode] = useState("breaker"); // "breaker" | "feeds"
+  const [linkCopied, setLinkCopied] = useState(false);
+
+  // Builds a link back to this exact panel's Breakers tab (?asset=...&tab=breakers,
+  // consumed by the one-time deep-link effect in AssetTracker) and copies it to the
+  // clipboard. Falls back to the older execCommand approach when the async Clipboard
+  // API isn't available (e.g. a plain file:// page, which isn't a secure context).
+  function copyPanelLink() {
+    const url = `${window.location.origin}${window.location.pathname}?asset=${encodeURIComponent(panelLabel)}&tab=breakers`;
+    const onCopied = () => { setLinkCopied(true); setTimeout(() => setLinkCopied(false), 1500); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(onCopied).catch(() => fallbackCopyToClipboard(url, onCopied));
+    } else {
+      fallbackCopyToClipboard(url, onCopied);
+    }
+  }
   const columns = layout === "single-column" ? 1 : 2;
   const rowOf = n => (columns === 1 ? n : Math.ceil(n / 2));
   const colOf = n => (columns === 1 ? 0 : (n % 2 === 1 ? 0 : 1));
@@ -5260,6 +5304,10 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, onReconfigure, o
           </span>
           <button onClick={onReconfigure} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex", alignItems: "center", color: C.muted }} aria-label="Reconfigure panel layout">
             <Settings size={14} />
+          </button>
+          <button onClick={copyPanelLink} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex", alignItems: "center", gap: 4, color: linkCopied ? C.success : C.muted }} aria-label="Copy link to this panel">
+            {linkCopied ? <Check size={14} /> : <Copy size={14} />}
+            {linkCopied && <span style={{ fontSize: 11, fontWeight: 600 }}>Copied!</span>}
           </button>
         </div>
         <div style={{ display: "flex", border: `1.5px solid ${C.border}`, borderRadius: 8, overflow: "hidden" }}>

@@ -62,6 +62,18 @@ per-device via `localStorage` (`SANDBOX_MODE_KEY`).
   Both live inside the same `view === "list"` screen; opening an asset (either tab) still
   goes through `openDetail()` into `view === "detail"`, and `openDetail(asset, "maintenance")`
   jumps straight to that asset's Maintenance sub-tab — used by the overview's row click.
+- **Deep links are one-way and on-demand, not continuous URL sync**: the app never pushes
+  `view`/`selectedLabel`/`detailTab` into the address bar as you navigate (no back-button
+  support, that wasn't asked for). Instead, a "Copy link" button (currently only in the
+  panel layout view, `PanelDiagram`) builds a `?asset=<label>&tab=<tab>` URL on demand and
+  copies it (`fallbackCopyToClipboard()` covers browsers/contexts without the async
+  Clipboard API, e.g. a plain `file://` page). On load, a one-time effect gated by
+  `urlDeepLinkAppliedRef` (a `useRef`, not empty-deps — `assets` starts `null` and the
+  effect has to wait for `loadData()` to resolve before there's anything to match against)
+  reads those params and calls `openDetail()` straight to that asset/tab if the label
+  still exists. Extend this same pattern (`?asset=...&tab=...` + a button calling the same
+  URL-building logic) for a "copy link" anywhere else it'd be useful — the restore side
+  already works for any asset/tab combination, only the button is scoped to panels so far.
 - **State**: the whole app is one component (`AssetTracker`, ~3700 lines) holding all
   state — assets, managed lists (change types, vendors, peripherals, users), audit log,
   column config. This is a known architectural weak point (see "Component size" below),
