@@ -363,6 +363,26 @@ array position can't serve as identity once things move.
   field to fill in. `MOCK_SNAPSHOT`'s circuits were migrated by hand — each one's old
   `description` became its `label`, and the handful with no description (the sub-panel-feed
   circuits) got a purpose-describing label written by hand (e.g. "Feed to garage sub-panel").
+- **`Circuit.notes` is a free-text, multi-line field for what's actually connected** — one
+  callout per line (e.g. "- North wall outlets\n- Closet outlets"), rendered with
+  `whiteSpace: "pre-line"` so embedded `\n`s show as real line breaks without needing to
+  split the string in JS. Uses the `ChildEntityTable` field system's new `"textarea"` type
+  (added alongside the existing text/number/date/select/multiselect types — a plain
+  `<textarea>`, `rows` configurable via `f.rows`, defaulting to 3). Shown in both the
+  expanded (`ChildEntityTable`'s `renderSummary`) and collapsed (plain read-only list)
+  circuit views — those two render blocks are kept in sync by hand since the collapsed one
+  is deliberately NOT `ChildEntityTable` (no per-row actions there, see the pencil-icon
+  standardization entry above), so a future circuit-summary field needs updating in both
+  places. `MOCK_SNAPSHOT`'s circuits were populated by hand with realistic per-circuit
+  callouts (walls/zones for outlet circuits, fixture names for lighting/appliance circuits,
+  "Feeds downstream sub-panel; no direct loads" for sub-panel-feed circuits) — written via a
+  line-number-anchored `sed` script (`/id: "cXX-Y"/ s/.../.../`) for the bulk of them, since
+  authoring ~84 individual Edit calls wasn't practical; the two circuits with genuinely
+  multi-line notes were done as direct `Edit` calls instead; see the PowerShell-file-editing
+  memory entry — GNU sed's `\n` in a replacement means a literal newline unless doubled to
+  `\\n`, and even that depends on how many escaping layers sit between you and the file, so
+  verify escaping empirically (e.g. `sed 's/X/A\\nB/' <<< X | cat -A`) before trusting it on
+  a real file, and diff/line-count-check immediately after any bulk substitution.
 - **Move Circuit** (`openMoveCircuit`/`submitMoveCircuit`) reassigns a circuit to a different
   breaker — **same panel only** in this pass; moving to a different Panel asset would mean
   mutating two assets atomically and is deferred as a follow-up.
