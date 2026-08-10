@@ -352,6 +352,17 @@ array position can't serve as identity once things move.
   found by searching all circuits for `feedsPanelLabel === thisPanelLabel` at render time,
   the same "computed, not stored" principle `inferBuilding()` already uses for a device's
   building.
+- **`Circuit.label` is the circuit's nice display name** (e.g. "Outlets", "Water Heater",
+  "Feed to Room 300 sub-panel") — it used to hold slot-style text mirroring the breaker's own
+  cell notation ("1", "8a"), with the actual human-readable name living in a separate
+  `Circuit.description` field. That split was redundant (the breaker already shows its own
+  slot) and confusing (two name-ish fields), so `description` is gone — every circuit's
+  identity is `id` (a `crypto.randomUUID()`, stable and guaranteed-unique, set once at
+  creation and never re-derived) plus `label` (freeform, user-edited, the only name field
+  now). The Add/Edit Circuit form is a single Label input; there's no separate description
+  field to fill in. `MOCK_SNAPSHOT`'s circuits were migrated by hand — each one's old
+  `description` became its `label`, and the handful with no description (the sub-panel-feed
+  circuits) got a purpose-describing label written by hand (e.g. "Feed to garage sub-panel").
 - **Move Circuit** (`openMoveCircuit`/`submitMoveCircuit`) reassigns a circuit to a different
   breaker — **same panel only** in this pass; moving to a different Panel asset would mean
   mutating two assets atomically and is deferred as a follow-up.
