@@ -5004,6 +5004,7 @@ function BreakersTabContent({
           layout={selectedAsset.panelLayout || "two-column"}
           breakers={selectedAsset.breakers || []}
           allAssets={assets}
+          breakerTypes={breakerTypes}
           panelLabel={selectedAsset.label}
           onReconfigure={() => setShowPanelConfig(true)}
           onSlotClick={id => {
@@ -5197,8 +5198,8 @@ function fallbackCopyToClipboard(text, onCopied) {
   document.body.removeChild(ta);
 }
 
-function PanelDiagram({ slotCount, layout, breakers, allAssets, panelLabel, onReconfigure, onSlotClick, onSpareClick }) {
-  const [infoMode, setInfoMode] = useState("breaker"); // "breaker" | "feeds"
+function PanelDiagram({ slotCount, layout, breakers, allAssets, breakerTypes, panelLabel, onReconfigure, onSlotClick, onSpareClick }) {
+  const [infoMode, setInfoMode] = useState("breaker"); // "breaker" | "feeds" | "list"
   const [linkCopied, setLinkCopied] = useState(false);
 
   // Builds a link back to this exact panel's Breakers tab (?asset=...&tab=breakers,
@@ -5269,9 +5270,9 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, panelLabel, onRe
         const s2 = Math.min(...slotsFromCells(b2.cells).map(Number));
         return s1 - s2;
       });
-      cells.push({ key: `group-${groupId}`, col, row: Math.min(...rows), rowSpan, kind: "tandem", breakers: orderedBreakers });
+      cells.push({ key: `group-${groupId}`, col, row: Math.min(...rows), rowSpan, kind: "tandem", breakers: orderedBreakers, slot: s });
     } else {
-      cells.push({ key: `breaker-${groupBreakers[0].id}`, col, row: Math.min(...rows), rowSpan, kind: "breaker", breaker: groupBreakers[0] });
+      cells.push({ key: `breaker-${groupBreakers[0].id}`, col, row: Math.min(...rows), rowSpan, kind: "breaker", breaker: groupBreakers[0], slot: s });
     }
   }
 
@@ -5337,7 +5338,7 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, panelLabel, onRe
           </button>
         </div>
         <div style={{ display: "flex", border: `1.5px solid ${C.border}`, borderRadius: 8, overflow: "hidden" }}>
-          {[["breaker", "Breaker"], ["feeds", "Feeds"]].map(([val, label]) => (
+          {[["breaker", "Breaker"], ["feeds", "Feeds"], ["list", "List"]].map(([val, label]) => (
             <button
               key={val} type="button" onClick={() => setInfoMode(val)}
               style={{ padding: "5px 10px", fontSize: 12, fontWeight: 600, border: "none", cursor: "pointer", background: infoMode === val ? C.brand : "#fff", color: infoMode === val ? "#fff" : C.ink }}
@@ -5347,6 +5348,61 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, panelLabel, onRe
           ))}
         </div>
       </div>
+      {infoMode === "list" ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {[...cells].sort((a, b2) => a.slot - b2.slot).map(cell => {
+            if (cell.kind === "spare") {
+              return (
+                <div key={cell.key} style={{ border: `1.5px dashed ${C.border}`, borderRadius: 8, padding: "8px 12px", fontSize: 12, color: C.placeholder }}>
+                  Slot {cell.slot} — Spare
+                </div>
+              );
+            }
+            const groupBreakers = cell.kind === "tandem" ? cell.breakers : [cell.breaker];
+            const type = breakerTypes.find(t => t.id === groupBreakers[0].breakerTypeId);
+            const slotLabel = [...new Set(groupBreakers.flatMap(b => slotsFromCells(b.cells)))]
+              .sort((a2, b2) => parseFloat(a2) - parseFloat(b2)).join("/");
+            return (
+              <div key={cell.key} style={{ border: `1.5px solid ${groupStatusColor(groupBreakers)}`, borderRadius: 8, padding: 12, background: "#fff" }}>
+                <button
+                  type="button" onClick={() => onSlotClick(groupBreakers[0].id)}
+                  style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", background: "none", border: "none", padding: 0, cursor: "pointer", marginBottom: 8, textAlign: "left" }}
+                >
+                  <span style={{ fontWeight: 700, fontSize: 13, color: C.brandDark }}>
+                    Slot {slotLabel}{type ? ` — ${type.name}` : ""}
+                  </span>
+                  <ChevronRight size={14} color={C.placeholder} />
+                </button>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {groupBreakers.map(b => (
+                    <div key={b.id}>
+                      {groupBreakers.length > 1 && (
+                        <div style={{ fontSize: 11, fontWeight: 700, color: C.ink, marginBottom: 4 }}>
+                          Slot {cellsLabel_(b)} · {b.ampRating ? `${b.ampRating}A` : "—"}
+                        </div>
+                      )}
+                      {(b.circuits || []).length === 0 ? (
+                        <div style={{ fontSize: 12, color: C.empty }}>No circuits</div>
+                      ) : b.circuits.map(c => (
+                        <div key={c.id} style={{ marginBottom: 4 }}>
+                          <div style={{ fontSize: 13, fontWeight: 600, color: C.ink }}>
+                            {c.feedsPanelLabel
+                              ? `Feeds → ${c.feedsPanelLabel}`
+                              : (c.roomsServedIds || []).length
+                              ? c.roomsServedIds.map(id => roomNameFor(id, allAssets)).join(", ")
+                              : c.label}
+                          </div>
+                          {c.notes && <div style={{ fontSize: 12, color: C.muted, whiteSpace: "pre-line" }}>{c.notes}</div>}
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
       <div style={{ display: "grid", gridTemplateColumns, gridAutoRows: "44px", gap: 6, width: "100%" }}>
         {numbers.map(n => (
           <div
@@ -5403,6 +5459,7 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, panelLabel, onRe
           );
         })}
       </div>
+      )}
     </div>
   );
 }
