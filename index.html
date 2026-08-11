@@ -5199,8 +5199,15 @@ function fallbackCopyToClipboard(text, onCopied) {
 }
 
 function PanelDiagram({ slotCount, layout, breakers, allAssets, breakerTypes, panelLabel, onReconfigure, onSlotClick, onSpareClick }) {
-  const [infoMode, setInfoMode] = useState("breaker"); // "breaker" | "feeds" | "list"
+  const [infoMode, setInfoMode] = useState("breaker"); // "breaker" | "feeds" | "table"
   const [linkCopied, setLinkCopied] = useState(false);
+  // Table mode's own sort/filter state — same ColumnHeaderCell/ColumnFilterModal
+  // pattern the Assets/Maintenance tables use (see CLAUDE.md), just local to this
+  // component instead of living on AssetTracker, since a panel's breaker table is
+  // self-contained data no other tab needs to read.
+  const [tableSortConfig, setTableSortConfig] = useState(null);
+  const [tableRoomFilter, setTableRoomFilter] = useState("");
+  const [tableActiveFilterCol, setTableActiveFilterCol] = useState(null);
 
   // Builds a link back to this exact panel's Breakers tab (?asset=...&tab=breakers,
   // consumed by the one-time deep-link effect in AssetTracker) and copies it to the
@@ -5338,7 +5345,7 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, breakerTypes, pa
           </button>
         </div>
         <div style={{ display: "flex", border: `1.5px solid ${C.border}`, borderRadius: 8, overflow: "hidden" }}>
-          {[["breaker", "Breaker"], ["feeds", "Feeds"], ["list", "List"]].map(([val, label]) => (
+          {[["breaker", "Breaker"], ["feeds", "Feeds"], ["table", "Table"]].map(([val, label]) => (
             <button
               key={val} type="button" onClick={() => setInfoMode(val)}
               style={{ padding: "5px 10px", fontSize: 12, fontWeight: 600, border: "none", cursor: "pointer", background: infoMode === val ? C.brand : "#fff", color: infoMode === val ? "#fff" : C.ink }}
@@ -5348,61 +5355,91 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, breakerTypes, pa
           ))}
         </div>
       </div>
-      {infoMode === "list" ? (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {[...cells].sort((a, b2) => a.slot - b2.slot).map(cell => {
-            if (cell.kind === "spare") {
-              return (
-                <div key={cell.key} style={{ border: `1.5px dashed ${C.border}`, borderRadius: 8, padding: "8px 12px", fontSize: 12, color: C.placeholder }}>
-                  Slot {cell.slot} — Spare
-                </div>
-              );
-            }
-            const groupBreakers = cell.kind === "tandem" ? cell.breakers : [cell.breaker];
-            const type = breakerTypes.find(t => t.id === groupBreakers[0].breakerTypeId);
-            const slotLabel = [...new Set(groupBreakers.flatMap(b => slotsFromCells(b.cells)))]
-              .sort((a2, b2) => parseFloat(a2) - parseFloat(b2)).join("/");
-            return (
-              <div key={cell.key} style={{ border: `1.5px solid ${groupStatusColor(groupBreakers)}`, borderRadius: 8, padding: 12, background: "#fff" }}>
-                <button
-                  type="button" onClick={() => onSlotClick(groupBreakers[0].id)}
-                  style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", background: "none", border: "none", padding: 0, cursor: "pointer", marginBottom: 8, textAlign: "left" }}
-                >
-                  <span style={{ fontWeight: 700, fontSize: 13, color: C.brandDark }}>
-                    Slot {slotLabel}{type ? ` — ${type.name}` : ""}
-                  </span>
-                  <ChevronRight size={14} color={C.placeholder} />
-                </button>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {groupBreakers.map(b => (
-                    <div key={b.id}>
-                      {groupBreakers.length > 1 && (
-                        <div style={{ fontSize: 11, fontWeight: 700, color: C.ink, marginBottom: 4 }}>
-                          Slot {cellsLabel_(b)} · {b.ampRating ? `${b.ampRating}A` : "—"}
-                        </div>
-                      )}
-                      {(b.circuits || []).length === 0 ? (
-                        <div style={{ fontSize: 12, color: C.empty }}>No circuits</div>
-                      ) : b.circuits.map(c => (
-                        <div key={c.id} style={{ marginBottom: 4 }}>
-                          <div style={{ fontSize: 13, fontWeight: 600, color: C.ink }}>
-                            {c.feedsPanelLabel
-                              ? `Feeds → ${c.feedsPanelLabel}`
-                              : (c.roomsServedIds || []).length
-                              ? c.roomsServedIds.map(id => roomNameFor(id, allAssets)).join(", ")
-                              : c.label}
-                          </div>
-                          {c.notes && <div style={{ fontSize: 12, color: C.muted, whiteSpace: "pre-line" }}>{c.notes}</div>}
-                        </div>
-                      ))}
-                    </div>
-                  ))}
-                </div>
+      {infoMode === "table" ? (() => {
+        // One row per circuit (a breaker with no circuits yet still gets a single
+        // row, circuit fields blank) — flat rows are what makes per-column sort
+        // and the Room filter meaningful, unlike the grouped-by-slot diagram/table
+        // toggle siblings. roomIds stays on the row (not just the display text) so
+        // the Room filter can do a real membership check against a circuit that
+        // serves more than one room, not a brittle string-contains match.
+        const tableRows = [];
+        [...cells].sort((a, b2) => a.slot - b2.slot).forEach(cell => {
+          if (cell.kind === "spare") {
+            tableRows.push({ key: cell.key, breakerId: null, slotSort: cell.slot, slotLabel: String(cell.slot), typeName: "—", ampRating: "", status: "Spare", roomIds: [], roomText: "—", notes: "" });
+            return;
+          }
+          const groupBreakers = cell.kind === "tandem" ? cell.breakers : [cell.breaker];
+          const type = breakerTypes.find(t => t.id === groupBreakers[0].breakerTypeId);
+          groupBreakers.forEach(b => {
+            const circuits = (b.circuits && b.circuits.length) ? b.circuits : [null];
+            circuits.forEach(c => {
+              const roomIds = c ? (c.roomsServedIds || []) : [];
+              const roomText = c
+                ? (c.feedsPanelLabel ? `Feeds → ${c.feedsPanelLabel}` : roomIds.length ? roomIds.map(id => roomNameFor(id, allAssets)).join(", ") : "—")
+                : "—";
+              tableRows.push({
+                key: `${b.id}-${c ? c.id : "none"}`, breakerId: b.id,
+                slotSort: Math.min(...slotsFromCells(b.cells).map(Number)), slotLabel: cellsLabel_(b),
+                typeName: type ? type.name : "—", ampRating: b.ampRating || "", status: b.status || "Active",
+                roomIds, roomText, notes: c ? (c.notes || "") : "",
+              });
+            });
+          });
+        });
+
+        const roomOptionIds = [...new Set(tableRows.flatMap(r => r.roomIds))]
+          .sort((a2, b2) => roomNameFor(a2, allAssets).localeCompare(roomNameFor(b2, allAssets)));
+        const tableFilterConfigs = {
+          room: {
+            label: "Room", value: tableRoomFilter, setValue: setTableRoomFilter, options: ["", ...roomOptionIds],
+            labelForOption: id => (id ? roomNameFor(id, allAssets) : "All rooms"),
+          },
+        };
+
+        let displayRows = tableRoomFilter ? tableRows.filter(r => r.roomIds.includes(tableRoomFilter)) : tableRows;
+        if (tableSortConfig) {
+          const mult = tableSortConfig.dir === "desc" ? -1 : 1;
+          const sortValue = r => {
+            if (tableSortConfig.key === "slot") return r.slotSort;
+            if (tableSortConfig.key === "amp") return parseFloat(r.ampRating) || 0;
+            return { type: r.typeName, room: r.roomText, notes: r.notes, status: r.status }[tableSortConfig.key] || "";
+          };
+          displayRows = [...displayRows].sort((a2, b2) => {
+            const av = sortValue(a2), bv = sortValue(b2);
+            if (typeof av === "number" && typeof bv === "number") return (av - bv) * mult;
+            return String(av).localeCompare(String(bv), undefined, { numeric: true, sensitivity: "base" }) * mult;
+          });
+        }
+
+        const tableCols = "70px 1fr 70px 1fr 1.6fr 90px";
+        return (
+          <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
+            <div className="scroller" style={{ overflowX: "auto" }}>
+              <div style={{ display: "grid", gridTemplateColumns: tableCols, background: C.brandDark, color: "#F4F0E6", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", minWidth: "max-content" }}>
+                {[["slot", "Slot"], ["type", "Type"], ["amp", "Amp"], ["room", "Room"], ["notes", "Notes"], ["status", "Status"]].map(([key, label]) => (
+                  <ColumnHeaderCell key={key} label={label} colKey={key} filterConfigs={tableFilterConfigs} sortConfig={tableSortConfig} setSortConfig={setTableSortConfig} onOpenFilter={setTableActiveFilterCol} />
+                ))}
               </div>
-            );
-          })}
-        </div>
-      ) : (
+              {displayRows.length === 0 ? (
+                <div style={{ padding: 24, textAlign: "center", color: C.empty, fontSize: 13, minWidth: "max-content" }}>No circuits match.</div>
+              ) : displayRows.map(r => (
+                <div
+                  key={r.key} onClick={() => r.breakerId && onSlotClick(r.breakerId)} className="row-body"
+                  style={{ display: "grid", gridTemplateColumns: tableCols, alignItems: "center", cursor: r.breakerId ? "pointer" : "default", borderTop: `1px solid ${C.border}`, minWidth: "max-content" }}
+                >
+                  <div style={{ padding: "10px 12px", fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", color: C.ink }}>{r.slotLabel}</div>
+                  <div style={{ padding: "10px 12px", fontSize: 13, color: C.ink }}>{r.typeName}</div>
+                  <div style={{ padding: "10px 12px", fontSize: 13, color: C.ink }}>{r.ampRating ? `${r.ampRating}A` : "—"}</div>
+                  <div style={{ padding: "10px 12px", fontSize: 13, color: C.ink }}>{r.roomText}</div>
+                  <div style={{ padding: "10px 12px", fontSize: 12, color: C.muted, whiteSpace: "pre-line" }}>{r.notes || "—"}</div>
+                  <div style={{ padding: "10px 12px", fontSize: 12, color: r.status === "Faulted" ? C.danger : (r.status === "Spare" || r.status === "Retired") ? C.muted : C.success }}>{r.status}</div>
+                </div>
+              ))}
+            </div>
+            <ColumnFilterModal activeCol={tableActiveFilterCol} filterConfigs={tableFilterConfigs} sortConfig={tableSortConfig} setSortConfig={setTableSortConfig} onClose={() => setTableActiveFilterCol(null)} />
+          </div>
+        );
+      })() : (
       <div style={{ display: "grid", gridTemplateColumns, gridAutoRows: "44px", gap: 6, width: "100%" }}>
         {numbers.map(n => (
           <div
