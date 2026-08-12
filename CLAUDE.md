@@ -205,7 +205,7 @@ and a checkmark on the selected item, visually matching the column-filter popup
 button that opens it, styled like the old `<select>` so form layouts didn't need to change.
 `TypeField`/`RoomField`/`BuildingField` are bespoke wrappers (id-based, with "(deleted room)"-
 style dangling-reference handling); everything else — Frequency, Change Type, Vendor, Bulk Item
-Sub-Type, Breaker Type, breaker Status, panel Layout, the Move Circuit/Add Breaker/toolbar
+Sub-Type, Breaker Type, panel Layout, the Move Circuit/Add Breaker/toolbar
 bulk-action pickers, and `ChildEntityTable`'s generic `type: "select"` field — goes through the
 generic `PickerField` component (same `PickerTrigger` + `SelectionModal`, parameterized by
 `options`/`labelForOption`/`onManage`). Pass `hideLabel` when the field already has its own
@@ -332,9 +332,17 @@ array position can't serve as identity once things move.
   double-pole) with its own pencil-to-edit control (`saveBreakerAmp`); **Serial/Installed
   Date/Notes** describe the one physical unit you bought and installed, so they're edited once
   at the group level and written to every member row (`saveBreakerInstanceDetails`) rather than
-  repeated per pole. `Status` was removed from the UI entirely (not useful in practice) — old
-  values on existing data are untouched, just no longer editable. All fields are read-only by
-  default with a pencil icon to enter edit mode (Save/Cancel), not an always-open form.
+  repeated per pole. All fields are read-only by default with a pencil icon to enter edit mode
+  (Save/Cancel), not an always-open form.
+- **Breakers have no `status` field at all anymore** — it was never editable after creation
+  (Swap Breaker and the per-member edit only ever touched serial/amp/installed date), and the
+  Add Breaker form was the sole place it could be set, so it was removed outright rather than
+  built out into something editable: no Status picker in Add Breaker, no status-based color
+  coding in the panel diagram (`statusColor()`/`groupStatusColor()` are gone — cell borders are
+  now a plain `C.border`), no Status column in the panel Table view, no Status column in the
+  Breakers export. A spare Table row now says "Spare" in the Type column instead of relying on
+  a status value. Old `status` values already sitting on existing breaker data are harmless
+  leftover fields — nothing reads them anymore.
 - **Delete removes the whole group at once** (`deleteBreakerGroup`/`canDeleteBreakerGroup`),
   not one member at a time — a breaker-type instance is one physical unit, not N independently
   removable poles. Blocked if any member still has circuits, naming how many

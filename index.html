@@ -1694,7 +1694,6 @@ function AssetTracker() {
     const existing = selectedAsset.breakers || [];
     const takenCells = new Set(existing.flatMap(b => b.cells || []));
     const groupId = crypto.randomUUID();
-    const status = draft.status || "Active";
     const serial = draft.serial || "";
     const installedDate = draft.installedDate || "";
     const notes = draft.notes || "";
@@ -1704,7 +1703,7 @@ function AssetTracker() {
         id: crypto.randomUUID(), panelLabel: selectedAsset.label, cells,
         breakerTypeId: type.id, groupId,
         ampRating: draft[`amp_${i}`] !== undefined && draft[`amp_${i}`] !== "" ? draft[`amp_${i}`] : member.ampRating,
-        status, serial, installedDate, notes,
+        serial, installedDate, notes,
         circuits: [],
       };
     });
@@ -2209,7 +2208,7 @@ function AssetTracker() {
         const breakerType = breakerTypes.find(t => t.id === b.breakerTypeId);
         breakerRows.push({
           Panel: a.label, "Slot(s)": slotsFromCells(b.cells).join("/"), "Amp Rating": b.ampRating || "",
-          Poles: polesFromCells(b.cells), Type: breakerType ? breakerType.name : "", Status: b.status || "", Serial: b.serial || "",
+          Poles: polesFromCells(b.cells), Type: breakerType ? breakerType.name : "", Serial: b.serial || "",
           "Installed Date": b.installedDate || "", Notes: b.notes || "", Circuits: (b.circuits || []).length,
         });
         (b.circuits || []).forEach(c => {
@@ -2242,7 +2241,7 @@ function AssetTracker() {
     XLSX.utils.book_append_sheet(
       wb,
       XLSX.utils.json_to_sheet(breakerRows.length ? breakerRows : [{
-        Panel: "", "Slot(s)": "", "Amp Rating": "", Poles: "", Mount: "", Status: "", Serial: "", "Installed Date": "", Notes: "", Circuits: "",
+        Panel: "", "Slot(s)": "", "Amp Rating": "", Poles: "", Mount: "", Serial: "", "Installed Date": "", Notes: "", Circuits: "",
       }]),
       "Breakers"
     );
@@ -5019,7 +5018,7 @@ function BreakersTabContent({
             openBreakerModal(id, members);
           }}
           onSpareClick={slot => {
-            setAddBreakerDraft({ breakerTypeId: breakerTypes[0] ? breakerTypes[0].id : "", startSlot: String(slot), status: "Active", serial: "", installedDate: "", notes: "", error: null });
+            setAddBreakerDraft({ breakerTypeId: breakerTypes[0] ? breakerTypes[0].id : "", startSlot: String(slot), serial: "", installedDate: "", notes: "", error: null });
           }}
         />
       )}
@@ -5082,13 +5081,6 @@ function BreakersTabContent({
                 </div>
               )}
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
-                <PickerField
-                  label="Status"
-                  value={addBreakerDraft.status}
-                  onChange={v => setAddBreakerDraft({ ...addBreakerDraft, status: v })}
-                  options={["Active", "Spare", "Faulted", "Retired"]}
-                  title="Select status"
-                />
                 <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                   <span style={labelStyle}>Serial</span>
                   <input value={addBreakerDraft.serial} onChange={e => setAddBreakerDraft({ ...addBreakerDraft, serial: e.target.value })} placeholder="optional" style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }} />
@@ -5291,23 +5283,6 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, breakerTypes, pa
     numbers.push({ key: `num-${s}`, slot: s, col: colOf(s), row: rowOf(s) });
   }
 
-  function statusColor(status) {
-    if (status === "Faulted") return C.danger;
-    if (status === "Retired" || status === "Spare") return C.muted;
-    return C.success;
-  }
-  // The outer box of a breaker-type placement (whether it's a single
-  // breaker or a multi-member group) is always outlined by ONE status
-  // color for the whole group, not per-member — a group's members are
-  // almost always placed together with the same status, and the individual
-  // breakers inside are already distinguished by the lighter divider lines
-  // between them, not by each having its own outline color.
-  function groupStatusColor(breakersInGroup) {
-    if (breakersInGroup.some(b => b.status === "Faulted")) return C.danger;
-    if (breakersInGroup.every(b => b.status === "Retired" || b.status === "Spare")) return C.muted;
-    return C.success;
-  }
-
   // What a cell shows in "feeds" mode — what the breaker's circuit(s) actually
   // serve (rooms, or a downstream sub-panel), not the circuit's own label or
   // its electrical spec.
@@ -5365,7 +5340,7 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, breakerTypes, pa
         const tableRows = [];
         [...cells].sort((a, b2) => a.slot - b2.slot).forEach(cell => {
           if (cell.kind === "spare") {
-            tableRows.push({ key: cell.key, breakerId: null, slotSort: cell.slot, slotLabel: String(cell.slot), typeName: "—", ampRating: "", status: "Spare", roomIds: [], roomText: "—", notes: "" });
+            tableRows.push({ key: cell.key, breakerId: null, spareSlot: cell.slot, slotSort: cell.slot, slotLabel: String(cell.slot), typeName: "Spare", ampRating: "", roomIds: [], roomText: "—", notes: "" });
             return;
           }
           const groupBreakers = cell.kind === "tandem" ? cell.breakers : [cell.breaker];
@@ -5380,7 +5355,7 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, breakerTypes, pa
               tableRows.push({
                 key: `${b.id}-${c ? c.id : "none"}`, breakerId: b.id,
                 slotSort: Math.min(...slotsFromCells(b.cells).map(Number)), slotLabel: cellsLabel_(b),
-                typeName: type ? type.name : "—", ampRating: b.ampRating || "", status: b.status || "Active",
+                typeName: type ? type.name : "—", ampRating: b.ampRating || "",
                 roomIds, roomText, notes: c ? (c.notes || "") : "",
               });
             });
@@ -5402,7 +5377,7 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, breakerTypes, pa
           const sortValue = r => {
             if (tableSortConfig.key === "slot") return r.slotSort;
             if (tableSortConfig.key === "amp") return parseFloat(r.ampRating) || 0;
-            return { type: r.typeName, room: r.roomText, notes: r.notes, status: r.status }[tableSortConfig.key] || "";
+            return { type: r.typeName, room: r.roomText, notes: r.notes }[tableSortConfig.key] || "";
           };
           displayRows = [...displayRows].sort((a2, b2) => {
             const av = sortValue(a2), bv = sortValue(b2);
@@ -5417,12 +5392,12 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, breakerTypes, pa
         // of alignment with its neighbors depending on how much content is in it.
         // Fixed tracks give every row (and the header) the identical total width
         // regardless of content, the same way the Assets/Maintenance tables do it.
-        const tableCols = "70px 170px 320px 190px 70px 90px";
+        const tableCols = "70px 190px 340px 210px 90px";
         return (
           <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
             <div className="scroller" style={{ overflowX: "auto" }}>
               <div style={{ display: "grid", gridTemplateColumns: tableCols, background: C.brandDark, color: "#F4F0E6", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", minWidth: "max-content" }}>
-                {[["slot", "Slot"], ["room", "Room"], ["notes", "Notes"], ["type", "Type"], ["amp", "Amp"], ["status", "Status"]].map(([key, label]) => (
+                {[["slot", "Slot"], ["room", "Room"], ["notes", "Notes"], ["type", "Type"], ["amp", "Amp"]].map(([key, label]) => (
                   <ColumnHeaderCell key={key} label={label} colKey={key} filterConfigs={tableFilterConfigs} sortConfig={tableSortConfig} setSortConfig={setTableSortConfig} onOpenFilter={setTableActiveFilterCol} />
                 ))}
               </div>
@@ -5430,15 +5405,16 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, breakerTypes, pa
                 <div style={{ padding: 24, textAlign: "center", color: C.empty, fontSize: 13, minWidth: "max-content" }}>No circuits match.</div>
               ) : displayRows.map(r => (
                 <div
-                  key={r.key} onClick={() => r.breakerId && onSlotClick(r.breakerId)} className="row-body"
-                  style={{ display: "grid", gridTemplateColumns: tableCols, alignItems: "center", cursor: r.breakerId ? "pointer" : "default", borderTop: `1px solid ${C.border}`, minWidth: "max-content" }}
+                  key={r.key}
+                  onClick={() => { if (r.breakerId) onSlotClick(r.breakerId); else if (r.spareSlot) onSpareClick(r.spareSlot); }}
+                  className="row-body"
+                  style={{ display: "grid", gridTemplateColumns: tableCols, alignItems: "center", cursor: "pointer", borderTop: `1px solid ${C.border}`, minWidth: "max-content" }}
                 >
                   <div style={{ padding: "10px 12px", fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", color: C.ink }}>{r.slotLabel}</div>
                   <div style={{ padding: "10px 12px", fontSize: 13, color: C.ink }}>{r.roomText}</div>
                   <div style={{ padding: "10px 12px", fontSize: 12, color: C.muted, whiteSpace: "pre-line" }}>{r.notes || "—"}</div>
                   <div style={{ padding: "10px 12px", fontSize: 13, color: C.ink }}>{r.typeName}</div>
                   <div style={{ padding: "10px 12px", fontSize: 13, color: C.ink }}>{r.ampRating ? `${r.ampRating}A` : "—"}</div>
-                  <div style={{ padding: "10px 12px", fontSize: 12, color: r.status === "Faulted" ? C.danger : (r.status === "Spare" || r.status === "Retired") ? C.muted : C.success }}>{r.status}</div>
                 </div>
               ))}
             </div>
@@ -5473,7 +5449,7 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, breakerTypes, pa
           }
           if (cell.kind === "tandem") {
             return (
-              <div key={cell.key} style={{ gridColumn: breakerTrack(cell.col), gridRow: `${cell.row} / span ${cell.rowSpan}`, border: `1.5px solid ${groupStatusColor(cell.breakers)}`, borderRadius: 8, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+              <div key={cell.key} style={{ gridColumn: breakerTrack(cell.col), gridRow: `${cell.row} / span ${cell.rowSpan}`, border: `1.5px solid ${C.border}`, borderRadius: 8, overflow: "hidden", display: "flex", flexDirection: "column" }}>
                 {cell.breakers.map((b, i) => {
                   const info = cellInfo(b);
                   return (
@@ -5481,7 +5457,7 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, breakerTypes, pa
                       key={b.id} onClick={() => onSlotClick(b.id)} type="button"
                       style={{ flex: 1, border: "none", borderTop: i > 0 ? `1px solid ${C.border}` : "none", background: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", cursor: "pointer", padding: "2px 4px", overflow: "hidden" }}
                     >
-                      <span style={{ fontSize: 9, fontWeight: 700, color: statusColor(b.status) }}>{info.primary}</span>
+                      <span style={{ fontSize: 9, fontWeight: 700, color: C.brandDark }}>{info.primary}</span>
                       <span style={{ fontSize: 8, color: C.muted, whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden", maxWidth: "100%" }}>{info.secondary}</span>
                     </button>
                   );
@@ -5494,7 +5470,7 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, breakerTypes, pa
           return (
             <button
               key={cell.key} onClick={() => onSlotClick(b.id)} type="button"
-              style={{ ...cellBase, gridColumn: breakerTrack(cell.col), gridRow: `${cell.row} / span ${cell.rowSpan}`, border: `1.5px solid ${statusColor(b.status)}` }}
+              style={{ ...cellBase, gridColumn: breakerTrack(cell.col), gridRow: `${cell.row} / span ${cell.rowSpan}`, border: `1.5px solid ${C.border}` }}
             >
               <span style={{ fontSize: 11, fontWeight: 700, color: C.brandDark }}>{info.primary}</span>
               <span style={{ fontSize: 9, color: C.muted, whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden", maxWidth: "100%" }}>{info.secondary}</span>
