@@ -5385,14 +5385,35 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, breakerTypes, pa
             return String(av).localeCompare(String(bv), undefined, { numeric: true, sensitivity: "base" }) * mult;
           });
         }
+        // A breaker with multiple circuits gets one row per circuit, so Slot/Type/
+        // Amp would otherwise repeat identically on every one of those rows — merge
+        // them into one vertically-centered cell spanning every consecutive row for
+        // that breaker instead. Based on adjacency in the already-sorted/filtered
+        // list, not a stored "first of group" flag, so it still does the right thing
+        // regardless of sort order: rows only merge when they actually land next to
+        // each other. mergeSpan is only set on the first row of a run; 0 means "this
+        // row's Slot/Type/Amp cells are covered by an earlier row's merged cell,
+        // don't render them here at all."
+        displayRows = displayRows.map((r, i) => {
+          const isFirst = !(i > 0 && r.breakerId && displayRows[i - 1].breakerId === r.breakerId);
+          if (!isFirst) return { ...r, mergeSpan: 0 };
+          let span = 1;
+          while (displayRows[i + span] && r.breakerId && displayRows[i + span].breakerId === r.breakerId) span++;
+          return { ...r, mergeSpan: span };
+        });
 
-        // Fixed px for every column, not 1fr/flex fractions — the header and each
-        // row are separate grid containers (not one shared grid), so a fractional
-        // track resolves relative to that row's own natural width and drifts out
-        // of alignment with its neighbors depending on how much content is in it.
-        // Fixed tracks give every row (and the header) the identical total width
-        // regardless of content, the same way the Assets/Maintenance tables do it.
-        const tableCols = "70px 190px 340px 210px 90px";
+        // Fixed px for every column, not 1fr/flex fractions — a fractional track
+        // resolves relative to its grid's own natural width, which drifted between
+        // rows back when each row was its own separate grid container. Body rows
+        // now all share ONE grid container (needed for the Slot/Type/Amp row-span
+        // above), so that particular failure mode can't recur here anymore, but the
+        // header is still a separate grid and needs to land on the same boundaries.
+        const tableCols = "70px 190px 220px 210px 90px";
+        const cellStyle = (col, span, borderTop) => ({
+          gridColumn: col, gridRow: span ? `span ${span}` : undefined,
+          padding: "10px 12px", borderTop: borderTop ? `1px solid ${C.border}` : "none",
+          display: "flex", alignItems: "center", cursor: "pointer",
+        });
         return (
           <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
             <div className="scroller" style={{ overflowX: "auto" }}>
@@ -5403,20 +5424,35 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, breakerTypes, pa
               </div>
               {displayRows.length === 0 ? (
                 <div style={{ padding: 24, textAlign: "center", color: C.empty, fontSize: 13, minWidth: "max-content" }}>No circuits match.</div>
-              ) : displayRows.map(r => (
-                <div
-                  key={r.key}
-                  onClick={() => { if (r.breakerId) onSlotClick(r.breakerId); else if (r.spareSlot) onSpareClick(r.spareSlot); }}
-                  className="row-body"
-                  style={{ display: "grid", gridTemplateColumns: tableCols, alignItems: "center", cursor: "pointer", borderTop: `1px solid ${C.border}`, minWidth: "max-content" }}
-                >
-                  <div style={{ padding: "10px 12px", fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", color: C.ink }}>{r.slotLabel}</div>
-                  <div style={{ padding: "10px 12px", fontSize: 13, color: C.ink }}>{r.roomText}</div>
-                  <div style={{ padding: "10px 12px", fontSize: 12, color: C.muted, whiteSpace: "pre-line" }}>{r.notes || "—"}</div>
-                  <div style={{ padding: "10px 12px", fontSize: 13, color: C.ink }}>{r.typeName}</div>
-                  <div style={{ padding: "10px 12px", fontSize: 13, color: C.ink }}>{r.ampRating ? `${r.ampRating}A` : "—"}</div>
+              ) : (
+                <div style={{ display: "grid", gridTemplateColumns: tableCols, gridAutoRows: "auto", minWidth: "max-content" }}>
+                  {displayRows.map((r, i) => {
+                    const onRowClick = () => { if (r.breakerId) onSlotClick(r.breakerId); else if (r.spareSlot) onSpareClick(r.spareSlot); };
+                    const top = i > 0;
+                    return (
+                      <React.Fragment key={r.key}>
+                        {r.mergeSpan !== 0 && (
+                          <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(1, r.mergeSpan, top), fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", color: C.ink }}>
+                            {r.slotLabel}
+                          </div>
+                        )}
+                        <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(2, 0, top), fontSize: 13, color: C.ink }}>{r.roomText}</div>
+                        <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(3, 0, top), fontSize: 12, color: C.muted, whiteSpace: "pre-line" }}>{r.notes || "—"}</div>
+                        {r.mergeSpan !== 0 && (
+                          <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(4, r.mergeSpan, top), fontSize: 13, color: C.ink }}>
+                            {r.typeName}
+                          </div>
+                        )}
+                        {r.mergeSpan !== 0 && (
+                          <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(5, r.mergeSpan, top), fontSize: 13, color: C.ink }}>
+                            {r.ampRating ? `${r.ampRating}A` : "—"}
+                          </div>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
                 </div>
-              ))}
+              )}
             </div>
             <ColumnFilterModal activeCol={tableActiveFilterCol} filterConfigs={tableFilterConfigs} sortConfig={tableSortConfig} setSortConfig={setTableSortConfig} onClose={() => setTableActiveFilterCol(null)} />
           </div>

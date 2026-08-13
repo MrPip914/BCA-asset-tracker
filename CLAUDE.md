@@ -475,26 +475,21 @@ When you do:
 
 ## Known constraints / things to watch
 
-- **Backend is behind the frontend as of this writing**: `index.html`/`AssetTrackerSync.gs`
-  are at v9 (Room/Building references switched to stable ids — `roomId`/`buildingId`/
-  `allocations[].roomId`/`Circuit.roomsServedIds` — plus everything through v8's
-  BreakerTypes catalog and `Breaker.cells`), but the live deployed backend is still v6 —
-  needs a fresh Apps Script redeploy before any of v7–v9's changes actually persist. The
-  live BCA0082–85 panel data still uses the pre-v7 shape (`slots`/`poles`/`mount`, no
-  `cells`), and every live asset's `.room`/`.building` are still plain name strings, not
-  ids — both need rebuilding via the UI after redeploying (breakers via Add Breaker, same
-  as the tandem/quad rebuild after v7; Room/Building links by re-picking each asset's Room/
-  Building field once, which now writes the id). No separate migration script — this is a
-  small live dataset, hand-rebuilding through the UI is simpler than one-off migration code.
-  Check `backendScriptVersion` in the UI (or the "Backend outdated" header warning) to see
-  what's actually live before assuming any of this works against the real Sheet — Sandbox
-  mode is unaffected either way.
-- **Mitsubishi mini-split/condenser sample data exists in Sandbox only, not the live Sheet
-  yet**: one "Mini Split" indoor unit per Room and one "Condenser" outdoor unit per Building,
-  each with seeded maintenance items (Monthly filter clean + Annual coil clean for Mini
-  Splits; Annual inspection/cleaning for Condensers). Deliberately not added to the live
-  Sheet yet since it's blocked on the same pending backend redeploy above — once that's
-  done, add the same assets/types there by hand through the UI, matching `MOCK_SNAPSHOT`.
+- **Backend is at v9 and the live Sheet is fully migrated to match** (as of the 2026-08-13
+  session): `roomId`/`buildingId`/`allocations[].roomId`/`Circuit.roomsServedIds` are all
+  stable ids on every live asset, all 4 real panels (BCA0082–85) were rebuilt with the
+  `cells`/`BreakerType` model (BCA0082 is the main panel, 32 slots, with 3 real sub-panel
+  feeds to BCA0083/84/85; each sub-panel is sized to its building's real room count — 3/3/4
+  rooms — with one reserved-but-not-yet-installed future sub-panel feed each), and the live
+  `BreakerTypes` tab (previously empty despite the v9 deploy) was seeded with the 5 catalog
+  types. The migration was written via a one-off PowerShell script against `SHEET_API_URL`
+  (not through the UI) since it touched ~130 assets at once; no migration script was kept
+  in the repo. Check `backendScriptVersion` in the UI if this ever seems stale.
+- Mitsubishi mini-split/condenser sample data now exists in both Sandbox and the live
+  Sheet: one "Mini Split" indoor unit per Room (18 on live) and one "Condenser" outdoor
+  unit per Building (4 on live, zone count matched to that building's room count), each
+  with seeded maintenance items (Monthly filter clean + Annual coil clean for Mini Splits;
+  Annual inspection/cleaning for Condensers).
 - No auth beyond the cosmetic name tag — anyone with the deployed URL can read/write
   everything. Fine for internal school use with a private link; not a public-facing
   security model.
