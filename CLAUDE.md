@@ -116,6 +116,36 @@ per-device via `localStorage` (`SANDBOX_MODE_KEY`).
   of rewriting the whole — ever-growing — history each time. A request with no `_dirty` at
   all (an old client, or a direct API call) still rewrites everything, as the safe fallback.
   `LockService` still guards every write so concurrent saves don't corrupt a tab.
+- **Optimistic concurrency (backend v12)**: because every save is a full overwrite, a
+  client saving a snapshot it loaded *before* someone else's save used to silently drop
+  that person's work. Each of the three `_dirty` domains now carries a revision counter,
+  stored in Config as `rev_assets`/`rev_config`/`rev_breakerTypes`. `doGet` returns them
+  (`revisions`), the frontend holds them next to `nextAssetNumber`, and `persist()` posts
+  them back as `_revisions`. Inside the same `LockService` critical section as the writes,
+  `doPost` compares posted vs stored for each domain it's about to write; on any mismatch
+  it writes **nothing** (not even the audit rows, which describe the rejected change) and
+  returns `{ ok: false, conflict: ["assets"], revisions: {...} }`. Otherwise it writes,
+  bumps only the domains it actually wrote, and returns the new revisions so the client can
+  keep saving without reloading first. Per-domain, not one global counter, so editing a
+  managed list doesn't conflict with someone editing an asset. On a conflict the frontend
+  does **not** merge and does **not** retry — either would destroy one of the two changes —
+  it reloads through `loadData()` (which also replaces the optimistic `setState` calls
+  `persist()` makes around the write, so the app stops showing an edit that isn't stored
+  anywhere) and shows a blocking "Your change wasn't saved" modal telling the user to redo
+  it. A payload with no `_revisions` (an older client, a direct API call) is still accepted
+  and written — same fallback philosophy as a missing `_dirty` — and still bumps the
+  counters so other clients notice. Sandbox mode makes no network call at all, so it
+  attaches no revisions and no check runs, rather than fabricating numbers locally. Two
+  supporting details in `persist()`: `revisionsRef` mirrors the revision state because a
+  POST needs the value as of the moment it's *sent*, and `writeQueueRef` serializes the
+  POSTs so only one is in flight — several call sites fire `persist()` without awaiting it,
+  and an overlapping second save would otherwise post the revision the first is about to
+  bump and be rejected as a conflict with this very client's own write (overlapping
+  full-snapshot writes could also already land out of order before this).
+  One knock-on effect: since the counters live in Config and `writeTable_` rewrites that
+  tab wholesale, Config is now rewritten whenever *any* domain is written. When config
+  itself isn't dirty its stored rows are copied straight back unparsed (including keys the
+  script doesn't know about), so the content is unchanged — only the counters move.
 - **Sheet schema**: Assets tab holds flat fields only (see `ASSET_FIELDS` in the .gs
   file). Comments, Changes (structured change log with type/vendor/cost), Allocations
   (bulk-item quantity assignments), and Maintenance (scheduled maintenance items) each
@@ -550,9 +580,15 @@ When you do:
 
 ## Known constraints / things to watch
 
-- **Backend is at v11 — this needs a re-paste + New version deploy to go live**, and it
-  carries *two* undeployed changes, since v10 was never deployed either (the live backend is
-  still v9). One paste + one New version deploy ships both.
+- **Backend is at v12 — this needs a re-paste + New version deploy to go live**, and it
+  carries *three* undeployed changes, since v10 and v11 were never deployed either (the live
+  backend is still v9). One paste + one New version deploy ships all three.
+  - v12 adds the per-domain revision counters (`rev_assets`/`rev_config`/`rev_breakerTypes`
+    in Config) behind the optimistic-concurrency check — see "Optimistic concurrency" under
+    Architecture. Until it deploys, the live backend ignores the `_revisions` the frontend
+    now posts and last-write-wins is still the live behavior; the frontend keeps working
+    against it (it just never sees a conflict, since a v9 backend reports no revisions and
+    the client's stay at 0). The first v12 save seeds the three `rev_*` rows in Config.
   - v11 adds `nextAssetNumber` to Config — the monotonic asset-label counter (see the
     Asset ID section under Data model). doGet returns it; doPost re-states it on every
     config write at `max(posted, stored)`. Until it deploys, the frontend still works —
@@ -589,8 +625,12 @@ When you do:
 - Apps Script free-tier quota is ~90 min of script runtime/day — comfortably enough
   for this app's usage pattern, but worth knowing if it ever gets flaky under heavy
   simultaneous use.
-- No conflict detection: if two people save at nearly the same moment, last write wins
-  and can silently drop the other person's change (each save is a full overwrite).
+- Conflict detection exists as of backend v12 (see "Optimistic concurrency" under
+  Architecture) but is **detect-and-reject, not merge**: the second person's save is
+  refused outright and they have to redo their change against freshly reloaded data.
+  Nothing auto-merges, and there's no live "someone else just changed this" indicator —
+  you find out at save time. Note it only guards against a *stale* save; two people can
+  still take turns overwriting the same field, each on current data.
 - **Date-only fields and Sheets auto-conversion**: any plain "yyyy-MM-dd" string (a
   maintenance item's `lastPerformed`, a breaker's `installedDate`, `purchaseDate`,
   `warrantyUntil`) used to come back from the Sheet as a full ISO timestamp instead —

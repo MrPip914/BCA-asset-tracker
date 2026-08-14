@@ -20,6 +20,16 @@
  * Missing `_dirty` (an older client, or a direct API call) defaults to
  * "rewrite everything" — the original behavior, kept as the safe fallback.
  *
+ * Every save is a FULL overwrite of the domains it touches, so a client
+ * saving a snapshot it loaded before someone else's save would silently drop
+ * that other person's work. Each of those same three domains therefore carries
+ * a revision counter in the Config tab: doGet hands them out, the client posts
+ * back the ones it loaded, and doPost — inside the same lock as the writes —
+ * refuses the whole save if any domain it's about to write has moved on since.
+ * See "Optimistic concurrency" in doPost. A payload with no `_revisions` (an
+ * older client, or a direct API call) is still accepted and written, the same
+ * fallback philosophy as a missing `_dirty`.
+ *
  * Tabs created automatically on first run: Assets, Comments, Changes,
  * Allocations, Maintenance, Breakers, Circuits, BreakerTypes, AuditLog, Config.
  */
@@ -31,7 +41,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v11 (2026-08-13) — Config gains `nextAssetNumber`, a monotonic counter for the next BCA asset label; read back in doGet and kept at max(posted, stored) on every config write, so a permanently deleted asset's label is never reissued to a new asset (which would inherit its AuditLog history)";
+const SCRIPT_VERSION = "v12 (2026-08-13) — optimistic concurrency: Config gains a per-domain revision counter (rev_assets/rev_config/rev_breakerTypes) returned by doGet and posted back by the client; doPost compares them inside the lock and, on any mismatch for a domain it's about to write, writes NOTHING and returns { ok: false, conflict: [...] } instead of silently overwriting whoever saved first";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -98,6 +108,45 @@ const CIRCUIT_FIELDS = ["id", "breakerId", "label", "roomsServed", "feedsPanelLa
 // cells at placement time in the frontend. Global/shared across all panels,
 // not scoped to any one asset — its own flat tab, like Breakers/Circuits.
 const BREAKER_TYPE_FIELDS = ["id", "name", "slotSpan", "members"];
+
+// --- Optimistic concurrency --------------------------------------------------
+// One revision counter per save domain — the same three domains `_dirty`
+// already describes. Per-domain rather than one global counter so two people
+// editing unrelated things (a managed list vs an asset) never collide: only a
+// domain this save actually writes can conflict.
+const REVISION_DOMAINS = ["assets", "config", "breakerTypes"];
+// Config-tab key each counter is stored under (rev_assets, rev_config,
+// rev_breakerTypes), alongside nextAssetNumber. Prefixed so it can't collide
+// with a managed-list key.
+const REVISION_KEY_PREFIX = "rev_";
+
+// The Config tab as a raw { key: cellValue } map — values are left as stored
+// (JSON strings), NOT parsed, so keys this request isn't changing can be
+// written straight back untouched when the tab gets rewritten.
+function readConfigMap_() {
+  const map = {};
+  readTable_(SHEET_NAMES.config, ["key", "value"]).forEach(r => {
+    if (r.key !== "" && r.key !== null && r.key !== undefined) map[r.key] = r.value;
+  });
+  return map;
+}
+
+// Current revision per domain. Missing/blank/garbage reads as 0 — which is
+// also what a client with no stored revisions posts, so an existing sheet (or
+// one last written by a backend predating this) starts out matched rather than
+// conflicting on its very first save after deploy.
+function readRevisions_(configMap) {
+  const revisions = {};
+  REVISION_DOMAINS.forEach(d => {
+    const raw = Number(configMap[REVISION_KEY_PREFIX + d]);
+    revisions[d] = isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+  });
+  return revisions;
+}
+
+function jsonOut_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
 
 function getSheet_(name) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -180,7 +229,11 @@ function doGet(e) {
     const configRows = readTable_(SHEET_NAMES.config, ["key", "value"]);
 
     const config = {};
-    configRows.forEach(r => { config[r.key] = r.value ? JSON.parse(r.value) : null; });
+    const configRaw = {};
+    configRows.forEach(r => {
+      configRaw[r.key] = r.value;
+      config[r.key] = r.value ? JSON.parse(r.value) : null;
+    });
 
     const assets = assetRows.map(a => {
       const label = a.label;
@@ -246,6 +299,11 @@ function doGet(e) {
       // label, and AuditLog rows keyed by that label outlive the asset).
       // null when never stored; the frontend seeds it from max+1 on first use.
       nextAssetNumber: config.nextAssetNumber || null,
+      // Per-domain revision counters as of this read. The client holds onto
+      // these and posts them back with every save; doPost rejects the save if
+      // a domain it's about to write has moved on since. All zeros on a sheet
+      // that has never been written by a v12+ backend.
+      revisions: readRevisions_(configRaw),
     };
 
     // Plain fetch() from a browser is blocked by CORS here, since Apps Script
@@ -275,6 +333,35 @@ function doPost(e) {
     // state). Missing/absent _dirty (an older client, or a direct API call)
     // means "rewrite everything" — the safe default, same as before this existed.
     const dirty = body._dirty || { assets: true, config: true, breakerTypes: true };
+
+    // --- Optimistic concurrency check ---------------------------------------
+    // Deliberately inside the LockService critical section that already guards
+    // the writes below: checking outside it would leave a window where someone
+    // else's save lands between the check passing and this one writing, which
+    // is the exact failure being prevented.
+    //
+    // Only domains this save is actually going to write are checked — a save
+    // that touches assets doesn't care that a managed list moved on. A domain
+    // the client didn't report a revision for isn't checked either, so an older
+    // client (no `_revisions` at all) still writes, same fallback philosophy as
+    // a missing `_dirty`.
+    const configMap = readConfigMap_();
+    const revisions = readRevisions_(configMap);
+    const postedRevisions = body._revisions;
+    if (postedRevisions) {
+      const conflict = REVISION_DOMAINS.filter(d => {
+        if (!dirty[d]) return false;
+        const posted = Number(postedRevisions[d]);
+        if (!isFinite(posted)) return false;
+        return Math.floor(posted) !== revisions[d];
+      });
+      if (conflict.length) {
+        // Write NOTHING — not the tabs, and not the audit rows either, since
+        // those describe the very changes being rejected. Returning the current
+        // revisions lets the client resync without a second round trip.
+        return jsonOut_({ ok: false, conflict: conflict, revisions: revisions });
+      }
+    }
 
     if (dirty.assets) {
       // Assets tab: flat fields only.
@@ -335,32 +422,6 @@ function doPost(e) {
       body.auditLog || []
     );
 
-    if (dirty.config) {
-      // The Config tab is rewritten wholesale, so nextAssetNumber has to be
-      // re-stated on every config write or it'd be dropped by an unrelated one
-      // (adding a vendor, say). Taking the max against what's already stored
-      // keeps it monotonic server-side too: a client that predates this key
-      // posts nothing for it, and a client that loaded before someone else
-      // created an asset posts a stale, lower value — either would otherwise
-      // walk the counter backwards and let a deleted asset's label be reissued.
-      const storedNextRow = readTable_(SHEET_NAMES.config, ["key", "value"])
-        .filter(r => r.key === "nextAssetNumber")[0];
-      const nextAssetNumber = Math.max(
-        Number(body.nextAssetNumber) || 0,
-        Number(storedNextRow && storedNextRow.value) || 0
-      );
-      writeTable_(SHEET_NAMES.config, ["key", "value"], [
-        { key: "columns", value: JSON.stringify(body.columns || []) },
-        { key: "changeTypes", value: JSON.stringify(body.changeTypes || []) },
-        { key: "vendors", value: JSON.stringify(body.vendors || []) },
-        { key: "peripheralsList", value: JSON.stringify(body.peripheralsList || []) },
-        { key: "usersList", value: JSON.stringify(body.usersList || []) },
-        { key: "bulkItemTypes", value: JSON.stringify(body.bulkItemTypes || []) },
-        { key: "typesList", value: JSON.stringify(body.typesList || []) },
-        { key: "nextAssetNumber", value: JSON.stringify(nextAssetNumber) },
-      ]);
-    }
-
     if (dirty.breakerTypes) {
       const breakerTypeRows = (body.breakerTypes || []).map(t => ({
         id: t.id, name: t.name, slotSpan: t.slotSpan, members: JSON.stringify(t.members || []),
@@ -368,9 +429,58 @@ function doPost(e) {
       writeTable_(SHEET_NAMES.breakerTypes, BREAKER_TYPE_FIELDS, breakerTypeRows);
     }
 
-    return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(ContentService.MimeType.JSON);
+    // --- Config tab + revision counters -------------------------------------
+    // The Config tab is rewritten wholesale and the revision counters live in
+    // it, so this now runs whenever ANY domain was written — not only on a
+    // config change. When config itself isn't dirty, its stored rows are copied
+    // straight back (raw cell values, unparsed, including any key this script
+    // doesn't know about) so an asset-only save still leaves Config untouched
+    // apart from the counters.
+    const written = REVISION_DOMAINS.filter(d => dirty[d]);
+    if (written.length) {
+      const configRows = [];
+      if (dirty.config) {
+        // nextAssetNumber has to be re-stated on every config write or it'd be
+        // dropped by an unrelated one (adding a vendor, say). Taking the max
+        // against what's already stored keeps it monotonic server-side too: a
+        // client that predates this key posts nothing for it, and a client that
+        // loaded before someone else created an asset posts a stale, lower
+        // value — either would otherwise walk the counter backwards and let a
+        // deleted asset's label be reissued. (The revision check above makes
+        // that second case a conflict now, but the max costs nothing and still
+        // covers a client that posts no revisions at all.)
+        const nextAssetNumber = Math.max(
+          Number(body.nextAssetNumber) || 0,
+          Number(configMap.nextAssetNumber) || 0
+        );
+        configRows.push({ key: "columns", value: JSON.stringify(body.columns || []) });
+        configRows.push({ key: "changeTypes", value: JSON.stringify(body.changeTypes || []) });
+        configRows.push({ key: "vendors", value: JSON.stringify(body.vendors || []) });
+        configRows.push({ key: "peripheralsList", value: JSON.stringify(body.peripheralsList || []) });
+        configRows.push({ key: "usersList", value: JSON.stringify(body.usersList || []) });
+        configRows.push({ key: "bulkItemTypes", value: JSON.stringify(body.bulkItemTypes || []) });
+        configRows.push({ key: "typesList", value: JSON.stringify(body.typesList || []) });
+        configRows.push({ key: "nextAssetNumber", value: JSON.stringify(nextAssetNumber) });
+      } else {
+        Object.keys(configMap).forEach(k => {
+          // Revision rows are re-added below with their new values.
+          if (k.indexOf(REVISION_KEY_PREFIX) === 0) return;
+          configRows.push({ key: k, value: String(configMap[k]) });
+        });
+      }
+      // Bump only what was actually written, so an assets-only save doesn't
+      // invalidate a config snapshot someone else is holding.
+      written.forEach(d => { revisions[d] = revisions[d] + 1; });
+      REVISION_DOMAINS.forEach(d => configRows.push({ key: REVISION_KEY_PREFIX + d, value: String(revisions[d]) }));
+      writeTable_(SHEET_NAMES.config, ["key", "value"], configRows);
+    }
+
+    // The post-write revisions go back with the response so the client can keep
+    // saving without a reload first — otherwise its very next save would post
+    // the pre-bump numbers and conflict with its own write.
+    return jsonOut_({ ok: true, revisions: revisions });
   } catch (err) {
-    return ContentService.createTextOutput(JSON.stringify({ ok: false, error: err.message })).setMimeType(ContentService.MimeType.JSON);
+    return jsonOut_({ ok: false, error: err.message });
   } finally {
     lock.releaseLock();
   }

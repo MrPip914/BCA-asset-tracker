@@ -40,7 +40,7 @@ import {
   Search, Plus, X, Pencil, Trash2, Save, ChevronRight, ChevronDown, ArrowLeft, MessageSquare,
   Monitor, Phone, Tv, Camera, HardDrive, HelpCircle, Columns3, Lock, Filter, Check, DoorOpen, Download,
   Wrench, UserCircle, Settings, History, Archive, ArchiveRestore, Building2, Package, Copy, Zap, Repeat, ArrowLeftRight, Menu,
-  FlaskConical, RotateCcw,
+  FlaskConical, RotateCcw, AlertTriangle,
 } from "lucide-react";
 
 // Starter managed peripherals/users/bulk-item-type lists — empty until the school
@@ -359,8 +359,41 @@ const SHEET_API_URL = "https://script.google.com/macros/s/AKfycbzXaKRuCrTesxobxP
 // backend actually reports (data.scriptVersion) and flags a mismatch —
 // catches a stuck deployment (edited-but-not-redeployed) automatically
 // instead of it silently dropping data until someone happens to notice.
-const FRONTEND_SCRIPT_VERSION = "v11 (2026-08-13) — Config gains `nextAssetNumber`, a monotonic counter for the next BCA asset label; read back in doGet and kept at max(posted, stored) on every config write, so a permanently deleted asset's label is never reissued to a new asset (which would inherit its AuditLog history)";
+const FRONTEND_SCRIPT_VERSION = "v12 (2026-08-13) — optimistic concurrency: Config gains a per-domain revision counter (rev_assets/rev_config/rev_breakerTypes) returned by doGet and posted back by the client; doPost compares them inside the lock and, on any mismatch for a domain it's about to write, writes NOTHING and returns { ok: false, conflict: [...] } instead of silently overwriting whoever saved first";
 const emptyDraftFrom = columns => Object.fromEntries(columns.map(c => [c.key, ""]));
+
+// --- Optimistic concurrency (per-domain revisions) ---------------------------
+// Every save is a full overwrite of the domains it touches, so a client saving
+// a snapshot it loaded before someone else's save would silently drop that
+// other person's work. The backend therefore keeps a revision counter per
+// domain — the same three the `_dirty` flags already describe — and bumps the
+// ones it actually writes. Each POST carries the revisions this client last
+// saw (`_revisions`); if a domain the save would write has moved on, the
+// backend writes nothing and reports a conflict, and the client reloads rather
+// than merging or retrying (either could destroy one of the two changes).
+// Per-domain, not one global counter, so two people editing unrelated things —
+// a managed list vs an asset — don't produce a false conflict.
+const REVISION_DOMAINS = ["assets", "config", "breakerTypes"];
+const EMPTY_REVISIONS = { assets: 0, config: 0, breakerTypes: 0 };
+// Human-readable name per domain, for the conflict message.
+const REVISION_DOMAIN_LABELS = {
+  assets: "asset data",
+  config: "lists and columns",
+  breakerTypes: "breaker types",
+};
+// Anything missing/garbage reads as 0 — the same value the backend reads for a
+// Config tab with no revision rows yet (an existing sheet, or one last written
+// by a backend predating this), so the first save after deploy matches instead
+// of conflicting. Also what sandbox mode leaves them at, harmlessly, since it
+// never posts anywhere.
+function normalizeRevisions(raw) {
+  const out = {};
+  REVISION_DOMAINS.forEach(d => {
+    const n = Number(raw && raw[d]);
+    out[d] = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  });
+  return out;
+}
 
 // --- Asset ID (label) issuing ------------------------------------------------
 // Generated Asset IDs are BCA-prefixed and zero-padded to 4 digits (BCA0082).
@@ -870,6 +903,29 @@ function AssetTracker() {
   const [loadError, setLoadError] = useState(false);
   const [saveError, setSaveError] = useState(false);
   const [backendScriptVersion, setBackendScriptVersion] = useState(null);
+  // Per-domain revision numbers as of the last load or successful save — see
+  // REVISION_DOMAINS. Loaded alongside nextAssetNumber/backendScriptVersion.
+  const [revisions, setRevisions] = useState(EMPTY_REVISIONS);
+  // null normally; otherwise the array of domains a save was just rejected on
+  // ("assets", ...) — someone else saved first, so this client's change never
+  // reached the Sheet and has to be redone. Drives the conflict modal.
+  const [saveConflict, setSaveConflict] = useState(null);
+  // The same numbers as `revisions`, mirrored in a ref because a POST needs the
+  // value as of the moment it's SENT, not the one its closure captured: several
+  // call sites fire persist() without awaiting it, so a save can be queued
+  // behind one that's still in flight and must use the revisions that one came
+  // back with — otherwise it would post the pre-bump numbers and be rejected as
+  // a conflict with this very client's own write.
+  const revisionsRef = useRef(EMPTY_REVISIONS);
+  // Serializes the POSTs themselves so only one is ever in flight. Needed for
+  // the above, and independently correct: two overlapping full-snapshot writes
+  // could already land out of order and let the older one win.
+  const writeQueueRef = useRef(Promise.resolve());
+  function rememberRevisions(raw) {
+    const next = normalizeRevisions(raw);
+    revisionsRef.current = next;
+    setRevisions(next);
+  }
 
   const [mainTab, setMainTab] = useState("assets"); // "assets" | "maintenance" — top-level page tab
   const [view, setView] = useState("list"); // "list" | "detail"
@@ -979,6 +1035,10 @@ function AssetTracker() {
       // still a real mismatch, not a "nothing to compare" case. In sandbox mode the
       // fixture always reports the current frontend version, so this never fires there.
       setBackendScriptVersion(data.scriptVersion || "(none reported — backend predates version tracking)");
+      // Absent (sandbox fixture, or a backend predating v12) normalizes to all
+      // zeros, which is exactly what such a backend compares against — so this
+      // stays a no-op rather than a permanent conflict.
+      rememberRevisions(data.revisions);
       // Migrate column config: append any default columns added in newer app versions.
       let storedCols = data.columns && data.columns.length ? data.columns : DEFAULT_COLUMNS;
       DEFAULT_COLUMNS.forEach(dc => {
@@ -1103,8 +1163,15 @@ function AssetTracker() {
     } catch (e) {
       throw new Error(`Non-JSON response: ${text.slice(0, 200)}`);
     }
-    if (!result || !result.ok) throw new Error(result && result.error ? result.error : "Unknown write failure");
-    return true;
+    // A rejected save (someone else saved first — see REVISION_DOMAINS) comes
+    // back as a normal 200 with { ok: false, conflict: [...] }. That's an
+    // expected outcome, not a transport failure, so it's returned to persist()
+    // to handle rather than thrown as an error.
+    if (!result) throw new Error("Empty response from backend");
+    if (!result.ok && !Array.isArray(result.conflict)) {
+      throw new Error(result.error ? result.error : "Unknown write failure");
+    }
+    return result;
   }
 
   // `overrides` only needs to name whichever domains actually changed — every
@@ -1160,8 +1227,11 @@ function AssetTracker() {
     };
     if (sandboxMode) {
       // Mirror to localStorage so a refresh doesn't lose sandbox edits — but
-      // never touches SHEET_API_URL. scriptVersion is stamped fresh each save
-      // so the sandbox never shows a false "backend outdated" warning.
+      // never touches SHEET_API_URL. No network call happens at all here, so
+      // there's nobody to conflict with: no `_revisions` is attached and no
+      // check runs, rather than fabricating revision numbers locally.
+      // scriptVersion is stamped fresh each save so the sandbox never shows a
+      // false "backend outdated" warning.
       try {
         localStorage.setItem(SANDBOX_DATA_KEY, JSON.stringify({ ...payload, scriptVersion: FRONTEND_SCRIPT_VERSION }));
         setSaveError(false);
@@ -1171,7 +1241,41 @@ function AssetTracker() {
       return;
     }
     try {
-      await writeSnapshot(payload);
+      // Queued behind any save still in flight, and reading the revisions at
+      // send time (not closure-capture time) so a queued save uses whatever the
+      // one before it came back with — see writeQueueRef/revisionsRef.
+      const send = writeQueueRef.current.then(
+        () => writeSnapshot({ ...payload, _revisions: revisionsRef.current })
+      );
+      writeQueueRef.current = send.then(() => {}, () => {}); // keep the chain alive past a failure
+      const result = await send;
+      if (result && Array.isArray(result.conflict) && result.conflict.length) {
+        // Someone else saved first, so the backend wrote NOTHING and this edit
+        // is gone. Deliberately no auto-merge and no silent retry — a merge
+        // can't know which of two conflicting values is right, and a retry
+        // would overwrite the other person's change, which is the exact bug
+        // this whole mechanism exists to prevent. Reload server truth instead
+        // (which also replaces the optimistic setState above, so the app stops
+        // showing an edit that isn't stored anywhere) and say so plainly.
+        rememberRevisions(result.revisions);
+        setSaveConflict(result.conflict);
+        setSaveError(false);
+        // Close anything mid-edit against records the reload is about to
+        // replace underneath it.
+        setBreakerModal(null);
+        setAddBreakerDraft(null);
+        setSwapModal(null);
+        setMoveCircuitModal(null);
+        setDetailEditing(false);
+        setEditingMaintenanceIdx(null);
+        setMaintenanceEditDraft(null);
+        await loadData();
+        return;
+      }
+      // A v11-or-older backend reports no revisions; leaving them as-is keeps
+      // posting the same (all-zero) numbers, which it ignores anyway.
+      if (result && result.revisions) rememberRevisions(result.revisions);
+      setSaveConflict(null);
       setSaveError(false);
     } catch (e) {
       setSaveError(true);
@@ -2508,6 +2612,41 @@ function AssetTracker() {
     </div>
   );
 
+  // Shown when a save was rejected because someone else saved first (see
+  // REVISION_DOMAINS). The change is genuinely gone — the backend wrote nothing
+  // and the app has already reloaded what's actually stored — so this has to be
+  // unmissable and has to say "redo it", not "retrying…". zIndex 60, above every
+  // other modal, since it can fire while one of them is open.
+  const conflictModal = saveConflict && (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 60, padding: 16 }}>
+      <div style={{ background: C.surface, border: `1.5px solid ${C.danger}`, borderRadius: 14, padding: 22, width: "100%", maxWidth: 380, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)" }}>
+        <div
+          style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}
+          title={`Server revisions now: ${REVISION_DOMAINS.map(d => `${d} ${revisions[d]}`).join(", ")}`}
+        >
+          <AlertTriangle size={18} style={{ color: C.danger }} />
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.danger }}>Your change wasn't saved</div>
+        </div>
+        <div style={{ fontSize: 14, color: C.ink, marginBottom: 10 }}>
+          Someone else saved{" "}
+          {saveConflict.map(d => REVISION_DOMAIN_LABELS[d] || d).join(" and ")}{" "}
+          while you were working, so this save was rejected to avoid overwriting their change.
+        </div>
+        <div style={{ fontSize: 13, color: C.muted, marginBottom: 16 }}>
+          Nothing you just did was stored. The latest data has been reloaded — check it, then make your change again.
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+          <button
+            onClick={() => setSaveConflict(null)}
+            style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+          >
+            Got it
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
   const peripheralsManagerModal = showPeripheralsManager && (
     <ListManagerModal
       title="Manage peripherals"
@@ -2789,6 +2928,7 @@ function AssetTracker() {
     return (
       <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'IBM Plex Sans', sans-serif", color: C.ink }}>
         {globalStyle}
+        {conflictModal}
         {nameModal}
         {peripheralsManagerModal}
         {usersManagerModal}
@@ -4033,6 +4173,7 @@ function AssetTracker() {
   return (
     <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'IBM Plex Sans', 'Helvetica Neue', sans-serif", color: C.ink }}>
       {globalStyle}
+      {conflictModal}
       {nameModal}
       {peripheralsManagerModal}
       {usersManagerModal}
