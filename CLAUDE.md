@@ -146,6 +146,30 @@ per-device via `localStorage` (`SANDBOX_MODE_KEY`).
   tab wholesale, Config is now rewritten whenever *any* domain is written. When config
   itself isn't dirty its stored rows are copied straight back unparsed (including keys the
   script doesn't know about), so the content is unchanged — only the counters move.
+- **Saving feedback is one flag, because `persist()` is the one choke point**: `isSaving`
+  (plus a `savingRef` mirror) is set at the top of `persist()` and cleared in a `finally`,
+  so it clears on success, on a network/backend failure, *and* on the conflict path that
+  reloads and opens the blocking modal — a spinner that never stops would be worse than
+  none. Since every write in the app funnels through `persist()`, that single flag covers
+  every form without per-form plumbing: it drives a "Saving…" pill in **both** headers
+  (list and detail) and puts every write control into a disabled *and visibly working*
+  state — label swapped to "Saving…", `C.border` background, spinner (`Loader2` +
+  the `.spin` keyframe) on the icon buttons. A disabled-but-otherwise-unchanged button
+  still reads as frozen, which is the exact confusion this exists to fix. Components
+  outside `AssetTracker` (`ListManagerModal`, `ChildEntityTable`, `BreakersTabContent`,
+  `PanelConfigForm`) take it as an `isSaving` prop.
+  Two things this is deliberately *not*: it is **not** a guard inside `persist()` — a few
+  write paths aren't gated on it (the bulk reassign/move toolbar), and refusing one of
+  those would silently drop a real edit; the guard is an `if (savingRef.current) return;`
+  at the top of each submit *handler* instead, catching the double-click that lands before
+  React re-renders the button as disabled. And it does **not** replace `writeQueueRef` —
+  that still serializes the POSTs; this stops the second identical submit from ever being
+  created, which the queue can't do (it would happily send both).
+  Sandbox mode needs no special case: its write never awaits, so `isSaving` goes true and
+  false inside one React batch and no "Saving…" frame is ever painted.
+  A failed save now shows a "Save failed" pill in that same slot. It used to be a bare
+  "Sync failed" tucked inside the name button on the *list* header only — i.e. invisible
+  on the detail page, where almost every edit is actually made.
 - **Sheet schema**: Assets tab holds flat fields only (see `ASSET_FIELDS` in the .gs
   file). Comments, Changes (structured change log with type/vendor/cost), Allocations
   (bulk-item quantity assignments), and Maintenance (scheduled maintenance items) each
