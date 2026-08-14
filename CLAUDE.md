@@ -186,12 +186,34 @@ per-device via `localStorage` (`SANDBOX_MODE_KEY`).
 Assets have a `type`, picked from a managed list (`typesList`, editable via the gear icon on
 the Type field — same pattern as peripherals/vendors/change types, seeded from `TYPE_OPTIONS`
 on a brand-new sheet: Computer, Monitor, Phone, TV, DocuCam, Stream Deck, Room, Building,
-Bulk Item, Electrical Panel, Other). `LOCKED_TYPES` (Room, Building, Bulk Item, Electrical
-Panel) can't be removed from the manager — they have deep structural dependencies elsewhere
-(`TYPE_ONLY_FIELDS`/`*_EXCLUDED_FIELDS`, Contents/Allocations/Breakers tabs, `inferBuilding()`)
-that a plain managed-list removal would silently break. Which fields apply to which type is
-governed by `TYPE_ONLY_FIELDS` and the `*_EXCLUDED_FIELDS` arrays near the top of the file
-(`fieldAppliesTo()`) — e.g. Room and Building assets don't have brand/model/serial; Bulk Items
+Bulk Item, Electrical Panel, Other).
+
+**Everything the app knows about a structurally special type lives in one `TYPE_REGISTRY`**
+near the top of `index.html`, keyed by type name. This replaced a set of parallel arrays
+(`TYPE_ONLY_FIELDS`, five `*_EXCLUDED_FIELDS`, `LOCKED_TYPES`, `CATEGORY_ICONS`) plus a
+scattering of `asset.type === "Room"`-style tests at render sites — adding a structurally
+new type meant editing all of them with nothing to catch a miss. Each entry may declare:
+- `locked` — can't be removed in the type manager (`isLockedType()`): Room, Building, Bulk
+  Item, Electrical Panel, which have deep structural dependencies elsewhere (field rules,
+  Contents/Allocations/Breakers tabs, `inferBuilding()`) a plain managed-list removal breaks.
+- `icon` — the lucide icon (`iconFor()`, default `HelpCircle`).
+- `excludedFields` — column keys this type doesn't get at all.
+- `onlyFields` — column keys belonging to this type. Any key named in *any* entry's
+  `onlyFields` becomes restricted app-wide (`RESTRICTED_FIELDS`, derived from the registry,
+  not declared separately): no type that doesn't name it gets it.
+- `linkage` — `"room"` (has a `roomId`; building inferred transitively through that Room) /
+  `"building"` (has its own `buildingId`; must also name `building` in `onlyFields`) /
+  `"allocations"` (a pooled quantity spread across rooms) / `"none"` (a Building, top of the
+  place tree — its `building` field is its own display name, not a link). **`linkageOf(type)`
+  is the only thing render sites should branch on** — never a hardcoded type-name comparison.
+
+Types added at runtime via the gear-icon manager are deliberately NOT in the registry: every
+lookup falls back to a generic room-linked device (no icon, no field rules, `DEFAULT_LINKAGE`),
+which is exactly how they behaved before the registry existed. Note that "which assets *are*
+Rooms" queries (`roomNameFor()`, the Contents tab's `isPlace`/`contentDevices`) legitimately
+still compare type names — those are identity questions, not linkage.
+
+`fieldAppliesTo()` reads the registry — e.g. Room and Building assets don't have brand/model/serial; Bulk Items
 (chairs, tables — not individually tagged) get a `totalQuantity` and an `itemName` instead, and
 are distributed across rooms via their own `allocations` array rather than a single `room` field.
 `itemName` ("Sub-Type" in the UI) is picked from its own managed list (`bulkItemTypes`) rather
@@ -225,15 +247,15 @@ field that's genuinely a plain string, since a Room doesn't reference itself.
 
 **"Condenser" is the one non-Room/Building type that links to a Building directly** (a
 `buildingId` field of its own) instead of inferring one through a Room — it's an outdoor
-unit that doesn't sit inside any particular Room. Added to `TYPE_ONLY_FIELDS.building`
-alongside Room/Building, with `room` excluded via `CONDENSER_EXCLUDED_FIELDS` so it doesn't
-also get a Room field. This is a second, generally-useful linkage pattern, not a one-off
-hack — reuse it (add the type to `TYPE_ONLY_FIELDS.building`, exclude `room` for it) for any
-future type that attaches to a Building as a whole rather than to one Room. Two rendering
+unit that doesn't sit inside any particular Room. Its registry entry is
+`{ linkage: "building", onlyFields: ["building"], excludedFields: ["room"] }` — so it gets a
+Building field and no Room field. This is a second, generally-useful linkage pattern, not a
+one-off hack — reuse it (that same three-key entry) for any future type that attaches to a
+Building as a whole rather than to one Room. Two rendering
 sites had to learn to resolve a *direct* `buildingId` for a non-Room type, since previously
 only Room ever had one: the read-only Detail view's building special-case (was hardcoded to
-`selectedAsset.type === "Room"`, now any type where `fieldAppliesTo("building", type)` and
-type isn't itself `"Building"`) and the list-row cell renderer (new `isBuildingCol` branch
+`selectedAsset.type === "Room"`, now `linkageOf(type) === "building"`, which covers Room and
+Condenser but not Building itself) and the list-row cell renderer (new `isBuildingCol` branch
 resolving via `buildingNameFor(a.buildingId, assets)`, alongside the existing `isRoomCol`/
 `isInferredBuilding` branches) — the latter was also silently blank for Room rows before
 this fix, since the generic fallback path read the non-existent `a.building` field instead
@@ -273,6 +295,59 @@ own audit history (new entries are logged against the *old* label at save time, 
 list view on save), the same failure mode the Room/Building hardening above was built to
 eliminate — found by auditing the codebase for other name-vs-id gaps after that fix.
 
+Two further gaps in that same "label is the primary key" story were closed later, both in
+the *add* path (the only place a label is authored at all):
+
+- **A duplicate label is rejected at creation** (`findLabelConflict()`, called from
+  `saveDraft()`'s add branch, case-insensitive and trimmed). The suggested label is
+  editable, so a typo could previously collide with an existing asset — and every lookup
+  that uses a label matches *all* rows sharing it (`assets.map(a => a.label === selectedLabel
+  ...)`, delete's mirror `filter`, and the backend grouping child rows by `assetLabel`), so
+  two assets with one label aren't two colliding assets, they're one merged asset with no
+  way to separate them again. The add form shows an inline error naming the existing asset
+  (and saying so when it's archived, since an archived asset isn't in the default list view)
+  rather than returning silently — Save doing nothing is indistinguishable from Save working
+  to whoever typed the typo. Empty Asset ID / Type go through the same inline error.
+- **Labels are issued from a persisted monotonic counter, not recomputed from the assets.**
+  `nextAssetNumber` lives in the Config domain (backend v11) and is read by
+  `peekAssetNumber()` / advanced by `advanceAssetNumber()`; `startAdd()` and
+  `duplicateAsset()` both go through it, so they can't disagree. Deriving it as max BCA
+  number + 1 — what both did before — meant permanently deleting the highest-numbered asset
+  freed its label for immediate reuse, and since AuditLog is keyed by `assetLabel` and
+  deliberately outlives the asset it logged, the next asset created silently inherited the
+  dead one's created/edited/archived/deleted history. `peekAssetNumber()` returns
+  `max(counter, derived)` rather than the counter alone, which is what seeds it on an
+  existing sheet (counter null → derived wins) and what keeps a counter that somehow lags
+  the sheet — a direct API write, a migration script, a hand-edited Config row — from ever
+  handing out a number that's already taken. It never decrements: a hand-typed *higher*
+  label pushes it past that number, a lower one (filling a hole) leaves it alone, and a
+  non-BCA label consumes nothing. Only BCA numbers are ever generated; the BCR/BCB labels on
+  Rooms/Buildings predate this and are never issued by it, and there's no per-type prefix
+  scheme — a new Room still gets a BCA label like everything else.
+
+### Reference conventions — apply these to any new module
+
+The rules the existing modules already follow, stated once so a new one doesn't have to
+rediscover them:
+
+- **A reference from one Asset to another stores the target's `label`** — `roomId`,
+  `buildingId`, `allocations[].roomId`, `Circuit.roomsServedIds`, `Breaker.panelLabel`,
+  `Circuit.feedsPanelLabel` — never the target's display name. Resolve to a name at render
+  time (`roomNameFor()`/`buildingNameFor()`), and handle a dangling id gracefully
+  ("(deleted room)") rather than throwing.
+- **A reference to a sub-entity stores its `crypto.randomUUID()` id** — `Circuit.breakerId`,
+  a Breaker's `groupId`/`breakerTypeId`. Breakers, Circuits, and BreakerTypes aren't Assets
+  and have no `label`, so the UUID is their only stable handle; array position isn't one,
+  since they get swapped and moved.
+- **Labels are never renamed.** Nothing keeps referring holders in sync on a rename, and
+  nothing should have to — an asset that's wrong or retired is archived and a replacement
+  gets a new label. That's why `label` is editable in the add form only.
+- **Computed, not stored, for anything derivable from a reference that already exists.** A
+  device's building comes from its Room (`inferBuilding()`); a panel's "fed from" comes from
+  searching all circuits for `feedsPanelLabel === thisPanelLabel`. Don't add a stored field
+  mirroring a relationship the other side already records — it's just a second copy to keep
+  in sync, and the one that goes stale.
+
 Every asset carries: `comments` (freeform notes), `changes` (structured: type/vendor/
 cost/note — its own managed lists, editable via gear-icon "manage" buttons), and is
 covered by a global `auditLog` that automatically records creates/edits/archives/
@@ -295,7 +370,7 @@ or remove data with no other history trail.
 
 **Electrical Panel** assets (`type: "Electrical Panel"`) are otherwise device-like — real
 brand/model/serial, purchase date, warranty, room placement via `inferBuilding()` like any
-other device — they just don't have `peripherals` (`ELECTRICAL_PANEL_EXCLUDED_FIELDS`). Each
+other device — they just don't have `peripherals` (their registry entry's `excludedFields`). Each
 carries a `breakers` array (own Breakers tab in the detail view), one level deeper than
 anything else in the app: **Circuit → Breaker → Panel**. Breakers and Circuits are *not*
 Assets themselves (don't appear in the main list, no independent archive) but get a real
@@ -475,7 +550,25 @@ When you do:
 
 ## Known constraints / things to watch
 
-- **Backend is at v9 and the live Sheet is fully migrated to match** (as of the 2026-08-13
+- **Backend is at v11 — this needs a re-paste + New version deploy to go live**, and it
+  carries *two* undeployed changes, since v10 was never deployed either (the live backend is
+  still v9). One paste + one New version deploy ships both.
+  - v11 adds `nextAssetNumber` to Config — the monotonic asset-label counter (see the
+    Asset ID section under Data model). doGet returns it; doPost re-states it on every
+    config write at `max(posted, stored)`. Until it deploys, the frontend still works —
+    it just re-seeds the counter from max+1 on every load, i.e. the old reuse-after-
+    permanent-delete behavior persists against the live Sheet.
+  - v10 adds `notes` to `CIRCUIT_FIELDS` and to both the doGet read and doPost write circuit
+    mappings, and drops the legacy `description` column. Until that deploy lands,
+    **circuit notes entered against the live Sheet are silently discarded on save** — the
+    "Backend outdated" banner will now catch this, since v11 ≠ the deployed v9.
+  The Circuits tab's header row changes shape on the first save after deploy (`description`
+  column gone, `notes` column added); `readTable_` keys off the sheet's own header row, so a
+  v10 backend reading a not-yet-rewritten v9 tab just returns empty notes rather than
+  breaking. Existing circuit `description` values on the live sheet are dropped at that
+  first rewrite — intended, nothing has read that column since the frontend collapsed
+  label/description into `label`.
+- **The live Sheet is fully migrated to the v9 id-based schema** (as of the 2026-08-13
   session): `roomId`/`buildingId`/`allocations[].roomId`/`Circuit.roomsServedIds` are all
   stable ids on every live asset, all 4 real panels (BCA0082–85) were rebuilt with the
   `cells`/`BreakerType` model (BCA0082 is the main panel, 32 slots, with 3 real sub-panel
@@ -515,3 +608,5 @@ When you do:
 - **Planned next**: Doors/Locks/Keys, reusing `ChildEntityTable`. Keying is many-to-many (one
   key opens many locks), not a tree like Panel→Breaker→Circuit — will need its own join-table
   design (`LockKeys`) and its own facility-wide view, not bolted onto the Panels tree pattern.
+  See `DOORS_LOCKS_KEYS_NOTES.md` for why `LockKeys` has to be top-level shared state with its
+  own sheet tab (the `breakerTypes` pattern) rather than an array nested in a Door asset.

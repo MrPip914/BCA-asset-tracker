@@ -49,14 +49,92 @@ const DEFAULT_PERIPHERALS = [];
 const DEFAULT_USERS = [];
 const DEFAULT_BULK_ITEM_TYPES = [];
 
-// Known types, used for the Type dropdown and for icons. Managed via the gear icon
-// on the Type field (persisted as Config's `typesList`) — this array is only the
-// starter/fallback set for a brand-new sheet.
-const TYPE_OPTIONS = ["Computer", "Monitor", "Phone", "TV", "DocuCam", "Stream Deck", "Mini Split", "Condenser", "Room", "Building", "Bulk Item", "Electrical Panel", "Other"];
-// These four have deep structural dependencies elsewhere (field-exclusion rules,
-// Contents/Allocations/Breakers tabs, inferBuilding()) — removing them from the
-// type list would break those, so the manager UI won't allow it.
-const LOCKED_TYPES = ["Room", "Building", "Bulk Item", "Electrical Panel"];
+// ---------- TYPE REGISTRY ----------
+// The single place describing everything the app knows about a *structurally*
+// special asset type. This used to be spread across TYPE_OPTIONS, LOCKED_TYPES,
+// TYPE_ONLY_FIELDS, five separate *_EXCLUDED_FIELDS arrays, CATEGORY_ICONS, and a
+// scattering of `asset.type === "Room"`-style tests at render sites — so adding a
+// structurally new type meant remembering to edit all of them, in the right
+// places, with nothing to catch a miss. Now it's one entry here.
+//
+// Each entry may declare:
+//   locked         — can't be removed from the managed type list (isLockedType()).
+//                    These have deep structural dependencies elsewhere (field
+//                    rules, Contents/Allocations/Breakers tabs, inferBuilding())
+//                    that a plain managed-list removal would silently break.
+//   icon           — lucide icon for list rows / the detail header. Default is
+//                    HelpCircle (see iconFor()).
+//   excludedFields — column keys this type doesn't get at all.
+//   onlyFields     — column keys that belong to THIS type. Any key named in any
+//                    entry's onlyFields becomes restricted app-wide (see
+//                    RESTRICTED_FIELDS below): no type that doesn't name it gets it.
+//   linkage        — how the type attaches to a place. This is the one thing
+//                    render sites branch on, instead of comparing type names:
+//                      "room"        — has a roomId; its Building is inferred
+//                                      transitively through that Room.
+//                      "building"    — has a buildingId of its own: a Room, or an
+//                                      outdoor unit that sits in no particular
+//                                      Room. Must also name "building" in onlyFields.
+//                      "allocations" — no single place; a pooled quantity spread
+//                                      across rooms via its own allocations[].
+//                      "none"        — attaches to nothing. A Building is the top
+//                                      of the place tree, and its `building` field
+//                                      is its own display name, not a link.
+//
+// Types added at runtime via the gear-icon type manager are deliberately NOT in
+// here — they're generic devices, and every lookup below falls back to exactly
+// that: no icon, no field rules, DEFAULT_LINKAGE.
+const DEFAULT_LINKAGE = "room";
+const TYPE_REGISTRY = {
+  Computer: { icon: HardDrive, linkage: "room", onlyFields: ["hostname"] },
+  Monitor: { icon: Monitor, linkage: "room", onlyFields: ["screenSize"] },
+  Phone: { icon: Phone, linkage: "room" },
+  TV: { icon: Tv, linkage: "room", onlyFields: ["screenSize"] },
+  DocuCam: { icon: Camera, linkage: "room" },
+  "Stream Deck": { linkage: "room" },
+  "Mini Split": { linkage: "room" },
+  // An outdoor unit doesn't sit inside any one Room, so it links straight to a
+  // Building instead of inferring one through a Room like every other device.
+  Condenser: { linkage: "building", onlyFields: ["building"], excludedFields: ["room"] },
+  // A Room is a space, not a device — no brand/model/serial/etc. It links up to
+  // the Building it's in.
+  Room: {
+    locked: true, icon: DoorOpen, linkage: "building", onlyFields: ["building"],
+    excludedFields: ["brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
+  },
+  // One level up from a Room, with even less in common with a device asset.
+  Building: {
+    locked: true, icon: Building2, linkage: "none", onlyFields: ["building"],
+    excludedFields: ["brand", "model", "serial", "peripherals", "hostname", "screenSize", "room", "purchaseDate", "warrantyUntil"],
+  },
+  // Tables, chairs... not individually tagged or tied to one room — a pooled
+  // quantity, distributed across rooms via the Allocations tab instead.
+  // `itemName` is its sub-type, picked from the managed bulkItemTypes list
+  // (e.g. "Folding Chair", "Cafeteria Table").
+  "Bulk Item": {
+    locked: true, icon: Package, linkage: "allocations", onlyFields: ["totalQuantity", "itemName"],
+    excludedFields: ["hostname", "screenSize", "peripherals", "serial", "room", "building", "person"],
+  },
+  // Otherwise device-like (real brand/model/serial, purchase date, warranty, room
+  // placement) — it just doesn't have peripherals like a computer does.
+  "Electrical Panel": { locked: true, icon: Zap, linkage: "room", excludedFields: ["peripherals"] },
+  Other: { linkage: "room" },
+};
+
+// Starter/fallback type list for a brand-new sheet, in registry order. The live
+// list is managed via the gear icon on the Type field (persisted as Config's
+// `typesList`) and can hold types that aren't in the registry at all.
+const TYPE_OPTIONS = Object.keys(TYPE_REGISTRY);
+
+// Locked types can't be removed in the type manager (see `locked` above).
+function isLockedType(type) {
+  return !!TYPE_REGISTRY[type]?.locked;
+}
+// How this type attaches to a place — the only thing render sites should branch
+// on. An unregistered (user-added) type is a generic room-linked device.
+function linkageOf(type) {
+  return TYPE_REGISTRY[type]?.linkage || DEFAULT_LINKAGE;
+}
 
 // Options for the structured per-asset change log
 const DEFAULT_CHANGE_TYPES = ["Purchase", "Repair", "Replacement", "Upgrade", "Maintenance", "Relocation", "Disposal", "Other"];
@@ -71,40 +149,22 @@ const MAINTENANCE_FREQUENCIES = [
   { label: "Annually", days: 365 },
 ];
 
-// Which extra field applies to which types. A field not listed here (or an
-// asset whose type isn't in the list) simply doesn't show that field.
-const TYPE_ONLY_FIELDS = {
-  hostname: ["Computer"],
-  screenSize: ["Monitor", "TV"],
-  // Room links to a building; Building uses it as its own name; Condenser (outdoor
-  // unit) sits outside any one Room, so it links directly to a Building too instead
-  // of inferring one transitively through a Room the way every other device does.
-  building: ["Room", "Building", "Condenser"],
-  totalQuantity: ["Bulk Item"],
-  itemName: ["Bulk Item"], // Bulk Item's sub-type — picked from the managed bulkItemTypes list (e.g. "Folding Chair", "Cafeteria Table")
-};
-// Fields that don't make sense for a Room asset at all (it's a space, not a device).
-const ROOM_EXCLUDED_FIELDS = ["brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"];
-// A Building is one level up from a Room — it has even less in common with a device asset.
-const BUILDING_EXCLUDED_FIELDS = ["brand", "model", "serial", "peripherals", "hostname", "screenSize", "room", "purchaseDate", "warrantyUntil"];
-// A Bulk Item (tables, chairs...) isn't individually tagged or tied to one room —
-// it's a pooled quantity, distributed across rooms via the Allocations tab instead.
-const BULK_ITEM_EXCLUDED_FIELDS = ["hostname", "screenSize", "peripherals", "serial", "room", "building", "person"];
-// An Electrical Panel is otherwise device-like (real brand/model/serial, purchase
-// date, warranty, room placement) — it just doesn't have peripherals like a computer.
-const ELECTRICAL_PANEL_EXCLUDED_FIELDS = ["peripherals"];
-// A Condenser links directly to a Building (see TYPE_ONLY_FIELDS.building above),
-// so it has no Room field of its own to exclude that one thing.
-const CONDENSER_EXCLUDED_FIELDS = ["room"];
+// A field key named in ANY registry entry's onlyFields is restricted app-wide:
+// only the types that name it get it. Derived from the registry rather than
+// declared as a second parallel list, so introducing a type-specific field is a
+// one-line change to one entry and can't drift out of sync.
+const RESTRICTED_FIELDS = new Set(
+  Object.values(TYPE_REGISTRY).flatMap(entry => entry.onlyFields || [])
+);
+// Does `key` apply to an asset of `type`? Explicit exclusions win first, then the
+// restricted-field rule; anything else is a common field present on every type.
+// An unregistered (user-added) type excludes nothing and owns no restricted field
+// — i.e. it behaves as a generic device, exactly as before the registry existed.
 function fieldAppliesTo(key, type) {
-  if (type === "Room" && ROOM_EXCLUDED_FIELDS.includes(key)) return false;
-  if (type === "Building" && BUILDING_EXCLUDED_FIELDS.includes(key)) return false;
-  if (type === "Bulk Item" && BULK_ITEM_EXCLUDED_FIELDS.includes(key)) return false;
-  if (type === "Electrical Panel" && ELECTRICAL_PANEL_EXCLUDED_FIELDS.includes(key)) return false;
-  if (type === "Condenser" && CONDENSER_EXCLUDED_FIELDS.includes(key)) return false;
-  const restriction = TYPE_ONLY_FIELDS[key];
-  if (!restriction) return true; // common field, applies to every type
-  return restriction.includes(type);
+  const entry = TYPE_REGISTRY[type];
+  if (entry?.excludedFields?.includes(key)) return false;
+  if (!RESTRICTED_FIELDS.has(key)) return true; // common field, applies to every type
+  return !!entry?.onlyFields?.includes(key);
 }
 
 const DEFAULT_COLUMNS = [
@@ -155,9 +215,10 @@ const C = {
   scrollThumb: "#C7BEA8",
 };
 
-const CATEGORY_ICONS = { Computer: HardDrive, Monitor: Monitor, Phone: Phone, TV: Tv, DocuCam: Camera, Room: DoorOpen, Building: Building2, "Bulk Item": Package, "Electrical Panel": Zap };
+// Registry types without an `icon` (and every user-added type) fall back to a
+// generic question mark.
 function iconFor(type) {
-  return CATEGORY_ICONS[type] || HelpCircle;
+  return TYPE_REGISTRY[type]?.icon || HelpCircle;
 }
 function slugify(name) {
   return "col_" + name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 30) || "col_field";
@@ -298,8 +359,21 @@ const SHEET_API_URL = "https://script.google.com/macros/s/AKfycbzXaKRuCrTesxobxP
 // backend actually reports (data.scriptVersion) and flags a mismatch —
 // catches a stuck deployment (edited-but-not-redeployed) automatically
 // instead of it silently dropping data until someone happens to notice.
-const FRONTEND_SCRIPT_VERSION = "v9 (2026-08-07) — Room/Building references switched from name strings to stable ids (roomId/buildingId/allocations[].roomId/Circuit.roomsServedIds); asset.room/building now only hold a Room/Building asset's own name";
+const FRONTEND_SCRIPT_VERSION = "v11 (2026-08-13) — Config gains `nextAssetNumber`, a monotonic counter for the next BCA asset label; read back in doGet and kept at max(posted, stored) on every config write, so a permanently deleted asset's label is never reissued to a new asset (which would inherit its AuditLog history)";
 const emptyDraftFrom = columns => Object.fromEntries(columns.map(c => [c.key, ""]));
+
+// --- Asset ID (label) issuing ------------------------------------------------
+// Generated Asset IDs are BCA-prefixed and zero-padded to 4 digits (BCA0082).
+// The BCR/BCB labels on Rooms/Buildings predate this and are never generated —
+// only BCA numbers are ever issued, for every type.
+const ASSET_LABEL_PREFIX = "BCA";
+const assetLabelForNumber = n => ASSET_LABEL_PREFIX + String(n).padStart(4, "0");
+// The numeric part of a BCA label, or 0 for anything else (a BCR/BCB label, or
+// a hand-typed non-conforming one) — those consume no number from the counter.
+function assetNumberFromLabel(label) {
+  const m = /^BCA(\d+)$/i.exec(String(label || "").trim());
+  return m ? parseInt(m[1], 10) : 0;
+}
 
 // --- Breaker cell addressing -------------------------------------------------
 // See BREAKER_TYPES_ARCHITECTURE.md. Every physical slot has two halves,
@@ -739,7 +813,7 @@ const MOCK_SNAPSHOT = {
       { task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
     ] },
     // Mitsubishi outdoor condenser/compressor units — one per Building, linked
-    // directly via buildingId (see CONDENSER_EXCLUDED_FIELDS/fieldAppliesTo) since
+    // directly via buildingId (TYPE_REGISTRY.Condenser's linkage: "building") since
     // an outdoor unit sits outside any one Room. Building 100 has 4 indoor zones
     // (Room 102, Kitchen, Storage Room, Room 101), so it gets a 4-zone outdoor
     // unit; the others each have a single zone.
@@ -787,6 +861,10 @@ function AssetTracker() {
   const [currentMemberAmp, setCurrentMemberAmp] = useState("");
   const [breakerTypeError, setBreakerTypeError] = useState(null);
   const [confirmDeleteTypeId, setConfirmDeleteTypeId] = useState(null);
+  // Monotonic counter for the next BCA number to issue, persisted in Config
+  // (see peekAssetNumber below). null = not stored yet (an existing sheet that
+  // predates it, or a brand-new one) — seeded from max+1 on first use.
+  const [nextAssetNumber, setNextAssetNumber] = useState(null);
   const [auditLog, setAuditLog] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -856,6 +934,11 @@ function AssetTracker() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [draft, setDraft] = useState({});
   const [showAdd, setShowAdd] = useState(false);
+  // Inline validation message for the add form (duplicate/missing Asset ID,
+  // missing Type) — shown above its Save button. "" = no error. The add form is
+  // the only place `label` is editable at all (it's filtered out of the edit
+  // form, see editFormColumns), so this is the only place it can be wrong.
+  const [addError, setAddError] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [confirmArchive, setConfirmArchive] = useState(null);
   const [confirmDeleteCol, setConfirmDeleteCol] = useState(null);
@@ -912,6 +995,10 @@ function AssetTracker() {
       setPeripheralsList(Array.isArray(data.peripheralsList) ? data.peripheralsList : DEFAULT_PERIPHERALS);
       setBulkItemTypes(Array.isArray(data.bulkItemTypes) ? data.bulkItemTypes : DEFAULT_BULK_ITEM_TYPES);
       setTypesList(Array.isArray(data.typesList) && data.typesList.length ? data.typesList : TYPE_OPTIONS);
+      // Absent/0/garbage all mean "never stored" — peekAssetNumber() seeds it
+      // from the loaded assets instead, and the first asset created writes it.
+      const storedNextNumber = Number(data.nextAssetNumber);
+      setNextAssetNumber(Number.isFinite(storedNextNumber) && storedNextNumber > 0 ? storedNextNumber : null);
       setBreakerTypes(Array.isArray(data.breakerTypes) && data.breakerTypes.length ? data.breakerTypes : SEEDED_BREAKER_TYPES);
       if (Array.isArray(data.usersList) && data.usersList.length) {
         setUsersList(data.usersList);
@@ -1035,6 +1122,7 @@ function AssetTracker() {
       bulkItemTypes: nextBulkItemTypes = bulkItemTypes,
       typesList: nextTypesList = typesList,
       breakerTypes: nextBreakerTypes = breakerTypes,
+      nextAssetNumber: nextNumberToIssue = nextAssetNumber,
     } = overrides;
     // Guard against ever writing over the Sheet before a real snapshot has been
     // loaded — the UI shouldn't be reachable in that state, but this keeps a
@@ -1050,7 +1138,7 @@ function AssetTracker() {
       assets: nextAssets !== assets,
       config: nextColumns !== columns || nextChangeTypes !== changeTypes || nextVendors !== vendors
         || nextPeripheralsList !== peripheralsList || nextUsersList !== usersList || nextBulkItemTypes !== bulkItemTypes
-        || nextTypesList !== typesList,
+        || nextTypesList !== typesList || nextNumberToIssue !== nextAssetNumber,
       breakerTypes: nextBreakerTypes !== breakerTypes,
     };
     setAssets(nextAssets);
@@ -1063,10 +1151,12 @@ function AssetTracker() {
     setBulkItemTypes(nextBulkItemTypes);
     setTypesList(nextTypesList);
     setBreakerTypes(nextBreakerTypes);
+    setNextAssetNumber(nextNumberToIssue);
     const payload = {
       assets: nextAssets, columns: nextColumns, changeTypes: nextChangeTypes,
       vendors: nextVendors, auditLog: nextAuditLog, peripheralsList: nextPeripheralsList, usersList: nextUsersList,
-      bulkItemTypes: nextBulkItemTypes, typesList: nextTypesList, breakerTypes: nextBreakerTypes, _dirty: dirty,
+      bulkItemTypes: nextBulkItemTypes, typesList: nextTypesList, breakerTypes: nextBreakerTypes,
+      nextAssetNumber: nextNumberToIssue, _dirty: dirty,
     };
     if (sandboxMode) {
       // Mirror to localStorage so a refresh doesn't lose sandbox edits — but
@@ -1282,28 +1372,93 @@ function AssetTracker() {
     setDetailEditing(true);
   }
 
+  // The next BCA number to issue. Backed by the persisted `nextAssetNumber`
+  // counter rather than recomputed from the current assets every time, which is
+  // what this did before: deriving it means permanently deleting the
+  // highest-numbered asset frees its label for immediate reuse, and since
+  // AuditLog is keyed by assetLabel and deliberately outlives the asset it
+  // logged, the next asset created would silently inherit the dead one's
+  // history (created/edited/archived/deleted entries and all).
+  //
+  // Max — not "the counter if it's set" — so it can also be seeded on an
+  // existing sheet that predates it (counter null -> derived wins), and so a
+  // counter that somehow lags the sheet (a direct API write, the one-off
+  // migration script, a hand-edited Config row) can still never hand out a
+  // number that's already on an asset.
+  function peekAssetNumber() {
+    const derived = Math.max(0, ...(assets || []).map(a => assetNumberFromLabel(a.label))) + 1;
+    return Math.max(nextAssetNumber || 0, derived);
+  }
+  // What to store back after actually creating an asset with `label`. Normally
+  // that's just peek+1, but the add form lets the suggested label be edited, so
+  // a hand-typed *higher* number has to push the counter past it too. A label
+  // that isn't a BCA number consumes nothing and leaves the counter alone.
+  // Never decrements: a lower hand-typed number (filling a hole) doesn't pull
+  // the counter back down over labels it has already issued.
+  function advanceAssetNumber(label) {
+    const used = assetNumberFromLabel(label);
+    const current = peekAssetNumber();
+    return used ? Math.max(current, used + 1) : current;
+  }
+
+  // An asset's `label` is the app-wide primary key: roomId/buildingId,
+  // panelLabel, feedsPanelLabel and every AuditLog row point at it, and every
+  // lookup that uses it matches ALL rows sharing it — edit does
+  // `assets.map(a => a.label === selectedLabel ? ...)`, delete does the mirror
+  // `filter`, and the backend groups child rows (comments/changes/breakers/...)
+  // by it. Two assets sharing a label therefore aren't two assets that happen
+  // to collide, they're one merged asset with no way to tell them apart again,
+  // so a collision has to be refused at creation. Case-insensitive and trimmed:
+  // "bca0082 " would be a distinct string but the same ID to a human.
+  function findLabelConflict(label) {
+    const key = String(label || "").trim().toLowerCase();
+    if (!key) return null;
+    return (assets || []).find(a => String(a.label || "").trim().toLowerCase() === key) || null;
+  }
+
   function startAdd() {
-    const nums = assets.filter(a => a.label.startsWith("BCA")).map(a => parseInt((a.label.match(/\d+/) || ["0"])[0], 10));
-    const next = Math.max(0, ...nums) + 1;
-    setDraft({ ...emptyDraftFrom(columns), label: "BCA" + String(next).padStart(4, "0"), type: "Computer", status: "Active", comments: [], changes: [], allocations: [] });
+    setAddError("");
+    setDraft({ ...emptyDraftFrom(columns), label: assetLabelForNumber(peekAssetNumber()), type: "Computer", status: "Active", comments: [], changes: [], allocations: [] });
     setShowAdd(true);
   }
 
   function cancelAdd() {
     setShowAdd(false);
     setDraft({});
+    setAddError("");
   }
 
   async function saveDraft() {
-    if (!draft.label?.trim() || !draft.type?.trim()) return;
     if (showAdd) {
+      // Every failure here sets a visible inline error instead of returning
+      // silently — the label is editable in this form, so "Save did nothing"
+      // is indistinguishable from "Save worked" to whoever typed the typo.
+      const label = (draft.label || "").trim();
+      if (!label) { setAddError("Asset ID is required."); return; }
+      if (!draft.type?.trim()) { setAddError("Type is required."); return; }
+      const conflict = findLabelConflict(label);
+      if (conflict) {
+        // Name the existing asset — and say so when it's archived, since an
+        // archived asset isn't in the default list view and "that ID is taken"
+        // is otherwise baffling when nothing on screen is using it.
+        const what = [conflict.type, conflict.status === "Archived" ? "archived" : null].filter(Boolean).join(", ");
+        setAddError(`Asset ID "${conflict.label}" is already in use${what ? ` (${what})` : ""}. Asset IDs must be unique — pick a different one.`);
+        return;
+      }
+      setAddError("");
       const createdEntry = {
-        at: new Date().toISOString(), by: currentUser || "", assetLabel: draft.label,
+        at: new Date().toISOString(), by: currentUser || "", assetLabel: label,
         assetType: draft.type, action: "created",
       };
-      await persist([...assets, { comments: [], changes: [], allocations: [], ...draft }], { auditLog: logAudit([createdEntry]) });
+      // `label` last, so the asset stores the trimmed value that was validated
+      // above rather than the raw draft string.
+      await persist(
+        [...assets, { comments: [], changes: [], allocations: [], ...draft, label }],
+        { auditLog: logAudit([createdEntry]), nextAssetNumber: advanceAssetNumber(label) }
+      );
       cancelAdd();
     } else {
+      if (!draft.label?.trim() || !draft.type?.trim()) return;
       const original = selectedAsset;
       const editEntries = [];
       // roomId/buildingId hold a stable label (id), not the display name — a
@@ -1398,8 +1553,9 @@ function AssetTracker() {
   }
 
   async function duplicateAsset(source) {
-    const nums = assets.filter(a => a.label.startsWith("BCA")).map(a => parseInt((a.label.match(/\d+/) || ["0"])[0], 10));
-    const nextLabel = "BCA" + String(Math.max(0, ...nums) + 1).padStart(4, "0");
+    // Same persisted counter as startAdd() — no separate max-derivation here,
+    // or the two would disagree the moment one of them issued a number.
+    const nextLabel = assetLabelForNumber(peekAssetNumber());
     const copy = {
       ...source,
       label: nextLabel,
@@ -1414,7 +1570,7 @@ function AssetTracker() {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: nextLabel,
       assetType: copy.type, action: "created",
     };
-    await persist([...assets, copy], { auditLog: logAudit([entry]) });
+    await persist([...assets, copy], { auditLog: logAudit([entry]), nextAssetNumber: advanceAssetNumber(nextLabel) });
     openDetail(copy);
   }
 
@@ -2051,11 +2207,11 @@ function AssetTracker() {
   }
 
   // Removing a type only takes it off the pick list — assets already using that
-  // value keep it until someone edits them. LOCKED_TYPES can't be removed at all,
-  // since Room/Building/Bulk Item/Electrical Panel have structural dependencies
-  // elsewhere (field-exclusion rules, Contents/Allocations/Breakers tabs).
+  // value keep it until someone edits them. A registry type marked `locked` can't
+  // be removed at all, since Room/Building/Bulk Item/Electrical Panel have
+  // structural dependencies elsewhere (field rules, Contents/Allocations/Breakers).
   function removeType(name) {
-    if (LOCKED_TYPES.includes(name)) return;
+    if (isLockedType(name)) return;
     persist(assets, { typesList: typesList.filter(t => t !== name) });
   }
 
@@ -2401,7 +2557,7 @@ function AssetTracker() {
       onRemove={removeType}
       onClose={() => { setShowTypesManager(false); setNewTypeName(""); }}
       placeholder="New type name"
-      isLocked={t => LOCKED_TYPES.includes(t)}
+      isLocked={isLockedType}
       hint="Room, Building, Bulk Item, and Electrical Panel are built into the app and can't be removed."
     />
   );
@@ -2690,8 +2846,12 @@ function AssetTracker() {
                         key={c.key}
                         label={c.label}
                         value={
-                          c.key === "room" && selectedAsset.type !== "Room" ? roomNameFor(selectedAsset.roomId, assets)
-                          : c.key === "building" && selectedAsset.type !== "Building" && fieldAppliesTo("building", selectedAsset.type) ? buildingNameFor(selectedAsset.buildingId, assets)
+                          // Room/Building here are id references to resolve, EXCEPT on a
+                          // type whose own display name lives in that field (a Room's
+                          // `room`, a Building's `building`) — which is exactly the
+                          // types whose linkage isn't "room"/"building" respectively.
+                          c.key === "room" && linkageOf(selectedAsset.type) === "room" ? roomNameFor(selectedAsset.roomId, assets)
+                          : c.key === "building" && linkageOf(selectedAsset.type) === "building" ? buildingNameFor(selectedAsset.buildingId, assets)
                           : selectedAsset[c.key]
                         }
                         wide={c.key === "notes"}
@@ -2746,9 +2906,9 @@ function AssetTracker() {
                 {editFormColumns.map(c => (
                   c.key === "type" ? (
                     <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v })} typeOptions={typesList} onManage={() => setShowTypesManager(true)} />
-                  ) : c.key === "room" && draft.type !== "Room" ? (
+                  ) : c.key === "room" && linkageOf(draft.type) === "room" ? (
                     <RoomField key={c.key} value={draft.roomId || ""} onChange={v => setDraft({ ...draft, roomId: v })} rooms={roomAssets} />
-                  ) : c.key === "building" && draft.type !== "Building" ? (
+                  ) : c.key === "building" && linkageOf(draft.type) === "building" ? (
                     <BuildingField key={c.key} value={draft.buildingId || ""} onChange={v => setDraft({ ...draft, buildingId: v })} buildings={buildingAssets} />
                   ) : c.key === "person" ? (
                     <UserField
@@ -4103,9 +4263,9 @@ function AssetTracker() {
               {addFormColumns.map(c => (
                 c.key === "type" ? (
                   <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v })} typeOptions={typesList} onManage={() => setShowTypesManager(true)} />
-                ) : c.key === "room" && draft.type !== "Room" ? (
+                ) : c.key === "room" && linkageOf(draft.type) === "room" ? (
                   <RoomField key={c.key} value={draft.roomId || ""} onChange={v => setDraft({ ...draft, roomId: v })} rooms={roomAssets} />
-                ) : c.key === "building" && draft.type !== "Building" ? (
+                ) : c.key === "building" && linkageOf(draft.type) === "building" ? (
                   <BuildingField key={c.key} value={draft.buildingId || ""} onChange={v => setDraft({ ...draft, buildingId: v })} buildings={buildingAssets} />
                 ) : c.key === "person" ? (
                   <UserField
@@ -4136,7 +4296,9 @@ function AssetTracker() {
                     key={c.key}
                     label={c.label}
                     value={draft[c.key] || ""}
-                    onChange={v => setDraft({ ...draft, [c.key]: v })}
+                    // Editing the Asset ID clears a stale duplicate-ID error, so
+                    // the message never outlives the value it was complaining about.
+                    onChange={v => { if (c.key === "label" && addError) setAddError(""); setDraft({ ...draft, [c.key]: v }); }}
                     wide={c.key === "notes"}
                     placeholder={c.key === "screenSize" ? 'e.g. 24"' : undefined}
                     type={c.key === "totalQuantity" ? "number" : undefined}
@@ -4144,6 +4306,7 @@ function AssetTracker() {
                 )
               ))}
             </div>
+            {addError && <div style={{ fontSize: 13, color: C.danger, marginTop: 12 }}>{addError}</div>}
             <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
               <button onClick={saveDraft} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: C.success, color: "#fff", border: "none", fontWeight: 600, fontSize: 14, borderRadius: 10 }}>
                 <Save size={15} /> Save
@@ -4244,8 +4407,12 @@ function AssetTracker() {
                   const isTypeCol = c.key === "type";
                   const Icon = isTypeCol ? iconFor(a.type) : null;
                   const applies = fieldAppliesTo(c.key, a.type);
-                  const isRoomCol = c.key === "room" && a.type !== "Room" && applies;
-                  const isBuildingCol = c.key === "building" && applies && a.type !== "Building";
+                  // A Room's `room` / a Building's `building` is that asset's own
+                  // display name, not an id to resolve — so only resolve when the
+                  // type actually links that way (see linkageOf).
+                  const linkage = linkageOf(a.type);
+                  const isRoomCol = c.key === "room" && applies && linkage === "room";
+                  const isBuildingCol = c.key === "building" && applies && linkage === "building";
                   const isInferredBuilding = c.key === "building" && !applies;
                   const inferredValue = isInferredBuilding ? inferBuilding(a, assets) : "";
                   return (

@@ -31,7 +31,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v9 (2026-08-07) — Room/Building references switched from name strings to stable ids (roomId/buildingId/allocations[].roomId/Circuit.roomsServedIds); asset.room/building now only hold a Room/Building asset's own name";
+const SCRIPT_VERSION = "v11 (2026-08-13) — Config gains `nextAssetNumber`, a monotonic counter for the next BCA asset label; read back in doGet and kept at max(posted, stored) on every config write, so a permanently deleted asset's label is never reissued to a new asset (which would inherit its AuditLog history)";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -86,7 +86,11 @@ const ASSET_FIELDS = [
 // placed from, for display only (e.g. a "Tandem" badge) — not a live link;
 // editing a placed breaker never touches the type or its sibling rows.
 const BREAKER_FIELDS = ["id", "panelLabel", "cells", "ampRating", "status", "serial", "installedDate", "notes", "groupId", "breakerTypeId"];
-const CIRCUIT_FIELDS = ["id", "breakerId", "label", "description", "roomsServed", "feedsPanelLabel"];
+// "notes" is the free-text, multi-line "what's actually connected" field — it can
+// contain embedded newlines (one callout per line), which Sheets stores fine in a
+// single cell. The legacy "description" column is gone: the frontend collapsed the
+// old label/description pair down to `label` alone, so nothing reads or writes it.
+const CIRCUIT_FIELDS = ["id", "breakerId", "label", "roomsServed", "feedsPanelLabel", "notes"];
 // A user-defined catalog of reusable breaker configurations — see
 // BREAKER_TYPES_ARCHITECTURE.md. "members" is a JSON-encoded array of
 // { cells, ampRating }, where cells use RELATIVE slot indices (a type's own
@@ -201,9 +205,9 @@ function doGet(e) {
           serial: b.serial, installedDate: b.installedDate, notes: b.notes,
           groupId: b.groupId, breakerTypeId: b.breakerTypeId,
           circuits: circuitRows.filter(c => c.breakerId === b.id).map(c => ({
-            id: c.id, breakerId: c.breakerId, label: c.label, description: c.description,
+            id: c.id, breakerId: c.breakerId, label: c.label,
             roomsServedIds: c.roomsServed ? String(c.roomsServed).split(",").map(s => s.trim()) : [],
-            feedsPanelLabel: c.feedsPanelLabel,
+            feedsPanelLabel: c.feedsPanelLabel, notes: c.notes,
           })),
         })),
       };
@@ -235,6 +239,13 @@ function doGet(e) {
       usersList: config.usersList || null,
       bulkItemTypes: config.bulkItemTypes || null,
       typesList: config.typesList || null,
+      // Monotonic counter for the next BCA asset number to issue — see
+      // peekAssetNumber() in index.html. Not a managed list like the rest of
+      // Config, just a number that has to survive asset deletion (deriving it
+      // from the assets instead would reissue a permanently deleted asset's
+      // label, and AuditLog rows keyed by that label outlive the asset).
+      // null when never stored; the frontend seeds it from max+1 on first use.
+      nextAssetNumber: config.nextAssetNumber || null,
     };
 
     // Plain fetch() from a browser is blocked by CORS here, since Apps Script
@@ -297,8 +308,9 @@ function doPost(e) {
             groupId: b.groupId || "", breakerTypeId: b.breakerTypeId || "",
           });
           (b.circuits || []).forEach(c => circuitRows.push({
-            id: c.id, breakerId: b.id, label: c.label, description: c.description || "",
+            id: c.id, breakerId: b.id, label: c.label,
             roomsServed: (c.roomsServedIds || []).join(","), feedsPanelLabel: c.feedsPanelLabel || "",
+            notes: c.notes || "",
           }));
         });
       });
@@ -324,6 +336,19 @@ function doPost(e) {
     );
 
     if (dirty.config) {
+      // The Config tab is rewritten wholesale, so nextAssetNumber has to be
+      // re-stated on every config write or it'd be dropped by an unrelated one
+      // (adding a vendor, say). Taking the max against what's already stored
+      // keeps it monotonic server-side too: a client that predates this key
+      // posts nothing for it, and a client that loaded before someone else
+      // created an asset posts a stale, lower value — either would otherwise
+      // walk the counter backwards and let a deleted asset's label be reissued.
+      const storedNextRow = readTable_(SHEET_NAMES.config, ["key", "value"])
+        .filter(r => r.key === "nextAssetNumber")[0];
+      const nextAssetNumber = Math.max(
+        Number(body.nextAssetNumber) || 0,
+        Number(storedNextRow && storedNextRow.value) || 0
+      );
       writeTable_(SHEET_NAMES.config, ["key", "value"], [
         { key: "columns", value: JSON.stringify(body.columns || []) },
         { key: "changeTypes", value: JSON.stringify(body.changeTypes || []) },
@@ -332,6 +357,7 @@ function doPost(e) {
         { key: "usersList", value: JSON.stringify(body.usersList || []) },
         { key: "bulkItemTypes", value: JSON.stringify(body.bulkItemTypes || []) },
         { key: "typesList", value: JSON.stringify(body.typesList || []) },
+        { key: "nextAssetNumber", value: JSON.stringify(nextAssetNumber) },
       ]);
     }
 
