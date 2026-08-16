@@ -460,13 +460,31 @@ array position can't serve as identity once things move.
   group in the diagram opens one modal for the whole group (every Breaker row sharing that
   `groupId`), since a breaker-type instance like a quad or split double-pole is one physical
   unit even though it's several rows. A single breaker can hold multiple circuits.
-- Within that modal, fields are split by what they actually describe: **Amp Rating** is
+- Within that modal, fields are still *stored* by what they describe: **Amp Rating** is
   per-member (the one spec that legitimately varies within a unit, e.g. the 15/30/15 split
-  double-pole) with its own pencil-to-edit control (`saveBreakerAmp`); **Serial/Installed
-  Date/Notes** describe the one physical unit you bought and installed, so they're edited once
-  at the group level and written to every member row (`saveBreakerInstanceDetails`) rather than
-  repeated per pole. All fields are read-only by default with a pencil icon to enter edit mode
-  (Save/Cancel), not an always-open form.
+  double-pole), while **Serial/Installed Date/Notes** describe the one physical unit you
+  bought and installed, so a single value is written to every member row rather than repeated
+  per pole. But **editing them is one mode, not two**: the modal is read-only by default with a
+  single icon-only pencil in its header (`breakerModal.editing`), and entering edit mode turns
+  the instance fields AND every member's amp rating into inputs simultaneously, with one
+  Cancel and one Save (plus the group Delete) in a footer at the bottom of the modal, below
+  everything they act on. Cancel reseeds every draft from stored values; so does *entering*
+  edit mode, so an abandoned edit can't leave a stale draft behind.
+  - Save is a **single `persist()`** (`saveBreakerUnit`), which replaced a pair of per-field
+    saves (`saveBreakerAmp` / `saveBreakerInstanceDetails`) each with its own pencil. That
+    split made correcting a split double-pole's three amps plus its serial four edit/save
+    cycles — and since every save posts the entire state snapshot (see Persistence model),
+    four backend round trips for one logical edit.
+  - Audit fidelity is unchanged and deliberately per-changed-thing: one entry per member whose
+    amp actually moved (labelled with that member's own slot) plus one per instance field that
+    actually changed (labelled with the group's slot) — never one blanket "unit edited" entry.
+    A Save where nothing changed is a no-op: no snapshot write, no audit row. Amp drafts are
+    compared as strings, since an untouched draft holds whatever was stored (possibly a number)
+    while a touched one is always a string.
+  - `activeMemberId` no longer gates editability — it now only tracks which member has its
+    Circuits sub-table expanded, and that toggle is a chevron (matching `ChildEntityTable`'s own
+    expand control), not a second pencil. It's hidden while in edit mode: circuits have their own
+    add/edit/delete flow that persists immediately, so they'd escape the unit's Cancel.
 - **Breakers have no `status` field at all anymore** — it was never editable after creation
   (Swap Breaker and the per-member edit only ever touched serial/amp/installed date), and the
   Add Breaker form was the sole place it could be set, so it was removed outright rather than

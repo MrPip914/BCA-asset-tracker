@@ -979,8 +979,12 @@ function AssetTracker() {
   // of these before this consolidation, so navigating to a different asset
   // while the modal was open left it holding a stale breaker id).
   // Shape when open: { anchorId, memberAmpDrafts: { [breakerId]: ampRating },
-  // editingMemberId, instanceDraft: { serial, installedDate, notes },
-  // editingInstance, error, confirmDeleteGroup, addingCircuitFor }.
+  // instanceDraft: { serial, installedDate, notes }, editing, error,
+  // confirmDeleteGroup, addingCircuitFor }. `editing` is ONE flag for the whole
+  // unit — the instance fields and every member's amp rating go editable
+  // together and save together (see saveBreakerUnit); it replaced a pair of
+  // flags (`editingInstance` plus a per-member `editingMemberId`) that made one
+  // logical edit into several save cycles.
   const [breakerModal, setBreakerModal] = useState(null);
   // null when closed — replaces a separate showAddBreakerForm boolean, since
   // the draft only ever exists while the form is open anyway. `error` lives
@@ -2060,10 +2064,9 @@ function AssetTracker() {
     setBreakerModal({
       anchorId,
       memberAmpDrafts: ampDrafts,
-      editingMemberId: null,
       activeMemberId: null,
       instanceDraft: { serial: anchor.serial || "", installedDate: anchor.installedDate || "", notes: anchor.notes || "" },
-      editingInstance: false,
+      editing: false,
       error: null,
       confirmDeleteGroup: false,
       addingCircuitFor: null,
@@ -2075,51 +2078,60 @@ function AssetTracker() {
   // aren't editable here, since changing them could orphan sibling rows in
   // the same group. Delete and re-add to change where/what a breaker is.
   //
-  // Amp rating is the one spec that legitimately varies per breaker within a
-  // type instance (e.g. the 15/30/15 split double-pole) — everything else
-  // (serial, installed date, notes) describes the one physical unit, not the
-  // individual pole, so those live at the group level (saveBreakerInstanceDetails
-  // below) instead of here.
-  function saveBreakerAmp(id, ampRating) {
-    if (savingRef.current) return; // double-submit guard, see savingRef
+  // ONE save for the whole unit, not one per field. The two things being
+  // written are stored at different levels and that hasn't changed: amp rating
+  // is per-member (the one spec that legitimately varies within a type
+  // instance, e.g. the 15/30/15 split double-pole), while serial/installed
+  // date/notes describe the single physical unit you bought and installed, not
+  // any one pole, so the same value goes onto every member row. What changed is
+  // the editing UI above it: each of those used to have its own pencil and its
+  // own save (`saveBreakerAmp` / `saveBreakerInstanceDetails`), so correcting a
+  // split double-pole's three amps plus its serial was four separate save
+  // cycles — and since every save posts the ENTIRE state snapshot (see
+  // Persistence model), four backend round trips for one logical edit.
+  //
+  // Audit fidelity is per-changed-thing, not per-save: one entry per member
+  // whose amp actually moved, plus one per instance field that actually
+  // changed — never one blanket "unit edited" entry, and never an entry for a
+  // field the user didn't touch. A Save where nothing changed writes nothing at
+  // all (no snapshot, no audit row) rather than logging a no-op edit.
+  function saveBreakerUnit(memberIds, groupSlotLabel, instanceDraft, ampDrafts) {
+    // Says why rather than returning silently — the modal keeps the drafts on
+    // screen in edit mode, so a Save that does nothing needs a reason.
+    if (savingRef.current) return SAVE_IN_PROGRESS_MESSAGE;
     if (!selectedAsset) return "No panel selected.";
     const existing = selectedAsset.breakers || [];
-    const original = existing.find(b => b.id === id);
-    if (!original) return "Breaker not found.";
-    const updated = { ...original, ampRating: ampRating || "" };
-    if ((original.ampRating || "") === updated.ampRating) return;
-    const entry = {
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
-      action: "breaker_edited", field: `Slot ${slotsLabel_(original)} — Amp Rating`, from: original.ampRating || "—", to: updated.ampRating || "—",
-    };
-    const nextBreakers = existing.map(b => (b.id === id ? updated : b));
-    persist(updateBreakers(nextBreakers), { auditLog: logAudit([entry]) });
-  }
-
-  // Applies to every member of the group at once — a serial/install date/notes
-  // describe the physical breaker unit you bought and installed, not any one
-  // pole of it, so editing it here writes the same value to every row in the
-  // group rather than just the member that happened to be clicked.
-  function saveBreakerInstanceDetails(memberIds, groupSlotLabel, draft) {
-    if (savingRef.current) return; // double-submit guard, see savingRef
-    if (!selectedAsset) return "No panel selected.";
-    const existing = selectedAsset.breakers || [];
-    const members = existing.filter(b => memberIds.includes(b.id));
+    const idSet = new Set(memberIds);
+    const members = existing.filter(b => idSet.has(b.id));
     if (members.length === 0) return "Breaker not found.";
     const anchor = members[0];
-    const next = { serial: draft.serial || "", installedDate: draft.installedDate || "", notes: draft.notes || "" };
+    const nextInstance = { serial: instanceDraft.serial || "", installedDate: instanceDraft.installedDate || "", notes: instanceDraft.notes || "" };
     const mk = (field, from, to) => ({
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
-      action: "breaker_edited", field: `Slot ${groupSlotLabel} — ${field}`, from, to,
+      action: "breaker_edited", field, from, to,
     });
     const entries = [];
-    if ((anchor.serial || "") !== next.serial) entries.push(mk("Serial", anchor.serial || "—", next.serial || "—"));
-    if ((anchor.installedDate || "") !== next.installedDate) {
-      entries.push(mk("Installed Date", formatDateOnly(anchor.installedDate) || "—", formatDateOnly(next.installedDate) || "—"));
+    if ((anchor.serial || "") !== nextInstance.serial) entries.push(mk(`Slot ${groupSlotLabel} — Serial`, anchor.serial || "—", nextInstance.serial || "—"));
+    if ((anchor.installedDate || "") !== nextInstance.installedDate) {
+      entries.push(mk(`Slot ${groupSlotLabel} — Installed Date`, formatDateOnly(anchor.installedDate) || "—", formatDateOnly(nextInstance.installedDate) || "—"));
     }
-    if ((anchor.notes || "") !== next.notes) entries.push(mk("Notes", anchor.notes || "—", next.notes || "—"));
-    const nextBreakers = existing.map(b => (memberIds.includes(b.id) ? { ...b, ...next } : b));
-    persist(updateBreakers(nextBreakers), { auditLog: entries.length ? logAudit(entries) : auditLog });
+    if ((anchor.notes || "") !== nextInstance.notes) entries.push(mk(`Slot ${groupSlotLabel} — Notes`, anchor.notes || "—", nextInstance.notes || "—"));
+    // Compared as strings: a draft the user never touched is whatever was
+    // stored (which older/seeded data may hold as a number), while the moment
+    // the number input is touched it's a string — so a bare !== would log an
+    // "edit" from 15 to "15".
+    const sameAmp = (a, b) => String(a === undefined || a === null ? "" : a) === String(b === undefined || b === null ? "" : b);
+    const nextAmps = {};
+    members.forEach(m => {
+      const draft = ampDrafts[m.id];
+      nextAmps[m.id] = draft === undefined ? (m.ampRating || "") : (draft || "");
+      if (!sameAmp(m.ampRating, nextAmps[m.id])) {
+        entries.push(mk(`Slot ${slotsLabel_(m)} — Amp Rating`, m.ampRating || "—", nextAmps[m.id] || "—"));
+      }
+    });
+    if (entries.length === 0) return; // nothing changed — don't spend a full-snapshot write on it
+    const nextBreakers = existing.map(b => (idSet.has(b.id) ? { ...b, ...nextInstance, ampRating: nextAmps[b.id] } : b));
+    persist(updateBreakers(nextBreakers), { auditLog: logAudit(entries) });
   }
 
   // Referential integrity (a breaker unit with circuits attached can't be
@@ -3858,9 +3870,9 @@ function AssetTracker() {
           const clicked = allBreakers.find(b => b.id === breakerModal.anchorId);
           if (!clicked) return null;
           // Local aliases so the rest of this block (unchanged below) can keep
-          // reading `instanceDraft`/`editingInstance`/etc. directly — only the
+          // reading `instanceDraft`/`editing`/etc. directly — only the
           // setters (further down) need to go through setBreakerModal now.
-          const { memberAmpDrafts, editingMemberId, activeMemberId, instanceDraft, editingInstance, error: breakerModalError, confirmDeleteGroup, addingCircuitFor } = breakerModal;
+          const { memberAmpDrafts, activeMemberId, instanceDraft, editing, error: breakerModalError, confirmDeleteGroup, addingCircuitFor } = breakerModal;
           const patchBreakerModal = patch => setBreakerModal({ ...breakerModal, ...patch });
           // A group is one physical breaker-type instance (tandem/quad/split
           // double-pole/...) even though it's several Breaker rows sharing a
@@ -3879,6 +3891,25 @@ function AssetTracker() {
           const labelStyle = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent };
           const inputStyle = { padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink };
           const closeModal = () => setBreakerModal(null);
+          // Edit mode covers the WHOLE unit — the instance fields and every
+          // member's amp rating at once — so both its entry and its exit reseed
+          // every draft from what's stored. Reseeding on entry (not just on
+          // Cancel) means no path back into edit mode can ever start from a
+          // stale draft left behind by an earlier abandoned edit.
+          const seedDrafts = () => {
+            const amps = {};
+            members.forEach(m => { amps[m.id] = m.ampRating || ""; });
+            return {
+              memberAmpDrafts: amps,
+              instanceDraft: { serial: anchor.serial || "", installedDate: anchor.installedDate || "", notes: anchor.notes || "" },
+            };
+          };
+          // Entering edit mode also collapses whichever member was expanded:
+          // circuits have their own add/edit/delete flow that persists on the
+          // spot, which doesn't belong inside a transaction the user can still
+          // Cancel out of.
+          const beginEdit = () => patchBreakerModal({ ...seedDrafts(), editing: true, error: null, activeMemberId: null, addingCircuitFor: null });
+          const cancelEdit = () => patchBreakerModal({ ...seedDrafts(), editing: false, error: null, confirmDeleteGroup: false });
           function renderCircuitTargetFields(values, setValues) {
             const mode = values.feedsPanelLabel ? "subpanel" : (values._mode || "rooms");
             const roomsSelected = values.roomsServedIds || [];
@@ -3947,12 +3978,16 @@ function AssetTracker() {
                     <div style={{ fontSize: 12, color: C.muted }}>Slot {groupSlotLabel}{breakerType ? ` — ${members.length} breaker${members.length !== 1 ? "s" : ""}` : ""}</div>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                    {/* Edits the breaker TYPE instance as a whole (serial/installed/notes,
-                        shared by every member below) — kept up here in the header, well
-                        separated from the individual breaker cards' own edit icons further
-                        down, so the two "edit" affordances aren't easy to confuse. */}
-                    {!editingInstance && (
-                      <button onClick={() => patchBreakerModal({ editingInstance: true })} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, display: "flex" }} aria-label="Edit">
+                    {/* The ONE edit affordance in this modal: it puts the whole unit into
+                        edit mode — the instance fields (serial/installed/notes, shared by
+                        every member) AND every member's amp rating below, saved together by
+                        a single Save at the bottom. There used to be a second pencil on each
+                        member's Amp Rating row, which meant a split double-pole's three amps
+                        and its serial were four separate edit/save cycles; the only pencil
+                        left per member is the chevron that shows that breaker's circuits,
+                        which is a different thing entirely. */}
+                    {!editing && (
+                      <button onClick={beginEdit} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, display: "flex" }} aria-label="Edit breaker unit">
                         <Pencil size={14} color={C.muted} />
                       </button>
                     )}
@@ -3965,49 +4000,26 @@ function AssetTracker() {
                     member row, not repeated per breaker. Deliberately not wrapped in
                     a bordered box like the breaker member rows below, so it reads as
                     plain metadata about this slot rather than a breaker of its own.
-                    Delete removes the whole unit for the same reason it's edited here
-                    — and only appears once editing, so it's not a stray action sitting
-                    next to Edit in the read-only view. */}
+                    In edit mode these are just the top of one form — Cancel/Save (and
+                    Delete, which removes the whole unit for the same reason these are
+                    edited at unit level) sit at the very bottom of the modal, below the
+                    member cards they also save, not up here above them. */}
                 <div style={{ marginBottom: 14 }}>
-                  {editingInstance ? (
-                    <>
-                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 10, marginBottom: 12 }}>
-                        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                          <span style={labelStyle}>Serial</span>
-                          <input value={instanceDraft.serial} onChange={e => patchBreakerModal({ instanceDraft: { ...instanceDraft, serial: e.target.value } })} placeholder="optional" style={inputStyle} />
-                        </label>
-                        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                          <span style={labelStyle}>Installed</span>
-                          <input type="date" value={dateOnly(instanceDraft.installedDate)} onChange={e => patchBreakerModal({ instanceDraft: { ...instanceDraft, installedDate: e.target.value } })} style={inputStyle} />
-                        </label>
-                        <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
-                          <span style={labelStyle}>Notes</span>
-                          <input value={instanceDraft.notes} onChange={e => patchBreakerModal({ instanceDraft: { ...instanceDraft, notes: e.target.value } })} style={inputStyle} />
-                        </label>
-                      </div>
-                      <div style={{ display: "flex", gap: 10, justifyContent: "space-between" }}>
-                        {!confirmDeleteGroup && (
-                          <button onClick={() => patchBreakerModal({ error: null, confirmDeleteGroup: true, editingInstance: false })} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label="Delete">
-                            <Trash2 size={14} color={C.danger} />
-                          </button>
-                        )}
-                        <div style={{ display: "flex", gap: 10, marginLeft: "auto" }}>
-                          <button
-                            onClick={() => patchBreakerModal({ instanceDraft: { serial: anchor.serial || "", installedDate: anchor.installedDate || "", notes: anchor.notes || "" }, editingInstance: false })}
-                            style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}
-                          >
-                            Cancel
-                          </button>
-                          <button
-                            onClick={() => { saveBreakerInstanceDetails(memberIds, groupSlotLabel, instanceDraft); patchBreakerModal({ editingInstance: false }); }}
-                            disabled={isSaving}
-                            style={{ padding: "8px 14px", background: isSaving ? C.border : C.success, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
-                          >
-                            {isSaving ? "Saving…" : "Save"}
-                          </button>
-                        </div>
-                      </div>
-                    </>
+                  {editing ? (
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 10 }}>
+                      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <span style={labelStyle}>Serial</span>
+                        <input value={instanceDraft.serial} onChange={e => patchBreakerModal({ instanceDraft: { ...instanceDraft, serial: e.target.value } })} placeholder="optional" style={inputStyle} />
+                      </label>
+                      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <span style={labelStyle}>Installed</span>
+                        <input type="date" value={dateOnly(instanceDraft.installedDate)} onChange={e => patchBreakerModal({ instanceDraft: { ...instanceDraft, installedDate: e.target.value } })} style={inputStyle} />
+                      </label>
+                      <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
+                        <span style={labelStyle}>Notes</span>
+                        <input value={instanceDraft.notes} onChange={e => patchBreakerModal({ instanceDraft: { ...instanceDraft, notes: e.target.value } })} style={inputStyle} />
+                      </label>
+                    </div>
                   ) : (
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 16 }}>
                       <div>
@@ -4024,70 +4036,35 @@ function AssetTracker() {
                       </div>
                     </div>
                   )}
-
-                  {confirmDeleteGroup && (
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
-                      <span style={{ fontSize: 13, color: C.danger }}>Delete this breaker unit?</span>
-                      <button onClick={() => patchBreakerModal({ confirmDeleteGroup: false })} style={{ padding: "8px 12px", background: "transparent", border: `1.5px solid ${C.border}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
-                        Cancel
-                      </button>
-                      <button
-                        onClick={() => {
-                          const reason = canDeleteBreakerGroup(members);
-                          if (reason) { patchBreakerModal({ error: reason, confirmDeleteGroup: false }); return; }
-                          deleteBreakerGroup(members, groupSlotLabel);
-                          closeModal();
-                        }}
-                        disabled={isSaving}
-                        style={{ padding: "8px 12px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
-                      >
-                        {isSaving ? "Saving…" : "Delete"}
-                      </button>
-                    </div>
-                  )}
-
-                  {breakerModalError && <div style={{ fontSize: 13, color: C.danger, marginTop: 10 }}>{breakerModalError}</div>}
                 </div>
 
                 {members.map((member, idx) => {
                   const ampDraft = memberAmpDrafts[member.id];
-                  if (ampDraft === undefined) return null;
-                  const isEditingAmp = editingMemberId === member.id;
+                  // Not an edit gate anymore — `activeMemberId` now only tracks which
+                  // member has its Circuits sub-table expanded (that's a separate flow
+                  // with its own immediate persists, deliberately outside the unit's
+                  // edit transaction). Every member's amp is editable at once in edit
+                  // mode, whether or not it's the expanded one.
                   const isActive = activeMemberId === member.id;
                   // A lone single-breaker "group" has no "Breaker N — Slot X" title (there's
                   // only ever one member, so it'd be redundant with the modal's own Slot X
-                  // header) — rather than leave that space blank next to the edit toggle,
+                  // header) — rather than leave that space blank next to the expand toggle,
                   // the Amp Rating row moves up into it instead of sitting on its own row.
                   const hasTitle = members.length > 1;
-                  const ampContent = isEditingAmp ? (
-                    <div style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
-                      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                        <span style={labelStyle}>Amp Rating</span>
-                        <input type="number" value={ampDraft} onChange={e => patchBreakerModal({ memberAmpDrafts: { ...memberAmpDrafts, [member.id]: e.target.value } })} style={{ ...inputStyle, width: 100 }} />
-                      </label>
-                      <button
-                        onClick={() => patchBreakerModal({ memberAmpDrafts: { ...memberAmpDrafts, [member.id]: member.ampRating || "" }, editingMemberId: null })}
-                        style={{ padding: "8px 12px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        onClick={() => { saveBreakerAmp(member.id, ampDraft); patchBreakerModal({ editingMemberId: null }); }}
-                        disabled={isSaving}
-                        style={{ padding: "8px 12px", background: isSaving ? C.border : C.success, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
-                      >
-                        {isSaving ? "Saving…" : "Save"}
-                      </button>
-                    </div>
+                  const ampContent = editing ? (
+                    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      <span style={labelStyle}>Amp Rating</span>
+                      <input
+                        type="number"
+                        value={ampDraft === undefined ? (member.ampRating || "") : ampDraft}
+                        onChange={e => patchBreakerModal({ memberAmpDrafts: { ...memberAmpDrafts, [member.id]: e.target.value } })}
+                        style={{ ...inputStyle, width: 100 }}
+                      />
+                    </label>
                   ) : (
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <span style={labelStyle}>Amp Rating</span>
                       <span style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>{member.ampRating ? `${member.ampRating}A` : "—"}</span>
-                      {isActive && (
-                        <button onClick={() => patchBreakerModal({ editingMemberId: member.id })} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label="Edit amp rating">
-                          <Pencil size={14} color={C.muted} />
-                        </button>
-                      )}
                     </div>
                   );
                   return (
@@ -4098,18 +4075,26 @@ function AssetTracker() {
                             {`Breaker ${idx + 1} — Slot ${slotsLabel_(member)}`}
                           </div>
                         ) : ampContent}
-                        <button
-                          onClick={() => patchBreakerModal({
-                            activeMemberId: isActive ? null : member.id,
-                            editingMemberId: null,
-                            addingCircuitFor: null,
-                          })}
-                          className="icon-btn"
-                          style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex", flexShrink: 0 }}
-                          aria-label={isActive ? "Done editing breaker" : "Edit breaker"}
-                        >
-                          {isActive ? <Check size={14} color={C.success} /> : <Pencil size={14} color={C.muted} />}
-                        </button>
+                        {/* A chevron, not a pencil: this only shows/hides that breaker's
+                            circuits. It used to be a pencil because expanding was also the
+                            only way to reach the amp-rating pencil inside — now that amps
+                            are edited from the unit's one edit mode, a second pencil here
+                            would just be the confusion this consolidation removes. Hidden
+                            in edit mode: circuits persist immediately, so they'd escape a
+                            Cancel. Matches ChildEntityTable's own expand toggle. */}
+                        {!editing && (
+                          <button
+                            onClick={() => patchBreakerModal({
+                              activeMemberId: isActive ? null : member.id,
+                              addingCircuitFor: null,
+                            })}
+                            className="icon-btn"
+                            style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex", flexShrink: 0 }}
+                            aria-label={isActive ? "Hide circuits" : "Show circuits"}
+                          >
+                            {isActive ? <ChevronDown size={15} color={C.brand} /> : <ChevronRight size={15} color={C.brand} />}
+                          </button>
+                        )}
                       </div>
                       {hasTitle && (
                         <div style={{ marginBottom: isActive ? 14 : 0 }}>
@@ -4194,6 +4179,73 @@ function AssetTracker() {
                     </div>
                   );
                 })}
+
+                {/* One Cancel/Save for the whole unit, sitting below everything it
+                    saves — the instance fields above AND every member's amp rating.
+                    Save is a single persist() (saveBreakerUnit), not one per changed
+                    field: every save posts the entire state snapshot, so the old
+                    per-field saves cost a backend round trip each. Delete lives here
+                    too — it removes the whole unit, so it belongs with the unit's other
+                    write actions, and keeping it inside edit mode (as it was before)
+                    keeps it from sitting next to the pencil as a stray action in the
+                    read-only view. */}
+                {editing && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, borderTop: `1px solid ${C.border}`, paddingTop: 14 }}>
+                    {confirmDeleteGroup ? (
+                      <>
+                        <span style={{ fontSize: 13, color: C.danger }}>Delete this breaker unit?</span>
+                        <div style={{ display: "flex", gap: 10, marginLeft: "auto" }}>
+                          <button onClick={() => patchBreakerModal({ confirmDeleteGroup: false })} style={{ padding: "8px 12px", background: "transparent", border: `1.5px solid ${C.border}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
+                            Cancel
+                          </button>
+                          <button
+                            onClick={() => {
+                              const reason = canDeleteBreakerGroup(members);
+                              if (reason) { patchBreakerModal({ error: reason, confirmDeleteGroup: false }); return; }
+                              deleteBreakerGroup(members, groupSlotLabel);
+                              closeModal();
+                            }}
+                            disabled={isSaving}
+                            style={{ padding: "8px 12px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                          >
+                            {isSaving ? "Saving…" : "Delete"}
+                          </button>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <button onClick={() => patchBreakerModal({ error: null, confirmDeleteGroup: true })} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label="Delete breaker unit">
+                          <Trash2 size={14} color={C.danger} />
+                        </button>
+                        <div style={{ display: "flex", gap: 10, marginLeft: "auto" }}>
+                          <button
+                            onClick={cancelEdit}
+                            style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            onClick={() => {
+                              // Stays in edit mode with the drafts intact if the save
+                              // reports a reason (mid-save double-click, panel gone) —
+                              // dropping the user's edits on a message they never saw
+                              // is exactly what the error string exists to prevent.
+                              const reason = saveBreakerUnit(memberIds, groupSlotLabel, instanceDraft, memberAmpDrafts);
+                              if (reason) { patchBreakerModal({ error: reason }); return; }
+                              patchBreakerModal({ editing: false, error: null });
+                            }}
+                            disabled={isSaving}
+                            style={{ padding: "8px 14px", background: isSaving ? C.border : C.success, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                          >
+                            {isSaving ? "Saving…" : "Save"}
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {breakerModalError && <div style={{ fontSize: 13, color: C.danger, marginTop: 10 }}>{breakerModalError}</div>}
               </div>
             </div>
           );
