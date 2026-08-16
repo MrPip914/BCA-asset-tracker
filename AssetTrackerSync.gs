@@ -41,7 +41,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v12 (2026-08-13) — optimistic concurrency: Config gains a per-domain revision counter (rev_assets/rev_config/rev_breakerTypes) returned by doGet and posted back by the client; doPost compares them inside the lock and, on any mismatch for a domain it's about to write, writes NOTHING and returns { ok: false, conflict: [...] } instead of silently overwriting whoever saved first";
+const SCRIPT_VERSION = "v13 (2026-08-16) — Circuits gain a panelLabel column, so a circuit can belong to a panel without belonging to a breaker: doGet attaches circuits with a breakerId to that breaker exactly as before, and returns the ones with an empty breakerId whose panelLabel matches as the panel's new unassignedCircuits array; doPost writes panelLabel on EVERY circuit row (nested and unassigned alike), always derived from the panel being iterated so it can never disagree with the breaker's own panel";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -100,7 +100,20 @@ const BREAKER_FIELDS = ["id", "panelLabel", "cells", "ampRating", "status", "ser
 // contain embedded newlines (one callout per line), which Sheets stores fine in a
 // single cell. The legacy "description" column is gone: the frontend collapsed the
 // old label/description pair down to `label` alone, so nothing reads or writes it.
-const CIRCUIT_FIELDS = ["id", "breakerId", "label", "roomsServed", "feedsPanelLabel", "notes"];
+//
+// "panelLabel" is the circuit's OWN link to its panel, not a copy of the breaker's.
+// A circuit's panel used to be implied entirely by its breaker (breakerId -> that
+// Breaker row's panelLabel), which left no way to record a circuit that exists but
+// isn't wired to a breaker yet — the thing "unassigned circuits" are. So the panel
+// is now stored on the circuit directly: a row with a breakerId is attached to that
+// breaker as before, and a row with an EMPTY breakerId belongs to the panel named
+// here and nothing else. panelLabel is the authoritative panel either way (doPost
+// always derives it from the panel it's iterating, so it can't drift from the
+// breaker's), which also means moving a circuit between breakers on one panel never
+// has to touch it. No migration is needed for rows written before this column
+// existed: every one of them has a breakerId, so they still attach to their breaker
+// on read, and each gets its panelLabel filled in the next time the panel is saved.
+const CIRCUIT_FIELDS = ["id", "breakerId", "panelLabel", "label", "roomsServed", "feedsPanelLabel", "notes"];
 // A user-defined catalog of reusable breaker configurations — see
 // BREAKER_TYPES_ARCHITECTURE.md. "members" is a JSON-encoded array of
 // { cells, ampRating }, where cells use RELATIVE slot indices (a type's own
@@ -258,11 +271,24 @@ function doGet(e) {
           serial: b.serial, installedDate: b.installedDate, notes: b.notes,
           groupId: b.groupId, breakerTypeId: b.breakerTypeId,
           circuits: circuitRows.filter(c => c.breakerId === b.id).map(c => ({
-            id: c.id, breakerId: c.breakerId, label: c.label,
+            id: c.id, breakerId: c.breakerId, panelLabel: label, label: c.label,
             roomsServedIds: c.roomsServed ? String(c.roomsServed).split(",").map(s => s.trim()) : [],
             feedsPanelLabel: c.feedsPanelLabel, notes: c.notes,
           })),
         })),
+        // Circuits that belong to this panel but aren't wired to any breaker yet.
+        // Identified by an EMPTY breakerId plus a panelLabel naming this asset —
+        // which is why panelLabel had to become a stored column: with the breaker
+        // gone there's nothing else on the row that says which panel it's for.
+        // Rows written before that column existed all have a breakerId, so none of
+        // them can land here by accident.
+        unassignedCircuits: circuitRows
+          .filter(c => String(c.breakerId || "").trim() === "" && c.panelLabel === label)
+          .map(c => ({
+            id: c.id, breakerId: "", panelLabel: label, label: c.label,
+            roomsServedIds: c.roomsServed ? String(c.roomsServed).split(",").map(s => s.trim()) : [],
+            feedsPanelLabel: c.feedsPanelLabel, notes: c.notes,
+          })),
       };
     });
 
@@ -394,12 +420,24 @@ function doPost(e) {
             installedDate: b.installedDate || "", notes: b.notes || "",
             groupId: b.groupId || "", breakerTypeId: b.breakerTypeId || "",
           });
+          // panelLabel comes from the panel being iterated, never from the
+          // circuit's own payload — same rule as the breaker's above. That's what
+          // keeps it from ever disagreeing with the breaker this circuit hangs off
+          // of, since both are stamped from the one asset that contains them.
           (b.circuits || []).forEach(c => circuitRows.push({
-            id: c.id, breakerId: b.id, label: c.label,
+            id: c.id, breakerId: b.id, panelLabel: a.label, label: c.label,
             roomsServed: (c.roomsServedIds || []).join(","), feedsPanelLabel: c.feedsPanelLabel || "",
             notes: c.notes || "",
           }));
         });
+        // Same tab, same shape — just with no breaker to point at, so panelLabel is
+        // the only thing tying the row to anything. doGet reads them straight back
+        // as unassignedCircuits on this panel.
+        (a.unassignedCircuits || []).forEach(c => circuitRows.push({
+          id: c.id, breakerId: "", panelLabel: a.label, label: c.label,
+          roomsServed: (c.roomsServedIds || []).join(","), feedsPanelLabel: c.feedsPanelLabel || "",
+          notes: c.notes || "",
+        }));
       });
       writeTable_(SHEET_NAMES.comments, ["assetLabel", "text", "at", "by"], commentRows);
       writeTable_(SHEET_NAMES.changes, ["assetLabel", "changeType", "vendor", "cost", "note", "at", "by"], changeRows);
