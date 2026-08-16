@@ -608,30 +608,24 @@ When you do:
 
 ## Known constraints / things to watch
 
-- **Backend is at v12 — this needs a re-paste + New version deploy to go live**, and it
-  carries *three* undeployed changes, since v10 and v11 were never deployed either (the live
-  backend is still v9). One paste + one New version deploy ships all three.
+- **Backend is at v12 — this needs a re-paste + New version deploy to go live.** The live
+  backend is **v11**, verified 2026-08-15 by fetching the deployed `/exec` URL directly and
+  reading its `scriptVersion`. v10 and v11 both shipped in the 2026-08-13 session, so v12 is
+  the *only* undeployed change — the "carries three undeployed changes" note that used to
+  live here was written before that deploy and was wrong once it landed.
   - v12 adds the per-domain revision counters (`rev_assets`/`rev_config`/`rev_breakerTypes`
     in Config) behind the optimistic-concurrency check — see "Optimistic concurrency" under
-    Architecture. Until it deploys, the live backend ignores the `_revisions` the frontend
+    Architecture. Until it deploys, the live v11 backend ignores the `_revisions` the frontend
     now posts and last-write-wins is still the live behavior; the frontend keeps working
-    against it (it just never sees a conflict, since a v9 backend reports no revisions and
+    against it (it just never sees a conflict, since a v11 backend reports no revisions and
     the client's stay at 0). The first v12 save seeds the three `rev_*` rows in Config.
-  - v11 adds `nextAssetNumber` to Config — the monotonic asset-label counter (see the
-    Asset ID section under Data model). doGet returns it; doPost re-states it on every
-    config write at `max(posted, stored)`. Until it deploys, the frontend still works —
-    it just re-seeds the counter from max+1 on every load, i.e. the old reuse-after-
-    permanent-delete behavior persists against the live Sheet.
-  - v10 adds `notes` to `CIRCUIT_FIELDS` and to both the doGet read and doPost write circuit
-    mappings, and drops the legacy `description` column. Until that deploy lands,
-    **circuit notes entered against the live Sheet are silently discarded on save** — the
-    "Backend outdated" banner will now catch this, since v11 ≠ the deployed v9.
-  The Circuits tab's header row changes shape on the first save after deploy (`description`
-  column gone, `notes` column added); `readTable_` keys off the sheet's own header row, so a
-  v10 backend reading a not-yet-rewritten v9 tab just returns empty notes rather than
-  breaking. Existing circuit `description` values on the live sheet are dropped at that
-  first rewrite — intended, nothing has read that column since the frontend collapsed
-  label/description into `label`.
+  - Already live from the v11 deploy, both confirmed against the live payload: `Circuit.notes`
+    round-trips (the Circuits tab was rewritten with a `notes` column on the first save after
+    the deploy, and the legacy `description` column is gone — its old values were dropped at
+    that rewrite, intended, since nothing had read them since the frontend collapsed
+    label/description into `label`), and doGet returns `nextAssetNumber`. That counter still
+    reads `null` because no asset has been created since the deploy; the first one created
+    writes it, and until then `peekAssetNumber()` seeds from max+1 as designed.
 - **The live Sheet is fully migrated to the v9 id-based schema** (as of the 2026-08-13
   session): `roomId`/`buildingId`/`allocations[].roomId`/`Circuit.roomsServedIds` are all
   stable ids on every live asset, all 4 real panels (BCA0082–85) were rebuilt with the
