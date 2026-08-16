@@ -1045,7 +1045,15 @@ function AssetTracker() {
         } catch (e) { /* corrupt/missing sandbox save — fall back to the fixture below */ }
         data = stored || JSON.parse(JSON.stringify(MOCK_SNAPSHOT));
       } else {
-        const res = await fetch(SHEET_API_URL);
+        // `cache: "no-store"` is REQUIRED, not a tidy-up candidate. Apps Script's
+        // /exec GET is cacheable, and a bare fetch() here was observed serving a
+        // stale snapshot for minutes after the Sheet had changed. That was merely
+        // confusing before optimistic concurrency; now it's a trap: a cached load
+        // brings back stale `revisions` too, so the next save is rejected as a
+        // conflict, and the conflict handler's own loadData() would be served the
+        // same cached response — leaving the user unable to ever save, with no way
+        // out from inside the app. See "Optimistic concurrency" in CLAUDE.md.
+        const res = await fetch(SHEET_API_URL, { cache: "no-store" });
         if (!res.ok) throw new Error("HTTP " + res.status);
         data = await res.json();
       }
@@ -5749,6 +5757,30 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, breakerTypes, pa
     numbers.push({ key: `num-${s}`, slot: s, col: colOf(s), row: rowOf(s) });
   }
 
+  // Every slot a group occupies must have the SAME parity, i.e. sit in one
+  // column — see BREAKER_TYPES_ARCHITECTURE.md section 4. The grid math above
+  // relies on it: a group is anchored at its lowest slot, takes its column from
+  // that one slot, and spans rowSpan rows there, so a group straddling both
+  // columns gets drawn on top of its neighbours while the slots it covers render
+  // nothing. Anything placed through Add Breaker satisfies this by construction
+  // (resolveTypeSlots steps by 2), but a scripted or imported write can violate
+  // it — sample data once did, and the only symptom was silently overlapping
+  // cells that read as a rendering glitch rather than bad data. Surfacing it is
+  // the whole point; the diagram deliberately still draws it as-is.
+  const parityWarnings = [];
+  {
+    const byGroup = {};
+    breakers.forEach(b => {
+      const key = b.groupId || `solo-${b.id}`;
+      (byGroup[key] = byGroup[key] || []).push(b);
+    });
+    Object.keys(byGroup).forEach(key => {
+      const slots = [...new Set(byGroup[key].flatMap(b => slotsFromCells(b.cells).map(x => parseInt(x, 10))))]
+        .filter(Boolean).sort((a, b2) => a - b2);
+      if (slots.length > 1 && new Set(slots.map(n => n % 2)).size > 1) parityWarnings.push(slots.join("+"));
+    });
+  }
+
   // What a cell shows in "feeds" mode — what the breaker's circuit(s) actually
   // serve (rooms, or a downstream sub-panel), not the circuit's own label or
   // its electrical spec.
@@ -5796,6 +5828,16 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, breakerTypes, pa
           ))}
         </div>
       </div>
+      {parityWarnings.length > 0 && (
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "10px 12px", marginBottom: 12, border: `1.5px solid ${C.danger}`, borderRadius: 8, background: "#fff" }}>
+          <AlertTriangle size={16} style={{ color: C.danger, flexShrink: 0, marginTop: 1 }} />
+          <div style={{ fontSize: 13, color: C.ink }}>
+            <b>Invalid breaker placement:</b> slots {parityWarnings.join("; ")}.{" "}
+            A breaker spanning more than one slot must occupy slots in a single column (e.g. 22 and 24, not 22 and 23) —
+            these overlap other breakers in the diagram until the data is corrected.
+          </div>
+        </div>
+      )}
       {infoMode === "table" ? (() => {
         // One row per circuit (a breaker with no circuits yet still gets a single
         // row, circuit fields blank) — flat rows are what makes per-column sort
