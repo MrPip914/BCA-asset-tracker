@@ -264,8 +264,12 @@ new type meant editing all of them with nothing to catch a miss. Each entry may 
 Types added at runtime via the gear-icon manager are deliberately NOT in the registry: every
 lookup falls back to a generic room-linked device (no icon, no field rules, `DEFAULT_LINKAGE`),
 which is exactly how they behaved before the registry existed. Note that "which assets *are*
-Rooms" queries (`roomNameFor()`, the Contents tab's `isPlace`/`contentDevices`) legitimately
-still compare type names — those are identity questions, not linkage.
+Rooms" queries (`roomNameFor()`, the Contents tab's `isPlace`/`contentRooms`, the Duplicate
+button's place check) legitimately still compare type names — those are identity questions,
+not linkage. "Which assets *live in* a place" is a linkage question and goes through
+`linkageOf()`: the Contents tab's `contentDevices` and the toolbar's `roomMovable` (bulk
+"Move filtered to room") both used to test `type !== "Room" && !== "Building" && !== "Bulk
+Item"` instead, which silently mishandled Condenser — see the Condenser section above.
 
 `fieldAppliesTo()` reads the registry — e.g. Room and Building assets don't have brand/model/serial; Bulk Items
 (chairs, tables — not individually tagged) get a `totalQuantity` and an `itemName` instead, and

@@ -1383,6 +1383,16 @@ function AssetTracker() {
     return list;
   }, [assets, query, roomFilter, buildingFilter, typeFilter, userFilter, statusFilter, sortConfig]);
 
+  // Which of the filtered assets the bulk "Move filtered to room" action can
+  // actually touch: only types that genuinely live in a Room. Branching on
+  // linkageOf instead of an exclusion list of type names means a Building-linked
+  // type (Condenser), a pooled Bulk Item, a Room, a Building, and any future type
+  // are all handled with no list to maintain — writing a roomId onto an asset
+  // whose type has no Room field at all (fieldAppliesTo("room", type) === false)
+  // is junk data nothing in the app ever reads, resolves, or displays. Shared by
+  // the handler and the count in the toolbar so the two can't drift apart.
+  const roomMovable = useMemo(() => filtered.filter(a => linkageOf(a.type) === "room"), [filtered]);
+
   // Flattened across every active asset's maintenanceItems, for the site-wide
   // Maintenance tab — archived assets are excluded, matching the default Active
   // filter on the Assets tab.
@@ -1746,7 +1756,7 @@ function AssetTracker() {
 
   async function moveFilteredTo(newRoomId) {
     if (!newRoomId) return;
-    const targets = new Set(filtered.filter(a => a.type !== "Room" && a.type !== "Building" && a.type !== "Bulk Item").map(a => a.label));
+    const targets = new Set(roomMovable.map(a => a.label));
     const entries = [];
     const newRoomName = roomNameFor(newRoomId, assets);
     const next = assets.map(a => {
@@ -3026,18 +3036,29 @@ function AssetTracker() {
     const editFormColumns = formColumnsFor(draft.type).filter(c => c.key !== "label");
 
     // Contents of a Room: devices located there + bulk-item allocations to it.
-    // Contents of a Building: its linked Rooms, plus devices in those rooms.
+    // Contents of a Building: its linked Rooms, the devices in those Rooms, and
+    // anything that attaches to the Building directly instead of through a Room.
+    // Which assets *are* Rooms/Buildings is an identity question, so those tests
+    // still compare type names; which assets *live in* a place is a linkage
+    // question, so those go through linkageOf.
     const isPlace = selectedAsset.type === "Room" || selectedAsset.type === "Building";
     let contentDevices = [], contentRooms = [], contentAllocations = [];
     if (selectedAsset.type === "Room") {
-      contentDevices = assets.filter(a => a.type !== "Room" && a.type !== "Building" && a.type !== "Bulk Item" && a.roomId === selectedAsset.label);
+      contentDevices = assets.filter(a => linkageOf(a.type) === "room" && a.roomId === selectedAsset.label);
       contentAllocations = assets
         .filter(a => a.type === "Bulk Item")
         .flatMap(b => (b.allocations || []).filter(al => al.roomId === selectedAsset.label).map(al => ({ bulk: b, quantity: al.quantity })));
     } else if (selectedAsset.type === "Building") {
       contentRooms = assets.filter(a => a.type === "Room" && a.buildingId === selectedAsset.label);
       const roomIds = new Set(contentRooms.map(r => r.label));
-      contentDevices = assets.filter(a => a.type !== "Room" && a.type !== "Building" && a.type !== "Bulk Item" && roomIds.has(a.roomId));
+      // A Condenser (linkage "building") has a buildingId and no roomId at all,
+      // so matching only on roomId left it out of its own Building's Contents.
+      // Room is the one other building-linked type, and it's excluded here
+      // because it's already listed separately above as contentRooms.
+      contentDevices = assets.filter(a => (
+        linkageOf(a.type) === "room" ? roomIds.has(a.roomId)
+        : linkageOf(a.type) === "building" && a.type !== "Room" && a.buildingId === selectedAsset.label
+      ));
     }
     const contentsCount = contentDevices.length + contentRooms.length + contentAllocations.length;
 
@@ -4617,9 +4638,9 @@ function AssetTracker() {
           </div>
         )}
 
-        {roomFilter && filtered.length > 0 && (
+        {roomFilter && roomMovable.length > 0 && (
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", border: `1.5px solid ${C.brand}`, borderRadius: 10, background: C.surface, padding: "10px 14px", marginBottom: 10, fontSize: 13 }}>
-            <span style={{ color: C.muted }}>Move {filtered.filter(a => a.type !== "Room" && a.type !== "Building" && a.type !== "Bulk Item").length} filtered device(s) from <b style={{ color: C.brandDark }}>{roomNameFor(roomFilter, assets)}</b> to:</span>
+            <span style={{ color: C.muted }}>Move {roomMovable.length} filtered device(s) from <b style={{ color: C.brandDark }}>{roomNameFor(roomFilter, assets)}</b> to:</span>
             <div style={{ flex: "1 1 140px", maxWidth: 220 }}>
               <PickerField
                 label="Move to room"
