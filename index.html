@@ -285,9 +285,16 @@ function describeAudit(entry) {
   if (entry.action === "breaker_added") return `Added breaker at ${entry.field} (${entry.to})`;
   if (entry.action === "breaker_swapped") return `Swapped breaker at ${entry.field} — serial changed from "${entry.from}" to "${entry.to}"`;
   if (entry.action === "breaker_removed") return `Removed breaker at ${entry.field}`;
-  if (entry.action === "circuit_added") return `Added circuit "${entry.field}" (${entry.to})`;
+  // `from` on an add/remove is where the circuit sat — "Slot 12" or "Unassigned".
+  // Entries logged before circuits could be unassigned have no `from` at all, so
+  // both fall back to the wording they used then rather than printing "at undefined".
+  if (entry.action === "circuit_added") {
+    return entry.from ? `Added circuit "${entry.field}" at ${entry.from} (${entry.to})` : `Added circuit "${entry.field}" (${entry.to})`;
+  }
   if (entry.action === "circuit_reassigned") return `Moved circuit "${entry.field}" from ${entry.from} to ${entry.to}`;
-  if (entry.action === "circuit_removed") return `Removed circuit "${entry.field}"`;
+  if (entry.action === "circuit_removed") {
+    return entry.from ? `Removed circuit "${entry.field}" from ${entry.from}` : `Removed circuit "${entry.field}"`;
+  }
   // breaker_edited / circuit_edited fall through to the generic case below —
   // their field/from/to are already in the "X changed from A to B" shape.
   return `${entry.field} changed from "${entry.from || "—"}" to "${entry.to || "—"}"`;
@@ -366,7 +373,7 @@ const SHEET_API_URL = "https://script.google.com/macros/s/AKfycbzXaKRuCrTesxobxP
 // backend actually reports (data.scriptVersion) and flags a mismatch —
 // catches a stuck deployment (edited-but-not-redeployed) automatically
 // instead of it silently dropping data until someone happens to notice.
-const FRONTEND_SCRIPT_VERSION = "v12 (2026-08-13) — optimistic concurrency: Config gains a per-domain revision counter (rev_assets/rev_config/rev_breakerTypes) returned by doGet and posted back by the client; doPost compares them inside the lock and, on any mismatch for a domain it's about to write, writes NOTHING and returns { ok: false, conflict: [...] } instead of silently overwriting whoever saved first";
+const FRONTEND_SCRIPT_VERSION = "v13 (2026-08-16) — Circuits gain a panelLabel column, so a circuit can belong to a panel without belonging to a breaker: doGet attaches circuits with a breakerId to that breaker exactly as before, and returns the ones with an empty breakerId whose panelLabel matches as the panel's new unassignedCircuits array; doPost writes panelLabel on EVERY circuit row (nested and unassigned alike), always derived from the panel being iterated so it can never disagree with the breaker's own panel";
 const emptyDraftFrom = columns => Object.fromEntries(columns.map(c => [c.key, ""]));
 
 // --- Optimistic concurrency (per-domain revisions) ---------------------------
@@ -462,6 +469,13 @@ function resolveRelativeCells(relativeCells, startSlot) {
 function resolveTypeSlots(slotSpan, startSlot) {
   return Array.from({ length: slotSpan }, (_, i) => startSlot + 2 * i);
 }
+
+// The Move Circuit picker's "Unassigned" option. A circuit with no breaker
+// stores breakerId "", but "" is already the picker's own nothing-selected
+// placeholder, so the option needs a value of its own that can't collide with
+// a real breaker's crypto.randomUUID() id. Normalized straight back to "" in
+// submitMoveCircuit — it exists only between the picker and that handler.
+const UNASSIGNED_TARGET = "__unassigned__";
 
 // Seeded so the catalog isn't empty on first use — covers every breaker
 // shape built or discussed while designing this: a plain single-pole, a
@@ -616,6 +630,18 @@ const MOCK_SNAPSHOT = {
           { id: "c82-23", breakerId: "b82-23", label: "Outlets", roomsServedIds: ["BCR0020"], feedsPanelLabel: "", notes: "- Closet outlets" },
         ] },
       ],
+      // Circuits that belong to this panel but aren't landed on a breaker yet —
+      // fixture data for the Layout tab's "Unassigned circuits" section. Note
+      // the empty breakerId plus an explicit panelLabel: with no breaker to
+      // chain through, panelLabel is the only thing tying these to BCA0082
+      // (see CIRCUIT_FIELDS in AssetTrackerSync.gs). The circuits nested under
+      // breakers above don't carry one in this fixture — the backend derives it
+      // from the panel on every write, so they get one on the next save; only
+      // the unassigned ones need it to be findable at all.
+      unassignedCircuits: [
+        { id: "c82-u1", breakerId: "", panelLabel: "BCA0082", label: "Kitchen island outlets (new)", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "- Pulled during the counter remodel\n- Landed in the panel, not yet on a breaker" },
+        { id: "c82-u2", breakerId: "", panelLabel: "BCA0082", label: "Parking lot sign", roomsServedIds: ["BCR0018"], feedsPanelLabel: "", notes: "- Conduit stubbed out to the sign; capped in the panel" },
+      ],
     },
     {
       label: "BCA0083", type: "Electrical Panel", roomId: "BCR0008", brand: "Square D", model: "QO112L125GRB", serial: "B200-SQD-4471",
@@ -683,6 +709,11 @@ const MOCK_SNAPSHOT = {
         { id: "b83-19", panelLabel: "BCA0083", cells: ["19a", "19b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
           { id: "c83-19", breakerId: "b83-19", label: "Outlets", roomsServedIds: ["BCR0008"], feedsPanelLabel: "", notes: "- Entry wall outlets" },
         ] },
+      ],
+      // See BCA0082's unassignedCircuits above — a second panel with one, so
+      // moving a circuit onto a breaker can be exercised on more than one panel.
+      unassignedCircuits: [
+        { id: "c83-u1", breakerId: "", panelLabel: "BCA0083", label: "Spare run to back wall", roomsServedIds: ["BCR0008"], feedsPanelLabel: "", notes: "- Capped in the panel; no breaker assigned yet" },
       ],
     },
     {
@@ -1678,6 +1709,11 @@ function AssetTracker() {
         (a.breakers || []).forEach(b => (b.circuits || []).forEach(c => {
           if ((c.roomsServedIds || []).includes(asset.label)) refs.push(`${a.label} Slot ${slotsLabel_(b)} (circuit "${c.label}")`);
         }));
+        // An unassigned circuit holds roomsServedIds exactly like an attached one,
+        // so it dangles the same way if the Room is deleted out from under it.
+        (a.unassignedCircuits || []).forEach(c => {
+          if ((c.roomsServedIds || []).includes(asset.label)) refs.push(`${a.label} (unassigned circuit "${c.label}")`);
+        });
       });
       if (refs.length > 0) return `Still referenced by: ${refs.join(", ")}.`;
     }
@@ -2197,44 +2233,90 @@ function AssetTracker() {
     setSwapModal(null);
   }
 
+  // A circuit lives in one of two places on its panel: attached to a breaker
+  // (`breakerId` set, stored inside that breaker's `circuits`) or attached to
+  // nothing yet (`breakerId` empty, stored in the panel's own
+  // `unassignedCircuits`). Every handler below takes that breaker id as its
+  // first argument and reads a falsy one as "the unassigned list", so there's
+  // one add/edit/delete/move flow rather than a parallel set for circuits that
+  // simply aren't wired up yet. `panelLabel` is on the circuit either way — it's
+  // the only thing that says which panel an unassigned circuit belongs to (see
+  // CIRCUIT_FIELDS in AssetTrackerSync.gs).
+  function circuitsIn(breakerId) {
+    if (!breakerId) return selectedAsset.unassignedCircuits || [];
+    const breaker = (selectedAsset.breakers || []).find(b => b.id === breakerId);
+    return breaker ? breaker.circuits || [] : [];
+  }
+
+  // Writes one panel's circuit containers back. Passing null for either means
+  // "leave that one as it is" — only a move between a breaker and the
+  // unassigned list touches both at once.
+  function updatePanelCircuits(nextBreakers, nextUnassigned) {
+    return assets.map(a => (a.label === selectedLabel ? {
+      ...a,
+      breakers: nextBreakers || a.breakers || [],
+      unassignedCircuits: nextUnassigned || a.unassignedCircuits || [],
+    } : a));
+  }
+
+  // "Slot 12" / "Unassigned" — the human-readable name for wherever a circuit
+  // sits, so an audit entry never reads as a blank or a raw breaker id.
+  function circuitLocationLabel(breakerId) {
+    if (!breakerId) return "Unassigned";
+    const breaker = (selectedAsset.breakers || []).find(b => b.id === breakerId);
+    return breaker ? `Slot ${slotsLabel_(breaker)}` : "Unassigned";
+  }
+
+  // The one rule a circuit is subject to wherever it lives: it either serves
+  // rooms or feeds a downstream sub-panel, never both and never neither. Shared
+  // by add and edit so an unassigned circuit can't sidestep it.
+  function validateCircuitDraft(draft) {
+    if (!draft.label || !draft.label.trim()) return "Enter a circuit label.";
+    const roomsServedIds = draft.roomsServedIds || [];
+    const feedsPanelLabel = draft.feedsPanelLabel || "";
+    if (roomsServedIds.length === 0 && !feedsPanelLabel) return "Pick either rooms served or a sub-panel this circuit feeds.";
+    if (roomsServedIds.length > 0 && feedsPanelLabel) return "A circuit can serve rooms or feed a sub-panel, not both.";
+    return null;
+  }
+
   function addCircuit(breakerId, draft) {
     // Returns the reason, not silence — ChildEntityTable renders it as the
     // form's error line and keeps the draft.
     if (savingRef.current) return SAVE_IN_PROGRESS_MESSAGE;
     if (!selectedAsset) return "No panel selected.";
-    if (!draft.label || !draft.label.trim()) return "Enter a circuit label.";
+    const invalid = validateCircuitDraft(draft);
+    if (invalid) return invalid;
     const roomsServedIds = draft.roomsServedIds || [];
     const feedsPanelLabel = draft.feedsPanelLabel || "";
-    if (roomsServedIds.length === 0 && !feedsPanelLabel) return "Pick either rooms served or a sub-panel this circuit feeds.";
-    if (roomsServedIds.length > 0 && feedsPanelLabel) return "A circuit can serve rooms or feed a sub-panel, not both.";
     const existing = selectedAsset.breakers || [];
-    const breaker = existing.find(b => b.id === breakerId);
-    if (!breaker) return "Breaker not found.";
+    if (breakerId && !existing.some(b => b.id === breakerId)) return "Breaker not found.";
     const circuit = {
-      id: crypto.randomUUID(), breakerId, label: draft.label.trim(), notes: (draft.notes || "").trim(),
+      id: crypto.randomUUID(), breakerId: breakerId || "", panelLabel: selectedLabel,
+      label: draft.label.trim(), notes: (draft.notes || "").trim(),
       roomsServedIds, feedsPanelLabel,
     };
-    const nextBreakers = existing.map(b => (b.id === breakerId ? { ...b, circuits: [...(b.circuits || []), circuit] } : b));
+    const nextBreakers = breakerId
+      ? existing.map(b => (b.id === breakerId ? { ...b, circuits: [...(b.circuits || []), circuit] } : b))
+      : null;
+    const nextUnassigned = breakerId ? null : [...(selectedAsset.unassignedCircuits || []), circuit];
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
-      action: "circuit_added", field: circuit.label,
+      action: "circuit_added", field: circuit.label, from: circuitLocationLabel(breakerId),
       to: feedsPanelLabel ? `Feeds ${feedsPanelLabel}` : `Serves ${roomsServedIds.map(id => roomNameFor(id, assets)).join(", ")}`,
     };
-    persist(updateBreakers(nextBreakers), { auditLog: logAudit([entry]) });
+    persist(updatePanelCircuits(nextBreakers, nextUnassigned), { auditLog: logAudit([entry]) });
   }
 
   function saveCircuitEdit(breakerId, id, draft) {
     if (savingRef.current) return SAVE_IN_PROGRESS_MESSAGE; // see addCircuit
     if (!selectedAsset) return "No panel selected.";
-    if (!draft.label || !draft.label.trim()) return "Enter a circuit label.";
+    const invalid = validateCircuitDraft(draft);
+    if (invalid) return invalid;
     const roomsServedIds = draft.roomsServedIds || [];
     const feedsPanelLabel = draft.feedsPanelLabel || "";
-    if (roomsServedIds.length === 0 && !feedsPanelLabel) return "Pick either rooms served or a sub-panel this circuit feeds.";
-    if (roomsServedIds.length > 0 && feedsPanelLabel) return "A circuit can serve rooms or feed a sub-panel, not both.";
     const existing = selectedAsset.breakers || [];
-    const breaker = existing.find(b => b.id === breakerId);
-    if (!breaker) return "Breaker not found.";
-    const original = (breaker.circuits || []).find(c => c.id === id);
+    if (breakerId && !existing.some(b => b.id === breakerId)) return "Breaker not found.";
+    const original = circuitsIn(breakerId).find(c => c.id === id);
     if (!original) return "Circuit not found.";
     const updated = { ...original, label: draft.label.trim(), notes: (draft.notes || "").trim(), roomsServedIds, feedsPanelLabel };
     const mk = (field, from, to) => ({
@@ -2250,55 +2332,73 @@ function AssetTracker() {
       entries.push(mk("Rooms served", fromNames || "—", toNames || "—"));
     }
     if ((original.feedsPanelLabel || "") !== feedsPanelLabel) entries.push(mk("Feeds sub-panel", original.feedsPanelLabel || "—", feedsPanelLabel || "—"));
-    const nextBreakers = existing.map(b => (b.id === breakerId ? { ...b, circuits: (b.circuits || []).map(c => (c.id === id ? updated : c)) } : b));
-    persist(updateBreakers(nextBreakers), { auditLog: entries.length ? logAudit(entries) : auditLog });
+    const nextBreakers = breakerId
+      ? existing.map(b => (b.id === breakerId ? { ...b, circuits: (b.circuits || []).map(c => (c.id === id ? updated : c)) } : b))
+      : null;
+    const nextUnassigned = breakerId ? null : (selectedAsset.unassignedCircuits || []).map(c => (c.id === id ? updated : c));
+    persist(updatePanelCircuits(nextBreakers, nextUnassigned), { auditLog: entries.length ? logAudit(entries) : auditLog });
   }
 
   function deleteCircuit(breakerId, id) {
     if (savingRef.current) return; // double-submit guard, see savingRef
     if (!selectedAsset) return;
     const existing = selectedAsset.breakers || [];
-    const breaker = existing.find(b => b.id === breakerId);
-    if (!breaker) return;
-    const circuit = (breaker.circuits || []).find(c => c.id === id);
+    const circuit = circuitsIn(breakerId).find(c => c.id === id);
     if (!circuit) return;
-    const nextBreakers = existing.map(b => (b.id === breakerId ? { ...b, circuits: (b.circuits || []).filter(c => c.id !== id) } : b));
+    const nextBreakers = breakerId
+      ? existing.map(b => (b.id === breakerId ? { ...b, circuits: (b.circuits || []).filter(c => c.id !== id) } : b))
+      : null;
+    const nextUnassigned = breakerId ? null : (selectedAsset.unassignedCircuits || []).filter(c => c.id !== id);
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
-      action: "circuit_removed", field: circuit.label,
+      action: "circuit_removed", field: circuit.label, from: circuitLocationLabel(breakerId),
     };
-    persist(updateBreakers(nextBreakers), { auditLog: logAudit([entry]) });
+    persist(updatePanelCircuits(nextBreakers, nextUnassigned), { auditLog: logAudit([entry]) });
   }
 
   // Same-panel only for this pass — moving a circuit to a different Panel
   // asset would mean mutating two assets atomically, deferred as a follow-up.
+  // Within this panel the destination is any other breaker OR the unassigned
+  // list, in either direction: `breakerId` (where it is now) and `target`
+  // (where it's going) are both "a breaker id, or UNASSIGNED_TARGET".
   function openMoveCircuit(breakerId, circuit) {
-    setMoveCircuitModal({ breakerId, circuit, target: "", error: null });
+    setMoveCircuitModal({ breakerId: breakerId || "", circuit, target: "", error: null });
   }
 
   function submitMoveCircuit() {
     if (!selectedAsset || !moveCircuitModal) return;
     const { breakerId, circuit: movingCircuitRef, target } = moveCircuitModal;
-    if (!target) { setMoveCircuitModal({ ...moveCircuitModal, error: "Pick a destination breaker." }); return; }
-    if (target === breakerId) { setMoveCircuitModal({ ...moveCircuitModal, error: "That's already this circuit's breaker." }); return; }
+    const fail = message => setMoveCircuitModal({ ...moveCircuitModal, error: message });
+    if (savingRef.current) { fail(SAVE_IN_PROGRESS_MESSAGE); return; } // double-submit guard, see savingRef
+    if (!target) { fail("Pick a destination."); return; }
+    // The picker's "Unassigned" option can't be a plain "" — that's already the
+    // placeholder — so it carries its own sentinel, normalized back to "" here.
+    const toBreakerId = target === UNASSIGNED_TARGET ? "" : target;
+    if (toBreakerId === (breakerId || "")) { fail(toBreakerId ? "That's already this circuit's breaker." : "This circuit is already unassigned."); return; }
     const existing = selectedAsset.breakers || [];
-    const fromBreaker = existing.find(b => b.id === breakerId);
-    const toBreaker = existing.find(b => b.id === target);
-    if (!fromBreaker || !toBreaker) { setMoveCircuitModal({ ...moveCircuitModal, error: "Breaker not found." }); return; }
-    const circuit = (fromBreaker.circuits || []).find(c => c.id === movingCircuitRef.id);
-    if (!circuit) { setMoveCircuitModal({ ...moveCircuitModal, error: "Circuit not found." }); return; }
-    const movedCircuit = { ...circuit, breakerId: toBreaker.id };
+    if (breakerId && !existing.some(b => b.id === breakerId)) { fail("Breaker not found."); return; }
+    if (toBreakerId && !existing.some(b => b.id === toBreakerId)) { fail("Breaker not found."); return; }
+    const circuit = circuitsIn(breakerId).find(c => c.id === movingCircuitRef.id);
+    if (!circuit) { fail("Circuit not found."); return; }
+    const fromLabel = circuitLocationLabel(breakerId);
+    const toLabel = circuitLocationLabel(toBreakerId);
+    // panelLabel is restated rather than assumed: a circuit that predates the
+    // v13 schema won't have one until something writes it.
+    const movedCircuit = { ...circuit, breakerId: toBreakerId, panelLabel: selectedLabel };
     const nextBreakers = existing.map(b => {
-      if (b.id === fromBreaker.id) return { ...b, circuits: (b.circuits || []).filter(c => c.id !== circuit.id) };
-      if (b.id === toBreaker.id) return { ...b, circuits: [...(b.circuits || []), movedCircuit] };
+      if (b.id === breakerId) return { ...b, circuits: (b.circuits || []).filter(c => c.id !== circuit.id) };
+      if (b.id === toBreakerId) return { ...b, circuits: [...(b.circuits || []), movedCircuit] };
       return b;
     });
+    const unassigned = selectedAsset.unassignedCircuits || [];
+    const nextUnassigned = breakerId
+      ? (toBreakerId ? unassigned : [...unassigned, movedCircuit])
+      : unassigned.filter(c => c.id !== circuit.id);
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
-      action: "circuit_reassigned", field: circuit.label,
-      from: `Slot ${slotsLabel_(fromBreaker)}`, to: `Slot ${slotsLabel_(toBreaker)}`,
+      action: "circuit_reassigned", field: circuit.label, from: fromLabel, to: toLabel,
     };
-    persist(updateBreakers(nextBreakers), { auditLog: logAudit([entry]) });
+    persist(updatePanelCircuits(nextBreakers, nextUnassigned), { auditLog: logAudit([entry]) });
     setMoveCircuitModal(null);
   }
 
@@ -2582,6 +2682,16 @@ function AssetTracker() {
             Serves: c.feedsPanelLabel ? `Feeds → ${c.feedsPanelLabel}` : (c.roomsServedIds || []).map(id => roomNameFor(id, assets)).join(", "),
             Notes: c.notes || "",
           });
+        });
+      });
+      // Circuits with no breaker land in the same sheet — they're real circuits
+      // on this panel, just not wired to a slot yet, so leaving them out would
+      // make the export quietly disagree with what the Layout tab shows.
+      (a.unassignedCircuits || []).forEach(c => {
+        circuitRows.push({
+          Panel: a.label, "Slot(s)": "Unassigned", Circuit: c.label,
+          Serves: c.feedsPanelLabel ? `Feeds → ${c.feedsPanelLabel}` : (c.roomsServedIds || []).map(id => roomNameFor(id, assets)).join(", "),
+          Notes: c.notes || "",
         });
       });
     });
@@ -3107,7 +3217,15 @@ function AssetTracker() {
             { key: "details", label: "Details" },
             ...(isPlace ? [{ key: "contents", label: "Contents", count: contentsCount }] : []),
             ...(selectedAsset.type === "Bulk Item" ? [{ key: "allocations", label: "Allocations", count: (selectedAsset.allocations || []).length }] : []),
-            ...(selectedAsset.type === "Electrical Panel" ? [{ key: "breakers", label: "Breakers", count: (selectedAsset.breakers || []).length }] : []),
+            // Label says "Layout" because the tab covers more than breakers now (the
+            // panel diagram plus the unassigned-circuit list), but the KEY stays
+            // "breakers" on purpose: it's what ?asset=...&tab=breakers deep links
+            // already in circulation carry, and what openDetail() defaults a panel to.
+            // Renaming it would silently break every previously-copied panel link.
+            // The count is breakers + unassigned circuits — both are things this tab
+            // holds, and counting only breakers would show "(0)" on a panel whose whole
+            // content is a pile of circuits waiting to be wired.
+            ...(selectedAsset.type === "Electrical Panel" ? [{ key: "breakers", label: "Layout", count: (selectedAsset.breakers || []).length + (selectedAsset.unassignedCircuits || []).length }] : []),
             { key: "maintenance", label: "Maintenance", count: maintenanceItems.length, urgent: overdueMaintenanceCount > 0 },
             { key: "comments", label: "Comments", count: comments.length },
             { key: "changes", label: "Change Log", count: changeEntries.length },
@@ -3451,6 +3569,11 @@ function AssetTracker() {
               setShowBreakerTypesManager={setShowBreakerTypesManager}
               addBreaker={addBreaker}
               isSaving={isSaving}
+              roomAssets={roomAssets}
+              addCircuit={addCircuit}
+              saveCircuitEdit={saveCircuitEdit}
+              deleteCircuit={deleteCircuit}
+              openMoveCircuit={openMoveCircuit}
             />
           )}
 
@@ -3919,63 +4042,9 @@ function AssetTracker() {
           const beginEdit = () => patchBreakerModal({ ...seedDrafts(), editing: true, error: null, activeMemberId: null, addingCircuitFor: null });
           const cancelEdit = () => patchBreakerModal({ ...seedDrafts(), editing: false, error: null, confirmDeleteGroup: false });
           function renderCircuitTargetFields(values, setValues) {
-            const mode = values.feedsPanelLabel ? "subpanel" : (values._mode || "rooms");
-            const roomsSelected = values.roomsServedIds || [];
-            return (
-              <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 8 }}>
-                <span style={labelStyle}>Serves</span>
-                <div style={{ display: "flex", gap: 6 }}>
-                  <button
-                    type="button"
-                    onClick={() => setValues({ ...values, _mode: "rooms", feedsPanelLabel: "" })}
-                    style={{ flex: 1, padding: "7px 10px", background: mode === "rooms" ? C.brand : "transparent", color: mode === "rooms" ? "#fff" : C.ink, border: `1.5px solid ${mode === "rooms" ? C.brand : C.border}`, borderRadius: 10, fontSize: 13, fontWeight: 600 }}
-                  >
-                    Serves rooms
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setValues({ ...values, _mode: "subpanel", roomsServedIds: [] })}
-                    style={{ flex: 1, padding: "7px 10px", background: mode === "subpanel" ? C.brand : "transparent", color: mode === "subpanel" ? "#fff" : C.ink, border: `1.5px solid ${mode === "subpanel" ? C.brand : C.border}`, borderRadius: 10, fontSize: 13, fontWeight: 600 }}
-                  >
-                    Feeds sub-panel
-                  </button>
-                </div>
-                {mode === "rooms" ? (
-                  roomAssets.length === 0 ? (
-                    <div style={{ fontSize: 13, color: C.empty }}>No Room assets yet.</div>
-                  ) : (
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                      {roomAssets.map(room => {
-                        const active = roomsSelected.includes(room.label);
-                        return (
-                          <button
-                            key={room.label}
-                            type="button"
-                            onClick={() => setValues({ ...values, roomsServedIds: active ? roomsSelected.filter(r => r !== room.label) : [...roomsSelected, room.label] })}
-                            style={{ padding: "6px 12px", borderRadius: 14, fontSize: 13, fontWeight: active ? 600 : 500, border: `1.5px solid ${active ? C.brand : C.border}`, background: active ? C.brand : "#fff", color: active ? "#fff" : C.ink }}
-                          >
-                            {room.room}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )
-                ) : otherPanelLabels.length === 0 ? (
-                  <div style={{ fontSize: 13, color: C.empty }}>No other Electrical Panel assets yet.</div>
-                ) : (
-                  <PickerField
-                    label="Feeds a sub-panel"
-                    hideLabel
-                    value={values.feedsPanelLabel || ""}
-                    onChange={v => setValues({ ...values, feedsPanelLabel: v })}
-                    options={["", ...otherPanelLabels]}
-                    placeholder="Select a panel…"
-                    labelForOption={p => p || "Select a panel…"}
-                    title="Select a panel"
-                  />
-                )}
-              </div>
-            );
+            // Body lives in the top-level CircuitTargetFields component — the panel's
+            // unassigned-circuit list needs the identical control, outside this modal.
+            return <CircuitTargetFields values={values} setValues={setValues} roomAssets={roomAssets} otherPanelLabels={otherPanelLabels} />;
           }
           return (
             <div onClick={closeModal} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
@@ -4125,11 +4194,8 @@ function AssetTracker() {
                           </div>
                           <ChildEntityTable
                             items={member.circuits || []}
-                            fields={[
-                              { key: "label", label: "Label", placeholder: "e.g. Outlets, Water Heater", wide: true },
-                              { key: "notes", label: "Notes", type: "textarea", wide: true, placeholder: "One callout per line, e.g.\n- North wall outlets\n- Closet outlets" },
-                            ]}
-                            initialDraft={{ label: "", notes: "", roomsServedIds: [], feedsPanelLabel: "" }}
+                            fields={CIRCUIT_TABLE_FIELDS}
+                            initialDraft={CIRCUIT_TABLE_INITIAL_DRAFT}
                             isSaving={isSaving}
                             onAdd={draft2 => addCircuit(member.id, draft2)}
                             onSave={(id, draft2) => saveCircuitEdit(member.id, id, draft2)}
@@ -4141,20 +4207,7 @@ function AssetTracker() {
                             emptyMessage="No circuits on this breaker yet."
                             renderCustomFields={renderCircuitTargetFields}
                             deleteConfirmMessage={circuit => `Delete circuit "${circuit.label}"?`}
-                            renderSummary={circuit => (
-                              <div>
-                                <div style={{ fontWeight: 600, fontSize: 13, color: C.ink }}>
-                                  {circuit.feedsPanelLabel
-                                    ? `Feeds → ${circuit.feedsPanelLabel}`
-                                    : (circuit.roomsServedIds || []).length
-                                    ? circuit.roomsServedIds.map(id => roomNameFor(id, assets)).join(", ")
-                                    : circuit.label}
-                                </div>
-                                {circuit.notes && (
-                                  <div style={{ fontSize: 12, color: C.muted, whiteSpace: "pre-line", marginTop: 2 }}>{circuit.notes}</div>
-                                )}
-                              </div>
-                            )}
+                            renderSummary={circuit => circuitSummary(circuit, assets)}
                             customRowActions={circuit => (
                               <button onClick={() => openMoveCircuit(member.id, circuit)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Move circuit ${circuit.label}`}>
                                 <ArrowLeftRight size={14} color={C.muted} />
@@ -4167,19 +4220,11 @@ function AssetTracker() {
                         <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 14, paddingTop: 12 }}>
                           <div style={{ ...labelStyle, marginBottom: 8 }}>Circuits</div>
                           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                            {/* Same content as the expanded view's rows, minus the per-row
+                                actions — both go through circuitSummary() now, so a future
+                                circuit-summary field only has to be added in one place. */}
                             {(member.circuits || []).map(circuit => (
-                              <div key={circuit.id}>
-                                <div style={{ fontWeight: 600, fontSize: 13, color: C.ink }}>
-                                  {circuit.feedsPanelLabel
-                                    ? `Feeds → ${circuit.feedsPanelLabel}`
-                                    : (circuit.roomsServedIds || []).length
-                                    ? circuit.roomsServedIds.map(id => roomNameFor(id, assets)).join(", ")
-                                    : circuit.label}
-                                </div>
-                                {circuit.notes && (
-                                  <div style={{ fontSize: 12, color: C.muted, whiteSpace: "pre-line", marginTop: 2 }}>{circuit.notes}</div>
-                                )}
-                              </div>
+                              <div key={circuit.id}>{circuitSummary(circuit, assets)}</div>
                             ))}
                           </div>
                         </div>
@@ -4311,24 +4356,32 @@ function AssetTracker() {
           <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
             <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 340 }}>
               <div style={{ fontWeight: 700, marginBottom: 4, color: C.brandDark }}>Move circuit "{moveCircuitModal.circuit.label}"</div>
-              <div style={{ fontSize: 13, color: C.muted, marginBottom: 14 }}>Choose a different breaker on this panel.</div>
+              <div style={{ fontSize: 13, color: C.muted, marginBottom: 14 }}>
+                Choose another breaker on this panel, or unassign it from breakers entirely.
+              </div>
               {(() => {
                 const targetBreakers = (selectedAsset.breakers || []).filter(b => b.id !== moveCircuitModal.breakerId);
+                // "Unassigned" is offered as just another destination rather than a
+                // separate action, so breaker -> breaker, breaker -> unassigned and
+                // unassigned -> breaker are all the same one flow. It's omitted when
+                // the circuit is already there, same as its current breaker is.
+                const options = ["", ...targetBreakers.map(b => b.id), ...(moveCircuitModal.breakerId ? [UNASSIGNED_TARGET] : [])];
                 const slotLabelFor = id => {
+                  if (id === UNASSIGNED_TARGET) return "Unassigned (no breaker)";
                   const b = targetBreakers.find(x => x.id === id);
-                  return b ? `Slot ${slotsLabel_(b)}` : "Select a breaker…";
+                  return b ? `Slot ${slotsLabel_(b)}` : "Select a destination…";
                 };
                 return (
                   <div style={{ marginBottom: 12 }}>
                     <PickerField
-                      label="Target breaker"
+                      label="Destination"
                       hideLabel
                       value={moveCircuitModal.target}
                       onChange={v => setMoveCircuitModal({ ...moveCircuitModal, target: v })}
-                      options={["", ...targetBreakers.map(b => b.id)]}
-                      placeholder="Select a breaker…"
+                      options={options}
+                      placeholder="Select a destination…"
                       labelForOption={slotLabelFor}
-                      title="Select a breaker"
+                      title="Select a destination"
                     />
                   </div>
                 );
@@ -4338,8 +4391,12 @@ function AssetTracker() {
                 <button onClick={() => setMoveCircuitModal(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
                   Cancel
                 </button>
-                <button onClick={submitMoveCircuit} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>
-                  Move
+                <button
+                  onClick={submitMoveCircuit}
+                  disabled={isSaving}
+                  style={{ padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                >
+                  {isSaving ? "Saving…" : "Move"}
                 </button>
               </div>
             </div>
@@ -5482,16 +5539,18 @@ function ColumnFilterModal({ activeCol, filterConfigs, sortConfig, setSortConfig
   );
 }
 
-// Everything the Breakers tab shows besides the breaker-detail/swap/move-
+// Everything the Layout tab shows besides the breaker-detail/swap/move-
 // circuit modals (those stay in AssetTracker since they're reachable from
 // other tabs too, e.g. a Room's "Fed by" link jumps straight into one) —
-// the "Fed from" banner, the panel diagram itself, and the Add Breaker form.
+// the "Fed from" banner, the panel diagram itself, the Add Breaker form, and
+// the panel's unassigned-circuit list.
 // Pulled out of AssetTracker's ~3700-line body as the first cut at breaking
 // that component up; the props list is exactly what this piece touches.
 function BreakersTabContent({
   selectedAsset, assets, breakerTypes, showPanelConfig, setShowPanelConfig,
   updatePanelConfig, openBreakerModal, addBreakerDraft, setAddBreakerDraft,
   setShowBreakerTypesManager, addBreaker, isSaving,
+  roomAssets, addCircuit, saveCircuitEdit, deleteCircuit, openMoveCircuit,
 }) {
   const feed = assets
     .filter(a => a.type === "Electrical Panel")
@@ -5504,6 +5563,8 @@ function BreakersTabContent({
   const inputStyle = { padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, maxWidth: 120 };
   const selectedType = addBreakerDraft ? breakerTypes.find(t => t.id === addBreakerDraft.breakerTypeId) : null;
   const closeAddBreakerForm = () => setAddBreakerDraft(null);
+  const unassignedCircuits = selectedAsset.unassignedCircuits || [];
+  const otherPanelLabels = assets.filter(a => a.type === "Electrical Panel" && a.label !== selectedAsset.label).map(a => a.label);
 
   return (
     <>
@@ -5547,6 +5608,45 @@ function BreakersTabContent({
           }}
         />
       )}
+
+      {/* Circuits that belong to this panel but aren't wired to a breaker — a
+          run that's been pulled and labelled but not landed yet, or one that
+          was taken off a breaker without being deleted. They're stored on the
+          panel itself (selectedAsset.unassignedCircuits), which is why a
+          Circuit now carries its own panelLabel: with no breaker to chain
+          through, nothing else records which panel it belongs to.
+          Deliberately the same ChildEntityTable, field config, summary and
+          Move action as the circuits under a breaker — it's the same entity
+          in a different place, not a second kind of circuit. `key` on the
+          panel label so navigating between panels can't leave a half-typed
+          add form (this component's own internal state) open on the next one. */}
+      <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14, marginTop: 20, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)" }}>
+        <div style={{ ...labelStyle, marginBottom: 10 }}>
+          Unassigned circuits{unassignedCircuits.length > 0 ? ` (${unassignedCircuits.length})` : ""}
+        </div>
+        <ChildEntityTable
+          key={selectedAsset.label}
+          items={unassignedCircuits}
+          fields={CIRCUIT_TABLE_FIELDS}
+          initialDraft={CIRCUIT_TABLE_INITIAL_DRAFT}
+          isSaving={isSaving}
+          onAdd={draft => addCircuit(null, draft)}
+          onSave={(id, draft) => saveCircuitEdit(null, id, draft)}
+          onDelete={id => deleteCircuit(null, id)}
+          addLabel="Add Circuit"
+          emptyMessage="No unassigned circuits on this panel."
+          renderCustomFields={(values, setValues) => (
+            <CircuitTargetFields values={values} setValues={setValues} roomAssets={roomAssets} otherPanelLabels={otherPanelLabels} />
+          )}
+          deleteConfirmMessage={circuit => `Delete circuit "${circuit.label}"?`}
+          renderSummary={circuit => circuitSummary(circuit, assets)}
+          customRowActions={circuit => (
+            <button onClick={() => openMoveCircuit(null, circuit)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Move circuit ${circuit.label} onto a breaker`}>
+              <ArrowLeftRight size={14} color={C.muted} />
+            </button>
+          )}
+        />
+      </div>
 
       {addBreakerDraft && (
         <div onClick={closeAddBreakerForm} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
@@ -6074,6 +6174,102 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, breakerTypes, pa
           );
         })}
       </div>
+      )}
+    </div>
+  );
+}
+
+// A circuit's "what does this feed?" control — the rooms-vs-sub-panel either/or
+// that doesn't fit ChildEntityTable's generic field types, so it goes in through
+// its renderCustomFields hook. Top-level (not a closure inside the breaker modal
+// where it started) because the same control now appears in two places: the
+// circuits under a breaker, and the panel's unassigned-circuit list. Same rule in
+// both — a circuit serves rooms OR feeds a downstream sub-panel, never both —
+// enforced for real in validateCircuitDraft; this just makes the choice visible.
+function CircuitTargetFields({ values, setValues, roomAssets, otherPanelLabels }) {
+  const labelStyle = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent };
+  const mode = values.feedsPanelLabel ? "subpanel" : (values._mode || "rooms");
+  const roomsSelected = values.roomsServedIds || [];
+  return (
+    <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 8 }}>
+      <span style={labelStyle}>Serves</span>
+      <div style={{ display: "flex", gap: 6 }}>
+        <button
+          type="button"
+          onClick={() => setValues({ ...values, _mode: "rooms", feedsPanelLabel: "" })}
+          style={{ flex: 1, padding: "7px 10px", background: mode === "rooms" ? C.brand : "transparent", color: mode === "rooms" ? "#fff" : C.ink, border: `1.5px solid ${mode === "rooms" ? C.brand : C.border}`, borderRadius: 10, fontSize: 13, fontWeight: 600 }}
+        >
+          Serves rooms
+        </button>
+        <button
+          type="button"
+          onClick={() => setValues({ ...values, _mode: "subpanel", roomsServedIds: [] })}
+          style={{ flex: 1, padding: "7px 10px", background: mode === "subpanel" ? C.brand : "transparent", color: mode === "subpanel" ? "#fff" : C.ink, border: `1.5px solid ${mode === "subpanel" ? C.brand : C.border}`, borderRadius: 10, fontSize: 13, fontWeight: 600 }}
+        >
+          Feeds sub-panel
+        </button>
+      </div>
+      {mode === "rooms" ? (
+        roomAssets.length === 0 ? (
+          <div style={{ fontSize: 13, color: C.empty }}>No Room assets yet.</div>
+        ) : (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {roomAssets.map(room => {
+              const active = roomsSelected.includes(room.label);
+              return (
+                <button
+                  key={room.label}
+                  type="button"
+                  onClick={() => setValues({ ...values, roomsServedIds: active ? roomsSelected.filter(r => r !== room.label) : [...roomsSelected, room.label] })}
+                  style={{ padding: "6px 12px", borderRadius: 14, fontSize: 13, fontWeight: active ? 600 : 500, border: `1.5px solid ${active ? C.brand : C.border}`, background: active ? C.brand : "#fff", color: active ? "#fff" : C.ink }}
+                >
+                  {room.room}
+                </button>
+              );
+            })}
+          </div>
+        )
+      ) : otherPanelLabels.length === 0 ? (
+        <div style={{ fontSize: 13, color: C.empty }}>No other Electrical Panel assets yet.</div>
+      ) : (
+        <PickerField
+          label="Feeds a sub-panel"
+          hideLabel
+          value={values.feedsPanelLabel || ""}
+          onChange={v => setValues({ ...values, feedsPanelLabel: v })}
+          options={["", ...otherPanelLabels]}
+          placeholder="Select a panel…"
+          labelForOption={p => p || "Select a panel…"}
+          title="Select a panel"
+        />
+      )}
+    </div>
+  );
+}
+
+// The shared field config for a Circuit row in ChildEntityTable — used by the
+// circuits under a breaker and by the panel's unassigned list, so the two can't
+// drift into showing different fields for the same entity.
+const CIRCUIT_TABLE_FIELDS = [
+  { key: "label", label: "Label", placeholder: "e.g. Outlets, Water Heater", wide: true },
+  { key: "notes", label: "Notes", type: "textarea", wide: true, placeholder: "One callout per line, e.g.\n- North wall outlets\n- Closet outlets" },
+];
+const CIRCUIT_TABLE_INITIAL_DRAFT = { label: "", notes: "", roomsServedIds: [], feedsPanelLabel: "" };
+
+// What a circuit row shows when collapsed: what it actually serves, then its
+// per-callout notes. Shared for the same reason the field config above is.
+function circuitSummary(circuit, assets) {
+  return (
+    <div>
+      <div style={{ fontWeight: 600, fontSize: 13, color: C.ink }}>
+        {circuit.feedsPanelLabel
+          ? `Feeds → ${circuit.feedsPanelLabel}`
+          : (circuit.roomsServedIds || []).length
+          ? circuit.roomsServedIds.map(id => roomNameFor(id, assets)).join(", ")
+          : circuit.label}
+      </div>
+      {circuit.notes && (
+        <div style={{ fontSize: 12, color: C.muted, whiteSpace: "pre-line", marginTop: 2 }}>{circuit.notes}</div>
       )}
     </div>
   );

@@ -542,9 +542,36 @@ array position can't serve as identity once things move.
   `\\n`, and even that depends on how many escaping layers sit between you and the file, so
   verify escaping empirically (e.g. `sed 's/X/A\\nB/' <<< X | cat -A`) before trusting it on
   a real file, and diff/line-count-check immediately after any bulk substitution.
+- **A circuit can belong to a panel without belonging to a breaker** (backend v13). Panel assets
+  carry an `unassignedCircuits` array alongside `breakers`, holding circuits that exist but
+  aren't wired to a slot yet — a run that's been pulled and labelled but not landed, or one
+  taken off a breaker without being deleted. That's what forced `panelLabel` onto `CIRCUIT_FIELDS`:
+  a circuit's panel used to be implied entirely by `breakerId` → that Breaker's `panelLabel`, so
+  with no breaker there was nothing recording which panel it was for. `panelLabel` is now the
+  authoritative panel for **every** circuit (`doPost` derives it from the panel being iterated,
+  never from the client payload, so it can't disagree with the breaker's own panel), and `doGet`
+  splits circuits by whether `breakerId` is empty. No migration was needed or written: every
+  pre-v13 row has a `breakerId`, so it still attaches to its breaker on read and picks up its
+  `panelLabel` on the next save of that panel.
+  Frontend-side, `addCircuit`/`saveCircuitEdit`/`deleteCircuit`/`openMoveCircuit` all take the
+  breaker id as their first argument and read a falsy one as "the unassigned list"
+  (`circuitsIn()` picks the container, `updatePanelCircuits()` writes back whichever changed) —
+  one flow, not a parallel set of handlers for circuits that happen not to be wired up. The
+  rooms-vs-sub-panel exclusivity rule is shared as `validateCircuitDraft()` so an unassigned
+  circuit can't sidestep it.
 - **Move Circuit** (`openMoveCircuit`/`submitMoveCircuit`) reassigns a circuit to a different
-  breaker — **same panel only** in this pass; moving to a different Panel asset would mean
-  mutating two assets atomically and is deferred as a follow-up.
+  breaker **or to/from the unassigned list** — all three directions go through the one modal,
+  with "Unassigned" offered as just another destination (`UNASSIGNED_TARGET`, a sentinel because
+  `""` is already the picker's nothing-selected placeholder). Still **same panel only**; moving
+  to a different Panel asset would mean mutating two assets atomically and is deferred as a
+  follow-up. `circuit_reassigned` audit entries read "Slot 13a → Unassigned" rather than a raw
+  id; `circuit_added`/`circuit_removed` gained the same location in their `from`, with a
+  fallback in `describeAudit()` for the older entries that don't have one.
+- **The panel detail tab is labelled "Layout", but its key is still `"breakers"`** — the label
+  changed when the tab grew past breakers (diagram + unassigned circuits), the key deliberately
+  did not: it's what `?asset=...&tab=breakers` deep links already in circulation carry and what
+  `openDetail()` defaults a panel to, so renaming it would silently break every copied panel
+  link. Its count badge is breakers + unassigned circuits, since both live on that tab.
 - Deleting a breaker with circuits attached, or a circuit's roomsServed/feedsPanelLabel
   exclusivity, is validated client-side only (`canDeleteBreaker`, `addCircuit`) — consistent
   with every other guard in this app (delete/archive confirmations etc.); nothing else
@@ -626,17 +653,27 @@ When you do:
 
 ## Known constraints / things to watch
 
-- **Backend is at v12 — this needs a re-paste + New version deploy to go live.** The live
-  backend is **v11**, verified 2026-08-15 by fetching the deployed `/exec` URL directly and
-  reading its `scriptVersion`. v10 and v11 both shipped in the 2026-08-13 session, so v12 is
-  the *only* undeployed change — the "carries three undeployed changes" note that used to
-  live here was written before that deploy and was wrong once it landed.
-  - v12 adds the per-domain revision counters (`rev_assets`/`rev_config`/`rev_breakerTypes`
+- **The repo is at backend v13, and v13 is the only undeployed change — one re-paste + one
+  New version deploy covers it.** Don't take a hardcoded "the live backend is vN" line here on
+  faith, including this one: it goes stale the moment someone redeploys and nothing prompts
+  anyone to update it, which has already sent a wrong "you're two versions behind" down a
+  branch once. Check instead — the app's "Backend outdated" banner names both versions in its
+  tooltip, or fetch the deployed `/exec` URL and read `scriptVersion` in the raw JSON. (For
+  what it's worth as a dated data point rather than a standing claim: everything through v12
+  was confirmed live on 2026-08-16.)
+  - v13 adds `panelLabel` to `CIRCUIT_FIELDS` and the `unassignedCircuits` array on panel
+    assets — see "A circuit can belong to a panel without belonging to a breaker" under Data
+    model. Until it deploys, the live backend has no `panelLabel` column: circuits attached to
+    breakers keep round-tripping exactly as before, but a live backend's `doPost` only walks
+    `a.breakers`, so an asset's `unassignedCircuits` are silently **not written at all** and
+    disappear on the next reload. Sandbox mode is unaffected — it never touches the backend.
+    No data migration is needed on deploy: existing circuit rows all have a `breakerId` and get
+    their `panelLabel` filled in on the next save.
+  - v12 added the per-domain revision counters (`rev_assets`/`rev_config`/`rev_breakerTypes`
     in Config) behind the optimistic-concurrency check — see "Optimistic concurrency" under
-    Architecture. Until it deploys, the live v11 backend ignores the `_revisions` the frontend
-    now posts and last-write-wins is still the live behavior; the frontend keeps working
-    against it (it just never sees a conflict, since a v11 backend reports no revisions and
-    the client's stay at 0). The first v12 save seeds the three `rev_*` rows in Config.
+    Architecture. Deployed 2026-08-16 and confirmed by a write coming back with a bumped
+    `revisions` object, which only a v12+ backend returns — so conflict detection is real
+    live behavior, not pending, and the three `rev_*` rows are seeded in Config.
   - Already live from the v11 deploy, both confirmed against the live payload: `Circuit.notes`
     round-trips (the Circuits tab was rewritten with a `notes` column on the first save after
     the deploy, and the legacy `description` column is gone — its old values were dropped at
