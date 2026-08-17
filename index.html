@@ -1698,7 +1698,7 @@ function AssetTracker() {
   // referenced by id from other assets' roomId/buildingId, Bulk Item
   // allocations, and Circuit.roomsServedIds, so deleting one out from under
   // those would leave a dangling id. Client-side only, same as every other
-  // delete guard in this app (canDeleteBreakerGroup, findBreakerTypeUsages).
+  // delete guard in this app (e.g. findBreakerTypeUsages).
   function canDeleteAsset(asset) {
     if (asset.type === "Room") {
       const refs = [];
@@ -2184,25 +2184,43 @@ function AssetTracker() {
   // validates server-side either, so this one check wouldn't close a real gap
   // by moving. Delete removes the whole group — a breaker-type instance is one
   // physical unit, not N independently removable poles.
-  function canDeleteBreakerGroup(members) {
-    const withCircuits = members.filter(m => (m.circuits || []).length > 0);
-    if (withCircuits.length > 0) {
-      return `Still has circuits attached (${withCircuits.length} of ${members.length} breaker${members.length !== 1 ? "s" : ""} in this unit) — move or remove them first.`;
-    }
-    return null;
+  // How many circuits the whole unit carries — drives the delete prompt's
+  // wording. Deleting a unit with circuits used to be refused outright
+  // (canDeleteBreakerGroup), which left the user to move every circuit by hand
+  // before the unit would budge. Now that a circuit can sit on the panel with no
+  // breaker at all, the prompt offers to unassign them instead: the circuits
+  // survive, detached, in the panel's Unassigned circuits section.
+  function attachedCircuitCount(members) {
+    return members.reduce((n, m) => n + (m.circuits || []).length, 0);
   }
 
-  function deleteBreakerGroup(members, groupSlotLabel) {
+  // `unassignCircuits` must be true to delete a unit that still has circuits —
+  // the caller has to have asked. Without it this is a no-op rather than a
+  // silent data loss, so a future call site can't delete circuits by omission.
+  function deleteBreakerGroup(members, groupSlotLabel, unassignCircuits) {
     if (savingRef.current) return; // double-submit guard, see savingRef
     if (!selectedAsset || members.length === 0) return;
+    const orphaned = members.flatMap(m => (m.circuits || []).map(c => ({ ...c, breakerId: "" })));
+    if (orphaned.length > 0 && !unassignCircuits) return;
     const ids = new Set(members.map(m => m.id));
     const existing = selectedAsset.breakers || [];
     const nextBreakers = existing.filter(b => !ids.has(b.id));
-    const entry = {
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
-      action: "breaker_removed", field: `Slot ${groupSlotLabel}`,
-    };
-    persist(updateBreakers(nextBreakers), { auditLog: logAudit([entry]) });
+    // null leaves the unassigned list untouched (see updatePanelCircuits) — only
+    // a unit that actually had circuits rewrites it.
+    const nextUnassigned = orphaned.length
+      ? [...(selectedAsset.unassignedCircuits || []), ...orphaned]
+      : null;
+    const stamp = { at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type };
+    // One entry per circuit that moved, not a single lumped one — each circuit
+    // ending up unattached is its own fact someone may later go looking for.
+    const entries = [
+      { ...stamp, action: "breaker_removed", field: `Slot ${groupSlotLabel}` },
+      ...orphaned.map(c => ({
+        ...stamp, action: "circuit_reassigned", field: c.label,
+        from: `Slot ${groupSlotLabel}`, to: "Unassigned",
+      })),
+    ];
+    persist(updatePanelCircuits(nextBreakers, nextUnassigned), { auditLog: logAudit(entries) });
   }
 
   // Swap is deliberately separate from the generic edit above — it's the only
@@ -4244,28 +4262,36 @@ function AssetTracker() {
                     read-only view. */}
                 {editing && (
                   <div style={{ display: "flex", alignItems: "center", gap: 10, borderTop: `1px solid ${C.border}`, paddingTop: 14 }}>
-                    {confirmDeleteGroup ? (
+                    {confirmDeleteGroup ? (() => {
+                      // A unit carrying circuits isn't refused any more — the prompt
+                      // says what will happen to them and the button name matches,
+                      // so "Unassign & delete" is never a surprise.
+                      const attached = attachedCircuitCount(members);
+                      return (
                       <>
-                        <span style={{ fontSize: 13, color: C.danger }}>Delete this breaker unit?</span>
+                        <span style={{ fontSize: 13, color: C.danger }}>
+                          {attached > 0
+                            ? `Delete this breaker unit? Its ${attached} circuit${attached !== 1 ? "s" : ""} will be unassigned, not deleted — ${attached !== 1 ? "they" : "it"} will move to Unassigned circuits.`
+                            : "Delete this breaker unit?"}
+                        </span>
                         <div style={{ display: "flex", gap: 10, marginLeft: "auto" }}>
                           <button onClick={() => patchBreakerModal({ confirmDeleteGroup: false })} style={{ padding: "8px 12px", background: "transparent", border: `1.5px solid ${C.border}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
                             Cancel
                           </button>
                           <button
                             onClick={() => {
-                              const reason = canDeleteBreakerGroup(members);
-                              if (reason) { patchBreakerModal({ error: reason, confirmDeleteGroup: false }); return; }
-                              deleteBreakerGroup(members, groupSlotLabel);
+                              deleteBreakerGroup(members, groupSlotLabel, attached > 0);
                               closeModal();
                             }}
                             disabled={isSaving}
                             style={{ padding: "8px 12px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                           >
-                            {isSaving ? "Saving…" : "Delete"}
+                            {isSaving ? "Saving…" : attached > 0 ? "Unassign & delete" : "Delete"}
                           </button>
                         </div>
                       </>
-                    ) : (
+                      );
+                    })() : (
                       <>
                         <button onClick={() => patchBreakerModal({ error: null, confirmDeleteGroup: true })} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label="Delete breaker unit">
                           <Trash2 size={14} color={C.danger} />

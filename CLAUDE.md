@@ -494,10 +494,18 @@ array position can't serve as identity once things move.
   Breakers export. A spare Table row now says "Spare" in the Type column instead of relying on
   a status value. Old `status` values already sitting on existing breaker data are harmless
   leftover fields — nothing reads them anymore.
-- **Delete removes the whole group at once** (`deleteBreakerGroup`/`canDeleteBreakerGroup`),
-  not one member at a time — a breaker-type instance is one physical unit, not N independently
-  removable poles. Blocked if any member still has circuits, naming how many
-  (`"Still has circuits attached (1 of 3 breakers in this unit)"`).
+- **Delete removes the whole group at once** (`deleteBreakerGroup`), not one member at a
+  time — a breaker-type instance is one physical unit, not N independently removable poles.
+  **A unit with circuits still attached is no longer refused**: the confirm prompt says how
+  many circuits there are and that they'll be unassigned rather than deleted, and the button
+  reads "Unassign & delete" so the outcome is never a surprise. The circuits land in the
+  panel's `unassignedCircuits` (see the unassigned-circuits section), each one getting its own
+  `circuit_reassigned` audit entry alongside the unit's `breaker_removed`. This replaced
+  `canDeleteBreakerGroup`, which blocked the delete outright and left the user to move every
+  circuit by hand first — only possible to improve once a circuit could exist without a
+  breaker. `deleteBreakerGroup` still requires its `unassignCircuits` argument to be true
+  before it will drop a unit that has circuits, so a future call site can't orphan them by
+  omission; `attachedCircuitCount()` is what the prompt counts with.
 - **Swap Breaker** (`openSwapBreaker`/`submitSwapBreaker`) still exists but its trigger button
   was removed from the breaker modal for now (per explicit request) — the functions and the
   swap modal are dead code until it's reconnected. If re-adding it, keep in mind Swap was
