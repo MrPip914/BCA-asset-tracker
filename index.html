@@ -105,6 +105,20 @@ const DEFAULT_BULK_ITEM_TYPES = [];
 //                    omission meant — an omission on a REGISTERED type is a
 //                    mistake, whereas an unregistered type legitimately falls
 //                    back to DEFAULT_PARENT_TYPES.
+//   modules        — the extra detail TABS this type owns, beyond the ones every
+//                    asset has (Details/Maintenance/Comments/Change Log/Audit).
+//                    Names entries in ASSET_MODULES below, which say what each
+//                    module is called and how to count it. A Bulk Item owns
+//                    ["allocations"], an Electrical Panel ["breakers"]; Doors
+//                    will own ["locks"] when that module exists.
+//                    This replaced a per-module `type === "Electrical Panel"`
+//                    test repeated at the tab list, the tab body, and the
+//                    default-tab choice — three places to remember for every new
+//                    module, with nothing to catch a miss.
+//   defaultTab     — which tab opens first (openDetail). Only worth setting when
+//                    the Details tab isn't the useful landing place: opening a
+//                    panel to anything but its Layout wastes a click every time.
+//                    Defaults to "details".
 //
 // Types added at runtime via the gear-icon type manager are deliberately NOT in
 // here — they're generic devices, and every lookup below falls back to exactly
@@ -150,10 +164,14 @@ const TYPE_REGISTRY = {
   "Bulk Item": {
     locked: true, icon: Package, parentTypes: [], onlyFields: ["totalQuantity", "itemName"], nameField: "itemName",
     excludedFields: ["hostname", "screenSize", "peripherals", "serial", "person"],
+    modules: ["allocations"],
   },
   // Otherwise device-like (real brand/model/serial, purchase date, warranty, room
   // placement) — it just doesn't have peripherals like a computer does.
-  "Electrical Panel": { locked: true, icon: Zap, parentTypes: ["Room"], excludedFields: ["peripherals"] },
+  "Electrical Panel": {
+    locked: true, icon: Zap, parentTypes: ["Room"], excludedFields: ["peripherals"],
+    modules: ["breakers"], defaultTab: "breakers",
+  },
   Other: { parentTypes: ["Room"] },
 };
 
@@ -215,6 +233,68 @@ const PLACE_TYPES = new Set(
 );
 function isPlaceType(type) {
   return PLACE_TYPES.has(type);
+}
+
+// What each sub-item module IS — its tab label and how to count what's in it.
+// The registry's `modules` says which types OWN a module; this says what the
+// module means. Two halves of the same question kept apart on purpose: whether
+// a Door has locks is a fact about Doors, while what a "locks" tab is called and
+// counts is a fact about the locks module, and a second type owning locks
+// shouldn't mean restating the label.
+//
+// Adding a module is now: one entry here, one name in the owning type's
+// `modules`, and one render branch for its body. Nothing else needs telling.
+//
+// "Contents" is deliberately NOT in here. Every other module is DECLARED by the
+// types that own it; contents is DERIVED — a type has it when anything can sit
+// inside it (isPlaceType), which falls out of parentTypes. Listing it here would
+// mean maintaining by hand a fact the registry already computes, and Campus
+// would have needed adding to that list to get a Contents tab at all.
+const ASSET_MODULES = {
+  allocations: {
+    label: "Allocations",
+    count: asset => (asset.allocations || []).length,
+  },
+  breakers: {
+    // Label says "Layout" because the tab covers more than breakers now (the
+    // panel diagram plus the unassigned-circuit list), but the KEY stays
+    // "breakers" on purpose: it's what ?asset=...&tab=breakers deep links
+    // already in circulation carry, and what openDetail() defaults a panel to.
+    // Renaming it would silently break every previously-copied panel link.
+    // The count is breakers + unassigned circuits — both are things this tab
+    // holds, and counting only breakers would show "(0)" on a panel whose whole
+    // content is a pile of circuits waiting to be wired.
+    label: "Layout",
+    count: asset => (asset.breakers || []).length + (asset.unassignedCircuits || []).length,
+  },
+};
+
+// Which sub-item modules this type owns. An unregistered (user-added) type owns
+// none — it's a plain device.
+function modulesFor(type) {
+  return TYPE_REGISTRY[type]?.modules || [];
+}
+// Does this type own a given module? The one thing render sites should ask,
+// rather than naming the type that happens to own it today.
+function hasModule(type, moduleKey) {
+  return modulesFor(type).includes(moduleKey);
+}
+// Which detail tab opens first for this type.
+function defaultTabFor(type) {
+  return TYPE_REGISTRY[type]?.defaultTab || "details";
+}
+
+// Every tab this type gets, in display order — the common ones every asset has,
+// plus Contents when it's a place and whatever modules it owns. One source for
+// both the tab bar and the deep-link check, so a link can't select a tab the bar
+// doesn't offer.
+function availableTabsFor(type) {
+  return [
+    "details",
+    ...(isPlaceType(type) ? ["contents"] : []),
+    ...modulesFor(type),
+    "maintenance", "comments", "changes", "audit",
+  ];
 }
 // What this asset is *called* — its type's nameField value (a Room's `room`, a
 // Building's `building`, a Bulk Item's `itemName`), falling back to the label
@@ -2015,7 +2095,12 @@ function AssetTracker() {
     setChangeDraft({ changeType: "", vendor: "", cost: "", note: "" });
     // Electrical Panels open straight to Breakers — that's the tab worth
     // seeing first for a panel, not the mostly-empty generic Details fields.
-    setDetailTab(initialTab || (asset.type === "Electrical Panel" ? "breakers" : "details"));
+    // A requested tab this type doesn't have falls back to its default rather
+    // than being honoured — a ?tab=breakers link pasted onto a Computer used to
+    // select a tab the bar didn't offer, leaving the tab strip with nothing
+    // under it. Deep links outlive the asset they were copied from.
+    const wanted = initialTab && availableTabsFor(asset.type).includes(initialTab) ? initialTab : defaultTabFor(asset.type);
+    setDetailTab(wanted);
     setConfirmCommentDelete(null);
     setConfirmChangeDelete(null);
     setConfirmArchive(null);
@@ -3108,7 +3193,7 @@ function AssetTracker() {
   // would go stale/blank, so it's still worth surfacing to fix first.
   function findBreakerTypeUsages(typeId) {
     const usages = [];
-    (assets || []).filter(a => a.type === "Electrical Panel").forEach(panel => {
+    (assets || []).filter(a => hasModule(a.type, "breakers")).forEach(panel => {
       (panel.breakers || []).filter(b => b.breakerTypeId === typeId).forEach(b => {
         usages.push({ panelLabel: panel.label, slot: cellsLabel_(b) });
       });
@@ -3149,7 +3234,9 @@ function AssetTracker() {
       row["Comments logged"] = (a.comments || []).length;
       row["Changes logged"] = (a.changes || []).length;
       row["Total cost logged"] = (a.changes || []).reduce((sum, c) => sum + (parseFloat(c.cost) || 0), 0);
-      if (a.type === "Bulk Item") {
+      // Allocated/Available are the allocations MODULE's summary, so they follow
+      // whoever owns that module rather than the one type that owns it today.
+      if (hasModule(a.type, "allocations")) {
         row["Allocated"] = getAllocatedTotal(a);
         row["Available"] = getAvailable(a);
       }
@@ -3749,24 +3836,21 @@ function AssetTracker() {
         </div>
 
         <div style={{ display: "flex", gap: 4, padding: "0 20px", borderBottom: `1.5px solid ${C.border}`, position: "sticky", top: 53, background: C.bg, zIndex: 9, overflowX: "auto" }}>
-          {[
-            { key: "details", label: "Details" },
-            ...(isPlace ? [{ key: "contents", label: "Contents", count: contentsCount }] : []),
-            ...(selectedAsset.type === "Bulk Item" ? [{ key: "allocations", label: "Allocations", count: (selectedAsset.allocations || []).length }] : []),
-            // Label says "Layout" because the tab covers more than breakers now (the
-            // panel diagram plus the unassigned-circuit list), but the KEY stays
-            // "breakers" on purpose: it's what ?asset=...&tab=breakers deep links
-            // already in circulation carry, and what openDetail() defaults a panel to.
-            // Renaming it would silently break every previously-copied panel link.
-            // The count is breakers + unassigned circuits — both are things this tab
-            // holds, and counting only breakers would show "(0)" on a panel whose whole
-            // content is a pile of circuits waiting to be wired.
-            ...(selectedAsset.type === "Electrical Panel" ? [{ key: "breakers", label: "Layout", count: (selectedAsset.breakers || []).length + (selectedAsset.unassignedCircuits || []).length }] : []),
-            { key: "maintenance", label: "Maintenance", count: maintenanceItems.length, urgent: overdueMaintenanceCount > 0 },
-            { key: "comments", label: "Comments", count: comments.length },
-            { key: "changes", label: "Change Log", count: changeEntries.length },
-            { key: "audit", label: "Audit", count: assetAuditEntries.length },
-          ].map(tab => {
+          {/* WHICH tabs appear comes from availableTabsFor (the registry);
+              what each one is CALLED and counts is looked up here, because the
+              counts are computed from this asset. Contents is derived from
+              place-ness, modules are declared per type — see ASSET_MODULES. */}
+          {availableTabsFor(selectedAsset.type).map(key => {
+            const meta = {
+              details: { label: "Details" },
+              contents: { label: "Contents", count: contentsCount },
+              maintenance: { label: "Maintenance", count: maintenanceItems.length, urgent: overdueMaintenanceCount > 0 },
+              comments: { label: "Comments", count: comments.length },
+              changes: { label: "Change Log", count: changeEntries.length },
+              audit: { label: "Audit", count: assetAuditEntries.length },
+            }[key] || { label: ASSET_MODULES[key].label, count: ASSET_MODULES[key].count(selectedAsset) };
+            return { key, ...meta };
+          }).map(tab => {
             const active = detailTab === tab.key;
             return (
               <button
@@ -4054,7 +4138,7 @@ function AssetTracker() {
             </>
           )}
 
-          {detailTab === "allocations" && (
+          {detailTab === "allocations" && hasModule(selectedAsset.type, "allocations") && (
             <>
               <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 16, fontSize: 13 }}>
                 <div><span style={{ color: C.muted }}>Total: </span><span style={{ fontWeight: 700, color: C.brandDark }}>{parseFloat(selectedAsset.totalQuantity) || 0}</span></div>
@@ -4116,7 +4200,7 @@ function AssetTracker() {
             </>
           )}
 
-          {detailTab === "breakers" && selectedAsset.type === "Electrical Panel" && (
+          {detailTab === "breakers" && hasModule(selectedAsset.type, "breakers") && (
             <BreakersTabContent
               selectedAsset={selectedAsset}
               assets={assets}

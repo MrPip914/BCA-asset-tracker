@@ -364,6 +364,37 @@ telling the world got a level deeper — paths, the Contents tab, the parent pic
 sort and export all just walk one more link. Compare what the old fixed `roomId`/`buildingId`
 pair would have required: a third id field and a rewrite of every site that resolved a place.
 
+**Which tabs a type gets, and which opens first, come from the registry too** (the rest of the
+type-settings consolidation, 2026-08-20). Three keys and three helpers:
+
+- `modules` on a registry entry names the extra detail tabs that type owns — `["allocations"]`
+  on Bulk Item, `["breakers"]` on Electrical Panel, `["locks"]` on Door when that exists.
+  `hasModule(type, key)` is what render sites ask instead of naming the type that happens to
+  own it today; `modulesFor(type)` lists them.
+- `ASSET_MODULES` says what each module IS — its tab label and how to count its contents.
+  Kept separate from `modules` because they answer different questions: whether a Door has
+  locks is a fact about Doors, while what a "locks" tab is called is a fact about the locks
+  module, and a second type owning locks shouldn't mean restating the label.
+- `defaultTab` is which tab opens first (`defaultTabFor()`), defaulting to `"details"`. Only
+  worth setting when Details isn't the useful landing place — opening a panel anywhere but its
+  Layout wastes a click every time.
+- `availableTabsFor(type)` composes the whole ordered list: the common tabs, Contents when
+  `isPlaceType()`, and the type's modules. **The tab bar and the deep-link check both read it**,
+  which is what stops a link selecting a tab the bar doesn't offer — a `?tab=breakers` link
+  pasted onto a Computer used to render the tab strip with nothing under it, and now falls back
+  to that type's default. Deep links outlive the asset they were copied from.
+
+This replaced a `type === "Electrical Panel"` test repeated at the tab list, the tab body and
+the default-tab choice, plus the Bulk Item equivalent — three places to remember per module,
+with nothing to catch a miss. Verified by the change it was built for: temporarily adding
+`modules: ["allocations"], defaultTab: "allocations"` to Room gave Rooms a working Allocations
+tab that opened by default, with **no other edit anywhere**.
+
+**Contents is the one tab that is derived rather than declared** — a type has it when anything
+can sit inside it, which falls out of `parentTypes`. Listing it in `ASSET_MODULES` would mean
+hand-maintaining a fact the registry already computes, and Campus would have needed adding to
+that list to get a Contents tab at all.
+
 **`isPlaceType()` answers "can this contain things", derived from the registry** rather than
 declared: it's the union of every entry's `parentTypes`, so a type becomes a place the moment
 anything names it as a possible parent. This replaced a hardcoded
