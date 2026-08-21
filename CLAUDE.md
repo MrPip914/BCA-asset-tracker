@@ -939,7 +939,10 @@ When you do:
 
 ## Known constraints / things to watch
 
-- **The backend here is v17, a single COMBINED version, and it is undeployed.** v14 (the public
+- **The backend here is v17, a single COMBINED version, and it was confirmed deployed on
+  2026-08-21** (by fetching the `/exec` URL and reading `scriptVersion` back — not by trusting
+  this line; see the standing warning about that a few paragraphs down, which applies to this
+  sentence exactly as much as to the ones it replaced). v14 (the public
   QR panel view), v15 (`parentId`) and v16 (`campus`) were each pending on their own branch and
   each called itself the next version. They edit the same `doGet`, so pasting one into the Apps
   Script editor after the other would have silently erased the first — and because each also
@@ -964,15 +967,18 @@ When you do:
   anyone to update it, which has already sent a wrong "you're two versions behind" down a
   branch once. Check instead — the app's "Backend outdated" banner names both versions in its
   tooltip, or fetch the deployed `/exec` URL and read `scriptVersion` in the raw JSON. (For
-  what it's worth as a dated data point rather than a standing claim: everything through v12
-  was confirmed live on 2026-08-16.)
+  what it's worth as a dated data point rather than a standing claim: v17 — and therefore
+  everything before it — was confirmed live on 2026-08-21, superseding an earlier note that
+  said the same of v12 on 2026-08-16.)
   - v17 bundles three things: the `campus` column (the Campus type's name field, purely
     additive — a sheet without it round-trips Campus rows with a blank name), the `?panel=`
     public read, and `parentId` on `ASSET_FIELDS` — see "The parent chain" under Data model, and
-    `PARENT_CHILD_MIGRATION.md` for the deploy/migration sequence. Until it deploys, the live
-    backend has no `parentId` column, so a `parentId` the app sends is dropped on write and the
-    app falls back to reading `roomId`/`buildingId` on every load (`adoptLegacyParentage()`) —
-    which means it *works*, correctly, it just can't persist a move. The old `roomId`/
+    `PARENT_CHILD_MIGRATION.md` for the deploy/migration sequence. Now that it's deployed,
+    `parentId` persists normally. Before the deploy the live backend had no such column, so a
+    `parentId` the app sent was dropped on write and the app fell back to reading
+    `roomId`/`buildingId` on every load (`adoptLegacyParentage()`) — which meant it *worked*,
+    correctly, it just couldn't persist a move. That fallback still runs, and still matters:
+    it's what resolves any row last written before the deploy, until a save rewrites it. The old `roomId`/
     `buildingId` columns are deliberately kept and still written, so v17 is reversible and
     un-migrated rows keep resolving. **No migration script exists or is needed**: every save
     rewrites the whole Assets tab, so the first asset-domain save after deploying fills
@@ -980,12 +986,13 @@ When you do:
     later, destructive step that has NOT been done — it's the one that closes the rollback.
   - v13 adds `panelLabel` to `CIRCUIT_FIELDS` and the `unassignedCircuits` array on panel
     assets — see "A circuit can belong to a panel without belonging to a breaker" under Data
-    model. Until it deploys, the live backend has no `panelLabel` column: circuits attached to
-    breakers keep round-tripping exactly as before, but a live backend's `doPost` only walks
-    `a.breakers`, so an asset's `unassignedCircuits` are silently **not written at all** and
-    disappear on the next reload. Sandbox mode is unaffected — it never touches the backend.
-    No data migration is needed on deploy: existing circuit rows all have a `breakerId` and get
-    their `panelLabel` filled in on the next save.
+    model. Live since the v17 deploy (v17 supersedes it). While it was pending, the live backend
+    had no `panelLabel` column: circuits attached to breakers kept round-tripping exactly as
+    before, but that backend's `doPost` only walked `a.breakers`, so an asset's
+    `unassignedCircuits` were silently **not written at all** and disappeared on the next reload.
+    Sandbox mode was unaffected — it never touches the backend. No data migration was needed:
+    existing circuit rows all have a `breakerId` and get their `panelLabel` filled in on the
+    next save.
   - v12 added the per-domain revision counters (`rev_assets`/`rev_config`/`rev_breakerTypes`
     in Config) behind the optimistic-concurrency check — see "Optimistic concurrency" under
     Architecture. Deployed 2026-08-16 and confirmed by a write coming back with a bumped

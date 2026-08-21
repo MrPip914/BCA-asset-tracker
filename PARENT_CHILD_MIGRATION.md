@@ -33,11 +33,15 @@ campuses exist isn't possible and doing it after costs five edits.
 are **not** kept in sync with `parentId` — once an asset is moved, they go stale. `parentId`
 is authoritative.
 
-## Step 1 — Deploy backend v17 (required)
+## Step 1 — Deploy backend v17 (required) — ✅ DONE 2026-08-21
 
-`AssetTrackerSync.gs` is at v17 — one combined script containing the `parentId` column, the `campus` column, and the public QR panel endpoint. One paste covers all three. Until it's deployed, the live
-backend has no such column, so a `parentId` the app sends is silently dropped and the app
-falls back to `roomId`/`buildingId` on every load. Nothing breaks; nothing new persists either.
+`AssetTrackerSync.gs` is at v17 — one combined script containing the `parentId` column, the `campus` column, and the public QR panel endpoint. One paste covered all three.
+
+**This is done.** Confirmed by fetching the deployed `/exec` URL and reading `scriptVersion`
+back as v17 on 2026-08-21 — not by trusting a note in a file, which is the only way this
+should ever be confirmed. While it was pending, the live backend had no such column, so a
+`parentId` the app sent was silently dropped and the app fell back to `roomId`/`buildingId`
+on every load. Nothing broke; nothing new persisted either.
 
 > ✅ **The clash with the QR panel work is resolved.** That change (which called itself v14)
 > edited the same `doGet`, so pasting one over the other would have silently erased the first.
