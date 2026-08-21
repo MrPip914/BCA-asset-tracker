@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Panel QR Labels — BCA Asset Tracker</title>
+<!--
+  BULK QR LABEL SHEET  (internal tool — not the public page)
+  =========================================================
+  Prints one QR sticker per electrical panel, each pointing at that panel's
+  public read-only view: <base>/panel.html?p=<label>. Stick them on the physical
+  panel doors; anyone who scans one gets the layout without logging in.
+
+  Open this file, check the panels you want, hit Print. Nothing is written
+  anywhere — it only reads.
+
+  This is an ADMIN tool, not a public one. It fetches the FULL snapshot (the
+  parameterless doGet) to list the panels, which is the same endpoint index.html
+  uses and the one that gets a token when auth lands. Don't put this file
+  wherever panel.html gets hosted for public scanning; keep it with the admin
+  app, and expect it to need the same credential index.html will.
+
+  QR encoding comes from a CDN (unpkg), the same way index.html sources React —
+  no build step exists in this project and hand-rolling a QR encoder to avoid one
+  request would be a bad trade. It renders SVG, not canvas, so the printed
+  modules stay crisp at any label size instead of being resampled from bitmap.
+  If unpkg is unreachable the page says so rather than printing blank labels.
+-->
+<script src="https://unpkg.com/qrcode-generator@1.4.4/qrcode.js"></script>
+<style>
+  :root {
+    --bg: #F4F0E6; --surface: #FFFFFF; --ink: #2A3439; --brand: #546F75;
+    --accent: #A9764B; --border: #DCD4C2; --muted: #5C6B6E; --danger: #9C3B2A;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 20px 16px 60px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 14px; margin-bottom: 18px; }
+  .panel {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px; margin-bottom: 16px;
+  }
+  label.field { display: block; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; color: var(--accent); margin-bottom: 5px; }
+  input[type=text], input[type=number] {
+    width: 100%; padding: 9px 10px; font-size: 14px; font: inherit;
+    border: 1.5px solid var(--border); border-radius: 8px; background: #fff;
+  }
+  .row { display: flex; gap: 14px; flex-wrap: wrap; }
+  .row > div { flex: 1; min-width: 180px; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 5px; }
+  button {
+    padding: 10px 18px; font-size: 14px; font-weight: 600; font-family: inherit;
+    background: var(--brand); color: #fff; border: none; border-radius: 8px; cursor: pointer;
+  }
+  button.secondary { background: #fff; color: var(--ink); border: 1.5px solid var(--border); }
+  button:disabled { opacity: .5; cursor: default; }
+  .panel-list { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+  .panel-row { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+  .panel-row code { font-family: ui-monospace, Menlo, Consolas, monospace; font-weight: 700; }
+  .panel-row .where { color: var(--muted); }
+  .status { font-size: 14px; color: var(--muted); }
+  .error { color: var(--danger); font-weight: 600; }
+
+  /* --- the printable sheet --- */
+  /* Sizes are in inches because label stock is sold in inches. The grid is
+     driven by CSS custom properties so the controls above can retune it
+     without this stylesheet knowing the specific product. */
+  #sheet { margin-top: 22px; }
+  .labels {
+    display: grid;
+    grid-template-columns: repeat(var(--cols, 3), var(--label-w, 2in));
+    gap: var(--gap, 0.18in);
+    justify-content: start;
+  }
+  .label {
+    width: var(--label-w, 2in); height: var(--label-h, 2in);
+    border: 1px dashed var(--border);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 0.08in; background: #fff; overflow: hidden;
+    page-break-inside: avoid; break-inside: avoid;
+  }
+  .label svg { width: 68%; height: auto; display: block; shape-rendering: crispEdges; }
+  .label .code {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-weight: 700; font-size: 11pt; margin-top: 0.04in; line-height: 1.1;
+  }
+  .label .where { font-size: 7.5pt; color: #333; text-align: center; line-height: 1.15; margin-top: 1px; }
+  .label .scan { font-size: 6pt; color: #666; margin-top: 2px; letter-spacing: .3px; }
+
+  @media print {
+    /* Everything but the labels is scaffolding. */
+    body { background: #fff; }
+    .noprint { display: none !important; }
+    .wrap { max-width: none; padding: 0; margin: 0; }
+    #sheet { margin: 0; }
+    /* No dashed guide on the real sticker — it's only there to show the cut
+       boundary while setting the sheet up on screen. */
+    .label { border: none; }
+    @page { margin: 0.5in; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="noprint">
+    <h1>Panel QR labels</h1>
+    <div class="sub">One sticker per electrical panel, each linking to that panel's public read-only layout.</div>
+
+    <div class="panel">
+      <div class="row">
+        <div>
+          <label class="field" for="base">Public page base URL</label>
+          <input type="text" id="base" />
+          <div class="hint">Where <code>panel.html</code> is hosted. Each QR encodes <code>&lt;base&gt;/panel.html?p=BCA0082</code>. Get this right before printing — it's baked into the sticker.</div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:14px">
+        <div>
+          <label class="field" for="cols">Labels per row</label>
+          <input type="number" id="cols" value="3" min="1" max="8" />
+        </div>
+        <div>
+          <label class="field" for="lw">Label width (in)</label>
+          <input type="number" id="lw" value="2" min="0.75" max="8" step="0.05" />
+        </div>
+        <div>
+          <label class="field" for="lh">Label height (in)</label>
+          <input type="number" id="lh" value="2" min="0.75" max="8" step="0.05" />
+        </div>
+        <div>
+          <label class="field" for="gap">Gap (in)</label>
+          <input type="number" id="gap" value="0.18" min="0" max="1" step="0.01" />
+        </div>
+      </div>
+      <div class="hint" style="margin-top:10px">
+        Print at 100% scale — "fit to page" will resize the labels off your stock.
+        Test one sheet on plain paper against the stock before committing a sheet of stickers.
+      </div>
+    </div>
+
+    <div class="panel">
+      <label class="field">Panels</label>
+      <div id="panels" class="status">Loading panels…</div>
+    </div>
+
+    <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+      <button id="print" disabled>Print labels</button>
+      <button id="reload" class="secondary">Reload panel list</button>
+      <span id="msg" class="status"></span>
+    </div>
+  </div>
+
+  <div id="sheet"></div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // Same deployment URL index.html and panel.html use. Duplicated for the same
+  // reason: no build step, so there is nowhere shared to put it.
+  var SHEET_API_URL = "https://script.google.com/macros/s/AKfycbzXaKRuCrTesxobxP-b2me1TSn0YoGogoYhNPTWU4qWWjXANXGlPuDzJSKGClOTsfOXRQ/exec";
+
+  var els = {
+    base: document.getElementById("base"),
+    cols: document.getElementById("cols"),
+    lw: document.getElementById("lw"),
+    lh: document.getElementById("lh"),
+    gap: document.getElementById("gap"),
+    panels: document.getElementById("panels"),
+    sheet: document.getElementById("sheet"),
+    print: document.getElementById("print"),
+    reload: document.getElementById("reload"),
+    msg: document.getElementById("msg"),
+  };
+
+  // Default the base URL to wherever this tool is being served from, since
+  // panel.html normally sits right next to it. A file:// open has no useful
+  // origin, so that falls back to a placeholder the user has to replace —
+  // better an obviously-wrong URL than a silently-broken one printed 40 times.
+  (function seedBase() {
+    if (window.location.protocol === "file:") {
+      els.base.value = "https://REPLACE-ME.example.org";
+      return;
+    }
+    var path = window.location.pathname.replace(/\/[^\/]*$/, "");
+    els.base.value = window.location.origin + path;
+  })();
+
+  var panels = [];
+  // ?only=BCA0082 preselects a single panel — what the QR button on a panel's
+  // Layout tab in index.html links to, for reprinting one sticker without
+  // deselecting every other panel by hand. Absent, everything starts checked.
+  var onlyLabel = (new URLSearchParams(window.location.search).get("only") || "").trim().toUpperCase();
+
+  function qrSvg(text) {
+    // Type 0 = auto-size to the smallest version that fits. Error correction M
+    // is the usual choice for printed labels: it survives a scuffed or partly
+    // covered sticker without inflating the module count the way H does.
+    var qr = qrcode(0, "M");
+    qr.addData(text);
+    qr.make();
+    // cellSize 1 + margin 4 gives the QR spec's required 4-module quiet zone
+    // (viewBox = moduleCount + 8), which phone scanners need to lock on — the
+    // library's defaults work out to a 1-module border, thin enough to fail
+    // against a busy or dark panel door. scalable:true keeps it a pure vector,
+    // so the CSS label size drives the printed resolution.
+    return qr.createSvgTag({ cellSize: 1, margin: 4, scalable: true });
+  }
+
+  function render() {
+    var base = els.base.value.replace(/\/+$/, "");
+    var chosen = panels.filter(function (p) { return p.checked; });
+    els.sheet.style.setProperty("--cols", els.cols.value);
+    els.sheet.style.setProperty("--label-w", els.lw.value + "in");
+    els.sheet.style.setProperty("--label-h", els.lh.value + "in");
+    els.sheet.style.setProperty("--gap", els.gap.value + "in");
+
+    els.sheet.textContent = "";
+    if (!chosen.length) { els.print.disabled = true; return; }
+
+    var grid = document.createElement("div");
+    grid.className = "labels";
+    chosen.forEach(function (p) {
+      var url = base + "/panel.html?p=" + encodeURIComponent(p.label);
+      var label = document.createElement("div");
+      label.className = "label";
+      // The QR library returns an SVG string it built itself (not user data), so
+      // innerHTML is safe here; every field that came out of the Sheet goes in
+      // through textContent below.
+      var svgHolder = document.createElement("div");
+      svgHolder.style.width = "100%";
+      svgHolder.style.display = "flex";
+      svgHolder.style.justifyContent = "center";
+      svgHolder.innerHTML = qrSvg(url);
+      label.appendChild(svgHolder);
+
+      var code = document.createElement("div");
+      code.className = "code";
+      code.textContent = p.label;
+      label.appendChild(code);
+
+      if (p.where) {
+        var where = document.createElement("div");
+        where.className = "where";
+        where.textContent = p.where;
+        label.appendChild(where);
+      }
+      var scan = document.createElement("div");
+      scan.className = "scan";
+      scan.textContent = "SCAN FOR PANEL LAYOUT";
+      label.appendChild(scan);
+
+      grid.appendChild(label);
+    });
+    els.sheet.appendChild(grid);
+    els.print.disabled = false;
+  }
+
+  function renderPanelList() {
+    els.panels.textContent = "";
+    if (!panels.length) {
+      els.panels.className = "status";
+      els.panels.textContent = "No Electrical Panel assets found.";
+      return;
+    }
+    els.panels.className = "panel-list";
+    panels.forEach(function (p) {
+      var row = document.createElement("label");
+      row.className = "panel-row";
+      var cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = p.checked;
+      cb.addEventListener("change", function () { p.checked = cb.checked; render(); });
+      var code = document.createElement("code");
+      code.textContent = p.label;
+      var where = document.createElement("span");
+      where.className = "where";
+      where.textContent = p.where || "";
+      row.appendChild(cb);
+      row.appendChild(code);
+      row.appendChild(where);
+      els.panels.appendChild(row);
+    });
+  }
+
+  function load() {
+    els.panels.className = "status";
+    els.panels.textContent = "Loading panels…";
+    els.msg.textContent = "";
+    if (typeof qrcode !== "function") {
+      els.panels.className = "status error";
+      els.panels.textContent = "The QR library didn't load (unpkg unreachable). Check the connection and reload — printing now would produce blank labels.";
+      return;
+    }
+    fetch(SHEET_API_URL, { cache: "no-store" })
+      .then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        var assets = (data && data.assets) || [];
+        // Room/Building names for the human-readable line under each QR — the
+        // sticker is more useful if it says where the panel is, and it makes a
+        // mis-stuck label obvious at a glance.
+        // A panel's Room and Building are found by walking up parentId, with the
+        // pre-v15 roomId/buildingId read as a fallback so labels are right
+        // against an un-migrated sheet too. Same rule as panel.html and the
+        // backend's effectiveParentId_.
+        var byLabel = {};
+        assets.forEach(function (a) { byLabel[a.label] = a; });
+        function effectiveParent(a) {
+          return String((a && (a.parentId || a.roomId || a.buildingId)) || "").trim();
+        }
+        function nearestOfType(startAsset, type) {
+          var seen = {}, cur = byLabel[effectiveParent(startAsset)], depth = 0;
+          while (cur && !seen[cur.label] && depth < 50) {
+            if (cur.type === type) return cur;
+            seen[cur.label] = true;
+            cur = byLabel[effectiveParent(cur)];
+            depth++;
+          }
+          return null;
+        }
+        panels = assets
+          .filter(function (a) { return a.type === "Electrical Panel" && a.status !== "Archived"; })
+          .map(function (a) {
+            var roomAsset = nearestOfType(a, "Room");
+            var buildingAsset = nearestOfType(a, "Building");
+            var room = roomAsset ? (roomAsset.room || "") : "";
+            var building = buildingAsset ? (buildingAsset.building || "") : "";
+            return {
+              label: a.label,
+              where: [room, building].filter(Boolean).join(" · "),
+              checked: !onlyLabel || a.label.toUpperCase() === onlyLabel,
+            };
+          })
+          .sort(function (a, b) { return a.label.localeCompare(b.label); });
+        // An ?only= naming a panel that no longer exists (renamed, archived, or
+        // a typo) would otherwise leave every box unchecked and an empty sheet,
+        // which reads as the tool being broken rather than the link being stale.
+        if (onlyLabel && !panels.some(function (p) { return p.checked; })) {
+          panels.forEach(function (p) { p.checked = true; });
+        }
+        renderPanelList();
+        render();
+        els.msg.textContent = panels.length + " panel" + (panels.length === 1 ? "" : "s") + " loaded.";
+      })
+      .catch(function () {
+        els.panels.className = "status error";
+        els.panels.textContent = "Couldn't reach the asset database.";
+      });
+  }
+
+  [els.base, els.cols, els.lw, els.lh, els.gap].forEach(function (el) {
+    el.addEventListener("input", render);
+  });
+  els.print.addEventListener("click", function () { window.print(); });
+  els.reload.addEventListener("click", load);
+
+  load();
+})();
+</script>
+</body>
+</html>

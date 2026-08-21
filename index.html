@@ -33,6 +33,7 @@
 
 <script type="text/babel" data-type="module" data-presets="react">
 import ReactDOM from "react-dom/client";
+import { createPortal } from "react-dom";
 
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import * as XLSX from "xlsx";
@@ -40,7 +41,7 @@ import {
   Search, Plus, X, Pencil, Trash2, Save, ChevronRight, ChevronDown, ArrowLeft, MessageSquare,
   Monitor, Phone, Tv, Camera, HardDrive, HelpCircle, Columns3, Lock, Filter, Check, DoorOpen, Download,
   Wrench, UserCircle, Settings, History, Archive, ArchiveRestore, Building2, Package, Copy, Zap, Repeat, ArrowLeftRight, Menu,
-  FlaskConical, RotateCcw, AlertTriangle, Loader2,
+  FlaskConical, RotateCcw, AlertTriangle, Loader2, Printer, MapPin, QrCode,
 } from "lucide-react";
 
 // Starter managed peripherals/users/bulk-item-type lists — empty until the school
@@ -68,57 +69,92 @@ const DEFAULT_BULK_ITEM_TYPES = [];
 //   onlyFields     — column keys that belong to THIS type. Any key named in any
 //                    entry's onlyFields becomes restricted app-wide (see
 //                    RESTRICTED_FIELDS below): no type that doesn't name it gets it.
-//   linkage        — how the type attaches to a place. This is the one thing
-//                    render sites branch on, instead of comparing type names:
-//                      "room"        — has a roomId; its Building is inferred
-//                                      transitively through that Room.
-//                      "building"    — has a buildingId of its own: a Room, or an
-//                                      outdoor unit that sits in no particular
-//                                      Room. Must also name "building" in onlyFields.
-//                      "allocations" — no single place; a pooled quantity spread
-//                                      across rooms via its own allocations[].
-//                      "none"        — attaches to nothing. A Building is the top
-//                                      of the place tree, and its `building` field
-//                                      is its own display name, not a link.
+//   nameField      — which field holds this type's human-readable NAME, when it
+//                    isn't the label. A Room is called by its `room`, a Building
+//                    by its `building`, a Bulk Item by its `itemName` sub-type
+//                    ("Folding Chair"); an ordinary device has no name of its own
+//                    and is called by its Asset ID. That per-type ladder used to
+//                    be written out inline at three separate render sites (the
+//                    Maintenance overview's row name, exportToExcel's
+//                    displayRoom/displayBuilding, the list view's Type column) —
+//                    and, being hand-copied chains, they had already drifted
+//                    apart on what to show when the name field is empty — while
+//                    a fourth site (the detail header's title) never got the
+//                    ladder at all and showed a Room the literal word "Room".
+//                    One key here plus nameOf() makes it one chain, and makes a
+//                    future named type a one-line registry change, not a hunt.
+//   parentTypes    — which types this type may sit INSIDE, as an array of type
+//                    names. This is what render sites branch on instead of
+//                    comparing type names, and it replaced `linkage` (the old
+//                    "room"/"building"/"allocations"/"none" enum) when the fixed
+//                    roomId/buildingId pair collapsed into one `parentId`. A
+//                    Computer names ["Room"], a Condenser ["Building"] (an
+//                    outdoor unit sits in no particular Room), a Room
+//                    ["Building", "Room"] — naming its own type is what lets a
+//                    closet nest inside a classroom, i.e. what makes the chain
+//                    arbitrarily deep instead of the two fixed levels the old
+//                    room/building fields could express.
+//                    An EMPTY array means "takes no parent at all", and covers
+//                    two genuinely different cases that need no distinction
+//                    anywhere: a Building is the top of the tree, and a Bulk
+//                    Item has no single place at all (it spreads a quantity
+//                    across rooms via its own allocations[] — see the Allocations
+//                    tab, which is deliberately NOT parent/child).
+//                    Every entry declares this explicitly, including the plain
+//                    devices, so `parentTypes || []` never has to guess what an
+//                    omission meant — an omission on a REGISTERED type is a
+//                    mistake, whereas an unregistered type legitimately falls
+//                    back to DEFAULT_PARENT_TYPES.
 //
 // Types added at runtime via the gear-icon type manager are deliberately NOT in
 // here — they're generic devices, and every lookup below falls back to exactly
-// that: no icon, no field rules, DEFAULT_LINKAGE.
-const DEFAULT_LINKAGE = "room";
+// that: no icon, no field rules, DEFAULT_PARENT_TYPES.
+const DEFAULT_PARENT_TYPES = ["Room"];
 const TYPE_REGISTRY = {
-  Computer: { icon: HardDrive, linkage: "room", onlyFields: ["hostname"] },
-  Monitor: { icon: Monitor, linkage: "room", onlyFields: ["screenSize"] },
-  Phone: { icon: Phone, linkage: "room" },
-  TV: { icon: Tv, linkage: "room", onlyFields: ["screenSize"] },
-  DocuCam: { icon: Camera, linkage: "room" },
-  "Stream Deck": { linkage: "room" },
-  "Mini Split": { linkage: "room" },
-  // An outdoor unit doesn't sit inside any one Room, so it links straight to a
-  // Building instead of inferring one through a Room like every other device.
-  Condenser: { linkage: "building", onlyFields: ["building"], excludedFields: ["room"] },
-  // A Room is a space, not a device — no brand/model/serial/etc. It links up to
-  // the Building it's in.
+  Computer: { icon: HardDrive, parentTypes: ["Room"], onlyFields: ["hostname"] },
+  Monitor: { icon: Monitor, parentTypes: ["Room"], onlyFields: ["screenSize"] },
+  Phone: { icon: Phone, parentTypes: ["Room"] },
+  TV: { icon: Tv, parentTypes: ["Room"], onlyFields: ["screenSize"] },
+  DocuCam: { icon: Camera, parentTypes: ["Room"] },
+  "Stream Deck": { parentTypes: ["Room"] },
+  "Mini Split": { parentTypes: ["Room"] },
+  // An outdoor unit doesn't sit inside any one Room, so it sits directly in a
+  // Building instead of inheriting one through a Room like every other device.
+  Condenser: { parentTypes: ["Building"] },
+  // A Room is a space, not a device — no brand/model/serial/etc. It sits in the
+  // Building it's in, or inside another Room (a closet within a classroom).
   Room: {
-    locked: true, icon: DoorOpen, linkage: "building", onlyFields: ["building"],
+    locked: true, icon: DoorOpen, parentTypes: ["Building", "Room"], nameField: "room",
     excludedFields: ["brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
   },
   // One level up from a Room, with even less in common with a device asset.
   Building: {
-    locked: true, icon: Building2, linkage: "none", onlyFields: ["building"],
-    excludedFields: ["brand", "model", "serial", "peripherals", "hostname", "screenSize", "room", "purchaseDate", "warrantyUntil"],
+    locked: true, icon: Building2, parentTypes: ["Campus"], nameField: "building",
+    excludedFields: ["brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
+  },
+  // A site — a group of Buildings, and the top of the tree. Added once the app
+  // had to describe more than one location (the school itself plus a separate
+  // residence), which the old fixed Building→Room pair couldn't express at all.
+  // That it was a one-entry change here, plus a column and a backend field, is
+  // the parent chain paying for itself: nothing else in the app needed telling
+  // that the world got a level deeper.
+  Campus: {
+    locked: true, icon: MapPin, parentTypes: [], nameField: "campus",
+    excludedFields: ["brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
   },
   // Tables, chairs... not individually tagged or tied to one room — a pooled
-  // quantity, distributed across rooms via the Allocations tab instead.
+  // quantity, distributed across rooms via the Allocations tab instead. That
+  // distribution is explicitly not parent/child, hence no parentTypes.
   // `itemName` is its sub-type, picked from the managed bulkItemTypes list
   // (e.g. "Folding Chair", "Cafeteria Table").
   "Bulk Item": {
-    locked: true, icon: Package, linkage: "allocations", onlyFields: ["totalQuantity", "itemName"],
-    excludedFields: ["hostname", "screenSize", "peripherals", "serial", "room", "building", "person"],
+    locked: true, icon: Package, parentTypes: [], onlyFields: ["totalQuantity", "itemName"], nameField: "itemName",
+    excludedFields: ["hostname", "screenSize", "peripherals", "serial", "person"],
   },
   // Otherwise device-like (real brand/model/serial, purchase date, warranty, room
   // placement) — it just doesn't have peripherals like a computer does.
-  "Electrical Panel": { locked: true, icon: Zap, linkage: "room", excludedFields: ["peripherals"] },
-  Other: { linkage: "room" },
+  "Electrical Panel": { locked: true, icon: Zap, parentTypes: ["Room"], excludedFields: ["peripherals"] },
+  Other: { parentTypes: ["Room"] },
 };
 
 // Starter/fallback type list for a brand-new sheet, in registry order. The live
@@ -130,10 +166,66 @@ const TYPE_OPTIONS = Object.keys(TYPE_REGISTRY);
 function isLockedType(type) {
   return !!TYPE_REGISTRY[type]?.locked;
 }
-// How this type attaches to a place — the only thing render sites should branch
-// on. An unregistered (user-added) type is a generic room-linked device.
-function linkageOf(type) {
-  return TYPE_REGISTRY[type]?.linkage || DEFAULT_LINKAGE;
+// Puts back any locked type missing from a stored type list, in registry order,
+// so a list saved before a new structural type existed still offers it. See the
+// call site in loadData for why only LOCKED types are restored.
+function ensureLockedTypes(list) {
+  const have = new Set(list);
+  const missing = TYPE_OPTIONS.filter(t => isLockedType(t) && !have.has(t));
+  if (missing.length === 0) return list; // reference-stable: persist()'s _dirty check compares by identity
+  return [...list, ...missing];
+}
+// Which types an asset of `type` may sit inside — the only thing render sites
+// should branch on, instead of comparing type names. A REGISTERED type always
+// declares this (an empty array meaning "takes no parent"), so `|| []` would be
+// wrong here: it would silently turn a forgotten key into "takes no parent"
+// rather than a visible mistake. Only an UNREGISTERED (user-added) type falls
+// back, and it falls back to a generic room-dwelling device.
+function parentTypesFor(type) {
+  const entry = TYPE_REGISTRY[type];
+  return entry ? (entry.parentTypes || []) : DEFAULT_PARENT_TYPES;
+}
+// Does this type take a parent at all? False for a Building (top of the tree)
+// and a Bulk Item (spreads across rooms via allocations instead) — the two cases
+// that render no Parent field and are never "Unassigned", because having no
+// parent is their correct and permanent state, not a gap to fill in.
+function typeTakesParent(type) {
+  return parentTypesFor(type).length > 0;
+}
+// May an asset of `childType` sit inside one of `parentType`? The single rule
+// the app enforces; storage itself stays permissive (see CLAUDE.md), so this is
+// also what flags parentage that arrived from a hand-edited sheet or a script.
+function canBeParentOf(parentType, childType) {
+  return parentTypesFor(childType).includes(parentType);
+}
+
+// The types that can CONTAIN something — derived from what every other type
+// names as a possible parent, not declared as a second list. So Campus, Building
+// and Room are places because something says it can sit in them, and a new kind
+// of place becomes one the moment anything can go inside it.
+//
+// This replaced a hardcoded `type === "Room" || type === "Building"` at the
+// Contents tab, which silently would NOT have included Campus — adding a level
+// above Building would have left campuses with no Contents tab and no way to see
+// what's on them. Deriving it is also the cheapest possible version of the
+// "move place-ness into the type settings" work, done here because Campus forced
+// the issue rather than as a refactor pass of its own.
+const PLACE_TYPES = new Set(
+  Object.values(TYPE_REGISTRY).flatMap(entry => entry.parentTypes || [])
+);
+function isPlaceType(type) {
+  return PLACE_TYPES.has(type);
+}
+// What this asset is *called* — its type's nameField value (a Room's `room`, a
+// Building's `building`, a Bulk Item's `itemName`), falling back to the label
+// (its Asset ID) when the type has no name of its own, when the name field is
+// still blank, or when the type isn't registered at all — an unregistered
+// (user-added) type degrades to a plain device with no name, exactly like every
+// other registry lookup. The one place to change if a new type gains a name.
+function nameOf(asset) {
+  const key = TYPE_REGISTRY[asset?.type]?.nameField;
+  const name = key ? asset[key] : "";
+  return name || asset?.label || "";
 }
 
 // Options for the structured per-asset change log
@@ -161,10 +253,59 @@ const RESTRICTED_FIELDS = new Set(
 // An unregistered (user-added) type excludes nothing and owns no restricted field
 // — i.e. it behaves as a generic device, exactly as before the registry existed.
 function fieldAppliesTo(key, type) {
+  // The Parent field exists only for a type that can actually sit inside
+  // something — a Building (top of the tree) and a Bulk Item (spreads across
+  // rooms via allocations) get no Parent picker at all.
+  if (key === "parent") return typeTakesParent(type);
   const entry = TYPE_REGISTRY[type];
   if (entry?.excludedFields?.includes(key)) return false;
   if (!RESTRICTED_FIELDS.has(key)) return true; // common field, applies to every type
   return !!entry?.onlyFields?.includes(key);
+}
+
+// Columns that are DERIVED from the parent chain rather than stored on the
+// asset. They're still real columns — you can show, sort and filter by Room and
+// Building exactly as before — but nothing writes them, so they never appear in
+// the add/edit forms, and the one thing you edit instead is Parent. Before the
+// parent chain existed these were two stored fields (roomId/buildingId) that
+// happened to be editable; keeping them editable now would mean two ways to say
+// where something is, and one of them going stale.
+//
+// The exception is what makes this type-aware rather than a flat set: `room` and
+// `building` each double as one type's OWN NAME (a Room is called by its `room`,
+// a Building by its `building` — that's exactly what the registry's nameField
+// says). For that type the column is a real, stored, editable field and must
+// keep its form input; treating it as computed everywhere removes the only way
+// to name a Room at all.
+const COMPUTED_COLUMNS = new Set(["room", "building", "campus"]);
+// Is this column one of the place columns at all? Type-independent — used where
+// the question is "does this column come from the chain" (the list cell, sorting,
+// the export) rather than "is it computed FOR THIS asset".
+function isComputedColumn(key) {
+  return COMPUTED_COLUMNS.has(key);
+}
+// Is it computed for an asset of THIS type? False when the column is that type's
+// own name field (a Room's `room`), which is a real stored, editable value.
+function isComputedColumnFor(key, type) {
+  if (!COMPUTED_COLUMNS.has(key)) return false;
+  return TYPE_REGISTRY[type]?.nameField !== key;
+}
+
+// Reads an asset stored in the OLD two-field shape (roomId for a device,
+// buildingId for a Room or Condenser) as if it already had a parentId, so the
+// app works correctly against a sheet that hasn't been migrated yet. Applied on
+// load, so nothing past loadData() ever sees the old shape.
+//
+// This is what makes the migration safe to schedule rather than urgent: the same
+// build runs against old data and new, the backend keeps both sets of columns,
+// and a migrated asset is simply one where the answer is already stored. An
+// asset that has BOTH is not a conflict to resolve — parentId wins, because the
+// only way to have both is to have been migrated (or edited) since, and the old
+// columns are then leftovers nothing writes any more.
+function adoptLegacyParentage(a) {
+  if (a.parentId) return a;
+  const legacy = a.roomId || a.buildingId || "";
+  return legacy ? { ...a, parentId: legacy } : a;
 }
 
 const DEFAULT_COLUMNS = [
@@ -172,6 +313,17 @@ const DEFAULT_COLUMNS = [
   { key: "itemName", label: "Sub-Type", width: 150 },
   { key: "screenSize", label: "Screen Size", width: 110 },
   { key: "totalQuantity", label: "Total Qty", width: 100 },
+  // One location column showing the whole chain (see pathOf). Its KEY is
+  // "parent" because that's the field it edits — the form renders a picker for
+  // the immediate parent here, while the list and detail read it out in full.
+  { key: "parent", label: "Path", width: 240 },
+  // Building and Room are still real columns and still filterable/sortable —
+  // they're just hidden by default now that Path covers the same ground more
+  // completely. Kept (rather than deleted) for two reasons: their column filters
+  // are what the bulk "Move filtered to room" toolbar hangs off, and each is the
+  // NAME field of its own type, so the column has to exist for a Room to be
+  // nameable at all. Re-enable either from the Columns menu.
+  { key: "campus", label: "Campus", width: 150 },
   { key: "building", label: "Building", width: 130 },
   { key: "room", label: "Room", width: 130 },
   { key: "person", label: "User", width: 170 },
@@ -185,7 +337,7 @@ const DEFAULT_COLUMNS = [
   { key: "notes", label: "Notes", width: 240 },
   { key: "label", label: "Asset ID", width: 110 },
   { key: "status", label: "Status", width: 100 },
-].map(c => ({ ...c, visible: ["type", "itemName", "building", "room", "person", "status"].includes(c.key), custom: false }));
+].map(c => ({ ...c, visible: ["type", "itemName", "parent", "person", "status"].includes(c.key), custom: false }));
 
 const STATUS_OPTIONS = ["Active", "Archived"];
 const STATUS_FILTER_OPTIONS = ["All statuses", "Active", "Archived"];
@@ -316,24 +468,192 @@ function buildingNameFor(buildingId, assets) {
   return building ? building.building || "" : "";
 }
 
-// Follows a non-Room asset's Room link to that Room's own Building link.
-// Rooms and Buildings store their building directly and don't need this.
-function inferBuilding(asset, assets) {
-  if (!asset || !asset.roomId) return "";
-  const roomAsset = assets.find(a => a.type === "Room" && a.label === asset.roomId);
-  return roomAsset ? buildingNameFor(roomAsset.buildingId, assets) : "";
+// ---------- PARENT CHAIN ----------
+// An asset's place in the world is one `parentId` holding the parent asset's
+// label (an id, never a display name — see "Reference conventions" in CLAUDE.md).
+// Everything that used to be a fixed roomId/buildingId pair is now derived by
+// walking up from here.
+//
+// EVERY walk is loop-safe, and that is not defensive padding: with fixed
+// room/building fields a cycle was structurally impossible, and with a general
+// parent it isn't. The app refuses to CREATE one (see wouldCreateCycle, wired
+// into saveDraft), but storage stays permissive by design, so a hand-edited
+// sheet or a bulk script can still introduce "A inside B inside A" — and an
+// unguarded walk would hang the browser rather than show bad data. The visited
+// set is what makes that impossible; MAX_PARENT_DEPTH is a second belt against
+// a chain that is merely absurdly long rather than circular.
+const MAX_PARENT_DEPTH = 50;
+// What an asset with no parent is called, wherever a place would otherwise be
+// shown. Deliberately NOT "Unplaced": a parent is a containment relationship,
+// not necessarily a location, so a type whose parent isn't a place would make
+// "Unplaced" read as nonsense.
+const UNASSIGNED_LABEL = "Unassigned";
+
+function parentOf(asset, assets) {
+  if (!asset || !asset.parentId) return null;
+  return (assets || []).find(a => a.label === asset.parentId) || null;
 }
 
-// Same "direct field, or inferred via Room" logic as inferBuilding above, but
-// returns the Building asset's id instead of its display name — used for
-// filtering/sorting by building, where matching on a stable id (not a name
-// that could theoretically collide or change) is what's actually wanted.
+// The chain above `asset`, nearest parent first, stopping at the root — or at
+// the first repeat if the data contains a loop.
+function ancestorsOf(asset, assets) {
+  const out = [];
+  const seen = new Set(asset?.label ? [asset.label] : []);
+  let cur = parentOf(asset, assets);
+  while (cur && !seen.has(cur.label) && out.length < MAX_PARENT_DEPTH) {
+    out.push(cur);
+    seen.add(cur.label);
+    cur = parentOf(cur, assets);
+  }
+  return out;
+}
+
+// The nearest ancestor of a given type. "Which of these assets is a Room?" is an
+// identity question, so comparing the type name here is correct — it's the
+// *capability* questions ("can this hold other things?") that go through the
+// registry instead. See CLAUDE.md's note on that distinction.
+function nearestAncestorOfType(asset, assets, type) {
+  return ancestorsOf(asset, assets).find(a => a.type === type) || null;
+}
+
+// Everything anywhere below `asset`, at any depth. Asks each candidate for its
+// own chain rather than walking down from the parent, which keeps it loop-safe
+// for free (ancestorsOf already is) and needs no child index. Fine at this
+// inventory's scale — a few hundred assets, only while a detail view is open.
+function descendantsOf(asset, assets) {
+  if (!asset) return [];
+  return (assets || []).filter(a => a.label !== asset.label && ancestorsOf(a, assets).some(p => p.label === asset.label));
+}
+
+// Would pointing `childLabel` at `parentId` close a loop? True when the proposed
+// parent IS the child, or already sits somewhere below it. ancestorsOf is itself
+// loop-safe, so this stays correct even when the existing data is already bad.
+function wouldCreateCycle(childLabel, parentId, assets) {
+  if (!parentId || !childLabel) return false;
+  if (parentId === childLabel) return true;
+  const parent = (assets || []).find(a => a.label === parentId);
+  if (!parent) return false;
+  return ancestorsOf(parent, assets).some(a => a.label === childLabel);
+}
+
+// Resolves a parentId to the parent's display name. A dangling id (its asset was
+// deleted) resolves to a visible marker rather than "" or a throw — the same
+// treatment RoomField/BuildingField gave a deleted Room/Building, kept because
+// silently blank is indistinguishable from "no parent", which is now a real and
+// different state.
+function parentNameFor(parentId, assets) {
+  if (!parentId) return "";
+  const p = (assets || []).find(a => a.label === parentId);
+  return p ? nameOf(p) : "(deleted asset)";
+}
+
+// The Room / Building an asset is in, by walking up. An asset that IS a Room (or
+// Building) answers with its own name — "which asset is a Room" is identity, as
+// above. Both return "" when there's nothing of that type in the chain, which is
+// a genuine answer (an Unassigned laptop is in no room) and not an error.
+function roomNameOf(asset, assets) {
+  if (!asset) return "";
+  if (asset.type === "Room") return nameOf(asset);
+  const r = nearestAncestorOfType(asset, assets, "Room");
+  return r ? nameOf(r) : "";
+}
+function buildingNameOf(asset, assets) {
+  if (!asset) return "";
+  if (asset.type === "Building") return nameOf(asset);
+  const b = nearestAncestorOfType(asset, assets, "Building");
+  return b ? nameOf(b) : "";
+}
+function campusNameOf(asset, assets) {
+  if (!asset) return "";
+  if (asset.type === "Campus") return nameOf(asset);
+  const c = nearestAncestorOfType(asset, assets, "Campus");
+  return c ? nameOf(c) : "";
+}
+
+// One place that turns a computed place column into its value, so the list cell,
+// the detail view, sorting and the export all read the chain the same way. Each
+// new level of the hierarchy (Campus was the first) adds one line here instead
+// of a branch at four separate render sites.
+function computedPlaceValue(key, asset, assets) {
+  if (key === "room") return roomNameOf(asset, assets);
+  if (key === "building") return buildingNameOf(asset, assets);
+  if (key === "campus") return campusNameOf(asset, assets);
+  return "";
+}
+
+// Where an asset sits, written out in full: the whole chain above it, outermost
+// first — "Building 100 › Room 101 › Storage Room". This is the list's one
+// location column, chosen over separate Building and Room columns so a deeply
+// nested item never hides the middle of its chain (a laptop in a closet in a
+// classroom would otherwise show the closet and the building, and silently drop
+// the classroom).
+// The asset itself is NOT included: the row already says what it is, and
+// repeating it would make every Room read "… › Room 101" twice over.
+const PATH_SEPARATOR = " › ";
+function pathOf(asset, assets) {
+  if (!asset) return "";
+  return ancestorsOf(asset, assets).map(a => nameOf(a)).reverse().join(PATH_SEPARATOR);
+}
+
+// Same as buildingNameOf but returns the Building asset's id — used for
+// filtering/sorting by building, where matching on a stable id (not a name that
+// could theoretically collide or change) is what's actually wanted.
 function effectiveBuildingId(asset, assets) {
   if (!asset) return "";
-  if (fieldAppliesTo("building", asset.type)) return asset.buildingId || "";
-  if (!asset.roomId) return "";
-  const roomAsset = assets.find(a => a.type === "Room" && a.label === asset.roomId);
-  return roomAsset ? roomAsset.buildingId || "" : "";
+  if (asset.type === "Building") return asset.label;
+  const b = nearestAncestorOfType(asset, assets, "Building");
+  return b ? b.label : "";
+}
+
+// Is this asset's stored parent actually legal for its type? Storage is
+// permissive, so this can be false for data the app itself would have refused —
+// which is exactly the case the UI flags rather than hides. A missing parent is
+// NOT invalid (that's Unassigned); a parent that no longer exists, or one of a
+// type this type may not sit inside, is.
+function parentageProblem(asset, assets) {
+  if (!asset || !asset.parentId) return null;
+  if (!typeTakesParent(asset.type)) return `A ${asset.type} doesn't sit inside anything, but this one has a parent.`;
+  const parent = (assets || []).find(a => a.label === asset.parentId);
+  if (!parent) return `Its parent (${asset.parentId}) no longer exists.`;
+  if (!canBeParentOf(parent.type, asset.type)) return `A ${asset.type} can't sit inside a ${parent.type}.`;
+  // Asking ancestorsOf(asset) whether it contains `asset` can never say yes — it
+  // seeds its visited set with asset.label and stops at the first repeat, so the
+  // asset is excluded by construction. The loop this asset is actually part of is
+  // the one you'd close by re-pointing it where it already points, which is
+  // exactly the question wouldCreateCycle answers.
+  if (wouldCreateCycle(asset.label, asset.parentId, assets)) return "It's part of a loop — something above it is also below it.";
+  if (ancestorsOf(asset, assets).length >= MAX_PARENT_DEPTH) return "Its chain of parents is unreasonably long, which usually means a loop.";
+  return null;
+}
+
+// Checks a parent the user is about to CHOOSE, and returns a message to show in
+// the form, or null if it's fine. ParentField already filters the illegal
+// choices out of its list, so this is the backstop for the ways one can get
+// through anyway: a form left open while the chain changed underneath it, a type
+// switched after the parent was picked, or an asset whose stored parent was
+// never legal to begin with. Empty is valid — that's Unassigned.
+// The add/edit draft doubles as the form's own scratch state, so it can carry a
+// key that belongs on screen and not on the asset (`parentError`). Stripped on
+// the way into persist() rather than kept in a second parallel state, matching
+// how addBreakerDraft/allocationDraft already fold their error in — but those
+// never get spread onto a stored record, and this one would.
+function stripDraftUiState(draft) {
+  const { parentError, ...rest } = draft;
+  return rest;
+}
+
+function validateParentChoice(childLabel, childType, parentId, assets) {
+  if (!parentId) return null;
+  if (!typeTakesParent(childType)) return `A ${childType} doesn't sit inside anything.`;
+  const parent = (assets || []).find(a => a.label === parentId);
+  if (!parent) return "That parent no longer exists — pick another.";
+  if (!canBeParentOf(parent.type, childType)) {
+    return `A ${childType} can't sit inside a ${parent.type}. It can go in: ${parentTypesFor(childType).join(" or ")}.`;
+  }
+  if (wouldCreateCycle(childLabel, parentId, assets)) {
+    return `That would put ${nameOf(parent)} inside itself — it's already somewhere below this asset.`;
+  }
+  return null;
 }
 
 // Buckets the read-only detail view's fields into labeled sections instead of
@@ -341,7 +661,10 @@ function effectiveBuildingId(asset, assets) {
 // into a trailing "Custom Fields" group rather than being dropped.
 const DETAIL_FIELD_GROUPS = [
   { title: "Overview", keys: ["type", "itemName", "screenSize", "totalQuantity", "label", "status"] },
-  { title: "Location & Assignment", keys: ["building", "room", "person"] },
+  // Path leads: it's the one thing here that's actually stored and editable. The
+  // computed Room/Building are filtered out before this runs; `room`/`building`
+  // only reach here as a Room's / Building's OWN name.
+  { title: "Location & Assignment", keys: ["parent", "campus", "building", "room", "person"] },
   { title: "Device Details", keys: ["brand", "model", "serial", "hostname", "peripherals"] },
   { title: "Purchase & Warranty", keys: ["purchaseDate", "warrantyUntil"] },
   { title: "Notes", keys: ["notes"] },
@@ -373,8 +696,17 @@ const SHEET_API_URL = "https://script.google.com/macros/s/AKfycbzXaKRuCrTesxobxP
 // backend actually reports (data.scriptVersion) and flags a mismatch —
 // catches a stuck deployment (edited-but-not-redeployed) automatically
 // instead of it silently dropping data until someone happens to notice.
-const FRONTEND_SCRIPT_VERSION = "v13 (2026-08-16) — Circuits gain a panelLabel column, so a circuit can belong to a panel without belonging to a breaker: doGet attaches circuits with a breakerId to that breaker exactly as before, and returns the ones with an empty breakerId whose panelLabel matches as the panel's new unassignedCircuits array; doPost writes panelLabel on EVERY circuit row (nested and unassigned alike), always derived from the panel being iterated so it can never disagree with the breaker's own panel";
-const emptyDraftFrom = columns => Object.fromEntries(columns.map(c => [c.key, ""]));
+const FRONTEND_SCRIPT_VERSION = "v17 (2026-08-20) — Combined deploy, superseding the separate v14/v15/v16 lines that were each pending on their own branch and would have silently erased one another if pasted in sequence. Contains all three: (v15) Assets gain parentId, one reference to the containing asset replacing the fixed roomId/buildingId pair so the hierarchy can be any depth — the old columns are KEPT and still written, so this is reversible and un-migrated rows still resolve; (v16) Assets gain campus, the name field of a Campus type above Building; (v14) doGet branches on ?panel=<label>, an anonymous read-only projection of ONE panel for the QR page panel.html, built by the PUBLIC_*_FIELDS whitelists so person/serial/hostname/purchase data and every other asset are unreachable through it. The public projection resolves a panel Room/Building by walking parentId (falling back to roomId/buildingId) rather than reading them directly, so it is correct both before and after the sheet is migrated. Parameterless doGet and doPost are otherwise unchanged.";
+// Seeds a blank draft with one key per column, so every input is controlled from
+// the first keystroke. The `parent` COLUMN is the one whose key isn't the field
+// name — it displays a resolved name but stores an id, so the asset's field is
+// `parentId` (the app-wide convention for a reference: see CLAUDE.md). Mapping it
+// here rather than at the two call sites is what stops a stray empty `parent`
+// key riding along onto every saved asset while the value the form actually
+// edits lives somewhere else.
+const emptyDraftFrom = columns => Object.fromEntries(
+  columns.map(c => [c.key === "parent" ? "parentId" : c.key, ""])
+);
 
 // --- Optimistic concurrency (per-domain revisions) ---------------------------
 // Every save is a full overwrite of the domains it touches, so a client saving
@@ -525,24 +857,30 @@ const SANDBOX_DATA_KEY = "asset-tracker-sandbox-data";
 const MOCK_SNAPSHOT = {
   scriptVersion: FRONTEND_SCRIPT_VERSION,
   assets: [
-    { label: "BCB0001", type: "Building", building: "Building 100", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
-    { label: "BCB0002", type: "Building", building: "Building 200", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
-    { label: "BCB0003", type: "Building", building: "Building 300", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
-    { label: "BCB0004", type: "Building", building: "Building 400", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
-    { label: "BCR0006", type: "Room", room: "Room 102", buildingId: "BCB0001", person: "Jen Kramer", notes: "", status: "Active" },
-    { label: "BCR0008", type: "Room", room: "Room 200", buildingId: "BCB0002", person: "Aaron Cantrell", notes: "", status: "Active" },
-    { label: "BCR0011", type: "Room", room: "Room 300", buildingId: "BCB0003", person: "Denise Sloan", notes: "", status: "Active" },
-    { label: "BCR0014", type: "Room", room: "Room 400", buildingId: "BCB0004", person: "Kelly Mackinga", notes: "", status: "Active" },
-    { label: "BCR0002", type: "Room", room: "Kitchen", buildingId: "BCB0001", person: "Multiple teachers", notes: "", status: "Active" },
-    { label: "BCR0018", type: "Room", room: "Storage Room", buildingId: "BCB0001", person: "", notes: "", status: "Active" },
-    { label: "BCR0020", type: "Room", room: "Room 101", buildingId: "BCB0001", person: "Dillon Jacobsma", notes: "", status: "Active" },
-    { label: "BCA0001", type: "Computer", roomId: "BCR0006", brand: "Dell", model: "OptiPlex 7010", serial: "MOCK-CMP-001", person: "Jen Kramer", peripherals: "Keyboard, Mouse", notes: "", status: "Active" },
-    { label: "BCA0002", type: "Monitor", roomId: "BCR0006", brand: "Dell", model: "P2419H", serial: "MOCK-MON-001", person: "Jen Kramer", notes: "", status: "Active" },
-    { label: "BCA0003", type: "Phone", roomId: "BCR0006", brand: "Cisco", model: "8841", serial: "MOCK-PHN-001", person: "Jen Kramer", notes: "", status: "Active" },
-    { label: "BCA0011", type: "Phone", roomId: "BCR0008", brand: "Cisco", model: "8841", serial: "MOCK-PHN-002", person: "Aaron Cantrell", notes: "", status: "Active" },
-    { label: "BCA0015", type: "Stream Deck", roomId: "BCR0008", brand: "Elgato", model: "Stream Deck MK.2", serial: "MOCK-SD-001", person: "Aaron Cantrell", notes: "", status: "Active" },
-    { label: "BCA0024", type: "TV", roomId: "BCR0011", brand: "Samsung", model: "55\" QLED", serial: "MOCK-TV-001", person: "Denise Sloan", notes: "", status: "Active" },
-    { label: "BCA0054", type: "DocuCam", roomId: "BCR0020", brand: "IPEVO", model: "V4K", serial: "MOCK-DC-001", person: "Dillon Jacobsma", notes: "", status: "Active" },
+    // Two campuses, the top of the tree. BCC labels follow the fixture's existing
+    // readable-prefix habit (BCB buildings, BCR rooms) — note that's a property of
+    // this hand-written fixture only; the app itself issues BCA numbers for
+    // everything and has no per-type prefix scheme.
+    { label: "BCC0001", type: "Campus", campus: "Brookside Christian Academy", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "The school site.", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    { label: "BCC0002", type: "Campus", campus: "Kramer Campus", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "Separate residential site — sample data behind the Electrical Map panel.", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    { label: "BCB0001", type: "Building", building: "Building 100", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    { label: "BCB0002", type: "Building", building: "Building 200", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    { label: "BCB0003", type: "Building", building: "Building 300", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    { label: "BCB0004", type: "Building", building: "Building 400", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    { label: "BCR0006", type: "Room", room: "Room 102", parentId: "BCB0001", person: "Jen Kramer", notes: "", status: "Active" },
+    { label: "BCR0008", type: "Room", room: "Room 200", parentId: "BCB0002", person: "Aaron Cantrell", notes: "", status: "Active" },
+    { label: "BCR0011", type: "Room", room: "Room 300", parentId: "BCB0003", person: "Denise Sloan", notes: "", status: "Active" },
+    { label: "BCR0014", type: "Room", room: "Room 400", parentId: "BCB0004", person: "Kelly Mackinga", notes: "", status: "Active" },
+    { label: "BCR0002", type: "Room", room: "Kitchen", parentId: "BCB0001", person: "Multiple teachers", notes: "", status: "Active" },
+    { label: "BCR0018", type: "Room", room: "Storage Room", parentId: "BCB0001", person: "", notes: "", status: "Active" },
+    { label: "BCR0020", type: "Room", room: "Room 101", parentId: "BCB0001", person: "Dillon Jacobsma", notes: "", status: "Active" },
+    { label: "BCA0001", type: "Computer", parentId: "BCR0006", brand: "Dell", model: "OptiPlex 7010", serial: "MOCK-CMP-001", person: "Jen Kramer", peripherals: "Keyboard, Mouse", notes: "", status: "Active" },
+    { label: "BCA0002", type: "Monitor", parentId: "BCR0006", brand: "Dell", model: "P2419H", serial: "MOCK-MON-001", person: "Jen Kramer", notes: "", status: "Active" },
+    { label: "BCA0003", type: "Phone", parentId: "BCR0006", brand: "Cisco", model: "8841", serial: "MOCK-PHN-001", person: "Jen Kramer", notes: "", status: "Active" },
+    { label: "BCA0011", type: "Phone", parentId: "BCR0008", brand: "Cisco", model: "8841", serial: "MOCK-PHN-002", person: "Aaron Cantrell", notes: "", status: "Active" },
+    { label: "BCA0015", type: "Stream Deck", parentId: "BCR0008", brand: "Elgato", model: "Stream Deck MK.2", serial: "MOCK-SD-001", person: "Aaron Cantrell", notes: "", status: "Active" },
+    { label: "BCA0024", type: "TV", parentId: "BCR0011", brand: "Samsung", model: "55\" QLED", serial: "MOCK-TV-001", person: "Denise Sloan", notes: "", status: "Active" },
+    { label: "BCA0054", type: "DocuCam", parentId: "BCR0020", brand: "IPEVO", model: "V4K", serial: "MOCK-DC-001", person: "Dillon Jacobsma", notes: "", status: "Active" },
     { label: "BCA0081", type: "Bulk Item", itemName: "Chairs", totalQuantity: "40", allocations: [{ roomId: "BCR0006", quantity: "20" }, { roomId: "BCR0008", quantity: "20" }], notes: "", status: "Active" },
     // Every panel below follows the same design: mostly single-pole breakers
     // feeding room outlet/lighting circuits, plus exactly one of each other
@@ -552,7 +890,7 @@ const MOCK_SNAPSHOT = {
     // the small sub-panels' sub-panel feeds point at plausible-but-nonexistent
     // future panel labels (BCA0100+), described as reserved/not yet installed.
     {
-      label: "BCA0082", type: "Electrical Panel", roomId: "BCR0018", brand: "Square D", model: "QO142M200PC", serial: "MN-88213-SQD",
+      label: "BCA0082", type: "Electrical Panel", parentId: "BCR0018", brand: "Square D", model: "QO142M200PC", serial: "MN-88213-SQD",
       notes: "Main service panel, 200A. Feeds Building 200/300/400 sub-panels.", status: "Active",
       panelSlotCount: 24, panelLayout: "two-column",
       breakers: [
@@ -644,7 +982,7 @@ const MOCK_SNAPSHOT = {
       ],
     },
     {
-      label: "BCA0083", type: "Electrical Panel", roomId: "BCR0008", brand: "Square D", model: "QO112L125GRB", serial: "B200-SQD-4471",
+      label: "BCA0083", type: "Electrical Panel", parentId: "BCR0008", brand: "Square D", model: "QO112L125GRB", serial: "B200-SQD-4471",
       notes: "Sub-panel fed from Main Distribution Panel (Storage Room), 125A main lug.", status: "Active",
       panelSlotCount: 20, panelLayout: "two-column",
       breakers: [
@@ -717,7 +1055,7 @@ const MOCK_SNAPSHOT = {
       ],
     },
     {
-      label: "BCA0084", type: "Electrical Panel", roomId: "BCR0011", brand: "Square D", model: "QO112L125GRB", serial: "B300-SQD-4472",
+      label: "BCA0084", type: "Electrical Panel", parentId: "BCR0011", brand: "Square D", model: "QO112L125GRB", serial: "B300-SQD-4472",
       notes: "Sub-panel fed from Main Distribution Panel (Storage Room), 125A main lug.", status: "Active",
       panelSlotCount: 20, panelLayout: "two-column",
       breakers: [
@@ -785,7 +1123,7 @@ const MOCK_SNAPSHOT = {
       ],
     },
     {
-      label: "BCA0085", type: "Electrical Panel", roomId: "BCR0014", brand: "Square D", model: "QO116L125GRB", serial: "B400-SQD-4473",
+      label: "BCA0085", type: "Electrical Panel", parentId: "BCR0014", brand: "Square D", model: "QO116L125GRB", serial: "B400-SQD-4473",
       notes: "Sub-panel fed from Main Distribution Panel (Storage Room), 125A main lug.", status: "Active",
       panelSlotCount: 20, panelLayout: "two-column",
       breakers: [
@@ -855,31 +1193,31 @@ const MOCK_SNAPSHOT = {
     // Mitsubishi mini-split indoor units — one per Room, linked via roomId like any
     // other device. Maintenance items mirror the real-world service schedule: filter
     // cleaning is a monthly DIY task, coil cleaning is an annual pro-service task.
-    { label: "BCA0086", type: "Mini Split", roomId: "BCR0006", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
+    { label: "BCA0086", type: "Mini Split", parentId: "BCR0006", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
       { task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "", owner: "", at: "", by: "" },
       { task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
     ] },
-    { label: "BCA0087", type: "Mini Split", roomId: "BCR0008", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
+    { label: "BCA0087", type: "Mini Split", parentId: "BCR0008", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
       { task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "", owner: "", at: "", by: "" },
       { task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
     ] },
-    { label: "BCA0088", type: "Mini Split", roomId: "BCR0011", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
+    { label: "BCA0088", type: "Mini Split", parentId: "BCR0011", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
       { task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "", owner: "", at: "", by: "" },
       { task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
     ] },
-    { label: "BCA0089", type: "Mini Split", roomId: "BCR0014", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
+    { label: "BCA0089", type: "Mini Split", parentId: "BCR0014", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
       { task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "", owner: "", at: "", by: "" },
       { task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
     ] },
-    { label: "BCA0090", type: "Mini Split", roomId: "BCR0002", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
+    { label: "BCA0090", type: "Mini Split", parentId: "BCR0002", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
       { task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "", owner: "", at: "", by: "" },
       { task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
     ] },
-    { label: "BCA0091", type: "Mini Split", roomId: "BCR0018", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
+    { label: "BCA0091", type: "Mini Split", parentId: "BCR0018", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
       { task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "", owner: "", at: "", by: "" },
       { task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
     ] },
-    { label: "BCA0092", type: "Mini Split", roomId: "BCR0020", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
+    { label: "BCA0092", type: "Mini Split", parentId: "BCR0020", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
       { task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "", owner: "", at: "", by: "" },
       { task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
     ] },
@@ -888,18 +1226,107 @@ const MOCK_SNAPSHOT = {
     // an outdoor unit sits outside any one Room. Building 100 has 4 indoor zones
     // (Room 102, Kitchen, Storage Room, Room 101), so it gets a 4-zone outdoor
     // unit; the others each have a single zone.
-    { label: "BCA0093", type: "Condenser", buildingId: "BCB0001", brand: "Mitsubishi", model: "MXZ-4C36NAHZ", serial: "", notes: "Outdoor condenser/compressor, 4-zone multi-split.", status: "Active", maintenanceItems: [
+    { label: "BCA0093", type: "Condenser", parentId: "BCB0001", brand: "Mitsubishi", model: "MXZ-4C36NAHZ", serial: "", notes: "Outdoor condenser/compressor, 4-zone multi-split.", status: "Active", maintenanceItems: [
       { task: "Inspection / cleaning", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
     ] },
-    { label: "BCA0094", type: "Condenser", buildingId: "BCB0002", brand: "Mitsubishi", model: "MUZ-GL15NA", serial: "", notes: "Outdoor condenser/compressor, single-zone.", status: "Active", maintenanceItems: [
+    { label: "BCA0094", type: "Condenser", parentId: "BCB0002", brand: "Mitsubishi", model: "MUZ-GL15NA", serial: "", notes: "Outdoor condenser/compressor, single-zone.", status: "Active", maintenanceItems: [
       { task: "Inspection / cleaning", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
     ] },
-    { label: "BCA0095", type: "Condenser", buildingId: "BCB0003", brand: "Mitsubishi", model: "MUZ-GL15NA", serial: "", notes: "Outdoor condenser/compressor, single-zone.", status: "Active", maintenanceItems: [
+    { label: "BCA0095", type: "Condenser", parentId: "BCB0003", brand: "Mitsubishi", model: "MUZ-GL15NA", serial: "", notes: "Outdoor condenser/compressor, single-zone.", status: "Active", maintenanceItems: [
       { task: "Inspection / cleaning", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
     ] },
-    { label: "BCA0096", type: "Condenser", buildingId: "BCB0004", brand: "Mitsubishi", model: "MUZ-GL15NA", serial: "", notes: "Outdoor condenser/compressor, single-zone.", status: "Active", maintenanceItems: [
+    { label: "BCA0096", type: "Condenser", parentId: "BCB0004", brand: "Mitsubishi", model: "MUZ-GL15NA", serial: "", notes: "Outdoor condenser/compressor, single-zone.", status: "Active", maintenanceItems: [
       { task: "Inspection / cleaning", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
     ] },
+    // --- Sample residential panel, transcribed from the "Electrical Map" Logseq
+    // page (a hand-written circuit map for a two-storey house). Kept as sample
+    // data because it exercises shapes the school panels above don't: a panel
+    // that's tandem-filled top to bottom, circuits serving several rooms at once
+    // (some spanning both floors), and slots whose load was never written down.
+    // The source labels positions "1A/1B" ... "9A/9B", which maps one-to-one onto
+    // this app's half-slot cell addressing (cells "1a"/"1b" — see
+    // BREAKER_TYPES_ARCHITECTURE.md), so every breaker here reads with the same
+    // name it has on the handwritten map. The panel is 12 slots in the usual
+    // two-column layout (odd left / even right); the map only documents
+    // positions 1-9, so slots 10-12 sit empty and render as spares. The map
+    // listing nine positions is NOT evidence the panel has nine slots — that
+    // was assumed here once and corrected.
+    { label: "BCB0005", type: "Building", building: "Kramer Residence", parentId: "BCC0002", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "Two-storey house — sample data behind the Electrical Map panel.", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    { label: "BCR0021", type: "Room", room: "Kitchen (Upstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
+    { label: "BCR0022", type: "Room", room: "Dining Room (Upstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
+    { label: "BCR0023", type: "Room", room: "Living Room (Upstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
+    { label: "BCR0024", type: "Room", room: "Bathroom (Upstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
+    { label: "BCR0025", type: "Room", room: "James's Room (Downstairs)", parentId: "BCB0005", person: "James", notes: "", status: "Active" },
+    { label: "BCR0026", type: "Room", room: "Living Room (Downstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
+    { label: "BCR0027", type: "Room", room: "Office (Downstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
+    { label: "BCR0028", type: "Room", room: "Utility Room (Downstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
+    { label: "BCR0029", type: "Room", room: "Bathroom (Downstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
+    { label: "BCR0030", type: "Room", room: "Hall (Downstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
+    { label: "BCR0031", type: "Room", room: "Water Heater Closet", parentId: "BCB0005", person: "", notes: "", status: "Active" },
+    {
+      label: "BCA0097", type: "Electrical Panel", parentId: "BCR0028", brand: "", model: "", serial: "",
+      notes: "Transcribed from the Electrical Map page. Positions 1A-9B on the handwritten map are cells 1a-9b here. Amp ratings are NOT from the source — 15A assumed for lighting-only circuits, 20A for everything else — so verify at the panel before relying on them.",
+      status: "Active",
+      panelSlotCount: 12, panelLayout: "two-column",
+      breakers: [
+        // 1A/1B and 3A/3B are listed on the map with nothing under them: the
+        // breakers are there, what they feed was never written down. Recorded as
+        // breakers carrying no circuit rather than as empty slots, which would
+        // claim the position is unused.
+        { id: "bH-1a", panelLabel: "BCA0097", cells: ["1a"], breakerTypeId: "type-tandem", ampRating: "20", serial: "", installedDate: "", notes: "Load not documented on the source circuit map.", groupId: "grpH-1", circuits: [] },
+        { id: "bH-1b", panelLabel: "BCA0097", cells: ["1b"], breakerTypeId: "type-tandem", ampRating: "20", serial: "", installedDate: "", notes: "Load not documented on the source circuit map.", groupId: "grpH-1", circuits: [] },
+        { id: "bH-2a", panelLabel: "BCA0097", cells: ["2a"], breakerTypeId: "type-tandem", ampRating: "20", serial: "", installedDate: "", notes: "Marked '(?)' on the source map, with 'Future garbage disposal?' under it — unconfirmed.", groupId: "grpH-2", circuits: [] },
+        { id: "bH-2b", panelLabel: "BCA0097", cells: ["2b"], breakerTypeId: "type-tandem", ampRating: "15", serial: "", installedDate: "", notes: "", groupId: "grpH-2", circuits: [
+          { id: "cH-2b", breakerId: "bH-2b", label: "Kitchen & dining lights (upstairs)", roomsServedIds: ["BCR0021", "BCR0022"], feedsPanelLabel: "", notes: "- Kitchen lights\n- Dining lights" },
+        ] },
+        { id: "bH-3a", panelLabel: "BCA0097", cells: ["3a"], breakerTypeId: "type-tandem", ampRating: "20", serial: "", installedDate: "", notes: "Load not documented on the source circuit map.", groupId: "grpH-3", circuits: [] },
+        { id: "bH-3b", panelLabel: "BCA0097", cells: ["3b"], breakerTypeId: "type-tandem", ampRating: "20", serial: "", installedDate: "", notes: "Load not documented on the source circuit map.", groupId: "grpH-3", circuits: [] },
+        { id: "bH-4a", panelLabel: "BCA0097", cells: ["4a"], breakerTypeId: "type-tandem", ampRating: "20", serial: "", installedDate: "", notes: "", groupId: "grpH-4", circuits: [
+          { id: "cH-4a", breakerId: "bH-4a", label: "Refrigerator", roomsServedIds: ["BCR0021"], feedsPanelLabel: "", notes: "- Fridge (upstairs kitchen)" },
+        ] },
+        { id: "bH-4b", panelLabel: "BCA0097", cells: ["4b"], breakerTypeId: "type-tandem", ampRating: "20", serial: "", installedDate: "", notes: "", groupId: "grpH-4", circuits: [
+          { id: "cH-4b", breakerId: "bH-4b", label: "Water heater", roomsServedIds: ["BCR0031"], feedsPanelLabel: "", notes: "- Water heater closet" },
+        ] },
+        { id: "bH-5a", panelLabel: "BCA0097", cells: ["5a"], breakerTypeId: "type-tandem", ampRating: "20", serial: "", installedDate: "", notes: "", groupId: "grpH-5", circuits: [
+          { id: "cH-5a", breakerId: "bH-5a", label: "Living room outlets (upstairs)", roomsServedIds: ["BCR0023"], feedsPanelLabel: "", notes: "- Living room plugs" },
+        ] },
+        { id: "bH-5b", panelLabel: "BCA0097", cells: ["5b"], breakerTypeId: "type-tandem", ampRating: "20", serial: "", installedDate: "", notes: "", groupId: "grpH-5", circuits: [
+          { id: "cH-5b", breakerId: "bH-5b", label: "James's room + adjacent living room outlets", roomsServedIds: ["BCR0025", "BCR0026"], feedsPanelLabel: "", notes: "- James's room\n- Living room plugs outside James's room" },
+        ] },
+        { id: "bH-6a", panelLabel: "BCA0097", cells: ["6a"], breakerTypeId: "type-tandem", ampRating: "20", serial: "", installedDate: "", notes: "", groupId: "grpH-6", circuits: [
+          { id: "cH-6a", breakerId: "bH-6a", label: "Freezer / hot tub", roomsServedIds: ["BCR0028"], feedsPanelLabel: "", notes: "- Utility room freezer\n- Hot tub" },
+        ] },
+        // 6B and 8B each run to both floors — one branch circuit, several rooms,
+        // which is exactly why roomsServedIds is a list and not a single room.
+        { id: "bH-6b", panelLabel: "BCA0097", cells: ["6b"], breakerTypeId: "type-tandem", ampRating: "20", serial: "", installedDate: "", notes: "", groupId: "grpH-6", circuits: [
+          { id: "cH-6b", breakerId: "bH-6b", label: "Kitchen outlets + back door / downstairs bath", roomsServedIds: ["BCR0021", "BCR0029"], feedsPanelLabel: "", notes: "- Kitchen plugs, upstairs (not the fridge)\n- Junction above the back door, downstairs\n- Plug outside the back door, downstairs\n- Bathroom under-sink plug, downstairs" },
+        ] },
+        { id: "bH-7a", panelLabel: "BCA0097", cells: ["7a"], breakerTypeId: "type-tandem", ampRating: "20", serial: "", installedDate: "", notes: "", groupId: "grpH-7", circuits: [
+          { id: "cH-7a", breakerId: "bH-7a", label: "Living room outlets (downstairs)", roomsServedIds: ["BCR0026"], feedsPanelLabel: "", notes: "- Living room, downstairs" },
+        ] },
+        { id: "bH-7b", panelLabel: "BCA0097", cells: ["7b"], breakerTypeId: "type-tandem", ampRating: "20", serial: "", installedDate: "", notes: "", groupId: "grpH-7", circuits: [
+          { id: "cH-7b", breakerId: "bH-7b", label: "Office outlets", roomsServedIds: ["BCR0027"], feedsPanelLabel: "", notes: "- Office plugs, downstairs" },
+        ] },
+        { id: "bH-8a", panelLabel: "BCA0097", cells: ["8a"], breakerTypeId: "type-tandem", ampRating: "20", serial: "", installedDate: "", notes: "", groupId: "grpH-8", circuits: [
+          { id: "cH-8a", breakerId: "bH-8a", label: "Unidentified — inside utility room wall", roomsServedIds: ["BCR0028"], feedsPanelLabel: "", notes: "- Runs into the utility room wall; load not identified on the source map" },
+        ] },
+        { id: "bH-8b", panelLabel: "BCA0097", cells: ["8b"], breakerTypeId: "type-tandem", ampRating: "20", serial: "", installedDate: "", notes: "", groupId: "grpH-8", circuits: [
+          { id: "cH-8b", breakerId: "bH-8b", label: "Upstairs bathroom + stove + exterior light", roomsServedIds: ["BCR0024", "BCR0021"], feedsPanelLabel: "", notes: "- Bathroom plugs and lights, upstairs\n- Plug outside the bathroom door, upstairs\n- Kitchen stove, upstairs\n- Outside light, downstairs" },
+        ] },
+        { id: "bH-9a", panelLabel: "BCA0097", cells: ["9a"], breakerTypeId: "type-tandem", ampRating: "15", serial: "", installedDate: "", notes: "", groupId: "grpH-9", circuits: [
+          { id: "cH-9a", breakerId: "bH-9a", label: "Downstairs lighting", roomsServedIds: ["BCR0027", "BCR0030", "BCR0026", "BCR0029", "BCR0028"], feedsPanelLabel: "", notes: "- Office light\n- Hall light\n- Living room lights\n- Bathroom lights and plug\n- Utility room lights" },
+        ] },
+        { id: "bH-9b", panelLabel: "BCA0097", cells: ["9b"], breakerTypeId: "type-tandem", ampRating: "20", serial: "", installedDate: "", notes: "", groupId: "grpH-9", circuits: [
+          { id: "cH-9b", breakerId: "bH-9b", label: "Washer/dryer + utility counter", roomsServedIds: ["BCR0028"], feedsPanelLabel: "", notes: "- Washer/dryer\n- Utility room counter" },
+        ] },
+        // Not on the Logseq map — added directly in the app by Eric and folded in
+        // from here. A 240V double-pole across slots 10 and 12 (same column, per
+        // the stacking rule in BREAKER_TYPES_ARCHITECTURE.md s4); what it feeds
+        // isn't recorded yet, hence no circuit.
+        { id: "bH-10-12", panelLabel: "BCA0097", cells: ["10a", "10b", "12a", "12b"], breakerTypeId: "type-double-pole", ampRating: "30", serial: "", installedDate: "", notes: "", groupId: "grpH-10", circuits: [] },
+      ],
+      unassignedCircuits: [],
+    },
   ],
   breakerTypes: SEEDED_BREAKER_TYPES,
   auditLog: [],
@@ -1028,6 +1455,12 @@ function AssetTracker() {
   const [columnVisibility, setColumnVisibility] = useState({}); // { [columnKey]: boolean } — per-device override, see COLUMN_VISIBILITY_STORAGE_KEY
 
   const [query, setQuery] = useState("");
+  // Which branch of the hierarchy the Assets list is looking at — "" is
+  // everywhere, otherwise a place asset's label. Distinct from the column
+  // filters below: this is *navigation* (drill in, see everything beneath) while
+  // those are *filters* (match one exact value). Both can be on at once and
+  // simply intersect.
+  const [scopeId, setScopeId] = useState("");
   const [roomFilter, setRoomFilter] = useState(""); // "" = All rooms; otherwise a Room asset's label (id)
   const [buildingFilter, setBuildingFilter] = useState(""); // "" = All buildings; otherwise a Building asset's label (id)
   const [typeFilter, setTypeFilter] = useState("All types");
@@ -1094,7 +1527,9 @@ function AssetTracker() {
       }
       if (!data || !Array.isArray(data.assets)) throw new Error("Malformed response from backend");
 
-      const loadedAssets = data.assets.map(a => ({ comments: [], changes: [], allocations: [], status: "Active", building: "", itemName: "", purchaseDate: "", warrantyUntil: "", ...a }));
+      const loadedAssets = data.assets
+        .map(a => ({ comments: [], changes: [], allocations: [], status: "Active", building: "", itemName: "", purchaseDate: "", warrantyUntil: "", ...a }))
+        .map(adoptLegacyParentage);
       setAssets(loadedAssets);
       // No scriptVersion at all means an old backend that predates this check entirely —
       // still a real mismatch, not a "nothing to compare" case. In sandbox mode the
@@ -1119,7 +1554,18 @@ function AssetTracker() {
       setAuditLog(Array.isArray(data.auditLog) ? data.auditLog : []);
       setPeripheralsList(Array.isArray(data.peripheralsList) ? data.peripheralsList : DEFAULT_PERIPHERALS);
       setBulkItemTypes(Array.isArray(data.bulkItemTypes) ? data.bulkItemTypes : DEFAULT_BULK_ITEM_TYPES);
-      setTypesList(Array.isArray(data.typesList) && data.typesList.length ? data.typesList : TYPE_OPTIONS);
+      // Migrate the managed type list the same way columns are migrated above:
+      // a list stored before a new LOCKED type existed would otherwise never gain
+      // it, so the type could never be picked in the add form and its assets
+      // could never be created. Campus is what exposed this — the stored list on
+      // any sheet (and any saved sandbox copy) predates it.
+      //
+      // Only locked types are restored, and that limit is the point: a locked
+      // type can't be removed in the type manager at all, so its absence is
+      // always a version gap and never a choice. An ordinary type the user
+      // deliberately deleted stays deleted, which re-adding every entry in
+      // TYPE_OPTIONS would undo on every single load.
+      setTypesList(ensureLockedTypes(Array.isArray(data.typesList) && data.typesList.length ? data.typesList : TYPE_OPTIONS));
       // Absent/0/garbage all mean "never stored" — peekAssetNumber() seeds it
       // from the loaded assets instead, and the first asset created writes it.
       const storedNextNumber = Number(data.nextAssetNumber);
@@ -1374,8 +1820,6 @@ function AssetTracker() {
   // Buildings as recognized by an actual Building asset — powers the linked
   // Building dropdown on Room assets, same id-based reasoning as rooms above.
   const buildingAssets = useMemo(() => (assets || []).filter(a => a.type === "Building"), [assets]);
-  const roomAssetNames = useMemo(() => Array.from(new Set(roomAssets.map(r => r.room).filter(Boolean))).sort(), [roomAssets]);
-  const buildingAssetNames = useMemo(() => Array.from(new Set(buildingAssets.map(b => b.building).filter(Boolean))).sort(), [buildingAssets]);
 
   const rooms = useMemo(() => (
     ["", ...roomAssets.map(r => r.label).sort((x, y) => roomNameFor(x, assets).localeCompare(roomNameFor(y, assets)))]
@@ -1397,23 +1841,39 @@ function AssetTracker() {
     if (!assets) return [];
     const q = query.trim().toLowerCase();
     const list = assets.filter(a => {
-      if (roomFilter && a.roomId !== roomFilter) return false;
+      // Scope: everything BENEATH the chosen place, at any depth — drilling to a
+      // building shows the equipment in all its rooms, not just what sits
+      // directly on the building. The place itself is excluded: you're looking
+      // *inside* it, and listing it as one of its own contents reads as an error
+      // (it's also what made the bulk move-to-room drag the room along).
+      if (scopeId && !ancestorsOf(a, assets).some(p => p.label === scopeId)) return false;
+      // The Room filter matches anything with that Room ANYWHERE above it, not
+      // just a direct child — otherwise a device in a closet inside Room 102
+      // would vanish from a filter on Room 102, which is the opposite of what
+      // nesting is for. A direct-parent test was correct only while the chain
+      // was fixed at one level deep.
+      if (roomFilter && !(a.label === roomFilter || ancestorsOf(a, assets).some(p => p.label === roomFilter))) return false;
       if (buildingFilter && effectiveBuildingId(a, assets) !== buildingFilter) return false;
       if (typeFilter !== "All types" && (a.type || "Other") !== typeFilter) return false;
       if (userFilter !== "All users" && !(a.person || "").split("/").map(s => s.trim()).includes(userFilter)) return false;
       if (statusFilter !== "All statuses" && (a.status || "Active") !== statusFilter) return false;
       if (!q) return true;
-      const roomName = roomNameFor(a.roomId, assets);
-      const buildingName = fieldAppliesTo("building", a.type) ? buildingNameFor(a.buildingId, assets) : inferBuilding(a, assets);
-      if (roomName.toLowerCase().includes(q) || buildingName.toLowerCase().includes(q)) return true;
+      // Searching matches the whole chain above an asset, so typing a building
+      // name finds the equipment inside it however many levels down it sits.
+      const chainNames = [roomNameOf(a, assets), buildingNameOf(a, assets), ...ancestorsOf(a, assets).map(p => nameOf(p))];
+      if (chainNames.some(n => n && n.toLowerCase().includes(q))) return true;
       return Object.values(a).some(v => typeof v === "string" && v.toLowerCase().includes(q));
     });
     if (sortConfig) {
       const { key, dir } = sortConfig;
       const mult = dir === "desc" ? -1 : 1;
       const sortValue = x => {
-        if (key === "room") return roomNameFor(x.roomId, assets);
-        if (key === "building") return fieldAppliesTo("building", x.type) ? buildingNameFor(x.buildingId, assets) : inferBuilding(x, assets);
+        if (isComputedColumn(key)) return computedPlaceValue(key, x, assets);
+        // Sorting the Path column on the full outermost-first string groups a
+        // building's contents together and orders rooms within it, which is what
+        // sorting by location is for. Sorting on the immediate parent's name
+        // alone would scatter them.
+        if (key === "parent") return pathOf(x, assets);
         return (x[key] || "").toString();
       };
       list.sort((x, y) => {
@@ -1424,17 +1884,37 @@ function AssetTracker() {
       });
     }
     return list;
-  }, [assets, query, roomFilter, buildingFilter, typeFilter, userFilter, statusFilter, sortConfig]);
+  }, [assets, query, scopeId, roomFilter, buildingFilter, typeFilter, userFilter, statusFilter, sortConfig]);
 
   // Which of the filtered assets the bulk "Move filtered to room" action can
-  // actually touch: only types that genuinely live in a Room. Branching on
-  // linkageOf instead of an exclusion list of type names means a Building-linked
-  // type (Condenser), a pooled Bulk Item, a Room, a Building, and any future type
-  // are all handled with no list to maintain — writing a roomId onto an asset
-  // whose type has no Room field at all (fieldAppliesTo("room", type) === false)
-  // is junk data nothing in the app ever reads, resolves, or displays. Shared by
-  // the handler and the count in the toolbar so the two can't drift apart.
-  const roomMovable = useMemo(() => filtered.filter(a => linkageOf(a.type) === "room"), [filtered]);
+  // actually touch: only types that are allowed to sit inside a Room. Asking the
+  // registry rather than keeping an exclusion list of type names means a
+  // Building-dwelling type (Condenser), a pooled Bulk Item, a Building, and any
+  // future type are all handled with no list to maintain — and a nested Room now
+  // qualifies too, since a Room may sit inside another Room, so filtering a room
+  // and moving its contents takes the closet along with the desks.
+  //
+  // The filtered room ITSELF is excluded, and that exclusion is load-bearing:
+  // the Room filter matches the room as well as everything under it (that's what
+  // makes it find things nested deeper), so without this every single use of
+  // "move the devices in this room" would quietly move the room into the
+  // destination as well — restructuring the building rather than relocating
+  // equipment. Caught in browser testing after the room filter became
+  // chain-aware; it was harmless when the filter only ever matched a roomId.
+  // Which room the bulk move takes things OUT of. The scope chooser is the
+  // primary way to narrow to a room now (the Room column filter is hidden by
+  // default since Path replaced it), so keying this off roomFilter alone would
+  // have left the bulk move effectively unreachable. The scope wins when it IS a
+  // room; the column filter still works for anyone using it.
+  const bulkMoveSourceId = useMemo(() => {
+    const scoped = scopeId ? (assets || []).find(a => a.label === scopeId) : null;
+    return scoped && scoped.type === "Room" ? scopeId : roomFilter;
+  }, [scopeId, roomFilter, assets]);
+
+  const roomMovable = useMemo(
+    () => filtered.filter(a => a.label !== bulkMoveSourceId && canBeParentOf("Room", a.type)),
+    [filtered, bulkMoveSourceId]
+  );
 
   // Flattened across every active asset's maintenanceItems, for the site-wide
   // Maintenance tab — archived assets are excluded, matching the default Active
@@ -1444,10 +1924,7 @@ function AssetTracker() {
     const rows = [];
     assets.forEach(a => {
       if ((a.status || "Active") === "Archived") return;
-      const assetName = a.type === "Bulk Item" ? (a.itemName || "Bulk Item")
-        : a.type === "Building" ? (a.building || "Building")
-        : a.type === "Room" ? (a.room || "Room")
-        : a.label;
+      const assetName = nameOf(a);
       (a.maintenanceItems || []).forEach((item, idx) => {
         rows.push({ asset: a, assetName, item, idx, status: maintenanceStatusOf(item), due: nextMaintenanceDue(item) });
       });
@@ -1492,7 +1969,7 @@ function AssetTracker() {
       if (maintenanceFrequencyFilter !== "All frequencies" && r.item.frequencyLabel !== maintenanceFrequencyFilter) return false;
       if (maintenanceOwnerFilter !== "All owners" && r.item.owner !== maintenanceOwnerFilter) return false;
       if (!q) return true;
-      return [r.item.task, r.item.owner, r.asset.label, roomNameFor(r.asset.roomId, assets), r.asset.type]
+      return [r.item.task, r.item.owner, r.asset.label, roomNameOf(r.asset, assets), r.asset.type]
         .some(v => (v || "").toLowerCase().includes(q));
     });
     if (maintenanceSortConfig) {
@@ -1644,6 +2121,8 @@ function AssetTracker() {
         setAddError(`Asset ID "${conflict.label}" is already in use${what ? ` (${what})` : ""}. Asset IDs must be unique — pick a different one.`);
         return;
       }
+      const parentError = validateParentChoice(label, draft.type, draft.parentId, assets);
+      if (parentError) { setAddError(parentError); return; }
       setAddError("");
       const createdEntry = {
         at: new Date().toISOString(), by: currentUser || "", assetLabel: label,
@@ -1652,36 +2131,39 @@ function AssetTracker() {
       // `label` last, so the asset stores the trimmed value that was validated
       // above rather than the raw draft string.
       await persist(
-        [...assets, { comments: [], changes: [], allocations: [], ...draft, label }],
+        [...assets, { comments: [], changes: [], allocations: [], ...stripDraftUiState(draft), label }],
         { auditLog: logAudit([createdEntry]), nextAssetNumber: advanceAssetNumber(label) }
       );
       cancelAdd();
     } else {
       if (!draft.label?.trim() || !draft.type?.trim()) return;
       const original = selectedAsset;
+      const parentError = validateParentChoice(original.label, draft.type, draft.parentId, assets);
+      if (parentError) { setDraft({ ...draft, parentError }); return; }
       const editEntries = [];
-      // roomId/buildingId hold a stable label (id), not the display name — a
-      // Room/Building asset's own name field is edited like any other field
-      // (below), and every OTHER asset just holds that id, so renaming needs
-      // no cascade: nothing else has to change, and lookups pick up the new
-      // name automatically. Diff display still needs to resolve ids to names.
+      // parentId holds a stable label (id), not the display name — an asset's own
+      // name field is edited like any other field (below), and everything that
+      // points AT it just holds that id, so renaming needs no cascade: nothing
+      // else has to change, and lookups pick up the new name automatically. Diff
+      // display still needs to resolve the id to a name, and an empty one reads
+      // as "Unassigned" rather than a blank, so a move in or out of that state
+      // is legible in the history.
       Object.keys(draft).forEach(key => {
-        if (key === "comments" || key === "changes" || key === "allocations") return;
+        if (key === "comments" || key === "changes" || key === "allocations" || key === "parentError") return;
         const oldVal = original[key] || "";
         const newVal = draft[key] || "";
         if (oldVal === newVal) return;
-        const isRoomIdField = key === "roomId";
-        const isBuildingIdField = key === "buildingId";
-        const fieldLabel = isRoomIdField ? "Room" : isBuildingIdField ? "Building" : (columns.find(c => c.key === key)?.label || key);
-        const from = isRoomIdField ? roomNameFor(oldVal, assets) : isBuildingIdField ? buildingNameFor(oldVal, assets) : oldVal;
-        const to = isRoomIdField ? roomNameFor(newVal, assets) : isBuildingIdField ? buildingNameFor(newVal, assets) : newVal;
+        const isParentField = key === "parentId";
+        const fieldLabel = isParentField ? "Parent" : (columns.find(c => c.key === key)?.label || key);
+        const from = isParentField ? (parentNameFor(oldVal, assets) || UNASSIGNED_LABEL) : oldVal;
+        const to = isParentField ? (parentNameFor(newVal, assets) || UNASSIGNED_LABEL) : newVal;
         editEntries.push({
           at: new Date().toISOString(), by: currentUser || "", assetLabel: original.label,
           assetType: draft.type || original.type, action: "edited", field: fieldLabel, from, to,
         });
       });
 
-      const next = assets.map(a => (a.label === selectedLabel ? { ...a, ...draft } : a));
+      const next = assets.map(a => (a.label === selectedLabel ? { ...a, ...stripDraftUiState(draft) } : a));
       if (editNote.trim()) {
         editEntries.push({
           at: new Date().toISOString(), by: currentUser || "", assetLabel: original.label,
@@ -1694,33 +2176,32 @@ function AssetTracker() {
     }
   }
 
-  // Referential integrity for permanent delete — a Room/Building is
-  // referenced by id from other assets' roomId/buildingId, Bulk Item
-  // allocations, and Circuit.roomsServedIds, so deleting one out from under
-  // those would leave a dangling id. Client-side only, same as every other
-  // delete guard in this app (e.g. findBreakerTypeUsages).
+  // Referential integrity for permanent delete — deleting an asset that other
+  // records point at would leave a dangling id. Client-side only, same as every
+  // other delete guard in this app (e.g. findBreakerTypeUsages).
+  //
+  // The "is anything inside this?" half is no longer two type-specific checks
+  // (Rooms looked for roomId, Buildings for a Room's buildingId): with one
+  // parent field it's one question asked of every asset, so a closet inside a
+  // classroom, or any future kind of container, is covered without adding a
+  // branch. The allocation/circuit checks below stay Room-shaped because those
+  // references genuinely are to a Room specifically, not to a parent.
   function canDeleteAsset(asset) {
-    if (asset.type === "Room") {
-      const refs = [];
-      assets.forEach(a => {
-        if (a.label === asset.label) return;
-        if (a.roomId === asset.label) refs.push(a.label);
-        (a.allocations || []).forEach(al => { if (al.roomId === asset.label) refs.push(`${a.label} (allocation)`); });
-        (a.breakers || []).forEach(b => (b.circuits || []).forEach(c => {
-          if ((c.roomsServedIds || []).includes(asset.label)) refs.push(`${a.label} Slot ${slotsLabel_(b)} (circuit "${c.label}")`);
-        }));
-        // An unassigned circuit holds roomsServedIds exactly like an attached one,
-        // so it dangles the same way if the Room is deleted out from under it.
-        (a.unassignedCircuits || []).forEach(c => {
-          if ((c.roomsServedIds || []).includes(asset.label)) refs.push(`${a.label} (unassigned circuit "${c.label}")`);
-        });
+    const refs = [];
+    assets.forEach(a => {
+      if (a.label === asset.label) return;
+      if (a.parentId === asset.label) refs.push(a.label);
+      (a.allocations || []).forEach(al => { if (al.roomId === asset.label) refs.push(`${a.label} (allocation)`); });
+      (a.breakers || []).forEach(b => (b.circuits || []).forEach(c => {
+        if ((c.roomsServedIds || []).includes(asset.label)) refs.push(`${a.label} Slot ${slotsLabel_(b)} (circuit "${c.label}")`);
+      }));
+      // An unassigned circuit holds roomsServedIds exactly like an attached one,
+      // so it dangles the same way if the Room is deleted out from under it.
+      (a.unassignedCircuits || []).forEach(c => {
+        if ((c.roomsServedIds || []).includes(asset.label)) refs.push(`${a.label} (unassigned circuit "${c.label}")`);
       });
-      if (refs.length > 0) return `Still referenced by: ${refs.join(", ")}.`;
-    }
-    if (asset.type === "Building") {
-      const refs = assets.filter(a => a.type === "Room" && a.buildingId === asset.label).map(a => a.label);
-      if (refs.length > 0) return `Still referenced by: ${refs.join(", ")}.`;
-    }
+    });
+    if (refs.length > 0) return `Still referenced by: ${refs.join(", ")}.`;
     return null;
   }
 
@@ -1804,19 +2285,31 @@ function AssetTracker() {
 
   async function moveFilteredTo(newRoomId) {
     if (!newRoomId) return;
-    const targets = new Set(roomMovable.map(a => a.label));
+    // A Room may now sit inside another Room, so this bulk move can be handed a
+    // target that is somewhere below one of the assets it's moving — which would
+    // close a loop. Skipping those (rather than refusing the whole batch) keeps
+    // the action useful: everything that can legally move does.
+    const targets = new Set(
+      roomMovable.filter(a => a.label !== newRoomId && !wouldCreateCycle(a.label, newRoomId, assets)).map(a => a.label)
+    );
     const entries = [];
     const newRoomName = roomNameFor(newRoomId, assets);
     const next = assets.map(a => {
-      if (!targets.has(a.label) || a.roomId === newRoomId) return a;
+      if (!targets.has(a.label) || a.parentId === newRoomId) return a;
       entries.push({
         at: new Date().toISOString(), by: currentUser || "", assetLabel: a.label,
-        assetType: a.type, action: "edited", field: "Room", from: roomNameFor(a.roomId, assets) || "", to: newRoomName,
+        assetType: a.type, action: "edited", field: "Parent",
+        from: parentNameFor(a.parentId, assets) || UNASSIGNED_LABEL, to: newRoomName,
       });
-      return { ...a, roomId: newRoomId };
+      return { ...a, parentId: newRoomId };
     });
     await persist(next, { auditLog: entries.length ? logAudit(entries) : auditLog });
-    setRoomFilter(newRoomId);
+    // Follow the things that just moved, using whichever mechanism the user was
+    // actually narrowing with — re-pointing the scope when they navigated there,
+    // the column filter when they filtered. Setting the wrong one would leave
+    // them looking at the now-empty room they moved out of.
+    if (scopeId && bulkMoveSourceId === scopeId) setScopeId(newRoomId);
+    else setRoomFilter(newRoomId);
     setMoveTarget("");
   }
 
@@ -2634,17 +3127,23 @@ function AssetTracker() {
   }
 
   function exportToExcel() {
-    // Room/Building are stored as ids everywhere except on the Room/Building
-    // asset's own name field — resolve to a display name for export the same
-    // way the UI does, rather than dumping raw label ids into the sheet.
-    const displayRoom = a => (a.type === "Room" ? (a.room || "") : roomNameFor(a.roomId, assets));
-    const displayBuilding = a => (a.type === "Building" ? (a.building || "") : buildingNameFor(a.buildingId, assets));
+    // Room/Building/Parent are relationships, not stored text — resolve each to
+    // a display name for export the same way the UI does, rather than dumping
+    // raw label ids into the sheet. roomNameOf/buildingNameOf already handle the
+    // "is this asset itself a Room/Building?" case by answering with its own
+    // name, so the identity test that used to live here moved into them.
     const assetRows = assets.map(a => {
       const row = {};
       columns.forEach(c => {
+        // The export keeps Room and Building as their own resolved columns even
+        // though the list hides them by default — a spreadsheet is where you'd
+        // pivot or group by building, and a single Path string can't be grouped.
+        if (isComputedColumnFor(c.key, a.type)) {
+          row[c.label] = computedPlaceValue(c.key, a, assets);
+          return;
+        }
         if (!fieldAppliesTo(c.key, a.type)) { row[c.label] = ""; return; }
-        if (c.key === "room") { row[c.label] = displayRoom(a); return; }
-        if (c.key === "building") { row[c.label] = displayBuilding(a); return; }
+        if (c.key === "parent") { row[c.label] = pathOf(a, assets) || UNASSIGNED_LABEL; return; }
         row[c.label] = a[c.key] || "";
       });
       row["Comments logged"] = (a.comments || []).length;
@@ -3151,8 +3650,12 @@ function AssetTracker() {
   // Fields to render in a form for the given type: common fields always,
   // type-restricted fields (hostname, screenSize) only when they apply.
   // Status is excluded — it's changed only via the Archive/Restore actions.
+  // Room and Building are derived from the parent chain, so they're shown but
+  // never typed into — the Parent field is what you edit instead. Filtering them
+  // here (rather than at each of the two form render sites) is what stops the
+  // app offering two different ways to say where something is.
   function formColumnsFor(type) {
-    return columns.filter(c => fieldAppliesTo(c.key, type) && c.key !== "status");
+    return columns.filter(c => fieldAppliesTo(c.key, type) && c.key !== "status" && !isComputedColumnFor(c.key, type));
   }
 
   // ---------- DETAIL VIEW ----------
@@ -3168,11 +3671,30 @@ function AssetTracker() {
       .map((item, idx) => ({ item, idx, status: maintenanceStatusOf(item), due: nextMaintenanceDue(item) }))
       .sort((a, b) => (a.due ? a.due.getTime() : -Infinity) - (b.due ? b.due.getTime() : -Infinity));
     const overdueMaintenanceCount = maintenanceItems.filter(m => m.status === "overdue").length;
-    const titleText = selectedAsset.type === "Bulk Item" && selectedAsset.itemName
-      ? `${selectedAsset.itemName} (Bulk Item)`
+    // The header prints selectedAsset.label immediately to the left of this, so
+    // the name only earns a spot here when it's actually a name — nameOf() falls
+    // back to the label, and "BCA0082  BCA0082" helps nobody. Generalizing the
+    // Bulk Item parenthetical ("Folding Chair (Bulk Item)") to `name (type)` is
+    // what lets a Room finally read "Room 300 (Room)" instead of just "Room",
+    // which is all it showed before — the type name it shares with 20 others.
+    const detailName = nameOf(selectedAsset);
+    const titleText = detailName !== selectedAsset.label
+      ? `${detailName} (${selectedAsset.type})`
       : selectedAsset.screenSize ? `${selectedAsset.type} · ${selectedAsset.screenSize}` : selectedAsset.type;
-    const visibleDetailColumns = columns.filter(c => fieldAppliesTo(c.key, selectedAsset.type));
-    const inheritedBuilding = !fieldAppliesTo("building", selectedAsset.type) ? inferBuilding(selectedAsset, assets) : "";
+    // Room and Building are computed columns now, so they're shown for every
+    // type that actually has one in its chain rather than being gated by
+    // fieldAppliesTo — a Condenser has a Building but no Room, and an Unassigned
+    // laptop has neither, and both fall out of the value being empty.
+    // The computed Room/Building columns are left OUT of the detail view
+    // entirely — the Path field says where this asset is, in full, and repeating
+    // the same answer twice more in shortened form is noise. The `room` column
+    // on a Room (and `building` on a Building) is NOT computed — it's that
+    // asset's own name — and isComputedColumnFor is exactly that distinction, so
+    // it still shows and is still editable.
+    const visibleDetailColumns = columns.filter(c => (
+      !isComputedColumnFor(c.key, selectedAsset.type) && fieldAppliesTo(c.key, selectedAsset.type)
+    ));
+    const parentProblem = parentageProblem(selectedAsset, assets);
     const detailGroups = groupDetailColumns(visibleDetailColumns);
     // "label" is excluded here (but not from addFormColumns) — it's the one
     // field the whole app treats as a stable, unique identifier elsewhere
@@ -3183,30 +3705,26 @@ function AssetTracker() {
     // references it yet.
     const editFormColumns = formColumnsFor(draft.type).filter(c => c.key !== "label");
 
-    // Contents of a Room: devices located there + bulk-item allocations to it.
-    // Contents of a Building: its linked Rooms, the devices in those Rooms, and
-    // anything that attaches to the Building directly instead of through a Room.
-    // Which assets *are* Rooms/Buildings is an identity question, so those tests
-    // still compare type names; which assets *live in* a place is a linkage
-    // question, so those go through linkageOf.
-    const isPlace = selectedAsset.type === "Room" || selectedAsset.type === "Building";
+    // What's inside this place, at any depth. This used to be two hand-written
+    // cases — a Room matched devices by roomId, a Building gathered its Rooms and
+    // then the devices in them, plus a special case for the one type (Condenser)
+    // that attached to a Building directly. One parent chain collapses all of
+    // that into "everything below me", which also means a device inside a closet
+    // inside a classroom shows up under the classroom, matching what the Room
+    // filter on the list now does.
+    // Which assets *are* Rooms is an identity question, so that test still
+    // compares the type name; Rooms are split out only so they list separately.
+    const isPlace = isPlaceType(selectedAsset.type);
     let contentDevices = [], contentRooms = [], contentAllocations = [];
-    if (selectedAsset.type === "Room") {
-      contentDevices = assets.filter(a => linkageOf(a.type) === "room" && a.roomId === selectedAsset.label);
+    if (isPlace) {
+      const below = descendantsOf(selectedAsset, assets);
+      contentRooms = below.filter(a => a.type === "Room");
+      contentDevices = below.filter(a => a.type !== "Room");
+      // A bulk allocation names a Room directly and is not a parent link, so it
+      // stays an exact match on this asset rather than anything below it.
       contentAllocations = assets
         .filter(a => a.type === "Bulk Item")
         .flatMap(b => (b.allocations || []).filter(al => al.roomId === selectedAsset.label).map(al => ({ bulk: b, quantity: al.quantity })));
-    } else if (selectedAsset.type === "Building") {
-      contentRooms = assets.filter(a => a.type === "Room" && a.buildingId === selectedAsset.label);
-      const roomIds = new Set(contentRooms.map(r => r.label));
-      // A Condenser (linkage "building") has a buildingId and no roomId at all,
-      // so matching only on roomId left it out of its own Building's Contents.
-      // Room is the one other building-linked type, and it's excluded here
-      // because it's already listed separately above as contentRooms.
-      contentDevices = assets.filter(a => (
-        linkageOf(a.type) === "room" ? roomIds.has(a.roomId)
-        : linkageOf(a.type) === "building" && a.type !== "Room" && a.buildingId === selectedAsset.label
-      ));
     }
     const contentsCount = contentDevices.length + contentRooms.length + contentAllocations.length;
 
@@ -3267,6 +3785,22 @@ function AssetTracker() {
         </div>
 
         <div style={{ padding: "18px 20px 60px", maxWidth: 720, margin: "0 auto" }}>
+          {/* Storage is permissive on purpose (see CLAUDE.md), so parentage the
+              app itself would have refused can still arrive from a hand-edited
+              sheet, a bulk script, or an asset deleted out from under this one.
+              Flagging it here is the other half of that decision — the app has
+              to tolerate bad parentage without breaking AND make it visible,
+              because the failure is otherwise silent: the Building column just
+              quietly reads "—" and nothing says why. */}
+          {detailTab === "details" && parentProblem && (
+            <div style={{ border: `1.5px solid ${C.danger}`, borderRadius: 10, background: "#FBF0EE", padding: "12px 14px", marginBottom: 16, display: "flex", gap: 10, alignItems: "flex-start" }}>
+              <AlertTriangle size={16} style={{ color: C.danger, flexShrink: 0, marginTop: 1 }} />
+              <div style={{ fontSize: 13, color: C.ink }}>
+                <b style={{ color: C.danger }}>This asset's parent doesn't make sense.</b>{" "}
+                {parentProblem} Edit it and pick a different parent, or set it to {UNASSIGNED_LABEL}.
+              </div>
+            </div>
+          )}
           {detailTab === "details" && (!detailEditing ? (
             <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 18, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)", marginBottom: 20 }}>
               {detailGroups.map((group, gi) => (
@@ -3280,20 +3814,17 @@ function AssetTracker() {
                         key={c.key}
                         label={c.label}
                         value={
-                          // Room/Building here are id references to resolve, EXCEPT on a
-                          // type whose own display name lives in that field (a Room's
-                          // `room`, a Building's `building`) — which is exactly the
-                          // types whose linkage isn't "room"/"building" respectively.
-                          c.key === "room" && linkageOf(selectedAsset.type) === "room" ? roomNameFor(selectedAsset.roomId, assets)
-                          : c.key === "building" && linkageOf(selectedAsset.type) === "building" ? buildingNameFor(selectedAsset.buildingId, assets)
+                          // Path reads out the whole chain above this asset; an
+                          // empty one is a real state ("Unassigned"), not a blank.
+                          // Any `room`/`building` reaching here is that asset's
+                          // own name (the computed ones were filtered out above),
+                          // so it falls through to the plain stored value.
+                          c.key === "parent" ? (pathOf(selectedAsset, assets) || UNASSIGNED_LABEL)
                           : selectedAsset[c.key]
                         }
-                        wide={c.key === "notes"}
+                        wide={c.key === "notes" || c.key === "parent"}
                       />
                     ))}
-                    {group.title === "Location & Assignment" && inheritedBuilding && (
-                      <Detail label="Building (via Room)" value={inheritedBuilding} italic />
-                    )}
                   </div>
                 </div>
               ))}
@@ -3301,7 +3832,13 @@ function AssetTracker() {
                 <button onClick={startEditSelected} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: C.brand, color: "#fff", border: "none", fontWeight: 600, fontSize: 14, borderRadius: 10 }}>
                   <Pencil size={15} /> Edit
                 </button>
-                {selectedAsset.type !== "Room" && selectedAsset.type !== "Building" && (
+                {/* Places aren't duplicated — copying a Room would produce a
+                    second room with the same name and none of its contents, which
+                    is never what's wanted. This asked for "not Room and not
+                    Building" by name until Campus arrived and silently got a
+                    Duplicate button the other two don't have; isPlaceType covers
+                    every level, including the next one. */}
+                {!isPlaceType(selectedAsset.type) && (
                   <button
                     onClick={() => duplicateAsset(selectedAsset)}
                     disabled={isSaving}
@@ -3342,10 +3879,16 @@ function AssetTracker() {
                 {editFormColumns.map(c => (
                   c.key === "type" ? (
                     <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v })} typeOptions={typesList} onManage={() => setShowTypesManager(true)} />
-                  ) : c.key === "room" && linkageOf(draft.type) === "room" ? (
-                    <RoomField key={c.key} value={draft.roomId || ""} onChange={v => setDraft({ ...draft, roomId: v })} rooms={roomAssets} />
-                  ) : c.key === "building" && linkageOf(draft.type) === "building" ? (
-                    <BuildingField key={c.key} value={draft.buildingId || ""} onChange={v => setDraft({ ...draft, buildingId: v })} buildings={buildingAssets} />
+                  ) : c.key === "parent" ? (
+                    <ParentField
+                      key={c.key}
+                      value={draft.parentId || ""}
+                      onChange={v => setDraft({ ...draft, parentId: v, parentError: "" })}
+                      childType={draft.type}
+                      childLabel={selectedAsset.label}
+                      assets={assets}
+                      error={draft.parentError}
+                    />
                   ) : c.key === "person" ? (
                     <UserField
                       key={c.key}
@@ -3483,7 +4026,7 @@ function AssetTracker() {
                       <button key={d.label} onClick={() => openDetail(d)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
                         <DIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
                         <span style={{ fontSize: 14, color: C.ink, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {d.type}{d.brand ? ` · ${d.brand}` : ""}{selectedAsset.type === "Building" && d.roomId ? ` · ${roomNameFor(d.roomId, assets)}` : ""}
+                          {d.type}{d.brand ? ` · ${d.brand}` : ""}{selectedAsset.type === "Building" && roomNameOf(d, assets) ? ` · ${roomNameOf(d, assets)}` : ""}
                         </span>
                         <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.accent }}>{d.label}</span>
                         <ChevronRight size={14} style={{ color: C.placeholder }} />
@@ -3500,7 +4043,7 @@ function AssetTracker() {
                     return (
                       <button key={bulk.label} onClick={() => openDetail(bulk)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
                         <BIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
-                        <span style={{ fontSize: 14, color: C.ink, flex: 1 }}>{bulk.itemName || "Bulk Item"}</span>
+                        <span style={{ fontSize: 14, color: C.ink, flex: 1 }}>{nameOf(bulk) !== bulk.label ? nameOf(bulk) : bulk.type}</span>
                         <span style={{ fontWeight: 600, color: C.brandDark }}>× {quantity}</span>
                         <ChevronRight size={14} style={{ color: C.placeholder }} />
                       </button>
@@ -3527,7 +4070,7 @@ function AssetTracker() {
                       const existing = (selectedAsset.allocations || []).find(a => a.roomId === v);
                       setAllocationDraft({ roomId: v, quantity: existing ? String(existing.quantity) : "", error: "" });
                     }}
-                    rooms={roomAssets}
+                    assets={assets}
                   />
                   <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Quantity</span>
@@ -3587,7 +4130,6 @@ function AssetTracker() {
               setShowBreakerTypesManager={setShowBreakerTypesManager}
               addBreaker={addBreaker}
               isSaving={isSaving}
-              roomAssets={roomAssets}
               addCircuit={addCircuit}
               saveCircuitEdit={saveCircuitEdit}
               deleteCircuit={deleteCircuit}
@@ -4036,7 +4578,7 @@ function AssetTracker() {
           const memberIds = members.map(m => m.id);
           const breakerType = breakerTypes.find(t => t.id === anchor.breakerTypeId);
           const groupSlotLabel = [...new Set(members.flatMap(m => slotsFromCells(m.cells)))].sort((a, b) => parseFloat(a) - parseFloat(b)).join("/") || "—";
-          const otherPanelLabels = assets.filter(a => a.type === "Electrical Panel" && a.label !== selectedAsset.label).map(a => a.label);
+          const otherPanels = assets.filter(a => a.type === "Electrical Panel" && a.label !== selectedAsset.label);
           const labelStyle = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent };
           const inputStyle = { padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink };
           const closeModal = () => setBreakerModal(null);
@@ -4062,7 +4604,7 @@ function AssetTracker() {
           function renderCircuitTargetFields(values, setValues) {
             // Body lives in the top-level CircuitTargetFields component — the panel's
             // unassigned-circuit list needs the identical control, outside this modal.
-            return <CircuitTargetFields values={values} setValues={setValues} roomAssets={roomAssets} otherPanelLabels={otherPanelLabels} />;
+            return <CircuitTargetFields values={values} setValues={setValues} assets={assets} otherPanels={otherPanels} />;
           }
           return (
             <div onClick={closeModal} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
@@ -4687,6 +5229,8 @@ function AssetTracker() {
       <div style={{ padding: "18px 20px 80px", maxWidth: 1300, margin: "0 auto" }}>
         {mainTab === "assets" && (
         <>
+        <HierarchyNav assets={assets} scopeId={scopeId} setScopeId={setScopeId} />
+
         {/* Add form */}
         {showAdd && (
           <div style={{ border: `1px solid ${C.border}`, background: C.surface, padding: 20, marginBottom: 18, borderRadius: 10, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)" }}>
@@ -4698,10 +5242,16 @@ function AssetTracker() {
               {addFormColumns.map(c => (
                 c.key === "type" ? (
                   <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v })} typeOptions={typesList} onManage={() => setShowTypesManager(true)} />
-                ) : c.key === "room" && linkageOf(draft.type) === "room" ? (
-                  <RoomField key={c.key} value={draft.roomId || ""} onChange={v => setDraft({ ...draft, roomId: v })} rooms={roomAssets} />
-                ) : c.key === "building" && linkageOf(draft.type) === "building" ? (
-                  <BuildingField key={c.key} value={draft.buildingId || ""} onChange={v => setDraft({ ...draft, buildingId: v })} buildings={buildingAssets} />
+                ) : c.key === "parent" ? (
+                  <ParentField
+                    key={c.key}
+                    value={draft.parentId || ""}
+                    onChange={v => setDraft({ ...draft, parentId: v, parentError: "" })}
+                    childType={draft.type}
+                    childLabel={draft.label}
+                    assets={assets}
+                    error={draft.parentError}
+                  />
                 ) : c.key === "person" ? (
                   <UserField
                     key={c.key}
@@ -4781,19 +5331,18 @@ function AssetTracker() {
           </div>
         )}
 
-        {roomFilter && roomMovable.length > 0 && (
+        {bulkMoveSourceId && roomMovable.length > 0 && (
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", border: `1.5px solid ${C.brand}`, borderRadius: 10, background: C.surface, padding: "10px 14px", marginBottom: 10, fontSize: 13 }}>
-            <span style={{ color: C.muted }}>Move {roomMovable.length} filtered device(s) from <b style={{ color: C.brandDark }}>{roomNameFor(roomFilter, assets)}</b> to:</span>
-            <div style={{ flex: "1 1 140px", maxWidth: 220 }}>
-              <PickerField
-                label="Move to room"
+            <span style={{ color: C.muted }}>Move {roomMovable.length} filtered device(s) from <b style={{ color: C.brandDark }}>{roomNameFor(bulkMoveSourceId, assets)}</b> to:</span>
+            <div style={{ flex: "1 1 180px", maxWidth: 260 }}>
+              {/* Excludes the room being moved OUT of — moving things to where
+                  they already are is the one destination that can't be meant. */}
+              <RoomField
                 hideLabel
                 value={moveTarget}
                 onChange={setMoveTarget}
-                options={["", ...roomAssets.filter(r => r.label !== roomFilter).map(r => r.label)]}
-                placeholder="Select a room…"
-                labelForOption={id => (id ? roomNameFor(id, assets) : "Select a room…")}
-                title="Select a room"
+                assets={assets}
+                excludeId={bulkMoveSourceId}
               />
             </div>
             <button
@@ -4842,14 +5391,28 @@ function AssetTracker() {
                   const isTypeCol = c.key === "type";
                   const Icon = isTypeCol ? iconFor(a.type) : null;
                   const applies = fieldAppliesTo(c.key, a.type);
-                  // A Room's `room` / a Building's `building` is that asset's own
-                  // display name, not an id to resolve — so only resolve when the
-                  // type actually links that way (see linkageOf).
-                  const linkage = linkageOf(a.type);
-                  const isRoomCol = c.key === "room" && applies && linkage === "room";
-                  const isBuildingCol = c.key === "building" && applies && linkage === "building";
-                  const isInferredBuilding = c.key === "building" && !applies;
-                  const inferredValue = isInferredBuilding ? inferBuilding(a, assets) : "";
+                  // Room and Building are read out of the parent chain: an asset
+                  // that IS one answers with its own name, anything else with the
+                  // nearest one above it. Italic marks the inherited case, which
+                  // is now every asset that isn't itself that kind of place —
+                  // previously only the Building column could be inherited, since
+                  // a Room was always stored directly on the asset.
+                  const isPlaceCol = isComputedColumn(c.key);
+                  const isParentCol = c.key === "parent";
+                  const computedValue = isPlaceCol ? computedPlaceValue(c.key, a, assets) : "";
+                  // Italic marks a value read off an ANCESTOR rather than set on
+                  // this asset. isComputedColumnFor is false exactly when the
+                  // column IS this type's own name field (a Room's `room`), so it
+                  // already draws that line — no per-column type test needed.
+                  const isInherited = isPlaceCol && isComputedColumnFor(c.key, a.type);
+                  // The asset's name ONLY when it genuinely has one. nameOf()
+                  // falls back to the label, which is right nearly everywhere but
+                  // wrong in the Type column below — an Asset ID is neither a name
+                  // nor a Type. Empty covers both "this type has no nameField" and
+                  // "it has one but it's still blank" (a Room created without a
+                  // name, a Bulk Item before its sub-type is picked — the
+                  // bulkItemTypes list starts out empty, so that one is routine).
+                  const realName = nameOf(a) !== a.label ? nameOf(a) : "";
                   return (
                     <div
                       key={c.key}
@@ -4858,8 +5421,8 @@ function AssetTracker() {
                         fontSize: c.key === "label" ? 12 : 13,
                         fontFamily: c.key === "label" ? "'IBM Plex Mono', monospace" : undefined,
                         fontWeight: c.key === "label" ? 600 : isTypeCol ? 500 : 400,
-                        fontStyle: isInferredBuilding && inferredValue ? "italic" : "normal",
-                        color: c.key === "label" ? C.accent : (applies || (isInferredBuilding && inferredValue)) ? C.muted : C.border,
+                        fontStyle: isInherited && computedValue ? "italic" : "normal",
+                        color: c.key === "label" ? C.accent : (applies || computedValue) ? C.muted : C.border,
                         overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                         display: "flex", alignItems: "center", gap: 8,
                         position: i === 0 ? "sticky" : "static",
@@ -4867,26 +5430,35 @@ function AssetTracker() {
                         background: i === 0 ? C.surface : "transparent",
                         zIndex: i === 0 ? 2 : "auto",
                       }}
-                      title={isInferredBuilding && inferredValue ? "Inherited via this asset's Room" : undefined}
+                      title={isInherited && computedValue ? `Inherited from ${parentNameFor(a.parentId, assets)}` : undefined}
                     >
                       {Icon && <Icon size={15} style={{ flexShrink: 0, color: C.brand }} />}
                       {isTypeCol && a.type === "Bulk Item" ? (
                         <>
-                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.itemName || "Bulk Item"}</span>
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{realName || a.type}</span>
                           <span style={{ flexShrink: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, fontWeight: 700, letterSpacing: 0.5, color: C.accent, border: `1px solid ${C.accent}`, borderRadius: 3, padding: "1px 4px" }}>
                             BULK
                           </span>
                         </>
-                      ) : isTypeCol && a.type === "Building" ? (
-                        a.building || "Building"
-                      ) : isTypeCol && a.type === "Room" ? (
-                        a.room || "Room"
-                      ) : isRoomCol ? (
-                        roomNameFor(a.roomId, assets) || "—"
-                      ) : isBuildingCol ? (
-                        buildingNameFor(a.buildingId, assets) || "—"
+                      ) : isTypeCol && realName ? (
+                        // A named type (Room, Building) shows what it's called
+                        // rather than the literal word "Room"/"Building". Gated on
+                        // realName, not merely on the type HAVING a nameField, so a
+                        // type whose name hasn't been filled in yet falls through to
+                        // the plain type string below exactly like a nameless type
+                        // does — testing the registry alone would print the label
+                        // nameOf() fell back to, and "BCR0002" is not a Type.
+                        realName
+                      ) : isPlaceCol ? (
+                        computedValue || "—"
+                      ) : isParentCol ? (
+                        // "Unassigned" only where a parent is a thing this type
+                        // could have — a Building or a Bulk Item takes none, and
+                        // labelling those "Unassigned" would read as a gap to fill
+                        // rather than their normal, correct state.
+                        applies ? (pathOf(a, assets) || UNASSIGNED_LABEL) : ""
                       ) : (
-                        applies ? (a[c.key] || "—") : isInferredBuilding ? (inferredValue || "") : ""
+                        applies ? (a[c.key] || "—") : ""
                       )}
                     </div>
                   );
@@ -5116,58 +5688,426 @@ function TypeField({ value, onChange, typeOptions, onManage }) {
 // `value` is a Room asset's stable `label` (id), not its display name — same
 // reasoning as roomNameFor/buildingNameFor: storing the id instead of the
 // mutable name means renaming a Room needs no cascade elsewhere.
-function RoomField({ value, onChange, rooms }) {
+// Picks a Room specifically — NOT a parent. Used by the Bulk Item Allocations
+// tab (which spreads a quantity across named Rooms — a distribution, explicitly
+// not parent/child, see CLAUDE.md) and by the list toolbar's bulk move-to-room.
+// Both browse the hierarchy through the same HierarchyBrowserModal as everything
+// else; only the selectable rule differs, and here it's simply "is it a Room".
+// The old BuildingField had no non-parent caller and is gone entirely.
+//
+// `label`/`ariaLabel` are parameterized because the toolbar's copy of this field
+// sits inline in a sentence ("Move 4 devices from X to:") where a stacked
+// "ROOM" caption would read as a second heading.
+function RoomField({ value, onChange, assets, label = "Room", hideLabel, excludeId }) {
   const [open, setOpen] = useState(false);
+  const all = assets || [];
+  const rooms = all.filter(a => a.type === "Room" && a.label !== excludeId);
   const placeholder = rooms.length ? "Select a room…" : "No Room assets yet";
-  const nameForId = id => {
-    if (!id) return placeholder;
-    const room = rooms.find(r => r.label === id);
-    return room ? room.room : "(deleted room)";
-  };
-  const ids = rooms.map(r => r.label);
-  const options = !value || ids.includes(value) ? ids : [value, ...ids];
-  const withClear = ["", ...options];
+  // Shows the full path, not the bare room name — two buildings can each have a
+  // "Kitchen", and the browser's breadcrumb is gone once the modal closes.
+  const chosen = value ? all.find(a => a.label === value) : null;
+  const triggerText = !value ? "" : !chosen ? "(deleted room)"
+    : [...ancestorsOf(chosen, all).reverse().map(p => nameOf(p)), nameOf(chosen)].join(PATH_SEPARATOR);
+  const excluded = useMemo(() => (excludeId ? new Set([excludeId]) : undefined), [excludeId]);
+
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Room</span>
-      <PickerTrigger value={value ? nameForId(value) : ""} placeholder={placeholder} onClick={() => setOpen(true)} ariaLabel="Select room" />
+      {!hideLabel && (
+        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>{label}</span>
+      )}
+      <PickerTrigger value={triggerText} placeholder={placeholder} onClick={() => setOpen(true)} ariaLabel="Select room" />
       {open && (
-        <SelectionModal
+        <HierarchyBrowserModal
           title="Select room"
-          options={withClear}
+          hint="Choose a Room"
+          assets={all}
+          isSelectable={a => a.type === "Room"}
+          excluded={excluded}
           value={value || ""}
           onChange={onChange}
           onClose={() => setOpen(false)}
-          labelForOption={nameForId}
         />
       )}
     </label>
   );
 }
 
-function BuildingField({ value, onChange, buildings }) {
-  const [open, setOpen] = useState(false);
-  const placeholder = buildings.length ? "Select a building…" : "No Building assets yet";
-  const nameForId = id => {
-    if (!id) return placeholder;
-    const building = buildings.find(b => b.label === id);
-    return building ? building.building : "(deleted building)";
+// The hierarchy navigator that sits above the asset list — drill into a campus,
+// then a building, then a room, and the list below narrows to everything inside
+// wherever you are. Inline rather than a modal, because it's not answering a
+// question and closing; it's the view you work in.
+//
+// Deliberately NOT built on HierarchyBrowserModal despite the obvious overlap:
+// that component picks ONE thing (or several) out of a tree and hands the answer
+// back, and to do it it hides places you can't pick and rows that lead nowhere.
+// Here every place is enterable — a building with no assets is still somewhere
+// you'd navigate to, to confirm it's empty — and there's no "selectable" notion
+// at all. Forcing one component to be both would have meant a predicate that
+// says "everything" plus disabling the modal's own hiding rules, which is more
+// configuration than the fifteen lines of shared tree-walking are worth.
+function HierarchyNav({ assets, scopeId, setScopeId }) {
+  const all = assets || [];
+  const scope = scopeId ? all.find(a => a.label === scopeId) : null;
+  // A scope whose asset has vanished (deleted in another tab) falls back to the
+  // top rather than showing an empty list with no way out.
+  const effectiveScope = scope ? scopeId : "";
+
+  // Only places are navigable. A dangling parent counts as a root, matching the
+  // browser modal, so an orphaned room stays reachable.
+  const parentKeyOf = a => {
+    const pid = a.parentId;
+    if (!pid) return null;
+    return all.some(x => x.label === pid) ? pid : null;
   };
-  const ids = buildings.map(b => b.label);
-  const options = !value || ids.includes(value) ? ids : [value, ...ids];
-  const withClear = ["", ...options];
+  const childPlaces = all
+    .filter(a => isPlaceType(a.type) && parentKeyOf(a) === (effectiveScope || null))
+    .sort((x, y) => nameOf(x).localeCompare(nameOf(y), undefined, { numeric: true, sensitivity: "base" }));
+
+  const trail = scope ? [...ancestorsOf(scope, all).reverse(), scope] : [];
+
+  const crumb = (label, id, isLast) => (
+    <React.Fragment key={id || "__root__"}>
+      {id !== undefined && <ChevronRight size={13} style={{ color: C.placeholder, flexShrink: 0 }} />}
+      <button
+        type="button"
+        onClick={() => setScopeId(id ?? "")}
+        disabled={isLast}
+        style={{
+          background: "none", border: "none", padding: "2px 4px", fontSize: 13,
+          color: isLast ? C.ink : C.brand, fontWeight: isLast ? 700 : 500, whiteSpace: "nowrap",
+        }}
+      >
+        {label}
+      </button>
+    </React.Fragment>
+  );
+
+  return (
+    <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", marginBottom: 12, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)" }}>
+      <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 1 }}>
+        {crumb("All assets", null, trail.length === 0)}
+        {trail.map((a, i) => crumb(nameOf(a), a.label, i === trail.length - 1))}
+      </div>
+      {childPlaces.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 9 }}>
+          {childPlaces.map(p => {
+            const Icon = iconFor(p.type);
+            return (
+              <button
+                key={p.label}
+                type="button"
+                onClick={() => setScopeId(p.label)}
+                style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 11px", borderRadius: 14, fontSize: 13, fontWeight: 500, border: `1.5px solid ${C.border}`, background: "transparent", color: C.ink }}
+              >
+                <Icon size={13} style={{ color: C.brand, flexShrink: 0 }} />
+                {nameOf(p)}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// A DRILL-DOWN browser over the asset hierarchy — the shared picker behind
+// every "which place?" question in the app. You start at the top (the
+// Buildings), open one, and see only what's inside it.
+//
+// It began life inside the parent picker as a flat list of every valid
+// candidate, each labelled with its own chain to disambiguate ("Kitchen —
+// Building 100" vs "Kitchen (Upstairs) — Residence"). That works at four rooms
+// and falls apart at forty: every room in the school in one alphabetical list,
+// with the path doing the work that navigation should be doing. Browsing also
+// matches how someone actually thinks about it — you know which building before
+// you know which room. It was generalized out of ParentField once the same
+// complaint applied to the circuit "serves rooms" chips, the bulk-item
+// allocation picker and the bulk move-to-room toolbar; four flat lists of every
+// room was three too many.
+//
+// The wrinkle that shapes the whole component: **the things you navigate THROUGH
+// are usually not things you may pick.** Choosing a Room, a Building is never a
+// valid answer, but it's the only route to the Rooms. So a row has up to two
+// independent affordances — choose it, and/or open it — and a row that is
+// neither selectable nor contains anything selectable is hidden entirely, so you
+// can never walk into a dead end.
+//
+// Callers supply the rule rather than the list:
+//   isSelectable(asset) — may this be chosen? (a type test, usually)
+//   excluded            — labels to hide from the tree outright (optional)
+//   multi               — true to pick several; the modal then stays open,
+//                         shows the running selection as removable chips, and
+//                         commits on Done. Single-select commits on click.
+//   noneLabel           — text for the "choose nothing" row, or omitted to have
+//                         no such row. Not defaulted to "Unassigned": that word
+//                         is right for a parent (a real, meaningful state) and
+//                         nonsense when you're assigning chairs to a room, where
+//                         the honest answer is that there's nothing to offer.
+function HierarchyBrowserModal({
+  title, hint, assets, isSelectable, excluded, multi, value, onChange, onClose, noneLabel,
+}) {
+  const all = assets || [];
+  const blocked = excluded || new Set();
+
+  // Multi keeps its own working copy so the caller only hears about the change
+  // once, on Done — a circuit's rooms are saved as one edit, and firing per
+  // toggle would make an eight-room circuit eight audit entries.
+  const [picked, setPicked] = useState(() => (multi ? [...(value || [])] : []));
+  const selectedIds = multi ? picked : (value ? [value] : []);
+  const isPicked = label => selectedIds.includes(label);
+
+  // An asset whose parent doesn't exist (deleted, or a bad hand edit) is treated
+  // as a root, so it stays reachable here instead of being stranded — otherwise
+  // the one orphaned room you need to pick would be invisible in the browser
+  // while the old flat list would have shown it.
+  const parentKeyOf = a => {
+    const pid = a.parentId;
+    if (!pid) return null;
+    return all.some(x => x.label === pid) ? pid : null;
+  };
+  const childrenOf = key => all
+    .filter(a => !blocked.has(a.label) && parentKeyOf(a) === key)
+    .sort((x, y) => nameOf(x).localeCompare(nameOf(y), undefined, { numeric: true, sensitivity: "base" }));
+
+  const canPick = a => isSelectable(a) && !blocked.has(a.label);
+  // Does anything inside this lead somewhere pickable? Drives whether the row is
+  // shown at all, and whether it gets an "open" chevron. The visited set guards
+  // the same loop case every other walk in this file does.
+  const hasSelectableInside = (a, seen = new Set()) => {
+    if (seen.has(a.label)) return false;
+    seen.add(a.label);
+    return childrenOf(a.label).some(c => canPick(c) || hasSelectableInside(c, seen));
+  };
+
+  // Open where the current selection lives, so an existing choice is on screen
+  // and ticked rather than making the user re-navigate to see what's set. With
+  // several selected, the first one wins — there's no level that shows them all.
+  const initialLevel = () => {
+    const first = selectedIds[0];
+    const current = first ? all.find(a => a.label === first) : null;
+    return current ? parentKeyOf(current) : null;
+  };
+  const [levelId, setLevelId] = useState(initialLevel);
+
+  const levelAsset = levelId ? all.find(a => a.label === levelId) : null;
+  // Guard against a levelId that no longer resolves (the asset was deleted in
+  // another tab while this was open) by falling back to the top.
+  const effectiveLevelId = levelAsset ? levelId : null;
+  const trail = levelAsset ? [...ancestorsOf(levelAsset, all).reverse(), levelAsset] : [];
+  const rows = childrenOf(effectiveLevelId).filter(a => canPick(a) || hasSelectableInside(a));
+
+  const toggle = a => {
+    if (multi) {
+      setPicked(p => (p.includes(a.label) ? p.filter(x => x !== a.label) : [...p, a.label]));
+    } else {
+      onChange(a.label);
+      onClose();
+    }
+  };
+
+  const crumb = (label, id, isLast) => (
+    <React.Fragment key={id || "__root__"}>
+      {id !== undefined && <ChevronRight size={12} style={{ color: C.placeholder, flexShrink: 0 }} />}
+      <button
+        type="button"
+        onClick={() => setLevelId(id ?? null)}
+        disabled={isLast}
+        style={{
+          background: "none", border: "none", padding: "2px 3px", fontSize: 12,
+          color: isLast ? C.ink : C.brand, fontWeight: isLast ? 700 : 500, whiteSpace: "nowrap",
+        }}
+      >
+        {label}
+      </button>
+    </React.Fragment>
+  );
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 40, padding: 16 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 380, maxHeight: "72vh", display: "flex", flexDirection: "column" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>{title}</div>
+          <button onClick={onClose} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+        </div>
+
+        {/* Says what you're looking for, which matters most at the top level,
+            where (choosing a Room) nothing on screen is pickable yet and the
+            list is all buildings. */}
+        <div style={{ fontSize: 12, color: C.empty, marginBottom: 8 }}>{hint}</div>
+
+        {/* Multi-select only: what's picked so far, as removable chips. Without
+            this you can't see your own selection — it's spread across levels and
+            only one level is on screen at a time, which the old flat chip wall
+            at least got right. Each chip removes itself, so undoing a pick never
+            means navigating back to where you made it. */}
+        {multi && picked.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 8 }}>
+            {picked.map(id => {
+              const a = all.find(x => x.label === id);
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setPicked(p => p.filter(x => x !== id))}
+                  aria-label={`Remove ${a ? nameOf(a) : id}`}
+                  style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 8px", borderRadius: 14, fontSize: 12, fontWeight: 600, border: `1.5px solid ${C.brand}`, background: C.brand, color: "#fff" }}
+                >
+                  {a ? nameOf(a) : "(deleted)"}
+                  <X size={12} />
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 1, marginBottom: 8, paddingBottom: 8, borderBottom: `1px solid ${C.border}` }}>
+          {crumb("All", null, trail.length === 0)}
+          {trail.map((a, i) => crumb(nameOf(a), a.label, i === trail.length - 1))}
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 2, overflowY: "auto" }}>
+          {/* The "none" row belongs to the top level only — it's the absence of a
+              choice, not something that lives inside Building 100. Single-select
+              only: in multi-select, picking nothing is just an empty chip row. */}
+          {!multi && !effectiveLevelId && noneLabel && (
+            <button
+              onClick={() => { onChange(""); onClose(); }}
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "space-between", padding: "9px 10px",
+                background: !value ? C.hover : "transparent", border: "none", borderRadius: 10,
+                fontSize: 14, textAlign: "left", color: C.empty, fontWeight: !value ? 600 : 400,
+              }}
+            >
+              {noneLabel}
+              {!value && <Check size={15} color={C.brand} />}
+            </button>
+          )}
+
+          {rows.length === 0 && (
+            <div style={{ fontSize: 13, color: C.empty, padding: "8px 2px" }}>
+              {effectiveLevelId ? "Nothing inside this you can choose." : "Nothing to choose from yet."}
+            </div>
+          )}
+
+          {rows.map(a => {
+            const selectable = canPick(a);
+            const openable = hasSelectableInside(a);
+            const isCurrent = isPicked(a.label);
+            const Icon = iconFor(a.type);
+            return (
+              <div key={a.label} style={{ display: "flex", alignItems: "stretch", gap: 2 }}>
+                <button
+                  // A row you can't choose still opens on its body — otherwise
+                  // the only way into a Building (when choosing a Room) would be
+                  // the small chevron, and the obvious click would do nothing.
+                  onClick={() => { if (selectable) toggle(a); else setLevelId(a.label); }}
+                  style={{
+                    flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 8, padding: "9px 10px",
+                    background: isCurrent ? C.hover : "transparent", border: "none", borderRadius: 10,
+                    fontSize: 14, textAlign: "left", color: selectable ? C.ink : C.muted, fontWeight: isCurrent ? 600 : 400,
+                  }}
+                >
+                  <Icon size={15} style={{ flexShrink: 0, color: C.brand }} />
+                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{nameOf(a)}</span>
+                  {isCurrent && <Check size={15} color={C.brand} style={{ flexShrink: 0 }} />}
+                </button>
+                {openable && (
+                  <button
+                    onClick={() => setLevelId(a.label)}
+                    className="icon-btn"
+                    aria-label={`Open ${nameOf(a)}`}
+                    style={{ background: "none", border: "none", padding: "0 8px", borderRadius: 10, color: C.muted, display: "flex", alignItems: "center", flexShrink: 0 }}
+                  >
+                    <ChevronRight size={16} />
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Multi-select commits here rather than per click, so a several-room
+            change lands as one edit. Single-select has no footer — a click IS
+            the commit. */}
+        {multi && (
+          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 12, paddingTop: 12, borderTop: `1px solid ${C.border}` }}>
+            <button onClick={onClose} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
+              Cancel
+            </button>
+            <button
+              onClick={() => { onChange(picked); onClose(); }}
+              style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+            >
+              Done{picked.length ? ` (${picked.length})` : ""}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// The one field that says where an asset sits — it replaced the placement role
+// of RoomField and the whole of BuildingField, which existed only because the
+// two fixed roomId/buildingId columns did. Which types may be chosen comes from
+// the registry (parentTypesFor), so a Computer gets Rooms, a Condenser gets
+// Buildings, and a Room gets both Buildings and other Rooms, with no list here
+// to keep in step. The picking itself happens in HierarchyBrowserModal above.
+function ParentField({ value, onChange, childType, childLabel, assets, error }) {
+  const [open, setOpen] = useState(false);
+  const allowedTypes = parentTypesFor(childType);
+  const anyCandidate = (assets || []).some(a => allowedTypes.includes(a.type) && a.label !== childLabel);
+
+  // The asset itself and everything below it, hidden from the tree outright
+  // rather than offered and then refused on save. Nothing below this asset can
+  // be a legal parent (that's the cycle rule), so there's nothing to navigate to
+  // down there either. saveDraft still validates; see validateParentChoice.
+  // This is the one caller that needs `excluded` — a plain room picker has no
+  // equivalent notion of "would loop".
+  const excluded = useMemo(() => {
+    const s = new Set();
+    if (!childLabel) return s;
+    s.add(childLabel);
+    const self = (assets || []).find(a => a.label === childLabel);
+    if (self) descendantsOf(self, assets).forEach(d => s.add(d.label));
+    return s;
+  }, [childLabel, assets]);
+
+  // An empty parent reads as the state it IS ("Unassigned"), not as a prompt to
+  // fill something in — it's a legitimate resting place for a spare in a drawer
+  // or something not yet installed, so "Select a room…" would misdescribe it.
+  // The "nothing to pick yet" case still says so, since that one really is a gap.
+  const typeWords = allowedTypes.join(" or ").toLowerCase();
+  const placeholder = anyCandidate ? UNASSIGNED_LABEL : `${UNASSIGNED_LABEL} — no ${typeWords} assets exist yet`;
+  // The trigger shows the full path, not just the parent's name — two rooms can
+  // share a name in different buildings, and the browser's breadcrumb is gone
+  // once the modal closes. A dangling id resolves to "(deleted asset)" rather
+  // than "" — blank is indistinguishable from Unassigned, a different state.
+  const chosen = value ? (assets || []).find(a => a.label === value) : null;
+  const triggerText = !value ? "" : !chosen ? "(deleted asset)"
+    : [...ancestorsOf(chosen, assets).reverse().map(p => nameOf(p)), nameOf(chosen)].join(PATH_SEPARATOR);
+
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Building</span>
-      <PickerTrigger value={value ? nameForId(value) : ""} placeholder={placeholder} onClick={() => setOpen(true)} ariaLabel="Select building" />
+      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Parent</span>
+      <PickerTrigger
+        value={triggerText}
+        placeholder={placeholder}
+        onClick={() => setOpen(true)}
+        ariaLabel="Select parent"
+      />
+      {error && <span style={{ fontSize: 12, color: C.danger }}>{error}</span>}
       {open && (
-        <SelectionModal
-          title="Select building"
-          options={withClear}
+        <HierarchyBrowserModal
+          title="Select parent"
+          hint={`Choose a ${allowedTypes.join(" or ")}`}
+          assets={assets}
+          isSelectable={a => allowedTypes.includes(a.type)}
+          excluded={excluded}
+          noneLabel={UNASSIGNED_LABEL}
           value={value || ""}
           onChange={onChange}
           onClose={() => setOpen(false)}
-          labelForOption={nameForId}
         />
       )}
     </label>
@@ -5576,7 +6516,7 @@ function BreakersTabContent({
   selectedAsset, assets, breakerTypes, showPanelConfig, setShowPanelConfig,
   updatePanelConfig, openBreakerModal, addBreakerDraft, setAddBreakerDraft,
   setShowBreakerTypesManager, addBreaker, isSaving,
-  roomAssets, addCircuit, saveCircuitEdit, deleteCircuit, openMoveCircuit,
+  addCircuit, saveCircuitEdit, deleteCircuit, openMoveCircuit,
 }) {
   const feed = assets
     .filter(a => a.type === "Electrical Panel")
@@ -5590,7 +6530,7 @@ function BreakersTabContent({
   const selectedType = addBreakerDraft ? breakerTypes.find(t => t.id === addBreakerDraft.breakerTypeId) : null;
   const closeAddBreakerForm = () => setAddBreakerDraft(null);
   const unassignedCircuits = selectedAsset.unassignedCircuits || [];
-  const otherPanelLabels = assets.filter(a => a.type === "Electrical Panel" && a.label !== selectedAsset.label).map(a => a.label);
+  const otherPanels = assets.filter(a => a.type === "Electrical Panel" && a.label !== selectedAsset.label);
 
   return (
     <>
@@ -5614,8 +6554,10 @@ function BreakersTabContent({
           slotCount={slotCount}
           layout={selectedAsset.panelLayout || "two-column"}
           breakers={selectedAsset.breakers || []}
+          unassignedCircuits={unassignedCircuits}
           allAssets={assets}
           breakerTypes={breakerTypes}
+          panelAsset={selectedAsset}
           panelLabel={selectedAsset.label}
           onReconfigure={() => setShowPanelConfig(true)}
           onSlotClick={id => {
@@ -5662,7 +6604,7 @@ function BreakersTabContent({
           addLabel="Add Circuit"
           emptyMessage="No unassigned circuits on this panel."
           renderCustomFields={(values, setValues) => (
-            <CircuitTargetFields values={values} setValues={setValues} roomAssets={roomAssets} otherPanelLabels={otherPanelLabels} />
+            <CircuitTargetFields values={values} setValues={setValues} assets={assets} otherPanels={otherPanels} />
           )}
           deleteConfirmMessage={circuit => `Delete circuit "${circuit.label}"?`}
           renderSummary={circuit => circuitSummary(circuit, assets)}
@@ -5842,9 +6784,277 @@ function fallbackCopyToClipboard(text, onCopied) {
   document.body.removeChild(ta);
 }
 
-function PanelDiagram({ slotCount, layout, breakers, allAssets, breakerTypes, panelLabel, onReconfigure, onSlotClick, onSpareClick }) {
+// ── Printed panel directory card ─────────────────────────────────────────────
+// A physical artifact, NOT a printout of the on-screen Table view: it ignores
+// Table mode's room filter and sort entirely and always prints every slot,
+// every breaker and every circuit — including the panel's `unassignedCircuits`,
+// which sit on no slot at all and would otherwise vanish from the one document
+// that's meant to be the complete record taped inside the panel door.
+//
+// Sized against the real panel rather than against paper. A standard breaker
+// slot is 1" tall and a two-column panel stacks two slots per inch of panel
+// height, so a panel's breaker area is slotCount/2 inches; listing slots
+// sequentially 1→N inside that same height works out to a uniform 0.5" per slot
+// row, with a 1" blank band top and bottom for trimming and tape.
+//
+// That row height is a MINIMUM, not a clamp: a slot carrying several circuits,
+// or one long note, grows its row instead of clipping it. "Include every
+// breaker and circuit" is the stated requirement, and it beats matching the
+// panel's height to the millimetre when the two conflict.
+const LEGEND_ROW_IN = 0.5;     // one slot row — see the slotCount/2 reasoning above
+const LEGEND_BAND_IN = 1;      // blank trim/tape band above and below
+const LEGEND_WIDTH_IN = 7.5;   // letter portrait minus 0.5" side margins
+const LEGEND_SIDE_PAD_IN = 0.5;
+
+// What a circuit feeds, in the terse form a door card needs: room names, or the
+// downstream panel for a sub-panel feed — with that panel's room appended,
+// since a bare asset id means nothing to whoever's standing at the panel.
+function legendServes(circuit, allAssets) {
+  if (circuit.feedsPanelLabel) {
+    const target = allAssets.find(a => a.label === circuit.feedsPanelLabel);
+    const room = target ? roomNameOf(target, allAssets) : "";
+    return `Feeds → ${circuit.feedsPanelLabel}${room ? ` (${room})` : ""}`;
+  }
+  return (circuit.roomsServedIds || []).map(id => roomNameFor(id, allAssets)).filter(Boolean).join(", ");
+}
+
+function PanelLegendCard({ slotCount, breakers, unassignedCircuits, allAssets, panelAsset, mode, pageHeightIn }) {
+  const tiled = mode === "tiled";
+  // The panel's own height is the FLOOR, not the answer. Rows grow past their
+  // 0.5" minimum whenever a slot carries several circuits or a long note, and
+  // the unassigned-circuit section adds height no slot count predicts — so a
+  // page sized from slotCount alone spills a few inches onto a second sheet.
+  // pageHeightIn is that card measured for real just before printing (see
+  // runPrint in PanelDiagram); it falls back to the computed floor if the
+  // measurement couldn't run.
+  const cardHeightIn = slotCount * LEGEND_ROW_IN + LEGEND_BAND_IN * 2;
+  const pageHeight = Math.max(cardHeightIn, pageHeightIn || 0);
+
+  // Which breakers touch each slot. Both directions are many: a slot can hold
+  // more than one breaker (a tandem is two breakers sharing slot 1, as 1a and
+  // 1b) and one breaker can touch more than one slot (a double-pole on 1 + 3).
+  const bySlot = new Map();
+  breakers.forEach(b => slotsFromCells(b.cells).forEach(s => {
+    const n = parseInt(s, 10);
+    if (!n) return;
+    if (!bySlot.has(n)) bySlot.set(n, []);
+    bySlot.get(n).push(b);
+  }));
+  const anchorSlot = b => Math.min(...slotsFromCells(b.cells).map(Number));
+
+  // One "line" per circuit rather than per slot, so the Serves and Notes columns
+  // stay aligned when a breaker carries several circuits. Each slot's lines then
+  // split that slot's 0.5" between them, keeping the physical scale intact.
+  //
+  // A breaker spanning non-adjacent slots (1 and 3) can't be a rowSpan in a
+  // sequential 1→N list — slot 2 sits between them — so it prints in full on its
+  // lowest slot and leaves a pointer on the others, the way a paper directory
+  // brackets a 240V pair.
+  const slots = [];
+  for (let s = 1; s <= slotCount; s++) {
+    const here = [...(bySlot.get(s) || [])].sort((a, b) =>
+      String((a.cells || []).slice().sort()[0] || "").localeCompare(
+        String((b.cells || []).slice().sort()[0] || ""), undefined, { numeric: true }));
+    const lines = [];
+    here.forEach(b => {
+      const span = cellsLabel_(b);
+      const badge = span !== String(s) ? span : "";
+      if (anchorSlot(b) !== s) { lines.push({ kind: "cont", badge, span }); return; }
+      const circuits = b.circuits || [];
+      if (circuits.length === 0) { lines.push({ kind: "empty", badge }); return; }
+      circuits.forEach(c => lines.push({ kind: "circuit", badge, serves: legendServes(c, allAssets), notes: c.notes || "" }));
+    });
+    if (lines.length === 0) lines.push({ kind: "spare" });
+    slots.push({ slot: s, lines });
+  }
+
+  const rule = "0.5pt solid #999";
+  const cellBase = { border: rule, padding: "2pt 4pt", verticalAlign: "top" };
+  const slotCell = { ...cellBase, fontFamily: "'IBM Plex Mono', monospace", fontSize: "9pt", fontWeight: 700, textAlign: "center", verticalAlign: "middle" };
+  const servesCell = { ...cellBase, fontSize: "8.5pt", fontWeight: 600, color: "#000" };
+  const notesCell = { ...cellBase, fontSize: "7.5pt", color: "#333", whiteSpace: "pre-line", lineHeight: 1.25 };
+  const headCell = { border: rule, background: "#E4E4E4", padding: "3pt 4pt", fontSize: "7pt", fontWeight: 700, letterSpacing: "0.5pt", textTransform: "uppercase", textAlign: "left" };
+  const badgeStyle = { fontFamily: "'IBM Plex Mono', monospace", fontSize: "6.5pt", fontWeight: 700, color: "#555", border: "0.5pt solid #999", borderRadius: "2pt", padding: "0 2pt", marginRight: "3pt" };
+
+  const room = roomNameOf(panelAsset, allAssets);
+  const building = buildingNameOf(panelAsset, allAssets);
+  const place = [room, building].filter(Boolean).join(" · ");
+
+  // The dynamic half of the print CSS. In exact mode the page IS the card, so
+  // @page carries the computed physical size and zero margin and the card
+  // supplies its own 1" bands. In tiled mode the page is plain letter and its
+  // margin does that job, so the bands collapse.
+  const css = `
+    .panel-legend { display: none; }
+    /* Deliberately OUTSIDE @media print: the measuring pass below lays this out
+       on screen, and it has to be the identical layout or the height it reports
+       is not the height that prints. Harmless on screen — the card is
+       display:none unless printing or measuring. */
+    .panel-legend { font-family: 'IBM Plex Sans', sans-serif; color: #000; background: #fff; }
+    .panel-legend table { border-collapse: collapse; width: 100%; table-layout: fixed; }
+    .panel-legend thead { display: table-header-group; }
+    .panel-legend tr { break-inside: avoid; page-break-inside: avoid; }
+    .panel-legend.measuring {
+      display: block; position: absolute; left: -10000px; top: 0;
+      width: ${LEGEND_WIDTH_IN}in;
+    }
+    @media print {
+      ${tiled ? "@page { size: letter portrait; margin: 0.5in; }" : `@page { size: ${LEGEND_WIDTH_IN}in ${pageHeight.toFixed(2)}in; margin: 0; }`}
+      /* The card is portalled to <body>, a sibling of #root rather than a
+         descendant, so print is a straight swap of which one displays. The
+         alternative — leaving it in the tree and hiding the app around it —
+         needs the card absolutely positioned to avoid inheriting the hidden-
+         but-still-laid-out app's offset, and that silently breaks the day
+         anyone wraps the panel view in a position:relative container. */
+      #root { display: none !important; }
+      .panel-legend { display: block; width: 100%; }
+      .panel-legend th, .panel-legend td { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+    }
+  `;
+
+  return createPortal(
+    <div className="panel-legend" aria-hidden="true">
+      <style>{css}</style>
+      <div style={{ minHeight: tiled ? 0 : `${cardHeightIn}in`, padding: tiled ? 0 : `0 ${LEGEND_SIDE_PAD_IN}in`, display: "flex", flexDirection: "column" }}>
+        <div style={{ height: tiled ? "auto" : `${LEGEND_BAND_IN}in`, display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: "8pt", paddingBottom: "4pt", marginBottom: "4pt", borderBottom: "1.5pt solid #000" }}>
+          <div>
+            <div style={{ fontSize: "13pt", fontWeight: 700, lineHeight: 1.1 }}>{panelAsset.label} — Circuit Directory</div>
+            <div style={{ fontSize: "8pt", color: "#333", marginTop: "2pt" }}>
+              {place ? `${place} · ` : ""}{slotCount} slots
+            </div>
+          </div>
+          <div style={{ fontSize: "7.5pt", color: "#333", whiteSpace: "nowrap" }}>Printed {new Date().toLocaleDateString()}</div>
+        </div>
+
+        <table>
+          <colgroup>
+            <col style={{ width: "0.5in" }} />
+            <col style={{ width: "2.1in" }} />
+            <col />
+          </colgroup>
+          <thead>
+            <tr>
+              <th style={{ ...headCell, textAlign: "center" }}>Slot</th>
+              <th style={headCell}>Serves</th>
+              <th style={headCell}>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {slots.map(({ slot, lines }) => lines.map((ln, i) => (
+              <tr key={`${slot}-${i}`} style={{ height: `${LEGEND_ROW_IN / lines.length}in` }}>
+                {i === 0 && <td rowSpan={lines.length} style={slotCell}>{slot}</td>}
+                {ln.kind === "spare" ? (
+                  /* Left deliberately blank — a spare slot is where an
+                     electrician hand-writes a newly added circuit at the panel. */
+                  <td colSpan={2} style={cellBase} />
+                ) : ln.kind === "cont" ? (
+                  <td colSpan={2} style={{ ...cellBase, fontSize: "7.5pt", color: "#555", fontStyle: "italic" }}>
+                    ↑ same breaker as slot {ln.span}
+                  </td>
+                ) : ln.kind === "empty" ? (
+                  <td colSpan={2} style={{ ...cellBase, fontSize: "7.5pt", color: "#777" }}>
+                    {ln.badge && <span style={badgeStyle}>{ln.badge}</span>}
+                    breaker installed — no circuits recorded
+                  </td>
+                ) : (
+                  <>
+                    <td style={servesCell}>
+                      {ln.badge && <span style={badgeStyle}>{ln.badge}</span>}
+                      {ln.serves || "—"}
+                    </td>
+                    <td style={notesCell}>{ln.notes}</td>
+                  </>
+                )}
+              </tr>
+            )))}
+          </tbody>
+        </table>
+
+        {unassignedCircuits.length > 0 && (
+          <div style={{ marginTop: "10pt" }}>
+            <div style={{ fontSize: "8pt", fontWeight: 700, letterSpacing: "0.5pt", textTransform: "uppercase", marginBottom: "3pt" }}>
+              Unassigned circuits — not landed on a breaker
+            </div>
+            <table>
+              <colgroup>
+                <col style={{ width: "2.6in" }} />
+                <col />
+              </colgroup>
+              <tbody>
+                {unassignedCircuits.map(c => (
+                  <tr key={c.id}>
+                    <td style={servesCell}>{legendServes(c, allAssets) || c.label || "—"}</td>
+                    <td style={notesCell}>{c.notes || ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {tiled && (
+          <div style={{ fontSize: "7pt", color: "#555", marginTop: "8pt" }}>
+            Cut along the table edge and tape the pages end-to-end in slot order.
+          </div>
+        )}
+        <div style={{ height: tiled ? 0 : `${LEGEND_BAND_IN}in`, flexShrink: 0 }} />
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAssets, breakerTypes, panelAsset, panelLabel, onReconfigure, onSlotClick, onSpareClick }) {
   const [infoMode, setInfoMode] = useState("breaker"); // "breaker" | "feeds" | "table"
   const [linkCopied, setLinkCopied] = useState(false);
+  // Printing the door card. `printMode` picks the page geometry (see
+  // PanelLegendCard); `printRequest` is a counter rather than a boolean so
+  // printing the same mode twice in a row still fires the effect. The deferral
+  // is what lets the swapped-in @page rule reach the stylesheet before
+  // window.print() reads it — calling print() straight from the click handler
+  // runs against the previous render. It's a timer and NOT requestAnimationFrame:
+  // rAF doesn't fire while the page isn't compositing, so a user who clicked and
+  // immediately switched tabs would get no print dialog at all until they came
+  // back. A timer fires either way.
+  const [printMenuOpen, setPrintMenuOpen] = useState(false);
+  const [printMode, setPrintMode] = useState("exact"); // "exact" | "tiled"
+  const [printPageHeightIn, setPrintPageHeightIn] = useState(null);
+  const [printRequest, setPrintRequest] = useState(0);
+  useEffect(() => {
+    if (!printRequest) return;
+    const t = setTimeout(() => window.print(), 0);
+    return () => clearTimeout(t);
+  }, [printRequest]);
+  // Exact mode sizes the page to the card, so it needs the card's real height —
+  // which a display:none element doesn't have. The .measuring class lays it out
+  // off-screen at the final print width for one synchronous read (CSS inches are
+  // 96px by definition, so the conversion is exact), then it goes back to hidden
+  // before the browser ever paints a frame with it visible.
+  //
+  // Called when the menu OPENS, not just on print, so the menu can quote the
+  // size that will actually come out. Quoting the slotCount floor instead would
+  // understate it by inches on any panel with long notes — and the number's
+  // whole job is to tell you whether the card fits the door.
+  function measureCard() {
+    const el = document.querySelector(".panel-legend");
+    if (!el) return;
+    el.classList.add("measuring");
+    const h = el.getBoundingClientRect().height / 96;
+    el.classList.remove("measuring");
+    setPrintPageHeightIn(h);
+  }
+  function togglePrintMenu() {
+    setPrintMenuOpen(open => {
+      if (!open) measureCard();
+      return !open;
+    });
+  }
+  function runPrint(mode) {
+    setPrintMenuOpen(false);
+    measureCard();
+    setPrintMode(mode);
+    setPrintRequest(n => n + 1);
+  }
   // Table mode's own sort/filter state — same ColumnHeaderCell/ColumnFilterModal
   // pattern the Assets/Maintenance tables use (see CLAUDE.md), just local to this
   // component instead of living on AssetTracker, since a panel's breaker table is
@@ -5865,6 +7075,16 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, breakerTypes, pa
     } else {
       fallbackCopyToClipboard(url, onCopied);
     }
+  }
+  // Opens the bulk QR label tool with just this panel preselected, so a single
+  // replacement sticker doesn't mean printing the whole set. Deliberately a
+  // hand-off rather than a QR rendered inline: drawing one here would mean
+  // pulling a QR encoder into index.html — another CDN module on an already
+  // heavy page — for a button most sessions never press. panel-qr-sheet.html
+  // already has the encoder, the print layout, and the label sizing.
+  function openPanelQrSheet() {
+    const base = `${window.location.origin}${window.location.pathname}`.replace(/[^/]*$/, "");
+    window.open(`${base}panel-qr-sheet.html?only=${encodeURIComponent(panelLabel)}`, "_blank", "noopener");
   }
   const columns = layout === "single-column" ? 1 : 2;
   const rowOf = n => (columns === 1 ? n : Math.ceil(n / 2));
@@ -5994,6 +7214,37 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, breakerTypes, pa
             {linkCopied ? <Check size={14} /> : <Copy size={14} />}
             {linkCopied && <span style={{ fontSize: 11, fontWeight: 600 }}>Copied!</span>}
           </button>
+          <button onClick={openPanelQrSheet} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex", alignItems: "center", color: C.muted }} aria-label="Print a QR sticker for this panel">
+            <QrCode size={14} />
+          </button>
+          {/* Prints the door card, which is built from the panel's own data —
+              so this sits outside the Breaker/Feeds/Table toggle and is offered
+              in all three modes, not just Table. The two entries are page
+              geometry, not content: both print the identical card. */}
+          <div style={{ position: "relative", display: "flex" }}>
+            <button onClick={togglePrintMenu} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex", alignItems: "center", color: C.muted }} aria-label="Print circuit directory">
+              <Printer size={14} />
+            </button>
+            {printMenuOpen && (
+              <>
+                <div onClick={() => setPrintMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
+                <div style={{ position: "absolute", top: "100%", left: 0, marginTop: 4, zIndex: 41, background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 10, boxShadow: "0 4px 12px rgba(42,52,57,0.15)", minWidth: 240, overflow: "hidden" }}>
+                  {[
+                    ["exact", "Print at panel size", `${LEGEND_WIDTH_IN}" × ${Math.max(slotCount * LEGEND_ROW_IN + LEGEND_BAND_IN * 2, printPageHeightIn || 0).toFixed(1)}" — one page, true scale. Save as PDF.`],
+                    ["tiled", "Tile across letter pages", "Cut and tape end-to-end. For printing at home."],
+                  ].map(([mode, title, hint]) => (
+                    <button
+                      key={mode} type="button" onClick={() => runPrint(mode)}
+                      style={{ display: "block", width: "100%", textAlign: "left", padding: "9px 12px", background: "none", border: "none", borderTop: mode === "tiled" ? `1px solid ${C.border}` : "none" }}
+                    >
+                      <div style={{ fontSize: 13, fontWeight: 600, color: C.ink }}>{title}</div>
+                      <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{hint}</div>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
         </div>
         <div style={{ display: "flex", border: `1.5px solid ${C.border}`, borderRadius: 8, overflow: "hidden" }}>
           {[["breaker", "Breaker"], ["feeds", "Feeds"], ["table", "Table"]].map(([val, label]) => (
@@ -6201,6 +7452,18 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, breakerTypes, pa
         })}
       </div>
       )}
+      {/* Always mounted, never visible on screen (.panel-legend is display:none
+          until @media print). Rendering it only on demand would mean printing a
+          card the browser hasn't laid out yet. */}
+      <PanelLegendCard
+        slotCount={slotCount}
+        breakers={breakers}
+        unassignedCircuits={unassignedCircuits || []}
+        allAssets={allAssets}
+        panelAsset={panelAsset}
+        mode={printMode}
+        pageHeightIn={printPageHeightIn}
+      />
     </div>
   );
 }
@@ -6212,7 +7475,73 @@ function PanelDiagram({ slotCount, layout, breakers, allAssets, breakerTypes, pa
 // circuits under a breaker, and the panel's unassigned-circuit list. Same rule in
 // both — a circuit serves rooms OR feeds a downstream sub-panel, never both —
 // enforced for real in validateCircuitDraft; this just makes the choice visible.
-function CircuitTargetFields({ values, setValues, roomAssets, otherPanelLabels }) {
+// The rooms a circuit serves — several, so this is the multi-select face of
+// HierarchyBrowserModal. It replaced a flat wrap of one chip per Room in the
+// school: fine at four rooms, a wall at forty, and with no building shown two
+// rooms both called "Kitchen" were indistinguishable.
+//
+// The chips stay, but as a summary of what's CHOSEN rather than the whole
+// catalogue — they're the answer to "what does this circuit serve", which is the
+// thing you want visible while filling the form in. Tapping one removes it, so
+// the common correction never needs the browser at all. Each chip carries its
+// building when there is one, since that's the ambiguity that started this.
+function RoomsServedField({ value, onChange, assets }) {
+  const [open, setOpen] = useState(false);
+  const all = assets || [];
+  const selected = value || [];
+  const anyRooms = all.some(a => a.type === "Room");
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      {selected.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {selected.map(id => {
+            const room = all.find(a => a.label === id);
+            const where = room ? buildingNameOf(room, all) : "";
+            return (
+              <button
+                key={id}
+                type="button"
+                onClick={() => onChange(selected.filter(x => x !== id))}
+                aria-label={`Remove ${room ? nameOf(room) : id}`}
+                style={{ display: "flex", alignItems: "center", gap: 5, padding: "6px 10px", borderRadius: 14, fontSize: 13, fontWeight: 600, border: `1.5px solid ${C.brand}`, background: C.brand, color: "#fff" }}
+              >
+                {room ? nameOf(room) : "(deleted room)"}
+                {where && <span style={{ fontWeight: 400, opacity: 0.85 }}>· {where}</span>}
+                <X size={13} />
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {!anyRooms ? (
+        <div style={{ fontSize: 13, color: C.empty }}>No Room assets yet.</div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          style={{ alignSelf: "flex-start", display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", borderRadius: 10, fontSize: 13, fontWeight: 600, border: `1.5px dashed ${C.border}`, background: "transparent", color: C.brandDark }}
+        >
+          <Plus size={14} /> {selected.length ? "Add or change rooms" : "Choose rooms"}
+        </button>
+      )}
+      {open && (
+        <HierarchyBrowserModal
+          title="Select rooms"
+          hint="Choose one or more Rooms"
+          assets={all}
+          isSelectable={a => a.type === "Room"}
+          multi
+          value={selected}
+          onChange={onChange}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function CircuitTargetFields({ values, setValues, assets, otherPanels }) {
   const labelStyle = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent };
   const mode = values.feedsPanelLabel ? "subpanel" : (values._mode || "rooms");
   const roomsSelected = values.roomsServedIds || [];
@@ -6236,26 +7565,12 @@ function CircuitTargetFields({ values, setValues, roomAssets, otherPanelLabels }
         </button>
       </div>
       {mode === "rooms" ? (
-        roomAssets.length === 0 ? (
-          <div style={{ fontSize: 13, color: C.empty }}>No Room assets yet.</div>
-        ) : (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {roomAssets.map(room => {
-              const active = roomsSelected.includes(room.label);
-              return (
-                <button
-                  key={room.label}
-                  type="button"
-                  onClick={() => setValues({ ...values, roomsServedIds: active ? roomsSelected.filter(r => r !== room.label) : [...roomsSelected, room.label] })}
-                  style={{ padding: "6px 12px", borderRadius: 14, fontSize: 13, fontWeight: active ? 600 : 500, border: `1.5px solid ${active ? C.brand : C.border}`, background: active ? C.brand : "#fff", color: active ? "#fff" : C.ink }}
-                >
-                  {room.room}
-                </button>
-              );
-            })}
-          </div>
-        )
-      ) : otherPanelLabels.length === 0 ? (
+        <RoomsServedField
+          value={roomsSelected}
+          onChange={ids => setValues({ ...values, roomsServedIds: ids })}
+          assets={assets}
+        />
+      ) : otherPanels.length === 0 ? (
         <div style={{ fontSize: 13, color: C.empty }}>No other Electrical Panel assets yet.</div>
       ) : (
         <PickerField
@@ -6263,9 +7578,19 @@ function CircuitTargetFields({ values, setValues, roomAssets, otherPanelLabels }
           hideLabel
           value={values.feedsPanelLabel || ""}
           onChange={v => setValues({ ...values, feedsPanelLabel: v })}
-          options={["", ...otherPanelLabels]}
+          options={["", ...otherPanels.map(p => p.label)]}
           placeholder="Select a panel…"
-          labelForOption={p => p || "Select a panel…"}
+          // A panel has no name of its own, so its Asset ID IS its identity —
+          // but an ID alone ("BCA0083") is unidentifiable when you're standing in
+          // front of four panels, so the location it's in is appended. This was a
+          // bare list of ids before.
+          labelForOption={id => {
+            if (!id) return "Select a panel…";
+            const p = otherPanels.find(x => x.label === id);
+            if (!p) return id;
+            const where = pathOf(p, assets);
+            return where ? `${p.label} — ${where}` : p.label;
+          }}
           title="Select a panel"
         />
       )}

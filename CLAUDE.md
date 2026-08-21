@@ -249,27 +249,58 @@ scattering of `asset.type === "Room"`-style tests at render sites — adding a s
 new type meant editing all of them with nothing to catch a miss. Each entry may declare:
 - `locked` — can't be removed in the type manager (`isLockedType()`): Room, Building, Bulk
   Item, Electrical Panel, which have deep structural dependencies elsewhere (field rules,
-  Contents/Allocations/Breakers tabs, `inferBuilding()`) a plain managed-list removal breaks.
+  Contents/Allocations/Breakers tabs, the parent chain) a plain managed-list removal breaks.
 - `icon` — the lucide icon (`iconFor()`, default `HelpCircle`).
 - `excludedFields` — column keys this type doesn't get at all.
 - `onlyFields` — column keys belonging to this type. Any key named in *any* entry's
   `onlyFields` becomes restricted app-wide (`RESTRICTED_FIELDS`, derived from the registry,
   not declared separately): no type that doesn't name it gets it.
-- `linkage` — `"room"` (has a `roomId`; building inferred transitively through that Room) /
-  `"building"` (has its own `buildingId`; must also name `building` in `onlyFields`) /
-  `"allocations"` (a pooled quantity spread across rooms) / `"none"` (a Building, top of the
-  place tree — its `building` field is its own display name, not a link). **`linkageOf(type)`
+- `nameField` — which field holds this type's human-readable **name**, when it isn't the
+  label: Room → `room`, Building → `building`, Bulk Item → `itemName` (its sub-type,
+  "Folding Chair"). Read it via **`nameOf(asset)`**, never inline — it returns that field's
+  value if non-empty and otherwise falls back to the asset's `label` (its Asset ID), which
+  is also what an ordinary device and any unregistered user-added type get, since neither
+  has a name of its own. This exists because that per-type ladder was previously hand-written inline at
+  **four** sites and had already drifted: the Maintenance overview's row name fell back to
+  the literal strings `"Bulk Item"`/`"Building"`/`"Room"`, `exportToExcel`'s
+  `displayRoom`/`displayBuilding` fell back to `""`, the list view's Type column fell back to
+  the literal type word, and the detail-view header had no ladder at all — so opening a Room
+  showed the word "Room" rather than which room it was. A fifth, partial instance (the Contents
+  tab's bulk-allocation rows, `bulk.itemName || "Bulk Item"`) was folded in at the same time:
+  it only ever handled the one type it could encounter, but it was the same question asked
+  outside the registry, which is exactly how the other copies drifted. All five now go through
+  `nameOf()`, converged on the label fallback, and a future named type is one registry key
+  instead of a hunt through render sites. **No code outside the registry should know which
+  field names a given type** — if you find yourself writing `.itemName ||` or `.room ||`, that's
+  the ladder growing back.
+- `parentTypes` — which types an asset of this type may sit **inside**, as an array of type
+  names; `[]` means it takes no parent. This replaced the old `linkage` enum
+  (`"room"`/`"building"`/`"allocations"`/`"none"`) when the fixed `roomId`/`buildingId` pair
+  collapsed into one `parentId` — `linkage` existed only to describe those two fields, so
+  keeping it would have left a second source of truth about the same question. **The registry
   is the only thing render sites should branch on** — never a hardcoded type-name comparison.
+  See "The parent chain" below for the full story.
 
 Types added at runtime via the gear-icon manager are deliberately NOT in the registry: every
-lookup falls back to a generic room-linked device (no icon, no field rules, `DEFAULT_LINKAGE`),
-which is exactly how they behaved before the registry existed. Note that "which assets *are*
-Rooms" queries (`roomNameFor()`, the Contents tab's `isPlace`/`contentRooms`, the Duplicate
-button's place check) legitimately still compare type names — those are identity questions,
-not linkage. "Which assets *live in* a place" is a linkage question and goes through
-`linkageOf()`: the Contents tab's `contentDevices` and the toolbar's `roomMovable` (bulk
-"Move filtered to room") both used to test `type !== "Room" && !== "Building" && !== "Bulk
-Item"` instead, which silently mishandled Condenser — see the Condenser section above.
+lookup falls back to a generic room-dwelling device (no icon, no field rules,
+`DEFAULT_PARENT_TYPES`), which is exactly how they behaved before the registry existed. Note
+that "which assets *are* Rooms" queries (`roomNameFor()`, the Contents tab's
+`isPlace`/`contentRooms`, the Duplicate button's place check, and `roomNameOf`/`buildingNameOf`'s
+"is this asset itself one?" test) legitimately still compare type names — those are identity
+questions. "What may contain what" is a capability question and goes through the registry:
+the toolbar's `roomMovable` (bulk "Move filtered to room") asks `canBeParentOf("Room", a.type)`,
+which correctly began including Rooms themselves once a Room could nest inside another. The
+Contents tab no longer asks the question at all — it walks the chain downwards
+(`descendantsOf()`), which is how the old Condenser special case disappeared.
+
+`roomMovable` also excludes **the filtered room itself**, and that exclusion is load-bearing
+rather than tidy-mindedness: the Room filter now matches the room *and* everything under it
+(that's what lets it find things nested deeper), and a Room is itself Room-movable, so without
+the exclusion every use of "move the devices in this room" quietly moved the room into the
+destination too — restructuring the building instead of relocating equipment. Nested rooms
+below it stay movable, which is the coherent reading of "everything in this room moves". The
+bug was introduced by making the filter chain-aware (it was harmless when the filter only ever
+matched a direct `roomId`) and was caught in browser testing, not by reading the diff.
 
 `fieldAppliesTo()` reads the registry — e.g. Room and Building assets don't have brand/model/serial; Bulk Items
 (chairs, tables — not individually tagged) get a `totalQuantity` and an `itemName` instead, and
@@ -277,6 +308,23 @@ are distributed across rooms via their own `allocations` array rather than a sin
 `itemName` ("Sub-Type" in the UI) is picked from its own managed list (`bulkItemTypes`) rather
 than freeform text, so it stays consistent — and the list view's Type column shows a Bulk Item's
 sub-type plus a small "BULK" badge instead of the literal "Bulk Item" for every row.
+
+That Type column generalizes via `nameField`: any type that has one shows the asset's name there
+(a Room row reads "Room 102", a Building row "Building 100"), while a type without one keeps
+showing the plain type string. It does **not** call `nameOf()` directly — the cell renderer
+derives a local `realName` (`nameOf(a) !== a.label ? nameOf(a) : ""`) and branches on that,
+because this is the one column where `nameOf()`'s label fallback is the wrong answer: an Asset
+ID is neither a name nor a Type. Testing only whether the *type* declares a `nameField` isn't
+enough either — that's true of a Room created without a name typed in, and of a Bulk Item before
+its sub-type is picked (`bulkItemTypes` starts out empty, so that case is routine, not exotic),
+and both would then print "BCR0002" where the type word belongs. `realName` collapses "type has
+no name field" and "has one, still blank" into the same falsy value, so both fall through to the
+plain type string. The Bulk Item case stays its own branch purely because of the BULK badge, and
+uses the same `realName || a.type`. The detail-view header does the same thing in its own shape: it prints `label` and
+then `titleText`, which is `"<name> (<type>)"` for a named asset ("Room 102 (Room)", "Chairs
+(Bulk Item)" — the pre-existing Bulk Item parenthetical, generalized) and otherwise the older
+`type · screenSize` / bare `type`. It's keyed on `nameOf(asset) !== asset.label` so a nameless
+asset can't render "BCA0082 BCA0082".
 
 **No native `<select>` appears anywhere in the app** — every single-select field uses the same
 custom modal picker (`SelectionModal`) instead: a centered card with a scrollable option list
@@ -294,31 +342,90 @@ Circuit form's Serves-rooms/Feeds-sub-panel picker) so `PickerField` renders jus
 not a second redundant header. `UserField`/`PeripheralsField` are deliberately NOT `PickerField`
 — they're multi-select chip-toggle groups, a different interaction from a single-select dropdown.
 
-Rooms link to Buildings, and devices link to Rooms, by **stable id** (the target Room/
-Building asset's own `label`, e.g. `BCR0002`) — `Room.buildingId`, everything else's
-`roomId`, `allocations[].roomId`, `Circuit.roomsServedIds` — not by the target's display
-name. `roomNameFor()`/`buildingNameFor()` resolve an id back to the current name at render
-time; a device's building is inferred transitively through its Room (see `inferBuilding()`,
-which now follows `roomId` → that Room's `buildingId`), not stored directly. `Room.room`/
-`Building.building` remain the *own* display name of that Room/Building asset — the one
-field that's genuinely a plain string, since a Room doesn't reference itself.
+### The parent chain
 
-**"Condenser" is the one non-Room/Building type that links to a Building directly** (a
-`buildingId` field of its own) instead of inferring one through a Room — it's an outdoor
-unit that doesn't sit inside any particular Room. Its registry entry is
-`{ linkage: "building", onlyFields: ["building"], excludedFields: ["room"] }` — so it gets a
-Building field and no Room field. This is a second, generally-useful linkage pattern, not a
-one-off hack — reuse it (that same three-key entry) for any future type that attaches to a
-Building as a whole rather than to one Room. Two rendering
-sites had to learn to resolve a *direct* `buildingId` for a non-Room type, since previously
-only Room ever had one: the read-only Detail view's building special-case (was hardcoded to
-`selectedAsset.type === "Room"`, now `linkageOf(type) === "building"`, which covers Room and
-Condenser but not Building itself) and the list-row cell renderer (new `isBuildingCol` branch
-resolving via `buildingNameFor(a.buildingId, assets)`, alongside the existing `isRoomCol`/
-`isInferredBuilding` branches) — the latter was also silently blank for Room rows before
-this fix, since the generic fallback path read the non-existent `a.building` field instead
-of resolving `a.buildingId`. Sort/filter/search and `exportToExcel`'s `displayBuilding`
-already resolved a direct `buildingId` correctly for any type, so they needed no changes.
+**An asset's place in the world is ONE reference: `parentId`, holding the containing asset's
+`label`.** A device's parent is its Room, a Room's is its Building, a closet's is the
+classroom it's inside. This replaced the fixed `roomId`/`buildingId` pair, which could only
+ever express two levels (Building contains Room contains equipment) because the hierarchy was
+baked into the field *names*. Now the hierarchy is ordinary data and can be any depth.
+`Room.room`/`Building.building` are untouched by this — they remain the *own* display name of
+that asset (the registry's `nameField`), the one genuinely plain string here, since a Room
+doesn't reference itself.
+
+Depth is unlimited by design (Eric's call, 2026-08-19): `Room`'s `parentTypes` names `Room`
+itself, which is what lets a closet nest inside a classroom. Nothing caps it, because a cap
+would be a new hardcoded rule right after removing the old one.
+
+**`Campus` sits above `Building`** (added 2026-08-20, so the app can describe more than one
+site — the school plus a separate residence). It's the payoff for the whole parent change: a
+registry entry, a `campus` column, a backend field, and `campusNameOf()`. Nothing else needed
+telling the world got a level deeper — paths, the Contents tab, the parent pickers, search,
+sort and export all just walk one more link. Compare what the old fixed `roomId`/`buildingId`
+pair would have required: a third id field and a rewrite of every site that resolved a place.
+
+**`isPlaceType()` answers "can this contain things", derived from the registry** rather than
+declared: it's the union of every entry's `parentTypes`, so a type becomes a place the moment
+anything names it as a possible parent. This replaced a hardcoded
+`type === "Room" || type === "Building"` at the Contents tab and a matching
+`!== "Room" && !== "Building"` on the Duplicate button — both of which silently excluded Campus
+when it arrived (no Contents tab on a campus; a Duplicate button that Rooms and Buildings
+correctly don't have). It's also the cheapest possible version of the deferred "move place-ness
+into the type settings" work, done here because Campus forced it rather than as a refactor of
+its own.
+
+**Which types may contain which is `parentTypes`, in the registry** — never a type-name
+comparison at a render site. `parentTypesFor()` reads it, `typeTakesParent()` asks whether
+there's a Parent field at all, `canBeParentOf(parentType, childType)` is the rule itself. An
+**empty array** means "takes no parent", covering two cases that need no distinction anywhere:
+a `Building` (top of the tree) and a `Bulk Item` (no single place — it spreads a quantity
+across rooms via `allocations`, which is explicitly *not* parent/child). Every registered type
+declares `parentTypes` explicitly, so `parentTypesFor` deliberately does NOT default a
+registered entry to `[]` — an omission on a registered type should be a visible mistake, not a
+silent "contains nothing". Only an *unregistered* (user-added) type falls back, to
+`DEFAULT_PARENT_TYPES` (`["Room"]`), i.e. a generic room-dwelling device.
+
+**No parent is a real state, called "Unassigned"** (`UNASSIGNED_LABEL`), not a blank — a spare
+in a drawer, something just delivered, a unit away for repair. Deliberately not "Unplaced":
+a parent is containment, not necessarily *location*, so a future type whose parent isn't a
+place would make "Unplaced" read as nonsense. Only shown for a type that could have a parent;
+a Building or Bulk Item renders nothing, since having none is their permanent correct state.
+
+**Everything derived from the chain is computed, never stored**, extending the principle
+the now-removed `inferBuilding()` followed: `roomNameOf()` / `buildingNameOf()` / `campusNameOf()` walk up to the nearest
+Room/Building (answering with the asset's *own* name when it IS one), `effectiveBuildingId()`
+does the same for a stable id, `pathOf()` renders the whole chain outermost-first, and
+`descendantsOf()` looks the other way for the Contents tab.
+
+**Every walk is loop-safe, and that is load-bearing, not padding.** With fixed room/building
+fields a cycle was structurally impossible; with a general parent it isn't. `ancestorsOf()`
+carries a visited set (plus `MAX_PARENT_DEPTH` as a second belt against a merely absurd
+chain), so it terminates on "A inside B inside A" instead of hanging the browser. The app
+refuses to *create* a cycle (`wouldCreateCycle()`, wired into `saveDraft` and into
+`ParentField`'s candidate list), but **storage stays permissive** — the backend validates
+nothing, matching every other rule in this app — so bad parentage can still arrive from a
+hand-edited sheet or a bulk script, and the app must tolerate *and flag* it rather than break.
+`parentageProblem()` is the flag: a banner on the Details tab naming what's wrong (parent
+missing, wrong type, part of a loop). Note `ancestorsOf(asset)` can never report that `asset`
+is its own ancestor — it seeds its visited set with `asset.label` and stops at the first
+repeat — so the "is this in a loop" test has to be `wouldCreateCycle(asset.label,
+asset.parentId, ...)`, i.e. "would re-pointing it where it already points close a loop".
+
+**Reading old data needs no migration**: `adoptLegacyParentage()` runs in `loadData()`'s map
+and reads a pre-v15 asset's `roomId`/`buildingId` as a `parentId`, so nothing past `loadData`
+ever sees the old shape and the same build is correct against a migrated sheet and an
+un-migrated one. `parentId` wins when both exist. See `PARENT_CHILD_MIGRATION.md` — the short
+version is that the first asset-domain save after deploying v15 rewrites the whole Assets tab
+and thereby migrates everything, so there's no script to run.
+
+**"Condenser" is the type that shows `parentTypes` doing its job**: `{ parentTypes:
+["Building"] }` and nothing else — an outdoor unit sits in no particular Room, so it names
+Building and is simply offered Buildings by the Parent picker. Under the old model this took
+three keys (`linkage: "building"`, `onlyFields: ["building"]`, `excludedFields: ["room"]`)
+plus special cases at two render sites, because it was the one non-Room type with a direct
+`buildingId`. Both special cases are gone: nothing branches on *how* a type attaches any more,
+it just walks up. Reuse the one-key entry for any future type that attaches to a Building as a
+whole rather than to one Room.
 
 This is deliberate hardening, not the original design: earlier, everything stored the
 target's display *name*, kept in sync by a rename cascade in the edit-save handler that
@@ -334,11 +441,115 @@ Room/Building that's still referenced is blocked (`canDeleteAsset()`, wired into
 (`canDeleteBreakerGroup`/`findBreakerTypeUsages`) — client-side only, consistent with
 every other delete guard in this app.
 
-`RoomField`/`BuildingField` (~line 4229) take the id-valued asset list (`rooms`/
-`buildings` — i.e. `roomAssets`/`buildingAssets`) directly rather than an array of name
-strings, and resolve the id to a name for display (`PickerTrigger`, `SelectionModal`'s
-`labelForOption`) while storing the id on change. A dangling id (its Room/Building was
-deleted) resolves to `"(deleted room)"`/`"(deleted building)"` rather than throwing.
+**`ParentField` is the one field that says where an asset sits.** It replaced `BuildingField`
+outright and took over `RoomField`'s placement role; `RoomField` survives with exactly one
+caller, the Bulk Item Allocations tab, which picks a *Room specifically* rather than a parent.
+Which types may be chosen comes from `parentTypesFor(childType)`, so a Computer gets Rooms, a
+Condenser Buildings, a Room both — no list to maintain here. The trigger shows the chosen
+parent's **full path**, since the browser's breadcrumb is gone once the modal closes and two
+rooms can share a name. A dangling id resolves to `"(deleted asset)"`, not `""` — blank is
+indistinguishable from Unassigned, which is now a different and legitimate state.
+
+**`HierarchyBrowserModal` is the app's one place picker — a drill-down over the hierarchy, not
+a flat list** (Eric's call, 2026-08-20). It first shipped inside the parent field as a flat
+list of every valid candidate, each suffixed with its own chain to disambiguate ("Kitchen —
+Building 100" vs "Kitchen (Upstairs) — Residence"); that works at four rooms and falls apart at
+forty, with the path suffix doing the work navigation should do. You now start at the roots,
+open one, and see only what's inside.
+
+It was generalized out of the parent field once the same complaint applied everywhere else, and
+**every place-picking control in the app now goes through it**: the Parent field, the circuit's
+"serves rooms", the Bulk Item allocation picker, and the list toolbar's bulk move-to-room. Four
+flat lists of every room was three too many. Callers pass a rule, not a list —
+`isSelectable(asset)` (a type test, usually), an optional `excluded` set of labels to hide
+outright, `multi` for several-at-once, and `noneLabel` for the "choose nothing" row.
+`noneLabel` is deliberately NOT defaulted to "Unassigned": that word is right for a parent (a
+real, meaningful state) and nonsense when assigning chairs to a room, where the honest answer
+is that there's no such row at all.
+
+The constraint that shapes the component: **the things you navigate THROUGH are usually not
+things you may pick.** Choosing a Room, a Building is never a valid answer but is the only
+route to the Rooms. So a row has up to two independent affordances — a body that selects it
+(when legal) and a chevron that opens it — and when a row isn't selectable its body opens it
+instead, because otherwise the obvious click would do nothing. Three rules keep it honest:
+
+- **No dead ends.** A row is hidden unless it is itself selectable *or* something inside it is
+  (`hasSelectableInside`, recursive with a visited set). An empty new Building is therefore
+  offered when placing a Room and hidden when placing a Computer — and note the first of those
+  is load-bearing: filter it out and you could never put the first Room in a new Building.
+- **Self and descendants are excluded from the tree**, not greyed out — nothing below an asset
+  can legally be its parent, so there's nothing to navigate to down there either. `saveDraft`
+  still validates (`validateParentChoice()`), since a form left open while the chain moved
+  underneath it can get past a filter computed at render time.
+- **A dangling parent counts as a root** (`parentKeyOf` maps it to `null`), so an asset whose
+  Building was deleted stays reachable instead of being stranded outside the tree.
+
+It opens at the current value's level so the existing choice is visible and ticked. **Known
+gap:** assets inside a *loop* are unreachable here, since they're neither roots nor below one
+— the flat list would have shown them. That's bad data either way, only creatable by hand
+editing, and `parentageProblem()` flags it on the asset's own Details tab, which is where it
+gets fixed. The recursion is loop-safe regardless (verified against injected cyclic data).
+
+**Multi-select** (`multi`) differs in three ways that all follow from one problem: you can only
+see one level at a time, so you can't see your own selection. So it keeps a working copy and
+commits once on **Done** rather than per click (a circuit's rooms are one edit, not one per
+room); it renders the running selection as removable chips above the breadcrumb, so a pick made
+three buildings ago stays visible and can be undone without navigating back to it; and it has
+no "none" row, since picking nothing is just an empty chip row. `RoomsServedField` wraps it for
+the circuit form and keeps those chips on the form itself — they're the answer to "what does
+this circuit serve", which is what you want visible while filling it in, and each carries its
+building, which is the ambiguity ("Kitchen" vs "Kitchen") that started all this.
+
+**`RoomField` picks a Room specifically — not a parent.** Its callers are the Bulk Item
+Allocations tab (a distribution across rooms, explicitly not parent/child) and the toolbar's
+bulk move-to-room. `excludeId` hides one room from the tree, which the toolbar uses to drop the
+room being moved *out of* — the one destination that can't be meant.
+
+**The sub-panel feed picker shows `label — path`** ("BCA0083 — Building 200 › Room 200"). A
+panel has no name of its own, so its Asset ID is its identity, but an ID alone is
+unidentifiable standing in front of four panels. It listed bare ids before. It stays a flat
+`PickerField` rather than a drill-down: there are four panels, not forty.
+
+**`HierarchyNav` is the drill-down that sits above the asset list** (added 2026-08-20): a
+breadcrumb plus a row of child places, narrowing the list to everything *beneath* wherever you
+are, at any depth — drill to a building and you get the equipment in all its rooms, not just
+what hangs directly off the building. Its state (`scopeId`) is **navigation**, deliberately
+separate from the column **filters**: they intersect rather than override, and the scope
+excludes the place itself (you're looking inside it).
+
+It's deliberately NOT built on `HierarchyBrowserModal` despite the overlap. That component
+picks one thing out of a tree and closes, and to do it it hides rows you can't pick and
+branches that lead nowhere. Here every place is enterable — an empty building is still
+somewhere you'd navigate to, to confirm it's empty — and nothing is "selectable" at all.
+Sharing them would mean a predicate saying "everything" plus switches disabling the modal's own
+hiding rules: more configuration than the shared tree-walking is worth.
+
+`bulkMoveSourceId` is where the two mechanisms meet: the "Move filtered devices to room"
+toolbar keys off the scope when the scope IS a room, falling back to `roomFilter`. Without
+that it would be effectively unreachable, since the Room column filter is hidden by default now
+that Path replaced it. `moveFilteredTo` then updates whichever one the user was actually
+using, so they follow the assets they just moved instead of staring at the emptied room.
+
+**Room, Building and Campus are computed *columns*, and the distinction that keeps that honest is
+`isComputedColumnFor(key, type)`.** They're still sortable/filterable columns, but nothing
+writes them, so `formColumnsFor` drops them from the add/edit forms — the Parent field is what
+you edit instead, and keeping both editable would mean two ways to say where something is with
+one of them going stale. The exception is why the check takes a *type*: `room` and `building`
+each double as one type's own `nameField`, and for that type the column is a real stored
+editable field. Treating them as flatly computed removed the only way to name a Room at all —
+caught in browser testing, not by reading.
+
+**The list shows one `Path` column instead of separate Building and Room** (Eric's call,
+2026-08-19, having been shown the trade-off). Its column *key* is still `parent` — that's the
+field it edits — while the list and detail read it out in full via `pathOf()`, e.g. "Building
+100 › Room 101 › Storage Room". A path is what makes deep nesting legible: with Building and
+Room columns alone, a panel in a closet in a classroom showed the closet and the building and
+silently dropped the classroom. The asset itself is not repeated in its own path. Building and
+Room columns still exist and are re-enablable from the Columns menu, just `visible: false` by
+default — deleting them would have taken their column filters with them, and the bulk "Move
+filtered to room" toolbar hangs off `roomFilter`. `exportToExcel` keeps them as their own
+resolved columns regardless, since a spreadsheet is where you'd group by building and a single
+path string can't be grouped.
 
 **Every asset's own `label` (its Asset ID, e.g. `BCA0082`) is the one field the whole app
 treats as a stable, unique identifier** — `Breaker.panelLabel`, `Circuit.feedsPanelLabel`,
@@ -388,11 +599,15 @@ the *add* path (the only place a label is authored at all):
 The rules the existing modules already follow, stated once so a new one doesn't have to
 rediscover them:
 
-- **A reference from one Asset to another stores the target's `label`** — `roomId`,
-  `buildingId`, `allocations[].roomId`, `Circuit.roomsServedIds`, `Breaker.panelLabel`,
+- **A reference from one Asset to another stores the target's `label`** — `parentId`,
+  `allocations[].roomId`, `Circuit.roomsServedIds`, `Breaker.panelLabel`,
   `Circuit.feedsPanelLabel` — never the target's display name. Resolve to a name at render
-  time (`roomNameFor()`/`buildingNameFor()`), and handle a dangling id gracefully
-  ("(deleted room)") rather than throwing.
+  time (`nameOf()` via `parentNameFor()`/`roomNameFor()`), and handle a dangling id gracefully
+  ("(deleted asset)") rather than throwing.
+- **Containment is `parentId` and nothing else.** If a new type needs to sit inside something,
+  give it `parentTypes` in the registry — do not add a second placement field. The whole point
+  of collapsing `roomId`/`buildingId` into one reference was that two fields could only ever
+  describe the one hierarchy their names happened to encode.
 - **A reference to a sub-entity stores its `crypto.randomUUID()` id** — `Circuit.breakerId`,
   a Breaker's `groupId`/`breakerTypeId`. Breakers, Circuits, and BreakerTypes aren't Assets
   and have no `label`, so the UUID is their only stable handle; array position isn't one,
@@ -401,7 +616,7 @@ rediscover them:
   nothing should have to — an asset that's wrong or retired is archived and a replacement
   gets a new label. That's why `label` is editable in the add form only.
 - **Computed, not stored, for anything derivable from a reference that already exists.** A
-  device's building comes from its Room (`inferBuilding()`); a panel's "fed from" comes from
+  device's building comes from walking up its parent chain (`buildingNameOf()`); a panel's "fed from" comes from
   searching all circuits for `feedsPanelLabel === thisPanelLabel`. Don't add a stored field
   mirroring a relationship the other side already records — it's just a second copy to keep
   in sync, and the one that goes stale.
@@ -427,7 +642,7 @@ own `at`/`by` is enough); marking done, editing, or deleting one is, since those
 or remove data with no other history trail.
 
 **Electrical Panel** assets (`type: "Electrical Panel"`) are otherwise device-like — real
-brand/model/serial, purchase date, warranty, room placement via `inferBuilding()` like any
+brand/model/serial, purchase date, warranty, room placement via its `parentId` like any
 other device — they just don't have `peripherals` (their registry entry's `excludedFields`). Each
 carries a `breakers` array (own Breakers tab in the detail view), one level deeper than
 anything else in the app: **Circuit → Breaker → Panel**. Breakers and Circuits are *not*
@@ -517,7 +732,7 @@ array position can't serve as identity once things move.
   serving rooms directly (`roomsServed`) — mutually exclusive, enforced in `addCircuit`/
   `saveCircuitEdit`. A panel's "fed from" info is never stored on the Panel itself — it's
   found by searching all circuits for `feedsPanelLabel === thisPanelLabel` at render time,
-  the same "computed, not stored" principle `inferBuilding()` already uses for a device's
+  the same "computed, not stored" principle the parent chain already uses for a device's
   building.
 - **`Circuit.label` is the circuit's nice display name** (e.g. "Outlets", "Water Heater",
   "Feed to Room 300 sub-panel") — it used to hold slot-style text mirroring the breaker's own
@@ -580,6 +795,38 @@ array position can't serve as identity once things move.
   did not: it's what `?asset=...&tab=breakers` deep links already in circulation carry and what
   `openDetail()` defaults a panel to, so renaming it would silently break every copied panel
   link. Its count badge is breakers + unassigned circuits, since both live on that tab.
+- **The printed door card (`PanelLegendCard`) is a physical artifact, not a printout of the
+  Table view.** It's what gets cut out and taped inside the panel door, so it deliberately
+  ignores Table mode's room filter and sort and always emits *every* slot, breaker and
+  circuit — including the panel's `unassignedCircuits`, which sit on no slot and would
+  otherwise be missing from the one document meant to be the complete record. Reached from a
+  Printer icon next to Copy link, offered in all three view modes since it doesn't render
+  what's on screen.
+  - **Sized against the panel, not the paper.** A breaker slot is 1" tall and a two-column
+    panel stacks two slots per inch of panel height, so the breaker area is `slotCount / 2`
+    inches; the card lists slots sequentially 1→N inside that height, which works out to
+    `LEGEND_ROW_IN` = 0.5" per slot row, plus a 1" blank trim/tape band top and bottom.
+    Width is one constant (`LEGEND_WIDTH_IN`, 7.5" = letter portrait minus 0.5" margins) —
+    change that number if a door turns out to be narrower.
+  - **Row height is a minimum, and the page height is MEASURED, not computed.** A slot with
+    several circuits or a long note grows its row (including every circuit beats matching the
+    panel's height exactly), and the unassigned section adds height no slot count predicts —
+    BCA0082 computes 14" and measures 15.26". So `runPrint`/`measureCard` lay the card out
+    off-screen via the `.measuring` class for one synchronous read before printing, and
+    `@page` uses that. Sizing the page from `slotCount` alone spills onto a second sheet.
+  - Two menu entries are page *geometry*, not content — both print the identical card:
+    exact panel size (custom `@page`, one true-scale page, what "Save as PDF and send it to
+    someone" wants) or tiled across letter pages.
+  - **The card is portalled to `document.body`**, so printing is a straight `#root`-hides /
+    card-shows swap. Leaving it in the tree instead means hiding the app around it, which
+    needs the card absolutely positioned — and that silently breaks the day someone wraps the
+    panel view in a `position: relative` container.
+  - The print trigger is a `setTimeout`, deliberately **not** `requestAnimationFrame`: rAF
+    doesn't fire while the page isn't compositing, so a user who clicked and immediately
+    switched tabs would get no dialog at all until they came back.
+  - The table rules (`border-collapse`, `table-layout`, `thead` repeat, `break-inside`) live
+    *outside* `@media print` on purpose — the measuring pass lays the card out on screen and
+    must produce the identical layout, or the height it reports isn't the height that prints.
 - Deleting a breaker with circuits attached, or a circuit's roomsServed/feedsPanelLabel
   exclusivity, is validated client-side only (`canDeleteBreaker`, `addCircuit`) — consistent
   with every other guard in this app (delete/archive confirmations etc.); nothing else
@@ -661,14 +908,45 @@ When you do:
 
 ## Known constraints / things to watch
 
-- **The repo is at backend v13, and v13 is the only undeployed change — one re-paste + one
-  New version deploy covers it.** Don't take a hardcoded "the live backend is vN" line here on
+- **The backend here is v17, a single COMBINED version, and it is undeployed.** v14 (the public
+  QR panel view), v15 (`parentId`) and v16 (`campus`) were each pending on their own branch and
+  each called itself the next version. They edit the same `doGet`, so pasting one into the Apps
+  Script editor after the other would have silently erased the first — and because each also
+  bumped `FRONTEND_SCRIPT_VERSION` to its own string, the "Backend outdated" banner would have
+  reported a *match* while the deployed script was missing one of the two changes. That's the
+  exact failure the version check exists to catch, so the numbering couldn't be left to sort
+  itself out.
+  They were merged rather than renumbered (2026-08-20), because renumbering alone would have
+  left the same trap in a different place. `panel.html`, `panel-qr-sheet.html`, the
+  `PUBLIC_*_FIELDS` whitelists, `publicPanelPayload_`, `respond_` and the panel QR button all
+  live here now; the sibling worktree `.claude/worktrees/practical-dhawan-c50573` still holds
+  the original uncommitted v14 and is now **superseded — don't merge it**, it would reintroduce
+  the pre-parent-chain version of the same code.
+  The merge was not a concatenation: the public projection resolved a panel's Room and Building
+  by reading `roomId`/`buildingId` directly, at four sites plus the whitelist. Those are what
+  `parentId` replaced, so left alone the QR page would have shown a blank location the moment
+  the sheet migrated. It now walks the chain (`effectiveParentId_`/`nearestAncestorRow_`, with
+  the legacy pair as a fallback so it's right before AND after migration), and the same walk was
+  applied to `panel.html`'s local-sandbox projection and `panel-qr-sheet.html`'s label text.
+  Don't take a hardcoded "the live backend is vN" line here on
   faith, including this one: it goes stale the moment someone redeploys and nothing prompts
   anyone to update it, which has already sent a wrong "you're two versions behind" down a
   branch once. Check instead — the app's "Backend outdated" banner names both versions in its
   tooltip, or fetch the deployed `/exec` URL and read `scriptVersion` in the raw JSON. (For
   what it's worth as a dated data point rather than a standing claim: everything through v12
   was confirmed live on 2026-08-16.)
+  - v17 bundles three things: the `campus` column (the Campus type's name field, purely
+    additive — a sheet without it round-trips Campus rows with a blank name), the `?panel=`
+    public read, and `parentId` on `ASSET_FIELDS` — see "The parent chain" under Data model, and
+    `PARENT_CHILD_MIGRATION.md` for the deploy/migration sequence. Until it deploys, the live
+    backend has no `parentId` column, so a `parentId` the app sends is dropped on write and the
+    app falls back to reading `roomId`/`buildingId` on every load (`adoptLegacyParentage()`) —
+    which means it *works*, correctly, it just can't persist a move. The old `roomId`/
+    `buildingId` columns are deliberately kept and still written, so v17 is reversible and
+    un-migrated rows keep resolving. **No migration script exists or is needed**: every save
+    rewrites the whole Assets tab, so the first asset-domain save after deploying fills
+    `parentId` in for every asset at once. Clearing the two legacy columns is a separate,
+    later, destructive step that has NOT been done — it's the one that closes the rollback.
   - v13 adds `panelLabel` to `CIRCUIT_FIELDS` and the `unassignedCircuits` array on panel
     assets — see "A circuit can belong to a panel without belonging to a breaker" under Data
     model. Until it deploys, the live backend has no `panelLabel` column: circuits attached to
@@ -690,7 +968,11 @@ When you do:
     reads `null` because no asset has been created since the deploy; the first one created
     writes it, and until then `peekAssetNumber()` seeds from max+1 as designed.
 - **The live Sheet is fully migrated to the v9 id-based schema** (as of the 2026-08-13
-  session): `roomId`/`buildingId`/`allocations[].roomId`/`Circuit.roomsServedIds` are all
+  session) and is still in that shape — the v15 parent chain has NOT been deployed or
+  migrated, so live assets still carry `roomId`/`buildingId` and no `parentId`. The app reads
+  that correctly (see the v15 note above); `PARENT_CHILD_MIGRATION.md` covers what changes
+  when it deploys. As of v9:
+  `roomId`/`buildingId`/`allocations[].roomId`/`Circuit.roomsServedIds` are all
   stable ids on every live asset, all 4 real panels (BCA0082–85) were rebuilt with the
   `cells`/`BreakerType` model (BCA0082 is the main panel, 32 slots, with 3 real sub-panel
   feeds to BCA0083/84/85; each sub-panel is sized to its building's real room count — 3/3/4

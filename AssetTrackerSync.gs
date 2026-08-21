@@ -41,7 +41,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v13 (2026-08-16) — Circuits gain a panelLabel column, so a circuit can belong to a panel without belonging to a breaker: doGet attaches circuits with a breakerId to that breaker exactly as before, and returns the ones with an empty breakerId whose panelLabel matches as the panel's new unassignedCircuits array; doPost writes panelLabel on EVERY circuit row (nested and unassigned alike), always derived from the panel being iterated so it can never disagree with the breaker's own panel";
+const SCRIPT_VERSION = "v17 (2026-08-20) — Combined deploy, superseding the separate v14/v15/v16 lines that were each pending on their own branch and would have silently erased one another if pasted in sequence. Contains all three: (v15) Assets gain parentId, one reference to the containing asset replacing the fixed roomId/buildingId pair so the hierarchy can be any depth — the old columns are KEPT and still written, so this is reversible and un-migrated rows still resolve; (v16) Assets gain campus, the name field of a Campus type above Building; (v14) doGet branches on ?panel=<label>, an anonymous read-only projection of ONE panel for the QR page panel.html, built by the PUBLIC_*_FIELDS whitelists so person/serial/hostname/purchase data and every other asset are unreachable through it. The public projection resolves a panel Room/Building by walking parentId (falling back to roomId/buildingId) rather than reading them directly, so it is correct both before and after the sheet is migrated. Parameterless doGet and doPost are otherwise unchanged.";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -59,12 +59,28 @@ const SHEET_NAMES = {
 // Flat fields stored directly as Asset columns (everything except the
 // per-asset arrays, which live in their own tabs keyed by asset label).
 // "room"/"building" hold a Room/Building asset's own display name (only
-// meaningful on that asset's own row). Every OTHER asset that's located in a
-// room, or a Room that belongs to a building, points at it via roomId/
-// buildingId — the referenced asset's stable `label`, not its mutable name —
-// so renaming a Room/Building needs no cascade across other rows.
+// meaningful on that asset's own row).
+//
+// "parentId" is where an asset SITS: the stable `label` of the asset that
+// contains it — a device's Room, a Room's Building, a closet's Room. One
+// reference, so the hierarchy is ordinary data and can be any depth, rather than
+// the two fixed levels roomId/buildingId could express. Empty is valid and means
+// "Unassigned" (a Building has no container; so does a spare in a drawer).
+//
+// Storage here is deliberately PERMISSIVE: this script does not check that a
+// parent exists, is of a sensible type, or doesn't close a loop. That matches
+// every other rule in this app — nothing is validated server-side — and the
+// frontend both enforces the rules on entry and tolerates/flags parentage that
+// arrived some other way (a hand-edited sheet, a bulk script).
+//
+// "roomId"/"buildingId" are the PREVIOUS shape and are kept on purpose. They're
+// still read and written unchanged, so this version is reversible and rows that
+// were never migrated still resolve (the frontend falls back to them when
+// parentId is empty). They are not maintained as a mirror of parentId, so once
+// an asset has been moved they can be stale — treat parentId as authoritative.
+// Dropping them is a separate later step, after a migration fills parentId in.
 const ASSET_FIELDS = [
-  "label", "type", "itemName", "screenSize", "hostname", "room", "building", "roomId", "buildingId",
+  "label", "type", "itemName", "screenSize", "hostname", "room", "building", "campus", "parentId", "roomId", "buildingId",
   "brand", "model", "serial", "person", "peripherals", "notes",
   "totalQuantity", "purchaseDate", "warrantyUntil", "status",
   "panelSlotCount", "panelLayout",
@@ -121,6 +137,75 @@ const CIRCUIT_FIELDS = ["id", "breakerId", "panelLabel", "label", "roomsServed",
 // cells at placement time in the frontend. Global/shared across all panels,
 // not scoped to any one asset — its own flat tab, like Breakers/Circuits.
 const BREAKER_TYPE_FIELDS = ["id", "name", "slotSpan", "members"];
+
+// --- Public panel view (anonymous, read-only) --------------------------------
+// Physical panels carry QR stickers pointing at panel.html?p=<label>, which any
+// staff member, electrician, or contractor can scan without logging in. That
+// page reads doGet(?panel=<label>) — a SEPARATE, deliberately anonymous
+// endpoint returning one panel and nothing else. The parameterless doGet (the
+// full snapshot) is the one that gets a token when auth lands; this one stays
+// open by design.
+//
+// The whitelists below are the entire privacy boundary. panel.html is NOT what
+// keeps anything private — someone curling the public URL gets exactly these
+// fields, so anything not named here (person, serial at either level, hostname,
+// purchaseDate, warrantyUntil, status, notes on the panel ASSET, and every other
+// asset in the inventory) is unreachable through this path rather than merely
+// unrendered. Adding a field to a *_FIELDS list below publishes it; that's the
+// only way to publish one, which is the point.
+//
+// Note what's deliberately IN here: a breaker's `notes` and a circuit's `notes`
+// are the "what's actually connected" free text, the single most useful thing
+// for someone standing at an open panel door. Only the panel asset's own notes
+// (procurement/maintenance commentary, not wiring) are withheld.
+//
+// PUBLIC_PANEL_FIELDS carried roomId/buildingId when this was first written
+// against the fixed two-field location model. Nothing ever read them — the page
+// renders the resolved roomName/buildingName below — so they were dropped rather
+// than swapped for parentId when the parent chain landed. A public endpoint
+// should publish the fewest fields that still answer the question.
+const PUBLIC_PANEL_FIELDS = ["label", "panelSlotCount", "panelLayout"];
+const PUBLIC_BREAKER_FIELDS = ["id", "cells", "ampRating", "groupId", "breakerTypeId", "notes"];
+const PUBLIC_CIRCUIT_FIELDS = ["id", "breakerId", "label", "roomsServedIds", "feedsPanelLabel", "notes"];
+const PUBLIC_BREAKER_TYPE_FIELDS = ["id", "name", "slotSpan", "members"];
+
+// Copies ONLY the named fields off a source object. Absent keys come back as ""
+// rather than being omitted, so the public payload's shape doesn't change based
+// on which cells happen to be blank in the sheet.
+function pickPublic_(source, fields) {
+  const out = {};
+  fields.forEach(f => {
+    const v = source[f];
+    out[f] = (v === undefined || v === null) ? "" : v;
+  });
+  return out;
+}
+
+// Where a row sits, as the frontend's adoptLegacyParentage() reads it: parentId
+// when present, else the pre-v15 roomId/buildingId. Keeping the fallback here
+// means the public panel page shows the right room BEFORE the sheet has been
+// migrated, which matters because a QR sticker gets scanned by whoever is
+// standing at the panel, not by whoever knows what a migration is.
+function effectiveParentId_(row) {
+  return String((row && (row.parentId || row.roomId || row.buildingId)) || "").trim();
+}
+
+// The nearest ancestor of a given type, walking up parentId. Loop-safe by the
+// same visited-set rule every chain walk in the frontend uses — storage is
+// permissive, so a hand-edited sheet really can contain "A inside B inside A",
+// and an unguarded walk here would hang a public page rather than a private one.
+function nearestAncestorRow_(startRow, byLabel, type) {
+  const seen = {};
+  let cur = byLabel[effectiveParentId_(startRow)];
+  let depth = 0;
+  while (cur && !seen[cur.label] && depth < 50) {
+    if (cur.type === type) return cur;
+    seen[cur.label] = true;
+    cur = byLabel[effectiveParentId_(cur)];
+    depth++;
+  }
+  return null;
+}
 
 // --- Optimistic concurrency --------------------------------------------------
 // One revision counter per save domain — the same three domains `_dirty`
@@ -221,7 +306,175 @@ function appendNewRows_(name, headers, rows) {
   range.setValues(data);
 }
 
+// Wraps a payload as JSON, or as a JSONP call when ?callback= was passed —
+// pulled out of doGet so the public panel branch gets the same treatment
+// without duplicating it.
+function respond_(payload, e) {
+  const callback = e && e.parameter && e.parameter.callback;
+  if (callback) {
+    return ContentService
+      .createTextOutput(`${callback}(${JSON.stringify(payload)});`)
+      .setMimeType(ContentService.MimeType.JAVASCRIPT);
+  }
+  return ContentService.createTextOutput(JSON.stringify(payload)).setMimeType(ContentService.MimeType.JSON);
+}
+
+// The anonymous per-panel read behind doGet(?panel=<label>) — see the
+// PUBLIC_*_FIELDS whitelists above for what it will and won't hand out.
+//
+// Everything here is assembled by copying named fields onto fresh objects, never
+// by deleting fields off a sheet row: a column added to the Assets/Breakers/
+// Circuits tabs later is invisible to this endpoint until someone deliberately
+// adds it to a whitelist. That's the opposite of a blacklist, which would start
+// leaking the moment a new field lands.
+function publicPanelPayload_(requestedLabel) {
+  const wanted = String(requestedLabel || "").trim().toUpperCase();
+  if (!wanted) return { ok: false, error: "No panel specified." };
+
+  const assetRows = readTable_(SHEET_NAMES.assets, ASSET_FIELDS);
+  const panelRow = assetRows.filter(a =>
+    a.type === "Electrical Panel" && String(a.label || "").trim().toUpperCase() === wanted
+  )[0];
+  // Deliberately the same message whether the label names a non-panel asset or
+  // nothing at all — a public endpoint shouldn't confirm which asset IDs exist.
+  if (!panelRow) return { ok: false, error: "No electrical panel found for that code." };
+
+  // Label -> row, for the parent-chain walks below.
+  const byLabel = {};
+  assetRows.forEach(a => { byLabel[a.label] = a; });
+
+  const panelLabel = panelRow.label;
+  // Read once, filter twice — this panel's own breakers below, and (further
+  // down) the single upstream breaker that feeds this panel, which by definition
+  // lives on a different one.
+  const allBreakerRows = readTable_(SHEET_NAMES.breakers, BREAKER_FIELDS);
+  const breakerRows = allBreakerRows.filter(b => b.panelLabel === panelLabel);
+  const circuitRows = readTable_(SHEET_NAMES.circuits, CIRCUIT_FIELDS);
+
+  // Circuits are matched by breaker membership first (which is how every row
+  // written before v13 — when panelLabel didn't exist as a column — has to be
+  // found), and only the breaker-less ones fall back to panelLabel. Same split
+  // doGet already does for breakers vs unassignedCircuits.
+  function publicCircuit_(c) {
+    const projected = pickPublic_({
+      id: c.id, breakerId: c.breakerId, label: c.label,
+      roomsServedIds: c.roomsServed ? String(c.roomsServed).split(",").map(s => s.trim()).filter(Boolean) : [],
+      feedsPanelLabel: c.feedsPanelLabel, notes: c.notes,
+    }, PUBLIC_CIRCUIT_FIELDS);
+    // pickPublic_ turns a missing array into "", which the renderer would then
+    // have to guard on — an empty list is the honest shape for "serves nothing".
+    if (!projected.roomsServedIds) projected.roomsServedIds = [];
+    return projected;
+  }
+
+  const breakers = breakerRows.map(b => {
+    const projected = pickPublic_(b, PUBLIC_BREAKER_FIELDS);
+    projected.cells = b.cells ? String(b.cells).split(",").map(s => s.trim()).filter(Boolean) : [];
+    projected.circuits = circuitRows.filter(c => c.breakerId === b.id).map(publicCircuit_);
+    return projected;
+  });
+  const unassignedCircuits = circuitRows
+    .filter(c => String(c.breakerId || "").trim() === "" && c.panelLabel === panelLabel)
+    .map(publicCircuit_);
+
+  // Only the catalog entries this panel actually places, not the whole catalog —
+  // it's all this page can render, and a shorter payload is the whole reason the
+  // public view exists as its own endpoint.
+  const usedTypeIds = {};
+  breakers.forEach(b => { if (b.breakerTypeId) usedTypeIds[b.breakerTypeId] = true; });
+  const breakerTypes = readTable_(SHEET_NAMES.breakerTypes, BREAKER_TYPE_FIELDS)
+    .filter(t => usedTypeIds[t.id])
+    .map(t => {
+      const projected = pickPublic_(t, PUBLIC_BREAKER_TYPE_FIELDS);
+      projected.members = t.members ? JSON.parse(t.members) : [];
+      return projected;
+    });
+
+  // Room NAMES, resolved here rather than by shipping the asset list. A circuit
+  // stores roomsServedIds (Room asset labels like "BCR0020"); resolving those on
+  // the client is what forces the whole ~107-asset inventory down the wire, which
+  // is exactly what this endpoint exists to avoid. Only rooms this panel actually
+  // references are included — it's a lookup map, not a room directory.
+  const roomNameById = {};
+  assetRows.forEach(a => { if (a.type === "Room") roomNameById[a.label] = a.room || ""; });
+
+  const panel = pickPublic_(panelRow, PUBLIC_PANEL_FIELDS);
+  // The "where am I" header. A panel's Room and Building are found by walking up
+  // the parent chain, so a panel in a closet inside a classroom still reports
+  // both — which the old direct roomId/buildingId lookup could not express.
+  const panelRoom = nearestAncestorRow_(panelRow, byLabel, "Room");
+  const panelBuilding = nearestAncestorRow_(panelRow, byLabel, "Building");
+  panel.roomName = panelRoom ? (panelRoom.room || "") : "";
+  panel.buildingName = panelBuilding ? (panelBuilding.building || "") : "";
+
+  const referencedRoomIds = {};
+  breakers.forEach(b => b.circuits.forEach(c => (c.roomsServedIds || []).forEach(id => { referencedRoomIds[id] = true; })));
+  unassignedCircuits.forEach(c => (c.roomsServedIds || []).forEach(id => { referencedRoomIds[id] = true; }));
+  if (panelRoom) referencedRoomIds[panelRoom.label] = true;
+  const rooms = {};
+  Object.keys(referencedRoomIds).forEach(id => {
+    if (roomNameById[id] !== undefined) rooms[id] = roomNameById[id];
+  });
+
+  // "Fed from" is never stored on a panel — it's found by asking which circuit
+  // anywhere feeds this one (the same computed-not-stored rule the parent chain
+  // follows). Worth the extra lookup here: at a sub-panel, "where's my upstream
+  // breaker" is the other question someone at the door actually has. Only the
+  // upstream panel's label/room and the feeding breaker's cells go out — its
+  // amps, serial, and every other breaker on it stay behind.
+  let fedFrom = null;
+  const feedingCircuit = circuitRows.filter(c => c.feedsPanelLabel === panelLabel)[0];
+  if (feedingCircuit) {
+    const feedingBreaker = allBreakerRows.filter(b => b.id === feedingCircuit.breakerId)[0];
+    const upstreamLabel = feedingBreaker ? feedingBreaker.panelLabel : (feedingCircuit.panelLabel || "");
+    const upstreamPanel = assetRows.filter(a => a.label === upstreamLabel && a.type === "Electrical Panel")[0];
+    const upstreamRoom = upstreamPanel ? nearestAncestorRow_(upstreamPanel, byLabel, "Room") : null;
+    fedFrom = {
+      panelLabel: upstreamLabel,
+      panelRoomName: upstreamRoom ? (upstreamRoom.room || "") : "",
+      circuitLabel: feedingCircuit.label || "",
+      cells: feedingBreaker && feedingBreaker.cells
+        ? String(feedingBreaker.cells).split(",").map(s => s.trim()).filter(Boolean)
+        : [],
+    };
+  }
+
+  return {
+    ok: true,
+    scriptVersion: SCRIPT_VERSION,
+    panel,
+    breakers,
+    unassignedCircuits,
+    breakerTypes,
+    rooms,
+    fedFrom,
+  };
+}
+
 function doGet(e) {
+  // The public per-panel branch. Checked before anything else reads a tab, so
+  // an anonymous request never touches the full-snapshot path at all — when that
+  // path gets a token, this one is already structurally separate from it rather
+  // than being an exemption inside it.
+  const panelParam = e && e.parameter && e.parameter.panel;
+  if (panelParam) {
+    // Same lock the full read takes, and for a sharper reason: writeTable_
+    // clear()s a tab before writing it, so an unlocked read landing mid-save can
+    // legitimately see an empty Breakers tab and render a panel with no breakers
+    // in it — which on a public page reads as "this panel is empty", not "try
+    // again". Never a write path regardless: doPost is untouched and unreachable
+    // from here.
+    const publicLock = LockService.getScriptLock();
+    publicLock.waitLock(10000);
+    try {
+      return respond_(publicPanelPayload_(panelParam), e);
+    } catch (err) {
+      return respond_({ ok: false, error: "Could not load that panel." }, e);
+    } finally {
+      publicLock.releaseLock();
+    }
+  }
+
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
@@ -332,17 +585,10 @@ function doGet(e) {
       revisions: readRevisions_(configRaw),
     };
 
-    // Plain fetch() from a browser is blocked by CORS here, since Apps Script
-    // doesn't send Access-Control-Allow-Origin headers. A <script> tag isn't
-    // subject to that restriction, so support JSONP: if the caller passes
-    // ?callback=name, wrap the payload as a function call instead of raw JSON.
-    const callback = e.parameter && e.parameter.callback;
-    if (callback) {
-      return ContentService
-        .createTextOutput(`${callback}(${JSON.stringify(payload)});`)
-        .setMimeType(ContentService.MimeType.JAVASCRIPT);
-    }
-    return ContentService.createTextOutput(JSON.stringify(payload)).setMimeType(ContentService.MimeType.JSON);
+    // respond_ handles the ?callback= JSONP wrapper — kept because a <script>
+    // tag isn't subject to the CORS restrictions a plain fetch() can hit here,
+    // Apps Script not sending Access-Control-Allow-Origin headers.
+    return respond_(payload, e);
   } finally {
     lock.releaseLock();
   }

@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="robots" content="noindex, nofollow" />
+<title>Electrical Panel — Brookside Christian Academy</title>
+<!--
+  PUBLIC, READ-ONLY PANEL VIEW
+  ============================
+  What this is: the page a physical panel's QR sticker points at
+  (panel.html?p=BCA0082). Anyone who scans it — staff, an electrician, a
+  contractor — gets that one panel's layout with no login. That's intentional,
+  not an oversight; the main app (index.html) is getting real auth separately
+  and this path is deliberately exempt from it.
+
+  Why it's a separate file instead of a mode inside index.html:
+    1. There is no write code here to disable. A "public mode" in the main app
+       would mean switching off every edit affordance individually, and any one
+       that got missed would fire persist() against live data.
+    2. index.html is ~400KB and transpiles JSX in the browser via Babel
+       Standalone on every load. That is the wrong thing to hand a phone on
+       school wifi in a mechanical room.
+    3. The job is different. Standing at an open panel door you want the slot
+       grid, the amp ratings, and what each breaker feeds — not a desktop
+       inventory UI.
+
+  So: no React, no Babel, no import map, no webfont, no CDN. One file, plain
+  DOM, one network request. The slot-grid geometry below is knowingly duplicated
+  from PanelDiagram in index.html (~150 lines) — CLAUDE.md calls the no-build-
+  step simplicity a virtue, and a third shared file would cost more than the
+  duplication does. If you change the grid math in one, change it in the other:
+  slotsFromCells / cellsLabel / the row/column/rowSpan math are the shared parts.
+
+  The privacy boundary is NOT here. It's the PUBLIC_*_FIELDS whitelists in
+  AssetTrackerSync.gs — this page can only render what that endpoint already
+  decided to publish. Don't add a field to the render code and assume it will
+  appear; and don't assume something is private because this page doesn't draw it.
+-->
+<style>
+  /* Brookside Christian Academy palette — same values as C in index.html. */
+  :root {
+    --bg: #F4F0E6;
+    --surface: #FFFFFF;
+    --ink: #2A3439;
+    --brand: #546F75;
+    --brand-dark: #3E5054;
+    --accent: #A9764B;
+    --border: #DCD4C2;
+    --danger: #9C3B2A;
+    --muted: #5C6B6E;
+    --placeholder: #9CA7A6;
+    --empty: #7C8A8C;
+  }
+  /* System font stack on purpose: a webfont is a render-blocking round trip to
+     fonts.googleapis.com, and this page's whole reason to exist is loading fast
+     on a phone with bad signal. */
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; background: var(--bg); color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 12px 12px 48px; }
+
+  /* --- header --- */
+  header { padding: 4px 0 14px; }
+  .eyebrow {
+    font-size: 11px; letter-spacing: 1px; text-transform: uppercase;
+    color: var(--accent); font-weight: 600;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  h1 { font-size: 26px; line-height: 1.15; margin: 4px 0 0; font-weight: 700; }
+  .where { font-size: 15px; color: var(--muted); margin-top: 4px; }
+  .fed-from {
+    margin-top: 12px; padding: 10px 12px; background: var(--surface);
+    border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    border-radius: 8px; font-size: 13px; color: var(--ink);
+  }
+  .fed-from a { color: var(--brand); font-weight: 600; }
+
+  /* --- cards --- */
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px; margin-bottom: 14px;
+  }
+  .section-title {
+    font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--accent);
+    font-weight: 600; margin: 0 0 10px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  /* --- slot grid ---
+     Mirrors PanelDiagram's geometry: number track, breaker track(s), number
+     track. A breaker group is anchored at its lowest slot and spans rows from
+     there, which is why every slot it touches must sit in one column. */
+  .grid { display: grid; gap: 5px; width: 100%; grid-auto-rows: 46px; }
+  .slot-num {
+    display: flex; align-items: center; font-size: 11px; font-weight: 700;
+    color: var(--muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .breaker-cell {
+    border: 1.5px solid var(--border); border-radius: 8px; background: #fff;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 3px 4px; overflow: hidden; text-align: center; cursor: pointer;
+    font: inherit; color: inherit; width: 100%;
+  }
+  .breaker-cell:active { background: var(--bg); }
+  /* flex-shrink:0 is load-bearing, not decoration: inside a stacked unit these
+     two lines share ~22px, and without it flex crushes the feeds line to a
+     one-pixel sliver that still passes an overflow check while being completely
+     unreadable. */
+  .amp { font-size: 13px; font-weight: 700; color: var(--brand-dark); line-height: 1.1; flex-shrink: 0; }
+  .feeds {
+    font-size: 10px; color: var(--muted); line-height: 1.2; max-width: 100%;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0;
+  }
+  .spare {
+    border: 1.5px dashed var(--border); border-radius: 8px; background: none;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; color: var(--placeholder);
+  }
+  /* A multi-member unit (tandem, quad, split double-pole) draws as one bordered
+     box with its members stacked inside, so it reads as the single physical
+     device it is. */
+  .unit { border: 1.5px solid var(--border); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; }
+  .unit .breaker-cell { border: none; border-radius: 0; flex: 1; min-height: 0; padding: 1px 3px; }
+  .unit .breaker-cell + .breaker-cell { border-top: 1px solid var(--border); }
+  /* A tandem's two members split one 46px slot row, so ~22px each — the type
+     sizes above don't fit and the room name is the line that loses. Smaller
+     type here keeps both readable, which matters most on exactly these
+     breakers: a tandem or quad is where "which of these is which" is hardest
+     to work out from the physical panel. */
+  .unit .amp { font-size: 10px; line-height: 1.1; }
+  .unit .feeds { font-size: 8px; line-height: 1.1; }
+
+  /* --- breaker detail list --- */
+  .brk {
+    border-top: 1px solid var(--border); padding: 12px 2px; scroll-margin-top: 12px;
+  }
+  .brk:first-of-type { border-top: none; }
+  .brk-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .brk-slot { font-size: 15px; font-weight: 700; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .brk-amp {
+    font-size: 12px; font-weight: 700; color: #fff; background: var(--brand);
+    border-radius: 10px; padding: 2px 8px;
+  }
+  .brk-type { font-size: 12px; color: var(--muted); }
+  .brk-notes { font-size: 13px; color: var(--muted); white-space: pre-line; margin-top: 6px; }
+  .circuit { margin-top: 10px; padding-left: 10px; border-left: 2px solid var(--border); }
+  .circuit-label { font-size: 14px; font-weight: 600; }
+  .circuit-serves { font-size: 13px; color: var(--brand-dark); margin-top: 2px; }
+  .circuit-serves a { color: var(--brand); font-weight: 600; }
+  .circuit-notes { font-size: 13px; color: var(--muted); white-space: pre-line; margin-top: 4px; }
+  .none { font-size: 13px; color: var(--empty); font-style: italic; }
+  /* Tapping a slot in the grid jumps to that breaker's entry — the public
+     stand-in for the main app's slot-click modal, which this page drops. */
+  @keyframes flash { from { background: var(--bg); } to { background: transparent; } }
+  .flash { animation: flash 1.4s ease-out; }
+
+  .warn {
+    display: flex; gap: 8px; padding: 10px 12px; margin-bottom: 14px;
+    border: 1px solid var(--danger); border-radius: 8px; background: var(--surface);
+    font-size: 13px;
+  }
+  .status { padding: 48px 16px; text-align: center; color: var(--muted); font-size: 15px; }
+  .btn {
+    display: inline-block; margin-top: 14px; padding: 9px 16px; font-size: 14px; font-weight: 600;
+    background: var(--brand); color: #fff; border: none; border-radius: 8px; cursor: pointer;
+  }
+  footer { margin-top: 24px; text-align: center; font-size: 12px; color: var(--empty); }
+</style>
+</head>
+<body>
+<div class="wrap" id="app"><div class="status">Loading panel…</div></div>
+
+<script>
+(function () {
+  "use strict";
+
+  // Duplicated from index.html rather than shared — this page deliberately has
+  // no build step and no imports. If the Apps Script deployment URL ever changes,
+  // it has to change in both files.
+  var SHEET_API_URL = "https://script.google.com/macros/s/AKfycbzXaKRuCrTesxobxP-b2me1TSn0YoGogoYhNPTWU4qWWjXANXGlPuDzJSKGClOTsfOXRQ/exec";
+
+  // index.html's sandbox fixture, read straight out of localStorage on the same
+  // origin. ONLY for local iteration, and only when ?sandbox=1 is passed
+  // explicitly — a scanned QR never carries it, so a real visitor can't land in
+  // here by accident. This is a developer convenience, not a privacy mechanism:
+  // it reads data this browser already has, and it does the same field-picking
+  // the backend does so the shape being rendered stays honest.
+  var SANDBOX_DATA_KEY = "asset-tracker-sandbox-data";
+
+  var params = new URLSearchParams(window.location.search);
+  var panelCode = (params.get("p") || "").trim();
+  var app = document.getElementById("app");
+
+  // ---------- tiny DOM helper ----------
+  // Everything user-authored (circuit labels, notes, room names) goes in as
+  // textContent, never innerHTML. On a public page that's the difference between
+  // a note field and a script injection vector.
+  function h(tag, attrs, children) {
+    var node = document.createElement(tag);
+    if (attrs) {
+      Object.keys(attrs).forEach(function (k) {
+        if (k === "class") node.className = attrs[k];
+        else if (k === "text") node.textContent = attrs[k];
+        else if (k === "style") node.setAttribute("style", attrs[k]);
+        else if (k.indexOf("on") === 0) node.addEventListener(k.slice(2), attrs[k]);
+        else node.setAttribute(k, attrs[k]);
+      });
+    }
+    (children || []).forEach(function (c) {
+      if (c === null || c === undefined || c === false) return;
+      node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+    });
+    return node;
+  }
+
+  // ---------- breaker cell addressing (ported from index.html) ----------
+  // See BREAKER_TYPES_ARCHITECTURE.md. Every slot has two halves ("1a"/"1b");
+  // a breaker's footprint is the set of halves it occupies, and poles are
+  // derived from the distinct slots those touch rather than stored.
+  function slotsFromCells(cells) {
+    var seen = {};
+    var out = [];
+    (cells || []).forEach(function (c) {
+      var slot = String(c).slice(0, -1);
+      if (!seen[slot]) { seen[slot] = true; out.push(slot); }
+    });
+    return out.sort(function (a, b) { return parseFloat(a) - parseFloat(b); });
+  }
+  // Collapses to a plain slot number ("6/8") when the breaker fills every half
+  // of every slot it touches; calls out the half otherwise ("9b/11a"), since a
+  // tandem's two breakers are indistinguishable without it.
+  function cellsLabel(breaker) {
+    var halvesBySlot = {};
+    var order = [];
+    (breaker.cells || []).forEach(function (c) {
+      var slot = String(c).slice(0, -1);
+      var half = String(c).slice(-1);
+      if (!halvesBySlot[slot]) { halvesBySlot[slot] = {}; order.push(slot); }
+      halvesBySlot[slot][half] = true;
+    });
+    if (!order.length) return "—";
+    return order.map(function (slot) {
+      var halves = halvesBySlot[slot];
+      return (halves.a && halves.b) ? slot : slot + Object.keys(halves)[0];
+    }).join("/");
+  }
+
+  // ---------- panel geometry (ported from PanelDiagram) ----------
+  function buildLayout(slotCount, layout, breakers) {
+    var columns = layout === "single-column" ? 1 : 2;
+    var rowOf = function (n) { return columns === 1 ? n : Math.ceil(n / 2); };
+    var colOf = function (n) { return columns === 1 ? 0 : (n % 2 === 1 ? 0 : 1); };
+    // Tracks left to right: [num] [breaker col 0] [breaker col 1] [num].
+    var breakerTrack = function (col) { return columns === 1 ? 2 : col + 2; };
+    var numberTrack = function (col) { return columns === 1 ? 1 : (col === 0 ? 1 : 4); };
+
+    var slotMap = {};
+    breakers.forEach(function (b) {
+      slotsFromCells(b.cells).forEach(function (s) {
+        var n = parseInt(s, 10);
+        if (!n) return;
+        (slotMap[n] = slotMap[n] || []).push(b);
+      });
+    });
+
+    var covered = {};
+    var cells = [];
+    for (var s = 1; s <= slotCount; s++) {
+      if (covered[s]) continue;
+      var here = slotMap[s] || [];
+      if (!here.length) {
+        cells.push({ kind: "spare", slot: s, col: colOf(s), row: rowOf(s), rowSpan: 1 });
+        continue;
+      }
+      // Every breaker placed through Add Breaker carries a groupId — even a lone
+      // single-pole, a "group" of one — so grouping never has to special-case
+      // how many members a unit has.
+      var groupId = here[0].groupId;
+      var groupBreakers = groupId
+        ? breakers.filter(function (b) { return b.groupId === groupId; })
+        : [here[0]];
+      var groupSlots = [];
+      groupBreakers.forEach(function (b) {
+        slotsFromCells(b.cells).forEach(function (x) {
+          var n = parseInt(x, 10);
+          if (n && groupSlots.indexOf(n) === -1) groupSlots.push(n);
+        });
+      });
+      groupSlots.sort(function (a, b) { return a - b; });
+      if (groupSlots[0] !== s) continue; // reached via a non-primary slot; already drawn
+      groupSlots.forEach(function (x) { if (x !== s) covered[x] = true; });
+      var rows = groupSlots.map(rowOf);
+      var rowSpan = Math.max.apply(null, rows) - Math.min.apply(null, rows) + 1;
+      // Sort each breaker ONCE by its own lowest slot. Bucketing by "which slots
+      // does this touch" would list a breaker spanning two slots twice, drawing
+      // it as a duplicate box.
+      var ordered = groupBreakers.slice().sort(function (b1, b2) {
+        return Math.min.apply(null, slotsFromCells(b1.cells).map(Number))
+             - Math.min.apply(null, slotsFromCells(b2.cells).map(Number));
+      });
+      cells.push({
+        kind: ordered.length > 1 ? "unit" : "breaker",
+        breakers: ordered, slot: s, col: colOf(s), row: Math.min.apply(null, rows), rowSpan: rowSpan,
+      });
+    }
+
+    var numbers = [];
+    for (var n2 = 1; n2 <= slotCount; n2++) {
+      numbers.push({ slot: n2, col: colOf(n2), row: rowOf(n2) });
+    }
+
+    // A group's slots must all share one parity, i.e. sit in one column — the
+    // anchoring math above depends on it (see BREAKER_TYPES_ARCHITECTURE.md §4).
+    // Scripted or imported data can violate it, and the only symptom is cells
+    // silently drawn on top of each other, which reads as a rendering glitch
+    // rather than bad data. Same check the main app makes, kept here so a public
+    // viewer isn't quietly shown an overlapping panel with no explanation.
+    var parityWarnings = [];
+    var byGroup = {};
+    breakers.forEach(function (b) {
+      var key = b.groupId || ("solo-" + b.id);
+      (byGroup[key] = byGroup[key] || []).push(b);
+    });
+    Object.keys(byGroup).forEach(function (key) {
+      var slots = [];
+      byGroup[key].forEach(function (b) {
+        slotsFromCells(b.cells).forEach(function (x) {
+          var n = parseInt(x, 10);
+          if (n && slots.indexOf(n) === -1) slots.push(n);
+        });
+      });
+      if (slots.length > 1) {
+        var parities = {};
+        slots.forEach(function (n) { parities[n % 2] = true; });
+        if (Object.keys(parities).length > 1) parityWarnings.push(slots.sort(function (a, b) { return a - b; }).join("+"));
+      }
+    });
+
+    return {
+      cells: cells, numbers: numbers, columns: columns, parityWarnings: parityWarnings,
+      breakerTrack: breakerTrack, numberTrack: numberTrack,
+      gridTemplateColumns: columns === 1 ? "26px 1fr" : "26px 1fr 1fr 26px",
+    };
+  }
+
+  // ---------- what a circuit serves ----------
+  // roomsServedIds hold Room asset labels (BCR0020); the backend ships a slim
+  // { id: name } map for exactly the rooms this panel references, so this page
+  // never needs the full asset list to resolve them. A dangling id (its Room was
+  // deleted) falls back to the raw id rather than rendering an empty string.
+  function roomName(id, rooms) {
+    if (!id) return "";
+    return (rooms && rooms[id]) ? rooms[id] : id;
+  }
+  function servesText(circuit, rooms) {
+    if (circuit.feedsPanelLabel) return "Feeds sub-panel " + circuit.feedsPanelLabel;
+    var ids = circuit.roomsServedIds || [];
+    if (!ids.length) return "";
+    return ids.map(function (id) { return roomName(id, rooms); }).join(", ");
+  }
+  // The one-line version that fits inside a slot cell.
+  function feedsSummary(breaker, rooms) {
+    var circuits = breaker.circuits || [];
+    if (!circuits.length) return "no circuits";
+    var parts = [];
+    circuits.forEach(function (c) {
+      if (c.feedsPanelLabel) { parts.push("→ " + c.feedsPanelLabel); return; }
+      (c.roomsServedIds || []).forEach(function (id) {
+        var name = roomName(id, rooms);
+        if (name && parts.indexOf(name) === -1) parts.push(name);
+      });
+    });
+    return parts.join(", ") || "—";
+  }
+
+  // ---------- render ----------
+  function render(data) {
+    var panel = data.panel;
+    var rooms = data.rooms || {};
+    var breakers = data.breakers || [];
+    var slotCount = parseInt(panel.panelSlotCount, 10) || 0;
+    var L = buildLayout(slotCount, panel.panelLayout || "two-column", breakers);
+
+    app.textContent = "";
+
+    // --- header ---
+    var whereParts = [];
+    if (panel.roomName) whereParts.push(panel.roomName);
+    if (panel.buildingName) whereParts.push(panel.buildingName);
+    app.appendChild(h("header", null, [
+      h("div", { class: "eyebrow", text: "Electrical Panel" }),
+      h("h1", { text: panel.label }),
+      whereParts.length ? h("div", { class: "where", text: whereParts.join(" · ") }) : null,
+    ]));
+
+    // --- fed from (computed by the backend, never stored on the panel) ---
+    if (data.fedFrom && data.fedFrom.panelLabel) {
+      var ff = data.fedFrom;
+      var ffSlot = ff.cells && ff.cells.length ? cellsLabel({ cells: ff.cells }) : "";
+      app.appendChild(h("div", { class: "fed-from" }, [
+        h("strong", { text: "Fed from: " }),
+        h("a", { href: "?p=" + encodeURIComponent(ff.panelLabel), text: ff.panelLabel }),
+        ff.panelRoomName ? document.createTextNode(" (" + ff.panelRoomName + ")") : null,
+        ffSlot ? document.createTextNode(" — slot " + ffSlot) : null,
+        ff.circuitLabel ? document.createTextNode(", " + ff.circuitLabel) : null,
+      ]));
+    }
+
+    if (L.parityWarnings.length) {
+      app.appendChild(h("div", { class: "warn" }, [
+        h("div", null, [
+          h("strong", { text: "Layout data problem: " }),
+          document.createTextNode(
+            "slots " + L.parityWarnings.join("; ") + ". A breaker spanning more than one slot should " +
+            "occupy slots in a single column (22 and 24, not 22 and 23), so these overlap other breakers " +
+            "in the diagram below. The written list underneath is unaffected."
+          ),
+        ]),
+      ]));
+    }
+
+    // --- slot grid ---
+    if (slotCount > 0) {
+      var grid = h("div", { class: "grid", style: "grid-template-columns: " + L.gridTemplateColumns });
+      L.numbers.forEach(function (n) {
+        grid.appendChild(h("div", {
+          class: "slot-num mono", text: String(n.slot),
+          style: "grid-column: " + L.numberTrack(n.col) + "; grid-row: " + n.row + "; " +
+                 "justify-content: " + (L.columns === 1 ? "center" : (n.col === 0 ? "flex-end" : "flex-start")) + ";",
+        }));
+      });
+      L.cells.forEach(function (cell) {
+        var place = "grid-column: " + L.breakerTrack(cell.col) + "; grid-row: " + cell.row + " / span " + cell.rowSpan + ";";
+        if (cell.kind === "spare") {
+          grid.appendChild(h("div", { class: "spare", text: "spare", style: place }));
+          return;
+        }
+        var members = cell.breakers.map(function (b) { return slotButton(b, rooms); });
+        if (cell.kind === "unit") {
+          grid.appendChild(h("div", { class: "unit", style: place }, members));
+        } else {
+          members[0].setAttribute("style", place);
+          grid.appendChild(members[0]);
+        }
+      });
+      app.appendChild(h("div", { class: "card" }, [
+        h("div", { class: "section-title", text: "Panel layout — " + slotCount + " slots" }),
+        grid,
+      ]));
+    }
+
+    // --- written breaker list ---
+    // The public stand-in for the main app's per-breaker modal: everything that
+    // modal would have shown, laid out flat so nothing needs to be tapped to be
+    // read. Sorted by slot so it reads down the panel in physical order.
+    var ordered = breakers.slice().sort(function (a, b) {
+      var sa = slotsFromCells(a.cells).map(Number);
+      var sb = slotsFromCells(b.cells).map(Number);
+      var mina = sa.length ? Math.min.apply(null, sa) : 9999;
+      var minb = sb.length ? Math.min.apply(null, sb) : 9999;
+      if (mina !== minb) return mina - minb;
+      return cellsLabel(a).localeCompare(cellsLabel(b));
+    });
+    var typeNameById = {};
+    (data.breakerTypes || []).forEach(function (t) { typeNameById[t.id] = t.name; });
+
+    var listCard = h("div", { class: "card" }, [
+      h("div", { class: "section-title", text: "Breakers & circuits" }),
+    ]);
+    if (!ordered.length) {
+      listCard.appendChild(h("div", { class: "none", text: "No breakers recorded for this panel yet." }));
+    }
+    ordered.forEach(function (b) {
+      listCard.appendChild(breakerEntry(b, rooms, typeNameById));
+    });
+    app.appendChild(listCard);
+
+    // --- unassigned circuits ---
+    // Circuits that belong to this panel but aren't landed on a breaker yet
+    // (backend v13). Real, physically present runs — worth showing to someone at
+    // the panel precisely because they're not on the grid above.
+    var unassigned = data.unassignedCircuits || [];
+    if (unassigned.length) {
+      var uCard = h("div", { class: "card" }, [
+        h("div", { class: "section-title", text: "Circuits not on a breaker" }),
+      ]);
+      unassigned.forEach(function (c) { uCard.appendChild(circuitEntry(c, rooms)); });
+      app.appendChild(uCard);
+    }
+
+    app.appendChild(h("footer", null, [
+      document.createTextNode("Read-only view · Brookside Christian Academy"),
+      h("br"),
+      document.createTextNode("Loaded " + new Date().toLocaleString()),
+    ]));
+  }
+
+  // One tappable cell in the grid. Tapping scrolls to that breaker's written
+  // entry and flashes it — this page has no modals by design, so the jump is the
+  // whole interaction.
+  function slotButton(b, rooms) {
+    var btn = h("button", {
+      class: "breaker-cell", type: "button",
+      "aria-label": "Slot " + cellsLabel(b),
+      onclick: function () {
+        var target = document.getElementById("b-" + b.id);
+        if (!target) return;
+        target.scrollIntoView({ behavior: "smooth", block: "center" });
+        target.classList.remove("flash");
+        void target.offsetWidth; // restart the animation if it's already played
+        target.classList.add("flash");
+      },
+    }, [
+      h("span", { class: "amp", text: b.ampRating ? b.ampRating + "A" : "—" }),
+      h("span", { class: "feeds", text: feedsSummary(b, rooms) }),
+    ]);
+    return btn;
+  }
+
+  function breakerEntry(b, rooms, typeNameById) {
+    var typeName = b.breakerTypeId ? typeNameById[b.breakerTypeId] : "";
+    var wrap = h("div", { class: "brk", id: "b-" + b.id }, [
+      h("div", { class: "brk-head" }, [
+        h("span", { class: "brk-slot", text: "Slot " + cellsLabel(b) }),
+        h("span", { class: "brk-amp", text: b.ampRating ? b.ampRating + "A" : "—" }),
+        typeName ? h("span", { class: "brk-type", text: typeName }) : null,
+      ]),
+      b.notes ? h("div", { class: "brk-notes", text: b.notes }) : null,
+    ]);
+    var circuits = b.circuits || [];
+    if (!circuits.length) {
+      wrap.appendChild(h("div", { class: "none", style: "margin-top:6px", text: "No circuits recorded." }));
+    }
+    circuits.forEach(function (c) { wrap.appendChild(circuitEntry(c, rooms)); });
+    return wrap;
+  }
+
+  function circuitEntry(c, rooms) {
+    var serves = servesText(c, rooms);
+    var servesNode = null;
+    if (c.feedsPanelLabel) {
+      // A sub-panel feed is the one place this page links onward — the
+      // downstream panel has its own public view at the same URL shape.
+      servesNode = h("div", { class: "circuit-serves" }, [
+        document.createTextNode("Feeds sub-panel "),
+        h("a", { href: "?p=" + encodeURIComponent(c.feedsPanelLabel), text: c.feedsPanelLabel }),
+      ]);
+    } else if (serves) {
+      servesNode = h("div", { class: "circuit-serves", text: serves });
+    }
+    return h("div", { class: "circuit" }, [
+      h("div", { class: "circuit-label", text: c.label || "(unnamed circuit)" }),
+      servesNode,
+      c.notes ? h("div", { class: "circuit-notes", text: c.notes }) : null,
+    ]);
+  }
+
+  function showStatus(message, retry) {
+    app.textContent = "";
+    app.appendChild(h("div", { class: "status" }, [
+      h("div", { text: message }),
+      retry ? h("button", { class: "btn", type: "button", text: "Try again", onclick: load }) : null,
+    ]));
+  }
+
+  // ---------- sandbox projection (local iteration only) ----------
+  // Mirrors publicPanelPayload_ in AssetTrackerSync.gs against the sandbox
+  // fixture, so the page can be developed and checked without a redeploy. It
+  // picks the same fields for the same reason: if this drifted from the backend,
+  // the page would be verified against a shape the real endpoint never sends.
+  function sandboxPayload(code) {
+    var raw = localStorage.getItem(SANDBOX_DATA_KEY);
+    if (!raw) return { ok: false, error: "No sandbox data saved yet — open index.html, turn Sandbox on, and make one edit." };
+    var snap = JSON.parse(raw);
+    var assets = snap.assets || [];
+    var wanted = code.trim().toUpperCase();
+    var panelAsset = assets.filter(function (a) {
+      return a.type === "Electrical Panel" && String(a.label || "").trim().toUpperCase() === wanted;
+    })[0];
+    if (!panelAsset) return { ok: false, error: "No electrical panel found for that code." };
+
+    var roomNameById = {};
+    var buildingNameById = {};
+    assets.forEach(function (a) {
+      if (a.type === "Room") roomNameById[a.label] = a.room || "";
+      if (a.type === "Building") buildingNameById[a.label] = a.building || "";
+    });
+    var pickCircuit = function (c) {
+      return {
+        id: c.id, breakerId: c.breakerId || "", label: c.label || "",
+        roomsServedIds: c.roomsServedIds || [], feedsPanelLabel: c.feedsPanelLabel || "", notes: c.notes || "",
+      };
+    };
+    var breakers = (panelAsset.breakers || []).map(function (b) {
+      return {
+        id: b.id, cells: b.cells || [], ampRating: b.ampRating || "", groupId: b.groupId || "",
+        breakerTypeId: b.breakerTypeId || "", notes: b.notes || "",
+        circuits: (b.circuits || []).map(pickCircuit),
+      };
+    });
+    var rooms = {};
+    breakers.forEach(function (b) {
+      b.circuits.forEach(function (c) {
+        (c.roomsServedIds || []).forEach(function (id) { if (roomNameById[id] !== undefined) rooms[id] = roomNameById[id]; });
+      });
+    });
+    (panelAsset.unassignedCircuits || []).forEach(function (c) {
+      (c.roomsServedIds || []).forEach(function (id) { if (roomNameById[id] !== undefined) rooms[id] = roomNameById[id]; });
+    });
+
+    // Where a panel sits is now one parentId walked upwards, not a direct
+    // roomId/buildingId pair. The old columns are still read as a fallback so
+    // this page is right against a sheet that hasn't been migrated — mirroring
+    // adoptLegacyParentage() in index.html and effectiveParentId_() in the
+    // backend, since all three answer the same question about the same rows.
+    var byLabel = {};
+    assets.forEach(function (a) { byLabel[a.label] = a; });
+    function effectiveParent(a) {
+      return String((a && (a.parentId || a.roomId || a.buildingId)) || "").trim();
+    }
+    // Loop-safe for the same reason every other chain walk is: storage is
+    // permissive, so a hand-edited sheet can contain a cycle, and this page is
+    // the one a contractor loads on their phone at an open panel door.
+    function nearestOfType(startAsset, type) {
+      var seen = {};
+      var cur = byLabel[effectiveParent(startAsset)];
+      var depth = 0;
+      while (cur && !seen[cur.label] && depth < 50) {
+        if (cur.type === type) return cur;
+        seen[cur.label] = true;
+        cur = byLabel[effectiveParent(cur)];
+        depth++;
+      }
+      return null;
+    }
+    var roomAsset = nearestOfType(panelAsset, "Room");
+    var buildingAsset = nearestOfType(panelAsset, "Building");
+
+    var fedFrom = null;
+    assets.forEach(function (a) {
+      (a.breakers || []).forEach(function (b) {
+        (b.circuits || []).forEach(function (c) {
+          if (fedFrom || c.feedsPanelLabel !== panelAsset.label) return;
+          var upRoom = nearestOfType(a, "Room");
+          fedFrom = {
+            panelLabel: a.label,
+            panelRoomName: upRoom ? (upRoom.room || "") : "",
+            circuitLabel: c.label || "", cells: b.cells || [],
+          };
+        });
+      });
+    });
+
+    return {
+      ok: true,
+      panel: {
+        label: panelAsset.label, panelSlotCount: panelAsset.panelSlotCount, panelLayout: panelAsset.panelLayout,
+        roomName: roomAsset ? (roomAsset.room || "") : "",
+        buildingName: buildingAsset ? (buildingAsset.building || "") : "",
+      },
+      breakers: breakers,
+      unassignedCircuits: (panelAsset.unassignedCircuits || []).map(pickCircuit),
+      breakerTypes: snap.breakerTypes || [],
+      rooms: rooms,
+      fedFrom: fedFrom,
+    };
+  }
+
+  // ---------- load ----------
+  function load() {
+    if (!panelCode) {
+      showStatus("This link has no panel code. A panel QR sticker should point at a URL ending in ?p=BCA0082.", false);
+      return;
+    }
+    showStatus("Loading panel…", false);
+
+    if (params.get("sandbox") === "1") {
+      try {
+        var local = sandboxPayload(panelCode);
+        if (!local.ok) showStatus(local.error, false); else render(local);
+      } catch (err) {
+        showStatus("Sandbox data could not be read.", false);
+      }
+      return;
+    }
+
+    // `cache: "no-store"` for the same reason index.html uses it: Apps Script's
+    // /exec GET is cacheable and has been observed serving a stale snapshot for
+    // minutes. Showing an electrician a panel layout that changed this morning
+    // is the failure this prevents.
+    fetch(SHEET_API_URL + "?panel=" + encodeURIComponent(panelCode), { cache: "no-store" })
+      .then(function (res) {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        if (!data || !data.ok) {
+          showStatus((data && data.error) || "That panel could not be found.", false);
+          return;
+        }
+        render(data);
+      })
+      .catch(function () {
+        showStatus("Couldn't reach the panel database. Check your connection.", true);
+      });
+  }
+
+  load();
+})();
+</script>
+</body>
+</html>
