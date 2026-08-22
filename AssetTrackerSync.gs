@@ -49,7 +49,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v20";
+const SCRIPT_VERSION = "v21";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -968,6 +968,35 @@ function doPost(e) {
         // those describe the very changes being rejected. Returning the current
         // revisions lets the client resync without a second round trip.
         return jsonOut_({ ok: false, conflict: conflict, revisions: revisions });
+      }
+    }
+
+    // --- Mass-deletion guard --------------------------------------------------
+    // Refuses a save that would take a populated Assets tab to empty. This
+    // architecture writes the FULL snapshot every time, which means "the client
+    // sent no assets" and "the user deleted every asset" are the same request on
+    // the wire — and the first one silently destroyed the live inventory once
+    // (2026-08-21), which is why this exists.
+    //
+    // Deliberately only the jump straight to zero. Deleting assets through the
+    // UI leaves N-1 each time and never trips this; nothing legitimate in the
+    // app empties the inventory in one save. A caller that genuinely means it
+    // can pass confirmEmptyAssets: true, so this is a safety catch and not a
+    // wall.
+    //
+    // getLastRow() rather than reading the tab: this runs on every asset save
+    // and only needs a count, not the data.
+    if (dirty.assets && assets.length === 0 && body.confirmEmptyAssets !== true) {
+      const existingRows = Math.max(0, getSheet_(SHEET_NAMES.assets).getLastRow() - 1);
+      if (existingRows > 0) {
+        return jsonOut_({
+          ok: false,
+          refused: "emptyAssets",
+          existingRows: existingRows,
+          error: "Refused: this save would have deleted all " + existingRows
+            + " assets at once. Nothing was changed. If that was genuinely intended, "
+            + "it has to be done deliberately rather than as a side effect of a save.",
+        });
       }
     }
 
