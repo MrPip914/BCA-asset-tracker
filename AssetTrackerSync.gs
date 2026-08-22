@@ -41,7 +41,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v17 (2026-08-20) — Combined deploy, superseding the separate v14/v15/v16 lines that were each pending on their own branch and would have silently erased one another if pasted in sequence. Contains all three: (v15) Assets gain parentId, one reference to the containing asset replacing the fixed roomId/buildingId pair so the hierarchy can be any depth — the old columns are KEPT and still written, so this is reversible and un-migrated rows still resolve; (v16) Assets gain campus, the name field of a Campus type above Building; (v14) doGet branches on ?panel=<label>, an anonymous read-only projection of ONE panel for the QR page panel.html, built by the PUBLIC_*_FIELDS whitelists so person/serial/hostname/purchase data and every other asset are unreachable through it. The public projection resolves a panel Room/Building by walking parentId (falling back to roomId/buildingId) rather than reading them directly, so it is correct both before and after the sheet is migrated. Parameterless doGet and doPost are otherwise unchanged.";
+const SCRIPT_VERSION = "v18 (2026-08-21) — Google Sign-In. The parameterless doGet no longer returns the inventory to anyone with the URL: it refuses with authFailed (still reporting scriptVersion, so the browser version check keeps working), and the full read moved to doPost({ op: 'read' }) so the ID token travels in the body instead of the query string. Every write now requires a verified Google identity whose email is on the authUsers allowlist in Config, with role editor; view-only is enforced here rather than by hiding buttons. OWNER_EMAIL is always an editor so lockout is impossible, and authUsers is preserved rather than overwritten when a save doesn't carry it — otherwise the wholesale Config rewrite would empty the allowlist. The anonymous ?panel= branch for panel.html is UNCHANGED and still anonymous by design. Previously: v17 (2026-08-20) — Combined deploy, superseding the separate v14/v15/v16 lines that were each pending on their own branch and would have silently erased one another if pasted in sequence. Contains all three: (v15) Assets gain parentId, one reference to the containing asset replacing the fixed roomId/buildingId pair so the hierarchy can be any depth — the old columns are KEPT and still written, so this is reversible and un-migrated rows still resolve; (v16) Assets gain campus, the name field of a Campus type above Building; (v14) doGet branches on ?panel=<label>, an anonymous read-only projection of ONE panel for the QR page panel.html, built by the PUBLIC_*_FIELDS whitelists so person/serial/hostname/purchase data and every other asset are unreachable through it. The public projection resolves a panel Room/Building by walking parentId (falling back to roomId/buildingId) rather than reading them directly, so it is correct both before and after the sheet is migrated. Parameterless doGet and doPost are otherwise unchanged.";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -240,6 +240,142 @@ function readRevisions_(configMap) {
     revisions[d] = isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
   });
   return revisions;
+}
+
+// --- Authentication ----------------------------------------------------------
+// Google Sign-In. The browser signs in against the OAuth client below and sends
+// the resulting ID token with every request; this file verifies that token with
+// Google, then checks the email against the allowlist stored in Config
+// (`authUsers`).
+//
+// Two separate questions, deliberately kept apart:
+//   1. "Is this really who they claim to be?"  -> Google answers, verifyIdToken_.
+//   2. "Are they allowed in, and may they write?" -> the allowlist answers.
+// The OAuth client is configured External, so ANY Google account can satisfy (1).
+// That grants nothing on its own — (2) is the actual gate, and it lives here in
+// the sheet rather than in Google's console so it can be managed from the app.
+//
+// The anonymous ?panel= branch of doGet predates this and STAYS anonymous by
+// design — it's the QR-code page on physical panels. It was written as its own
+// branch rather than an exemption inside the authenticated path, so nothing
+// here has to carve a hole for it.
+const OAUTH_CLIENT_ID = "512657381831-4so7t5t2shqn8nbgrgktsg6s37podqji.apps.googleusercontent.com";
+
+// Always an editor, whatever the allowlist says — the escape hatch that makes
+// lockout impossible. Every config save rewrites the Config tab wholesale, so a
+// bad save (or a client predating `authUsers` that posts none) could otherwise
+// empty the allowlist and leave nobody able to sign in and repair it. Changing
+// this line needs the Apps Script editor, which only the sheet owner can open.
+const OWNER_EMAIL = "mrpip914@gmail.com";
+
+const ROLE_EDITOR = "editor";
+const ROLE_VIEWER = "viewer";
+
+// Verifies a Google ID token, returning { email, name } or null for anything
+// that doesn't check out. Uses Google's tokeninfo endpoint rather than checking
+// the JWT signature by hand — Apps Script has no RS256 primitive, and this is
+// one UrlFetch on a request that's already doing spreadsheet I/O, so the added
+// latency is noise.
+function verifyIdToken_(idToken) {
+  if (!idToken || typeof idToken !== "string") return null;
+  try {
+    const res = UrlFetchApp.fetch(
+      "https://oauth2.googleapis.com/tokeninfo?id_token=" + encodeURIComponent(idToken),
+      { muteHttpExceptions: true }
+    );
+    if (res.getResponseCode() !== 200) return null;
+    const info = JSON.parse(res.getContentText());
+    // aud proves the token was minted for THIS app. Without this check, a token
+    // issued to any other site using Google Sign-In could be replayed here.
+    if (info.aud !== OAUTH_CLIENT_ID) return null;
+    // Comes back as the STRING "true", not a boolean.
+    if (String(info.email_verified) !== "true") return null;
+    if (!info.email) return null;
+    // tokeninfo rejects expired tokens itself; re-checking costs nothing and
+    // means this doesn't silently depend on that staying true.
+    const exp = Number(info.exp);
+    if (isFinite(exp) && exp * 1000 < Date.now()) return null;
+    return { email: String(info.email).toLowerCase().trim(), name: info.name || "" };
+  } catch (err) {
+    return null;
+  }
+}
+
+// Normalizes an allowlist from any source — the sheet, or a client's save — into
+// [{ email, name, role }] with lowercased emails, no duplicates, and OWNER_EMAIL
+// always present as an editor. Shared by both directions on purpose: the list
+// that gets written back is cleaned by exactly the same rules as the list that
+// gets read, so a save can't introduce a shape that a later read chokes on.
+function sanitizeAuthUsers_(list) {
+  if (!Array.isArray(list)) list = [];
+  const byEmail = {};
+  const cleaned = [];
+  list
+    .filter(u => u && u.email)
+    .forEach(u => {
+      const email = String(u.email).toLowerCase().trim();
+      if (!email || byEmail[email]) return;
+      byEmail[email] = true;
+      cleaned.push({
+        email: email,
+        name: u.name || "",
+        // Anything not explicitly the viewer role is an editor, so a typo in a
+        // stored value fails toward the app's long-standing behavior rather
+        // than silently stripping someone's ability to work.
+        role: u.role === ROLE_VIEWER ? ROLE_VIEWER : ROLE_EDITOR,
+      });
+    });
+  if (!byEmail[OWNER_EMAIL]) {
+    cleaned.unshift({ email: OWNER_EMAIL, name: "Owner", role: ROLE_EDITOR });
+  }
+  return cleaned;
+}
+
+// The allowlist as stored in Config. OWNER_EMAIL is always present as an editor
+// whether or not the stored list mentions it — see the constant above.
+function readAuthUsers_(configMap) {
+  let list = [];
+  try {
+    if (configMap.authUsers) list = JSON.parse(configMap.authUsers);
+  } catch (err) {
+    list = [];
+  }
+  return sanitizeAuthUsers_(list);
+}
+
+// Second half of the answer: a verified identity is checked against the
+// allowlist. Split from verifyIdToken_ so the two halves can run in different
+// places — verification does a network round trip to Google and belongs OUTSIDE
+// the script lock, while the allowlist read has to happen INSIDE it (reading
+// Config mid-rewrite would show an empty list and reject everyone). Holding a
+// cross-execution mutex across a network call would serialize every save in the
+// app behind it.
+//
+// Returns { ok: true, email, name, role, users } or { ok: false, reason, error }.
+// `reason` is what the frontend branches on: "signin" means the token was
+// missing/expired/bogus (show the sign-in button again), "notallowed" means a
+// real, verified person who simply isn't on the list (say so, rather than
+// looping them through a sign-in that will keep succeeding and keep failing).
+function authorizeIdentity_(identity, configMap) {
+  const users = readAuthUsers_(configMap);
+  const match = users.filter(u => u.email === identity.email)[0];
+  if (!match) {
+    return {
+      ok: false,
+      reason: "notallowed",
+      email: identity.email,
+      error: identity.email + " isn't on the access list for this asset tracker. Ask an editor to add you.",
+    };
+  }
+  return {
+    ok: true,
+    email: identity.email,
+    // The stored name wins over Google's: it's what an editor typed for this
+    // person here, and it's what already stamps their rows in the audit log.
+    name: match.name || identity.name || identity.email,
+    role: match.role,
+    users: users,
+  };
 }
 
 function jsonOut_(obj) {
@@ -475,9 +611,64 @@ function doGet(e) {
     }
   }
 
+  // Everything below this point used to be the anonymous full read — the entire
+  // inventory to anyone holding the URL. It now lives behind doPost's op:"read",
+  // which can carry an ID token in its request BODY. A GET can only carry one in
+  // the query string, which would write a live credential into browser history
+  // and Google's request logs. See loadData() in index.html.
+  //
+  // scriptVersion is deliberately still reported without a token: opening the
+  // /exec URL in a browser to see which version is actually deployed is a
+  // documented diagnostic (see the SCRIPT_VERSION comment at the top of this
+  // file), and it's the one thing that has to keep working unauthenticated.
+  return respond_({
+    ok: false,
+    authFailed: true,
+    reason: "signin",
+    scriptVersion: SCRIPT_VERSION,
+    error: "This endpoint requires sign-in.",
+  }, e);
+}
+
+// The authenticated full-inventory read, reached via doPost({ op: "read" }).
+// Takes its own lock, so doPost routes here BEFORE acquiring the write lock —
+// Apps Script's script lock is a cross-execution mutex, not a reentrant one, and
+// acquiring it twice in one execution would deadlock against itself.
+//
+// The lock matters for the same reason it does on the public panel branch:
+// writeTable_ clear()s a tab before rewriting it, so an unlocked read landing
+// mid-save can legitimately observe an empty tab.
+function handleAuthenticatedRead_(idToken, e) {
+  // Token verified BEFORE the lock — it's a network round trip to Google, and
+  // see authorizeIdentity_ for why the two halves are split.
+  const identity = verifyIdToken_(idToken);
+  if (!identity) {
+    return respond_({
+      ok: false,
+      authFailed: true,
+      reason: "signin",
+      error: "Sign in with Google to use the asset tracker.",
+      scriptVersion: SCRIPT_VERSION,
+    }, e);
+  }
+
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
+    // Allowlist read under the same lock as the data: outside it, a Config
+    // rewrite in flight would show an empty list and reject everyone.
+    const auth = authorizeIdentity_(identity, readConfigMap_());
+    if (!auth.ok) {
+      return respond_({
+        ok: false,
+        authFailed: true,
+        reason: auth.reason,
+        email: auth.email || "",
+        error: auth.error,
+        scriptVersion: SCRIPT_VERSION,
+      }, e);
+    }
+
     const assetRows = readTable_(SHEET_NAMES.assets, ASSET_FIELDS);
     const commentRows = readTable_(SHEET_NAMES.comments, ["assetLabel", "text", "at", "by"]);
     const changeRows = readTable_(SHEET_NAMES.changes, ["assetLabel", "changeType", "vendor", "cost", "note", "at", "by"]);
@@ -583,6 +774,18 @@ function doGet(e) {
       // a domain it's about to write has moved on since. All zeros on a sheet
       // that has never been written by a v12+ backend.
       revisions: readRevisions_(configRaw),
+      // Who the backend decided this caller is, and the allowlist itself so the
+      // app can render the user-management screen. Sent from here rather than
+      // trusted from the token client-side: the role that governs whether a
+      // save is accepted has to be the one the SERVER resolved, or a viewer
+      // could simply edit their own role in memory and start writing.
+      auth: {
+        email: auth.email,
+        name: auth.name,
+        role: auth.role,
+        users: auth.users,
+        ownerEmail: OWNER_EMAIL,
+      },
     };
 
     // respond_ handles the ?callback= JSONP wrapper — kept because a <script>
@@ -595,10 +798,37 @@ function doGet(e) {
 }
 
 function doPost(e) {
+  // Parsed before the lock so a read can be routed away without ever taking the
+  // write lock — handleAuthenticatedRead_ acquires its own, and the script lock
+  // is not reentrant.
+  let body;
+  try {
+    body = JSON.parse(e.postData.contents);
+  } catch (err) {
+    return jsonOut_({ ok: false, error: "Malformed request body." });
+  }
+
+  // The authenticated full read. It's a POST purely so the ID token can ride in
+  // the body rather than the URL — nothing on this path writes anything.
+  if (body.op === "read") {
+    return handleAuthenticatedRead_(body.idToken, e);
+  }
+
+  // Verified outside the lock (network round trip); the allowlist half runs
+  // inside it, below.
+  const identity = verifyIdToken_(body.idToken);
+  if (!identity) {
+    return jsonOut_({
+      ok: false,
+      authFailed: true,
+      reason: "signin",
+      error: "Your sign-in expired before this change could be saved. Sign in again and retry.",
+    });
+  }
+
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
-    const body = JSON.parse(e.postData.contents);
     const assets = body.assets || [];
     // Which domains actually changed, as reported by the client (see persist()
     // in index.html — computed there by reference-equality against its current
@@ -618,6 +848,33 @@ function doPost(e) {
     // client (no `_revisions` at all) still writes, same fallback philosophy as
     // a missing `_dirty`.
     const configMap = readConfigMap_();
+
+    // --- Authorization ------------------------------------------------------
+    // Deliberately inside the lock and re-read on every save, so removing
+    // someone (or dropping them to view-only) takes effect on their very next
+    // save rather than whenever they happen to reload the page.
+    //
+    // View-only is enforced HERE, not by hiding buttons in the app. The UI does
+    // hide them, but that's a courtesy — this is the rule.
+    const auth = authorizeIdentity_(identity, configMap);
+    if (!auth.ok) {
+      return jsonOut_({
+        ok: false,
+        authFailed: true,
+        reason: auth.reason,
+        email: auth.email || "",
+        error: auth.error,
+      });
+    }
+    if (auth.role !== ROLE_EDITOR) {
+      return jsonOut_({
+        ok: false,
+        authFailed: true,
+        reason: "readonly",
+        error: "Your access is view-only, so that change wasn't saved.",
+      });
+    }
+
     const revisions = readRevisions_(configMap);
     const postedRevisions = body._revisions;
     if (postedRevisions) {
@@ -744,6 +1001,18 @@ function doPost(e) {
         configRows.push({ key: "usersList", value: JSON.stringify(body.usersList || []) });
         configRows.push({ key: "bulkItemTypes", value: JSON.stringify(body.bulkItemTypes || []) });
         configRows.push({ key: "typesList", value: JSON.stringify(body.typesList || []) });
+        // The access allowlist, PRESERVED from the sheet unless this save
+        // explicitly carries one. Every other key above is rewritten from the
+        // posted body, which is exactly the hazard here: a client that predates
+        // user management, or any save that simply isn't about users, would
+        // otherwise blank the list and lock everyone except OWNER_EMAIL out of
+        // the app. Absent means "leave it alone", not "set it to empty".
+        configRows.push({
+          key: "authUsers",
+          value: JSON.stringify(
+            Array.isArray(body.authUsers) ? sanitizeAuthUsers_(body.authUsers) : readAuthUsers_(configMap)
+          ),
+        });
         configRows.push({ key: "nextAssetNumber", value: JSON.stringify(nextAssetNumber) });
       } else {
         Object.keys(configMap).forEach(k => {

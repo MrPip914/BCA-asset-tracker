@@ -178,9 +178,43 @@ per-device via `localStorage` (`SANDBOX_MODE_KEY`).
   see Data model) are the same pattern with an extra level of nesting. Config tab stores
   the managed lists and column config as JSON blobs (key/value rows), since those aren't
   naturally tabular.
-- **Personal identity**: a lightweight, unverified "who's using this browser" name tag
-  is stored in `localStorage` (not the Sheet) — used only to stamp comments/changes/edits
-  with an author name. Not real auth.
+- **Authentication (backend v18)**: Google Sign-In, gating the whole app. The browser signs
+  in against `GOOGLE_CLIENT_ID` (`index.html`) / `OAUTH_CLIENT_ID` (`AssetTrackerSync.gs`) —
+  **the same id must appear in both**, since the backend rejects any token not minted for
+  exactly it. The ID token is sent with every request and verified server-side against
+  Google's `tokeninfo` endpoint, then the email is checked against the `authUsers` allowlist
+  in Config.
+  - **Two separate questions, kept apart deliberately.** Google answers "is this really
+    them?"; the allowlist answers "may they in, and may they write?". The OAuth client is
+    **External** (the school has no Workspace, so Internal was unavailable), meaning *any*
+    Google account can pass the first. That grants nothing — the allowlist is the gate.
+  - **The full read is now a POST**, `doPost({ op: "read" })`, not a GET. Purely so the token
+    travels in the body: a GET could only carry it in the query string, writing a live
+    credential into browser history and Google's logs. The parameterless `doGet` now refuses
+    with `authFailed` — but still reports `scriptVersion`, because checking the deployed
+    version by opening `/exec` in a browser is a documented diagnostic that has to keep
+    working without a token.
+  - **`?panel=` stays anonymous**, unchanged. It's the QR-code page for physical panels
+    (`panel.html`). v14 wrote it as its own branch rather than an exemption inside the
+    authenticated path, which is exactly why v18 needed to carve no hole for it.
+  - **Roles**: `editor` or `viewer`. View-only is enforced in `doPost` and again at
+    `persist()` — the buttons are also hidden, but that is a courtesy, not the control.
+  - **Lockout is impossible**: `OWNER_EMAIL` in `AssetTrackerSync.gs` is always an editor
+    regardless of the allowlist, and `authUsers` is *preserved* rather than overwritten when
+    a save doesn't carry it. That second part matters because the Config tab is rewritten
+    wholesale on every config save — without it, one save from a client that doesn't know
+    about `authUsers` would empty the allowlist and lock out everyone but the owner.
+  - **Sandbox bypasses all of it** (`authSatisfied = sandboxMode || !!auth`), since it never
+    touches the backend. The sign-in screen carries its own "Continue in Sandbox" link —
+    the Sandbox pill lives in the header, which is now behind the gate, so without that link
+    a signed-out browser could never reach sandbox mode at all.
+  - **Local testing needs `http://localhost:<port>` registered** as an authorized JavaScript
+    origin on the OAuth client. `file://` has no origin Google accepts, so double-clicking
+    `index.html` shows the sign-in button and then fails.
+- **Personal identity**: `currentUser` (what stamps comments/changes/audit rows) now comes
+  from the server-resolved identity on load — verified, not typed. The old self-declared
+  `localStorage` name tag (`USER_STORAGE_KEY`) survives for **sandbox mode only**, which has
+  no sign-in but still wants an author on audit entries.
 - **Column visibility is per-device**, also `localStorage` (`COLUMN_VISIBILITY_STORAGE_KEY`),
   not the Sheet. Column *definitions* (key/label/width/custom flag) stay server-synced via
   Config, since a custom column adds a real field to every asset — only which columns are
@@ -939,7 +973,23 @@ When you do:
 
 ## Known constraints / things to watch
 
-- **The backend here is v17, a single COMBINED version, and it was confirmed deployed on
+- **The repo is at v18 (Google Sign-In) and v18 is UNDEPLOYED as of 2026-08-21.** The live
+  backend is still v17, which means the live app currently still serves the whole inventory
+  to anyone with the URL — authentication is not in force until v18 is pasted in and a **New
+  version** deploy is created on the existing deployment. Until then the frontend here and
+  the live backend disagree and the app will not load against production.
+  - **The mismatch was nearly destructive, and the guard against it is load-bearing.** v18's
+    `index.html` POSTs `op:"read"`, which a v17 backend doesn't recognise and treats as an
+    ordinary save. A read payload carries no assets, and `_dirty` absent means "rewrite
+    everything" — so the first load of the new frontend against the old backend would have
+    blanked the Assets tab and every child tab with it. `loadData()` therefore sends
+    `_dirty: { assets:false, config:false, breakerTypes:false }` explicitly. Every write
+    branch in `doPost` is gated on one of those flags, the audit append receives an empty
+    list, and the Config block is skipped because no domain was written — so an old backend
+    writes *nothing* and the load fails cleanly on "Malformed response" instead. Do not
+    remove that `_dirty` from the read payload; v18 itself never reads it.
+  - Deploy the backend and the frontend together. Everything below about v17 is history.
+- **The backend was v17, a single COMBINED version, confirmed deployed on
   2026-08-21** (by fetching the `/exec` URL and reading `scriptVersion` back — not by trusting
   this line; see the standing warning about that a few paragraphs down, which applies to this
   sentence exactly as much as to the ones it replaced). v14 (the public
@@ -1024,9 +1074,25 @@ When you do:
   unit per Building (4 on live, zone count matched to that building's room count), each
   with seeded maintenance items (Monthly filter clean + Annual coil clean for Mini Splits;
   Annual inspection/cleaning for Condensers).
-- No auth beyond the cosmetic name tag — anyone with the deployed URL can read/write
-  everything. Fine for internal school use with a private link; not a public-facing
-  security model.
+- ~~No auth beyond the cosmetic name tag~~ — **fixed in v18**, see Authentication under
+  Architecture. Worth recording why it mattered more than it looked: the GitHub repo is
+  **public**, so `SHEET_API_URL` in `index.html` was published the whole time. The
+  "private link" model was never actually private. Rotating the URL was considered and
+  rejected — once the backend authenticates, the address isn't a secret and doesn't need
+  to be. (The one genuine trap there: an *old deployment* left active keeps serving its
+  own frozen copy of the code, unauthenticated. Updating the existing deployment in place,
+  which is this project's normal ritual, avoids it. Confirmed there is only one.)
+- Access changes aren't written to the audit log. The log is keyed by `assetLabel` and
+  every row describes an asset event, so "Jane was made view-only" has nowhere natural to
+  sit. Worth revisiting if who-changed-whose-access ever needs answering.
+- Individual edit controls are still rendered for view-only users in most places. Every
+  write funnels through `persist()`, which refuses and explains, and the backend refuses
+  independently — so nothing can actually be changed. But a viewer still sees buttons that
+  do nothing except produce a notice, which is a rough edge rather than a hole.
+- `index.html` crossed 500KB with v18, so Babel Standalone now logs a "code generator has
+  deoptimised the styling" note on every load. Harmless, but it means in-browser transpile
+  time is no longer trivial — relevant to the long-standing "should this get a build step"
+  question, and to the reason `panel.html` was kept as a separate small page.
 - Apps Script free-tier quota is ~90 min of script runtime/day — comfortably enough
   for this app's usage pattern, but worth knowing if it ever gets flaky under heavy
   simultaneous use.

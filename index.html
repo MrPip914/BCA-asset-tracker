@@ -27,6 +27,15 @@
 
 <!-- Babel Standalone: transpiles the JSX/ESM below in the browser at load time. -->
 <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+
+<!-- Google Identity Services — the "Sign in with Google" button and the ID token
+     it mints. Loaded as a plain classic script (not through the import map)
+     because it registers the global `google.accounts.id` that the app polls for
+     on mount. Deliberately NOT async/defer: Babel transpiles the module below
+     at load time, which takes long enough that this has always resolved first,
+     and waiting on it explicitly (see waitForGoogleIdentity) covers the case
+     where it hasn't. -->
+<script src="https://accounts.google.com/gsi/client"></script>
 </head>
 <body>
 <div id="root"></div>
@@ -771,12 +780,58 @@ const COLUMN_VISIBILITY_STORAGE_KEY = "asset-tracker-column-visibility";
 // Your deployed Apps Script Web App URL. Redeploy in Apps Script (Deploy > Manage
 // deployments > New version) any time you change AssetTrackerSync.gs.
 const SHEET_API_URL = "https://script.google.com/macros/s/AKfycbzXaKRuCrTesxobxP-b2me1TSn0YoGogoYhNPTWU4qWWjXANXGlPuDzJSKGClOTsfOXRQ/exec";
+
+// Google Sign-In client, matching OAUTH_CLIENT_ID in AssetTrackerSync.gs — the
+// backend rejects any token not minted for exactly this id, so the two must stay
+// in step. Safe in public source: a client id names the app, it doesn't authorize
+// anything. Access is decided by the allowlist in the Sheet, not by holding this.
+//
+// Sign-in only works from an origin registered on this client in the Google Cloud
+// console. Currently https://mrpip914.github.io. A file:// page has no origin
+// Google will accept, so local testing needs a real http://localhost server AND
+// that localhost origin added there — opening index.html by double-clicking it
+// will show the sign-in button and then fail.
+const GOOGLE_CLIENT_ID = "512657381831-4so7t5t2shqn8nbgrgktsg6s37podqji.apps.googleusercontent.com";
+
+// The live Google ID token, held at module scope rather than in React state on
+// purpose: loadData/writeSnapshot read it at call time, and a state value would
+// hand them whatever was captured when their closure was created — which during
+// a token refresh is the token that just expired. One value, read fresh, no
+// stale-closure class of bug. The React copy below is for rendering only.
+let authIdToken = null;
+
+// Google ID tokens last about an hour. Rather than tracking that clock, the app
+// treats an authFailed response as "the token is stale" and re-prompts — the
+// server is the only thing whose opinion of expiry actually matters.
+function setAuthIdToken(token) { authIdToken = token || null; }
+
+// Resolves with `window.google.accounts.id` once the GSI script has registered
+// it, or null if it never shows up. The script tag in <head> is not deferred, so
+// in practice this resolves on the first check — but Babel transpiling this file
+// is the slow step on load, and depending on "the other script definitely won a
+// race" is the kind of assumption that fails on a cold cache or a slow phone.
+// A blocked/failed script (offline, a network that blocks Google) resolves null
+// rather than hanging, so the sign-in screen can say so instead of spinning.
+function waitForGoogleIdentity(timeoutMs = 10000) {
+  return new Promise(resolve => {
+    const started = Date.now();
+    (function check() {
+      if (window.google && window.google.accounts && window.google.accounts.id) {
+        resolve(window.google.accounts.id);
+      } else if (Date.now() - started > timeoutMs) {
+        resolve(null);
+      } else {
+        setTimeout(check, 100);
+      }
+    })();
+  });
+}
 // Must match SCRIPT_VERSION in AssetTrackerSync.gs, bumped by hand any time
 // either file changes. loadData() compares this against what the deployed
 // backend actually reports (data.scriptVersion) and flags a mismatch —
 // catches a stuck deployment (edited-but-not-redeployed) automatically
 // instead of it silently dropping data until someone happens to notice.
-const FRONTEND_SCRIPT_VERSION = "v17 (2026-08-20) — Combined deploy, superseding the separate v14/v15/v16 lines that were each pending on their own branch and would have silently erased one another if pasted in sequence. Contains all three: (v15) Assets gain parentId, one reference to the containing asset replacing the fixed roomId/buildingId pair so the hierarchy can be any depth — the old columns are KEPT and still written, so this is reversible and un-migrated rows still resolve; (v16) Assets gain campus, the name field of a Campus type above Building; (v14) doGet branches on ?panel=<label>, an anonymous read-only projection of ONE panel for the QR page panel.html, built by the PUBLIC_*_FIELDS whitelists so person/serial/hostname/purchase data and every other asset are unreachable through it. The public projection resolves a panel Room/Building by walking parentId (falling back to roomId/buildingId) rather than reading them directly, so it is correct both before and after the sheet is migrated. Parameterless doGet and doPost are otherwise unchanged.";
+const FRONTEND_SCRIPT_VERSION = "v18 (2026-08-21) — Google Sign-In. The parameterless doGet no longer returns the inventory to anyone with the URL: it refuses with authFailed (still reporting scriptVersion, so the browser version check keeps working), and the full read moved to doPost({ op: 'read' }) so the ID token travels in the body instead of the query string. Every write now requires a verified Google identity whose email is on the authUsers allowlist in Config, with role editor; view-only is enforced there rather than by hiding buttons. OWNER_EMAIL is always an editor so lockout is impossible, and authUsers is preserved rather than overwritten when a save doesn't carry it — otherwise the wholesale Config rewrite would empty the allowlist. The anonymous ?panel= branch for panel.html is UNCHANGED and still anonymous by design. Previously: v17 (2026-08-20) — Combined deploy, superseding the separate v14/v15/v16 lines that were each pending on their own branch and would have silently erased one another if pasted in sequence. Contains all three: (v15) Assets gain parentId, one reference to the containing asset replacing the fixed roomId/buildingId pair so the hierarchy can be any depth — the old columns are KEPT and still written, so this is reversible and un-migrated rows still resolve; (v16) Assets gain campus, the name field of a Campus type above Building; (v14) doGet branches on ?panel=<label>, an anonymous read-only projection of ONE panel for the QR page panel.html, built by the PUBLIC_*_FIELDS whitelists so person/serial/hostname/purchase data and every other asset are unreachable through it. The public projection resolves a panel Room/Building by walking parentId (falling back to roomId/buildingId) rather than reading them directly, so it is correct both before and after the sheet is migrated. Parameterless doGet and doPost are otherwise unchanged.";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -1532,6 +1587,43 @@ function AssetTracker() {
   const [currentUser, setCurrentUser] = useState(null);
   const [showNamePrompt, setShowNamePrompt] = useState(false);
   const [nameInput, setNameInput] = useState("");
+
+  // --- Google Sign-In state ---------------------------------------------------
+  // `auth` is what the SERVER said this person is: { email, name, role, users,
+  // ownerEmail }, or null when not signed in. Never assembled from the ID token
+  // client-side — the role that decides whether a save is accepted has to be the
+  // one the backend resolved, or a viewer could rewrite their own role in memory.
+  const [auth, setAuth] = useState(null);
+  // Why sign-in isn't available yet: { reason, message }. reason "signin" means
+  // try again; "notallowed" means a real person who isn't on the list, where
+  // re-prompting would just succeed at Google and fail here all over again.
+  const [authError, setAuthError] = useState(null);
+  // True from the moment a token is handed over until the backend has ruled on
+  // it — the sign-in screen shows a spinner rather than an unexplained pause,
+  // since the round trip includes Google's tokeninfo call.
+  const [authPending, setAuthPending] = useState(false);
+
+  // Sandbox is local-only — it never calls the backend, so requiring a Google
+  // account to look at fixture data would just make UI iteration slower for no
+  // security benefit. The real backend is guarded server-side regardless of
+  // anything decided here.
+  // Set when a view-only user's action was refused, cleared when they dismiss it.
+  const [readOnlyNotice, setReadOnlyNotice] = useState(null);
+
+  // The access allowlist, [{ email, name, role }] — who may sign in and whether
+  // they can edit. Distinct from `usersList`, which is the managed list of people
+  // an ASSET can be assigned to; someone can own a laptop without having a login,
+  // and an IT contractor can have a login without owning anything. Seeded from
+  // the server on every load, and only ever sent back when it actually changed
+  // (see persist) so an ordinary save can't overwrite it.
+  const [accessUsers, setAccessUsers] = useState([]);
+  const [showAccessManager, setShowAccessManager] = useState(false);
+  const [accessDraft, setAccessDraft] = useState({ email: "", name: "", role: "editor", error: "" });
+
+  const authSatisfied = sandboxMode || !!auth;
+  // View-only users are stopped in persist() and again in the backend. Buttons
+  // are also hidden where practical, but that's a courtesy, not the control.
+  const canEdit = sandboxMode || (auth && auth.role !== "viewer");
   const [columnVisibility, setColumnVisibility] = useState({}); // { [columnKey]: boolean } — per-device override, see COLUMN_VISIBILITY_STORAGE_KEY
 
   const [query, setQuery] = useState("");
@@ -1580,7 +1672,78 @@ function AssetTracker() {
   // than silently showing something that isn't the real inventory. Exposed
   // as a named function (not inline in the effect) so the "Try again" button
   // on that error screen, and the sandbox toggle, can both call it directly.
+  // --- Google Sign-In wiring ---------------------------------------------------
+  const signInButtonRef = useRef(null);
+  // Reassigned every render so the callback GSI holds (registered once, below)
+  // always calls through to the CURRENT closure. Registering the handler
+  // directly would freeze it against the state of the render that initialized
+  // Google, and it would go on calling a stale loadData forever after.
+  const credentialHandlerRef = useRef(null);
+  credentialHandlerRef.current = (response) => {
+    if (!response || !response.credential) {
+      setAuthError({ reason: "signin", message: "Google didn't complete the sign-in. Try again." });
+      return;
+    }
+    setAuthError(null);
+    setAuthPending(true);
+    setAuthIdToken(response.credential);
+    // Routed straight into loadData on purpose: the response that proves who you
+    // are is the same one that carries the inventory, so signing in and loading
+    // are one round trip. loadData() adopts data.auth and clears authPending.
+    loadData();
+  };
+
+  useEffect(() => {
+    if (authSatisfied) return undefined;
+    let cancelled = false;
+    (async () => {
+      const googleId = await waitForGoogleIdentity();
+      if (cancelled) return;
+      if (!googleId) {
+        setAuthError({
+          reason: "signin",
+          message: "Couldn't load Google sign-in. Check your connection and reload.",
+        });
+        return;
+      }
+      googleId.initialize({
+        client_id: GOOGLE_CLIENT_ID,
+        callback: (resp) => credentialHandlerRef.current && credentialHandlerRef.current(resp),
+      });
+      if (signInButtonRef.current) {
+        googleId.renderButton(signInButtonRef.current, {
+          theme: "outline", size: "large", text: "signin_with", shape: "pill", width: 260,
+        });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [authSatisfied]);
+
+  // Drops the current session back to the sign-in screen. Used both by the
+  // Sign out button and by any authFailed response — an expired token and a
+  // deliberate sign-out land in exactly the same state, so they share a path.
+  function endSession(error) {
+    setAuthIdToken(null);
+    setAuth(null);
+    setAuthPending(false);
+    setCurrentUser(null);
+    setAssets(null);
+    setAuthError(error || null);
+    // Without this, Google silently re-issues the same account on the next
+    // render and an intentional sign-out bounces straight back in.
+    try {
+      if (window.google && window.google.accounts && window.google.accounts.id) {
+        window.google.accounts.id.disableAutoSelect();
+      }
+    } catch (e) { /* non-fatal — worst case the next sign-in is one extra click */ }
+  }
+
+  // Which sandbox setting the current data was loaded for. Stamped here rather
+  // than in the effect so a sign-in-triggered load counts too — see the effect.
+  const lastLoadedSandboxRef = useRef(null);
+
   async function loadData() {
+    lastLoadedSandboxRef.current = sandboxMode;
     setLoading(true);
     setLoadError(false);
     try {
@@ -1593,19 +1756,70 @@ function AssetTracker() {
         } catch (e) { /* corrupt/missing sandbox save — fall back to the fixture below */ }
         data = stored || JSON.parse(JSON.stringify(MOCK_SNAPSHOT));
       } else {
-        // `cache: "no-store"` is REQUIRED, not a tidy-up candidate. Apps Script's
-        // /exec GET is cacheable, and a bare fetch() here was observed serving a
-        // stale snapshot for minutes after the Sheet had changed. That was merely
-        // confusing before optimistic concurrency; now it's a trap: a cached load
-        // brings back stale `revisions` too, so the next save is rejected as a
-        // conflict, and the conflict handler's own loadData() would be served the
-        // same cached response — leaving the user unable to ever save, with no way
-        // out from inside the app. See "Optimistic concurrency" in CLAUDE.md.
-        const res = await fetch(SHEET_API_URL, { cache: "no-store" });
+        // A POST, not a GET, purely so the ID token rides in the body: a GET
+        // could only carry it in the query string, writing a live credential
+        // into browser history and Google's logs. Nothing on this path writes —
+        // the backend routes op:"read" away before it takes the write lock.
+        //
+        // `cache: "no-store"` is kept even though POSTs aren't cached the way
+        // the old GET was. It cost nothing, and the failure it originally fixed
+        // was vicious: a cached load brings back stale `revisions`, so the next
+        // save is rejected as a conflict, and the conflict handler's own
+        // loadData() gets served the same cached response — leaving the user
+        // unable to ever save, with no way out from inside the app. See
+        // "Optimistic concurrency" in CLAUDE.md.
+        const res = await fetch(SHEET_API_URL, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain;charset=utf-8" },
+          // `_dirty` all-false is a SAFETY GUARD against a version mismatch, not
+          // something v18 itself needs — v18's doPost routes op:"read" away
+          // before it looks at _dirty at all.
+          //
+          // It matters if this frontend ever reaches a v17-or-older backend
+          // (the window between pulling this code and doing the Apps Script
+          // redeploy, which is not a hypothetical — the redeploy is a manual
+          // step that has been forgotten in this project before). Such a backend
+          // doesn't know op:"read"; it treats this as an ordinary save. With
+          // _dirty absent it defaults to "rewrite everything", and since a read
+          // payload carries no assets, it would blank the Assets tab and every
+          // child tab with it. All-false makes an old backend write nothing:
+          // each write branch is gated on a dirty flag, the audit append gets an
+          // empty list, and the Config block is skipped because no domain was
+          // written. The load then fails cleanly on "Malformed response" instead
+          // of destroying the inventory.
+          body: JSON.stringify({
+            op: "read",
+            idToken: authIdToken,
+            _dirty: { assets: false, config: false, breakerTypes: false },
+          }),
+          cache: "no-store",
+        });
         if (!res.ok) throw new Error("HTTP " + res.status);
         data = await res.json();
+        // Not signed in, expired, or not on the allowlist. An expected outcome
+        // rather than a transport failure, so it resets to the sign-in screen
+        // instead of showing the generic "couldn't reach the backend" error.
+        if (data && data.authFailed) {
+          endSession({
+            reason: data.reason || "signin",
+            message: data.error || "Sign in to use the asset tracker.",
+          });
+          setLoading(false);
+          return;
+        }
       }
       if (!data || !Array.isArray(data.assets)) throw new Error("Malformed response from backend");
+
+      // Identity as the SERVER resolved it — never assembled from the token on
+      // this side. Absent in sandbox mode, which has no backend and no allowlist,
+      // and where authSatisfied is already true.
+      if (data.auth) {
+        setAuth(data.auth);
+        setCurrentUser(data.auth.name || data.auth.email);
+        setAccessUsers(data.auth.users || []);
+        setShowNamePrompt(false);
+      }
+      setAuthPending(false);
 
       const loadedAssets = data.assets
         .map(a => ({ comments: [], changes: [], allocations: [], status: "Active", building: "", itemName: "", purchaseDate: "", warrantyUntil: "", ...a }))
@@ -1671,7 +1885,17 @@ function AssetTracker() {
     }
   }
 
-  useEffect(() => { loadData(); }, [sandboxMode]);
+  // Loads once sign-in is settled, and again whenever the sandbox toggle flips.
+  // The guard ref exists because the sign-in path calls loadData() directly with
+  // the fresh token — that response is what establishes `auth` in the first
+  // place — so without it, `auth` appearing would immediately fire this effect
+  // and repeat the identical fetch. loadData() stamps the ref itself, so both
+  // entry points are covered by one piece of bookkeeping.
+  useEffect(() => {
+    if (!authSatisfied) return;
+    if (lastLoadedSandboxRef.current === sandboxMode) return;
+    loadData();
+  }, [sandboxMode, authSatisfied]);
 
   // Consumes a shared deep link (?asset=BCA0082&tab=breakers) once, on the
   // first load where assets are actually available — jumps straight to that
@@ -1703,7 +1927,12 @@ function AssetTracker() {
     if (sandboxMode) loadData();
   }
 
+  // Only sandbox mode still asks for a typed name. It has no backend and no
+  // sign-in, but audit entries still want an author on them. A signed-in session
+  // takes its identity from the server instead (see loadData) — replacing this
+  // unverified, self-declared name tag is the entire point of the change.
   useEffect(() => {
+    if (!sandboxMode) return;
     try {
       const stored = localStorage.getItem(USER_STORAGE_KEY);
       if (stored) setCurrentUser(stored);
@@ -1711,7 +1940,7 @@ function AssetTracker() {
     } catch (e) {
       setShowNamePrompt(true);
     }
-  }, []);
+  }, [sandboxMode]);
 
   useEffect(() => {
     try {
@@ -1744,7 +1973,10 @@ function AssetTracker() {
     const res = await fetch(SHEET_API_URL, {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify(payload),
+      // The ID token goes in the body, not a header: a custom header would make
+      // this a non-simple CORS request, and the browser's preflight OPTIONS is
+      // exactly what Apps Script can't answer — see the text/plain note above.
+      body: JSON.stringify({ ...payload, idToken: authIdToken }),
     });
     const text = await res.text();
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
@@ -1759,7 +1991,13 @@ function AssetTracker() {
     // expected outcome, not a transport failure, so it's returned to persist()
     // to handle rather than thrown as an error.
     if (!result) throw new Error("Empty response from backend");
-    if (!result.ok && !Array.isArray(result.conflict)) {
+    // An auth failure — expired token, access revoked since load, or view-only —
+    // also comes back as a normal 200 with { ok: false, authFailed: true }.
+    // Like a conflict it's an expected outcome rather than a transport failure,
+    // so it's handed to persist() to deal with instead of thrown: persist sends
+    // the user back to sign-in, which a thrown error would show as a generic
+    // "save failed" with no way to recover.
+    if (!result.ok && !result.authFailed && !Array.isArray(result.conflict)) {
       throw new Error(result.error ? result.error : "Unknown write failure");
     }
     return result;
@@ -1781,11 +2019,27 @@ function AssetTracker() {
       typesList: nextTypesList = typesList,
       breakerTypes: nextBreakerTypes = breakerTypes,
       nextAssetNumber: nextNumberToIssue = nextAssetNumber,
+      // Defaults to undefined, NOT to the current list, which is the opposite of
+      // every other domain here and deliberate. The backend treats an absent
+      // authUsers as "leave the allowlist alone" and only overwrites when one is
+      // actually sent — so a save that isn't about access can never rewrite it,
+      // even if this client's copy were somehow stale or empty.
+      authUsers: nextAuthUsers = undefined,
     } = overrides;
     // Guard against ever writing over the Sheet before a real snapshot has been
     // loaded — the UI shouldn't be reachable in that state, but this keeps a
     // load-failure from being able to clobber live data no matter how it's triggered.
     if (assets === null) return;
+    // View-only. The backend refuses these saves too — that is the actual
+    // control, and it's the one that matters since anything here can be edited
+    // in a browser console. Stopping at this choke point as well means a
+    // viewer's click doesn't optimistically repaint the screen with a change
+    // that the next load will silently undo. Every write in the app funnels
+    // through persist(), so nothing gets past this by being missed.
+    if (!canEdit) {
+      setReadOnlyNotice("Your access is view-only, so that change wasn't saved.");
+      return;
+    }
     // Reference equality against current state, computed before any setState
     // below. Every call site either passes a domain through untouched (same
     // reference) or a freshly computed one (new reference) — that's already
@@ -1796,7 +2050,8 @@ function AssetTracker() {
       assets: nextAssets !== assets,
       config: nextColumns !== columns || nextChangeTypes !== changeTypes || nextVendors !== vendors
         || nextPeripheralsList !== peripheralsList || nextUsersList !== usersList || nextBulkItemTypes !== bulkItemTypes
-        || nextTypesList !== typesList || nextNumberToIssue !== nextAssetNumber,
+        || nextTypesList !== typesList || nextNumberToIssue !== nextAssetNumber
+        || nextAuthUsers !== undefined,
       breakerTypes: nextBreakerTypes !== breakerTypes,
     };
     // Set before the first await and cleared in the finally below, so it always
@@ -1817,11 +2072,17 @@ function AssetTracker() {
       setTypesList(nextTypesList);
       setBreakerTypes(nextBreakerTypes);
       setNextAssetNumber(nextNumberToIssue);
+      if (nextAuthUsers !== undefined) setAccessUsers(nextAuthUsers);
       const payload = {
         assets: nextAssets, columns: nextColumns, changeTypes: nextChangeTypes,
         vendors: nextVendors, auditLog: nextAuditLog, peripheralsList: nextPeripheralsList, usersList: nextUsersList,
         bulkItemTypes: nextBulkItemTypes, typesList: nextTypesList, breakerTypes: nextBreakerTypes,
         nextAssetNumber: nextNumberToIssue, _dirty: dirty,
+        // Spread conditionally so the key is genuinely ABSENT on an ordinary
+        // save, not present-but-undefined — JSON.stringify drops undefined
+        // values, but relying on that to protect the allowlist would be a
+        // silent dependency on a serialization detail.
+        ...(nextAuthUsers !== undefined ? { authUsers: nextAuthUsers } : {}),
       };
       if (sandboxMode) {
         // Mirror to localStorage so a refresh doesn't lose sandbox edits — but
@@ -1851,6 +2112,17 @@ function AssetTracker() {
         );
         writeQueueRef.current = send.then(() => {}, () => {}); // keep the chain alive past a failure
         const result = await send;
+        // Sign-in expired mid-session, or access was changed since load. Nothing
+        // was written. endSession() drops `assets` back to null, which also
+        // discards the optimistic setState above — the edit is genuinely gone,
+        // and leaving it on screen would be a lie the next load would undo.
+        if (result && result.authFailed) {
+          endSession({
+            reason: result.reason || "signin",
+            message: result.error || "Your sign-in expired. Sign in again to keep working.",
+          });
+          return;
+        }
         if (result && Array.isArray(result.conflict) && result.conflict.length) {
           // Someone else saved first, so the backend wrote NOTHING and this edit
           // is gone. Deliberately no auto-merge and no silent retry — a merge
@@ -3337,6 +3609,81 @@ function AssetTracker() {
     XLSX.writeFile(wb, "brookside-asset-inventory.xlsx");
   }
 
+  // The sign-in gate. Ahead of the loading and error screens deliberately: a
+  // visitor who isn't signed in should be asked to sign in, not shown a spinner
+  // or a "couldn't reach the backend" error that misdescribes what happened.
+  //
+  // The button container is mounted unconditionally rather than swapped out
+  // while a check is in flight. Google injects its button into that node once,
+  // driven by an effect keyed on authSatisfied — which doesn't change on a
+  // failed attempt, so unmounting the node would take the button away for good
+  // and leave a dead end with no way to retry.
+  if (!authSatisfied) {
+    const notAllowed = authError && authError.reason === "notallowed";
+    return (
+      <div style={{ minHeight: "100vh", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'IBM Plex Sans', sans-serif", padding: 16 }}>
+        <div style={{ background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 10, padding: 28, width: "100%", maxWidth: 380, textAlign: "center", boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)" }}>
+          <div style={{ fontWeight: 700, fontSize: 17, color: C.ink, marginBottom: 4 }}>BCA Asset Tracker</div>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, marginBottom: 20 }}>
+            Brookside Christian Academy
+          </div>
+
+          {notAllowed ? (
+            <div style={{ fontSize: 13, color: C.danger, background: "rgba(200,60,60,0.07)", border: `1px solid ${C.danger}`, borderRadius: 8, padding: "10px 12px", marginBottom: 18, textAlign: "left", lineHeight: 1.5 }}>
+              {authError.message}
+            </div>
+          ) : (
+            <div style={{ fontSize: 14, color: C.muted, marginBottom: 18, lineHeight: 1.5 }}>
+              Sign in with your Google account to view and edit the inventory.
+            </div>
+          )}
+
+          {authError && !notAllowed && (
+            <div style={{ fontSize: 13, color: C.danger, marginBottom: 14, lineHeight: 1.5 }}>
+              {authError.message}
+            </div>
+          )}
+
+          <div
+            ref={signInButtonRef}
+            style={{ display: "flex", justifyContent: "center", opacity: authPending ? 0.4 : 1, pointerEvents: authPending ? "none" : "auto" }}
+          />
+
+          {authPending && (
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: C.muted, marginTop: 14 }}>
+              Checking your access…
+            </div>
+          )}
+
+          {notAllowed && !authPending && (
+            <button
+              onClick={() => endSession(null)}
+              style={{ marginTop: 14, padding: "7px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 13, borderRadius: 10, color: C.ink, cursor: "pointer" }}
+            >
+              Use a different account
+            </button>
+          )}
+
+          {/* The Sandbox pill lives in the header, which is now behind this
+              gate — so without this, turning sandbox mode ON from a signed-out
+              browser is impossible, and anyone whose sandbox was OFF is locked
+              out of local iteration entirely. Sandbox touches no backend and no
+              real data, so it needs no sign-in of its own. */}
+          <div style={{ marginTop: 22, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
+            <button
+              onClick={toggleSandboxMode}
+              title="Work against local fixture data instead. Nothing is read from or written to the Google Sheet."
+              style={{ display: "inline-flex", alignItems: "center", gap: 5, background: "none", border: "none", padding: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted, textDecoration: "underline", cursor: "pointer" }}
+            >
+              <FlaskConical size={12} />
+              Continue in Sandbox (local test data)
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (loadError) {
     return (
       <div style={{ minHeight: "100vh", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'IBM Plex Sans', sans-serif", padding: 16 }}>
@@ -3514,6 +3861,169 @@ function AssetTracker() {
       placeholder="New peripheral name"
       isSaving={isSaving}
     />
+  );
+
+  // --- Access management -------------------------------------------------------
+  // Every one of these routes through persist({ authUsers }), so the allowlist
+  // travels the same save path, lock, and conflict check as everything else —
+  // and, like everything else, is re-authorized by the backend before it lands.
+  const ownerEmail = (auth && auth.ownerEmail) || "";
+
+  function addAccessUser() {
+    const email = accessDraft.email.trim().toLowerCase();
+    const name = accessDraft.name.trim();
+    if (!email) {
+      setAccessDraft(d => ({ ...d, error: "Enter the person's Google account email." }));
+      return;
+    }
+    // Deliberately loose. Strict email validation rejects addresses that are
+    // actually valid, and the real check happens at sign-in anyway: an address
+    // that isn't a working Google account simply never gets in.
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      setAccessDraft(d => ({ ...d, error: "That doesn't look like an email address." }));
+      return;
+    }
+    if (accessUsers.some(u => u.email === email)) {
+      setAccessDraft(d => ({ ...d, error: "That address already has access." }));
+      return;
+    }
+    const next = [...accessUsers, { email, name, role: accessDraft.role }];
+    setAccessDraft({ email: "", name: "", role: "editor", error: "" });
+    persist(assets, { authUsers: next });
+  }
+
+  function removeAccessUser(email) {
+    // Removing yourself would sign you out on your very next action, which reads
+    // as the app breaking rather than as a thing you just did to yourself.
+    if (auth && email === auth.email) {
+      setAccessDraft(d => ({ ...d, error: "You can't remove your own access." }));
+      return;
+    }
+    persist(assets, { authUsers: accessUsers.filter(u => u.email !== email) });
+  }
+
+  function setAccessRole(email, role) {
+    if (auth && email === auth.email) {
+      setAccessDraft(d => ({ ...d, error: "You can't change your own access level." }));
+      return;
+    }
+    persist(assets, { authUsers: accessUsers.map(u => (u.email === email ? { ...u, role } : u)) });
+  }
+
+  const accessManagerModal = showAccessManager && (
+    <div
+      onClick={() => { setShowAccessManager(false); setAccessDraft({ email: "", name: "", role: "editor", error: "" }); }}
+      style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", zIndex: 70, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{ background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 12, width: "100%", maxWidth: 560, maxHeight: "86vh", overflowY: "auto", padding: 22, boxShadow: "0 8px 28px rgba(42,52,57,0.28)" }}
+      >
+        <div style={{ fontWeight: 700, fontSize: 16, color: C.ink, marginBottom: 4 }}>Who can use this app</div>
+        <div style={{ fontSize: 13, color: C.muted, marginBottom: 18, lineHeight: 1.5 }}>
+          Anyone listed here can sign in with that Google account. Editors can make
+          changes; view-only people can look but not change anything. Everyone else
+          is turned away, even with the link.
+        </div>
+
+        <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden", marginBottom: 18 }}>
+          {accessUsers.length === 0 && (
+            <div style={{ padding: 14, fontSize: 13, color: C.muted }}>Nobody added yet.</div>
+          )}
+          {accessUsers.map((u, i) => {
+            const isOwner = u.email === ownerEmail;
+            const isSelf = auth && u.email === auth.email;
+            return (
+              <div
+                key={u.email}
+                style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", borderTop: i === 0 ? "none" : `1px solid ${C.border}`, flexWrap: "wrap" }}
+              >
+                <div style={{ flex: "1 1 180px", minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: C.ink, overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {u.name || u.email}
+                    {isSelf && <span style={{ color: C.muted, fontWeight: 400 }}> (you)</span>}
+                  </div>
+                  {u.name && (
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted, overflow: "hidden", textOverflow: "ellipsis" }}>{u.email}</div>
+                  )}
+                </div>
+
+                {/* The owner row is fixed: the backend always restores this
+                    address as an editor, so offering controls that silently get
+                    undone would be worse than showing none. */}
+                {isOwner ? (
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.accent }} title="Set in the Apps Script file — always an editor, so the app can never lock everyone out.">
+                    Owner · always editor
+                  </span>
+                ) : (
+                  <>
+                    <select
+                      value={u.role}
+                      disabled={isSelf || isSaving}
+                      onChange={e => setAccessRole(u.email, e.target.value)}
+                      style={{ padding: "5px 8px", border: `1.5px solid ${C.border}`, borderRadius: 8, fontSize: 12, background: C.surface, color: C.ink }}
+                    >
+                      <option value="editor">Editor</option>
+                      <option value="viewer">View only</option>
+                    </select>
+                    <button
+                      onClick={() => removeAccessUser(u.email)}
+                      disabled={isSelf || isSaving}
+                      style={{ background: "none", border: "none", padding: 4, color: isSelf ? C.border : C.danger, fontSize: 12, fontWeight: 600, cursor: isSelf ? "default" : "pointer" }}
+                    >
+                      Remove
+                    </button>
+                  </>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        <div style={{ fontWeight: 600, fontSize: 13, color: C.ink, marginBottom: 8 }}>Add someone</div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+          <input
+            value={accessDraft.email}
+            onChange={e => setAccessDraft(d => ({ ...d, email: e.target.value, error: "" }))}
+            placeholder="their.name@gmail.com"
+            style={{ flex: "2 1 200px", padding: "8px 10px", border: `1.5px solid ${C.border}`, borderRadius: 10, fontSize: 13, background: C.surface, color: C.ink }}
+          />
+          <input
+            value={accessDraft.name}
+            onChange={e => setAccessDraft(d => ({ ...d, name: e.target.value, error: "" }))}
+            placeholder="Display name (optional)"
+            style={{ flex: "1 1 150px", padding: "8px 10px", border: `1.5px solid ${C.border}`, borderRadius: 10, fontSize: 13, background: C.surface, color: C.ink }}
+          />
+          <select
+            value={accessDraft.role}
+            onChange={e => setAccessDraft(d => ({ ...d, role: e.target.value }))}
+            style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, borderRadius: 10, fontSize: 13, background: C.surface, color: C.ink }}
+          >
+            <option value="editor">Editor</option>
+            <option value="viewer">View only</option>
+          </select>
+        </div>
+        {accessDraft.error && (
+          <div style={{ fontSize: 12, color: C.danger, marginBottom: 10 }}>{accessDraft.error}</div>
+        )}
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+          <button
+            onClick={addAccessUser}
+            disabled={isSaving}
+            style={{ padding: "8px 16px", background: C.brand, color: "#fff", border: "none", fontWeight: 600, fontSize: 13, borderRadius: 10, cursor: "pointer" }}
+          >
+            Add
+          </button>
+          <button
+            onClick={() => { setShowAccessManager(false); setAccessDraft({ email: "", name: "", role: "editor", error: "" }); }}
+            style={{ padding: "8px 16px", background: "transparent", border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 13, borderRadius: 10, color: C.ink, cursor: "pointer" }}
+          >
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
   );
 
   const usersManagerModal = showUsersManager && (
@@ -3822,6 +4332,7 @@ function AssetTracker() {
         {nameModal}
         {peripheralsManagerModal}
         {usersManagerModal}
+        {accessManagerModal}
         {bulkItemTypesManagerModal}
         {typesManagerModal}
         {breakerTypesManagerModal}
@@ -5097,9 +5608,33 @@ function AssetTracker() {
       {nameModal}
       {peripheralsManagerModal}
       {usersManagerModal}
+        {accessManagerModal}
       {bulkItemTypesManagerModal}
       {typesManagerModal}
       {breakerTypesManagerModal}
+
+      {/* Shown when a view-only user's action was refused. persist() sets this
+          and returns without touching anything, so the message is the only
+          evidence the click happened — without it the app would just look
+          broken to someone who doesn't know they're view-only. */}
+      {readOnlyNotice && (
+        <div
+          style={{
+            position: "fixed", top: 12, left: "50%", transform: "translateX(-50%)", zIndex: 60,
+            background: C.surface, border: `1.5px solid ${C.accent}`, borderRadius: 10,
+            padding: "10px 14px", display: "flex", alignItems: "center", gap: 12,
+            boxShadow: "0 4px 12px rgba(42,52,57,0.18)", maxWidth: "min(92vw, 460px)",
+          }}
+        >
+          <span style={{ fontSize: 13, color: C.ink, lineHeight: 1.45 }}>{readOnlyNotice}</span>
+          <button
+            onClick={() => setReadOnlyNotice(null)}
+            style={{ background: "none", border: "none", padding: 0, color: C.muted, fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       {/* Slim header */}
       <div style={{ borderBottom: `2px solid ${C.brand}`, padding: "10px 20px", position: "sticky", top: 0, background: C.bg, zIndex: 10, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
@@ -5129,13 +5664,53 @@ function AssetTracker() {
             </button>
           )}
           {saveStatusPill}
-          <button
-            onClick={() => { setNameInput(currentUser || ""); setShowNamePrompt(true); }}
-            style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", padding: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: C.muted }}
-          >
-            <UserCircle size={14} style={{ color: C.brand }} />
-            {currentUser || "Set name"}
-          </button>
+          {/* Sandbox keeps the old typed name tag — it has no sign-in, but audit
+              entries still want an author. A signed-in session shows the identity
+              the SERVER resolved, and it isn't editable: the whole point is that
+              it can't be whatever someone types. */}
+          {sandboxMode ? (
+            <button
+              onClick={() => { setNameInput(currentUser || ""); setShowNamePrompt(true); }}
+              style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", padding: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: C.muted }}
+            >
+              <UserCircle size={14} style={{ color: C.brand }} />
+              {currentUser || "Set name"}
+            </button>
+          ) : auth && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span
+                title={`Signed in as ${auth.email}\nAccess: ${canEdit ? "editor" : "view-only"}`}
+                style={{ display: "flex", alignItems: "center", gap: 5, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: C.muted }}
+              >
+                <UserCircle size={14} style={{ color: C.brand }} />
+                {auth.name || auth.email}
+              </span>
+              {canEdit && (
+                <button
+                  onClick={() => setShowAccessManager(true)}
+                  title="Manage who can sign in to the asset tracker"
+                  style={{ background: "none", border: "none", padding: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted, textDecoration: "underline", cursor: "pointer" }}
+                >
+                  Access
+                </button>
+              )}
+              {!canEdit && (
+                <span
+                  title="You can browse the inventory but not change it. Ask an editor if you need to make changes."
+                  style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, border: `1px solid ${C.accent}`, borderRadius: 10, padding: "2px 7px" }}
+                >
+                  View only
+                </span>
+              )}
+              <button
+                onClick={() => endSession(null)}
+                title="Sign out of the asset tracker"
+                style={{ background: "none", border: "none", padding: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted, textDecoration: "underline", cursor: "pointer" }}
+              >
+                Sign out
+              </button>
+            </div>
+          )}
           {backendScriptVersion && backendScriptVersion !== FRONTEND_SCRIPT_VERSION && (
             <span
               style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.danger }}
