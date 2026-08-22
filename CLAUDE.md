@@ -26,6 +26,13 @@ outbound network requests to arbitrary domains, which is why this migration happ
   on every load and shows a "Backend outdated" warning (with both version strings in
   its tooltip) if the live backend doesn't match — the fast way to confirm a redeploy
   actually landed, instead of only finding out when a feature quietly fails to persist.
+  - **The version is JUST A NUMBER — `"v20"`, nothing more.** It used to carry a
+    description of the change, which grew into a multi-paragraph changelog inside a
+    string constant duplicated across two files that must match character for
+    character. At v18 the two copies drifted by one word (`here` vs `there`), which
+    would have shown a permanent false "Backend outdated" warning; it went unnoticed
+    only because sign-in was broken and nobody reached the header. **What changed in a
+    version goes in the commit message and in this file, not in the constant.**
 
 ## Local Sandbox mode
 

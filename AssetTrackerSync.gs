@@ -34,14 +34,22 @@
  * Allocations, Maintenance, Breakers, Circuits, BreakerTypes, AuditLog, Config.
  */
 
-// Bump this (number + short description) any time this file changes, so a
-// stuck deployment is obvious instead of silently serving stale logic.
+// Bump this number any time this file changes, so a stuck deployment is obvious
+// instead of silently serving stale logic.
+//
+// JUST THE NUMBER. This used to carry a description of each change, which grew
+// into a full changelog several paragraphs long, in the one place it was least
+// readable — a string constant, duplicated in two files that had to match
+// character for character. They drifted by a single word at v18 and would have
+// shown a permanent false "Backend outdated" warning. What changed in a version
+// belongs in the git history and CLAUDE.md, which is where it now lives.
+//
 // Two ways to check what's actually LIVE (not just what's pasted in the
 // editor — those can differ if "New version" wasn't created on deploy):
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
-//   2. Compare this string to SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v20 (2026-08-21) — Adds forceAuthorizeExternalRequests(), a run-by-hand helper that forces Google’s consent prompt for script.external_request. Running doGet() to trigger it does not work: with no event parameter it returns at the first branch and never reaches an outbound call, so the web app fails at runtime with a permission error while the editor looks fine. Previously v19: Auth failures now carry a `detail` naming WHICH check failed (unreachable Google, aud mismatch, unverified email, expired), returned to the client and shown on the sign-in screen; a silent bounce back to sign-in was undebuggable from outside. verifyIdToken_ returns {ok,detail} instead of a bare null. Previously v18: Google Sign-In. The parameterless doGet no longer returns the inventory to anyone with the URL: it refuses with authFailed (still reporting scriptVersion, so the browser version check keeps working), and the full read moved to doPost({ op: 'read' }) so the ID token travels in the body instead of the query string. Every write now requires a verified Google identity whose email is on the authUsers allowlist in Config, with role editor; view-only is enforced here rather than by hiding buttons. OWNER_EMAIL is always an editor so lockout is impossible, and authUsers is preserved rather than overwritten when a save doesn't carry it — otherwise the wholesale Config rewrite would empty the allowlist. The anonymous ?panel= branch for panel.html is UNCHANGED and still anonymous by design. Previously: v17 (2026-08-20) — Combined deploy, superseding the separate v14/v15/v16 lines that were each pending on their own branch and would have silently erased one another if pasted in sequence. Contains all three: (v15) Assets gain parentId, one reference to the containing asset replacing the fixed roomId/buildingId pair so the hierarchy can be any depth — the old columns are KEPT and still written, so this is reversible and un-migrated rows still resolve; (v16) Assets gain campus, the name field of a Campus type above Building; (v14) doGet branches on ?panel=<label>, an anonymous read-only projection of ONE panel for the QR page panel.html, built by the PUBLIC_*_FIELDS whitelists so person/serial/hostname/purchase data and every other asset are unreachable through it. The public projection resolves a panel Room/Building by walking parentId (falling back to roomId/buildingId) rather than reading them directly, so it is correct both before and after the sheet is migrated. Parameterless doGet and doPost are otherwise unchanged.";
+//   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
+const SCRIPT_VERSION = "v20";
 
 const SHEET_NAMES = {
   assets: "Assets",
