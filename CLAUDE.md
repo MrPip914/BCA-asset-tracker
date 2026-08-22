@@ -1089,6 +1089,24 @@ When you do:
   to be. (The one genuine trap there: an *old deployment* left active keeps serving its
   own frozen copy of the code, unauthenticated. Updating the existing deployment in place,
   which is this project's normal ritual, avoids it. Confirmed there is only one.)
+- **Data-loss incident, 2026-08-21 ~17:57 — cause never identified.** The Assets tab and
+  every child tab went empty during the v18 Google Sign-In rollout. Recovered in full from
+  the Sheet's own version history (File > Version history), which is the reason this was an
+  inconvenience rather than a disaster — that history is the real backstop for this app.
+  - What was ruled out: the read-path guard (`_dirty` all-false on `op:"read"`) was present
+    in the very first pushed commit, so the frontend-newer-than-backend window did not do
+    it. Reads never write on any version. The Executions log showed several `doGet`s at
+    the time and `doGet` has never written anything.
+  - What was never established: which request actually emptied the tabs. Only a `doPost`
+    can write, and no `doPost` was tied to the moment.
+  - **The response was to make the outcome impossible rather than to keep hunting** (v21):
+    `doPost` refuses to write an empty asset list over a populated Assets tab unless
+    `confirmEmptyAssets` is passed. In a full-overwrite design, "the client sent nothing"
+    and "the user deleted everything" are the same request on the wire — that ambiguity is
+    the actual defect, and it was worth closing whatever the trigger turned out to be.
+  - If assets ever vanish again: restore from version history first with the app CLOSED,
+    then check whether the guard fired (the app shows a "Refused:" notice) before assuming
+    a new cause.
 - Access changes aren't written to the audit log. The log is keyed by `assetLabel` and
   every row describes an asset event, so "Jane was made view-only" has nowhere natural to
   sit. Worth revisiting if who-changed-whose-access ever needs answering.
