@@ -41,7 +41,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v18 (2026-08-21) — Google Sign-In. The parameterless doGet no longer returns the inventory to anyone with the URL: it refuses with authFailed (still reporting scriptVersion, so the browser version check keeps working), and the full read moved to doPost({ op: 'read' }) so the ID token travels in the body instead of the query string. Every write now requires a verified Google identity whose email is on the authUsers allowlist in Config, with role editor; view-only is enforced here rather than by hiding buttons. OWNER_EMAIL is always an editor so lockout is impossible, and authUsers is preserved rather than overwritten when a save doesn't carry it — otherwise the wholesale Config rewrite would empty the allowlist. The anonymous ?panel= branch for panel.html is UNCHANGED and still anonymous by design. Previously: v17 (2026-08-20) — Combined deploy, superseding the separate v14/v15/v16 lines that were each pending on their own branch and would have silently erased one another if pasted in sequence. Contains all three: (v15) Assets gain parentId, one reference to the containing asset replacing the fixed roomId/buildingId pair so the hierarchy can be any depth — the old columns are KEPT and still written, so this is reversible and un-migrated rows still resolve; (v16) Assets gain campus, the name field of a Campus type above Building; (v14) doGet branches on ?panel=<label>, an anonymous read-only projection of ONE panel for the QR page panel.html, built by the PUBLIC_*_FIELDS whitelists so person/serial/hostname/purchase data and every other asset are unreachable through it. The public projection resolves a panel Room/Building by walking parentId (falling back to roomId/buildingId) rather than reading them directly, so it is correct both before and after the sheet is migrated. Parameterless doGet and doPost are otherwise unchanged.";
+const SCRIPT_VERSION = "v19 (2026-08-21) — Auth failures now carry a `detail` naming WHICH check failed (unreachable Google, aud mismatch, unverified email, expired), returned to the client and shown on the sign-in screen; a silent bounce back to sign-in was undebuggable from outside. verifyIdToken_ returns {ok,detail} instead of a bare null. Previously v18: Google Sign-In. The parameterless doGet no longer returns the inventory to anyone with the URL: it refuses with authFailed (still reporting scriptVersion, so the browser version check keeps working), and the full read moved to doPost({ op: 'read' }) so the ID token travels in the body instead of the query string. Every write now requires a verified Google identity whose email is on the authUsers allowlist in Config, with role editor; view-only is enforced here rather than by hiding buttons. OWNER_EMAIL is always an editor so lockout is impossible, and authUsers is preserved rather than overwritten when a save doesn't carry it — otherwise the wholesale Config rewrite would empty the allowlist. The anonymous ?panel= branch for panel.html is UNCHANGED and still anonymous by design. Previously: v17 (2026-08-20) — Combined deploy, superseding the separate v14/v15/v16 lines that were each pending on their own branch and would have silently erased one another if pasted in sequence. Contains all three: (v15) Assets gain parentId, one reference to the containing asset replacing the fixed roomId/buildingId pair so the hierarchy can be any depth — the old columns are KEPT and still written, so this is reversible and un-migrated rows still resolve; (v16) Assets gain campus, the name field of a Campus type above Building; (v14) doGet branches on ?panel=<label>, an anonymous read-only projection of ONE panel for the QR page panel.html, built by the PUBLIC_*_FIELDS whitelists so person/serial/hostname/purchase data and every other asset are unreachable through it. The public projection resolves a panel Room/Building by walking parentId (falling back to roomId/buildingId) rather than reading them directly, so it is correct both before and after the sheet is migrated. Parameterless doGet and doPost are otherwise unchanged.";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -276,29 +276,66 @@ const ROLE_VIEWER = "viewer";
 // the JWT signature by hand — Apps Script has no RS256 primitive, and this is
 // one UrlFetch on a request that's already doing spreadsheet I/O, so the added
 // latency is noise.
+// Returns { ok: true, email, name } or { ok: false, detail } — never a bare
+// null. `detail` names WHICH check failed, and is passed back to the client and
+// shown on the sign-in screen.
+//
+// That's a deliberate reversal of the usual "give a failed login nothing to work
+// with". The things this can report — your token was minted for a different app,
+// the script couldn't reach Google, your clock says the token expired — say
+// nothing about whether an account exists or is allowed; that's the allowlist's
+// job, and it stays vague. What they do is turn a silent bounce back to the
+// sign-in screen, which is undebuggable from the outside and was exactly the
+// symptom that cost a round trip here, into a sentence naming the cause.
 function verifyIdToken_(idToken) {
-  if (!idToken || typeof idToken !== "string") return null;
+  if (!idToken || typeof idToken !== "string") {
+    return { ok: false, detail: "No sign-in token was sent with the request." };
+  }
+  let res;
   try {
-    const res = UrlFetchApp.fetch(
+    res = UrlFetchApp.fetch(
       "https://oauth2.googleapis.com/tokeninfo?id_token=" + encodeURIComponent(idToken),
       { muteHttpExceptions: true }
     );
-    if (res.getResponseCode() !== 200) return null;
-    const info = JSON.parse(res.getContentText());
-    // aud proves the token was minted for THIS app. Without this check, a token
-    // issued to any other site using Google Sign-In could be replayed here.
-    if (info.aud !== OAUTH_CLIENT_ID) return null;
-    // Comes back as the STRING "true", not a boolean.
-    if (String(info.email_verified) !== "true") return null;
-    if (!info.email) return null;
-    // tokeninfo rejects expired tokens itself; re-checking costs nothing and
-    // means this doesn't silently depend on that staying true.
-    const exp = Number(info.exp);
-    if (isFinite(exp) && exp * 1000 < Date.now()) return null;
-    return { email: String(info.email).toLowerCase().trim(), name: info.name || "" };
   } catch (err) {
-    return null;
+    // Most likely the script's permission to make external requests, which is a
+    // scope this file only started needing in v18.
+    return { ok: false, detail: "The script couldn't reach Google to check the sign-in: " + err.message };
   }
+  const code = res.getResponseCode();
+  const bodyText = res.getContentText();
+  if (code !== 200) {
+    return { ok: false, detail: "Google rejected the sign-in token (HTTP " + code + "): " + bodyText.slice(0, 300) };
+  }
+  let info;
+  try {
+    info = JSON.parse(bodyText);
+  } catch (err) {
+    return { ok: false, detail: "Google's reply wasn't readable: " + bodyText.slice(0, 200) };
+  }
+  // aud proves the token was minted for THIS app. Without this check, a token
+  // issued to any other site using Google Sign-In could be replayed here.
+  if (info.aud !== OAUTH_CLIENT_ID) {
+    return {
+      ok: false,
+      detail: "This sign-in was issued for a different app. The script expects client id ending "
+        + String(OAUTH_CLIENT_ID).slice(-30) + " but the token names " + String(info.aud || "(none)").slice(-30) + ".",
+    };
+  }
+  // Comes back as the STRING "true", not a boolean.
+  if (String(info.email_verified) !== "true") {
+    return { ok: false, detail: "That Google account's email address isn't verified." };
+  }
+  if (!info.email) {
+    return { ok: false, detail: "Google didn't include an email address with the sign-in." };
+  }
+  // tokeninfo rejects expired tokens itself; re-checking costs nothing and
+  // means this doesn't silently depend on that staying true.
+  const exp = Number(info.exp);
+  if (isFinite(exp) && exp * 1000 < Date.now()) {
+    return { ok: false, detail: "That sign-in had already expired." };
+  }
+  return { ok: true, email: String(info.email).toLowerCase().trim(), name: info.name || "" };
 }
 
 // Normalizes an allowlist from any source — the sheet, or a client's save — into
@@ -642,12 +679,13 @@ function handleAuthenticatedRead_(idToken, e) {
   // Token verified BEFORE the lock — it's a network round trip to Google, and
   // see authorizeIdentity_ for why the two halves are split.
   const identity = verifyIdToken_(idToken);
-  if (!identity) {
+  if (!identity.ok) {
     return respond_({
       ok: false,
       authFailed: true,
       reason: "signin",
       error: "Sign in with Google to use the asset tracker.",
+      detail: identity.detail,
       scriptVersion: SCRIPT_VERSION,
     }, e);
   }
@@ -817,12 +855,13 @@ function doPost(e) {
   // Verified outside the lock (network round trip); the allowlist half runs
   // inside it, below.
   const identity = verifyIdToken_(body.idToken);
-  if (!identity) {
+  if (!identity.ok) {
     return jsonOut_({
       ok: false,
       authFailed: true,
       reason: "signin",
       error: "Your sign-in expired before this change could be saved. Sign in again and retry.",
+      detail: identity.detail,
     });
   }
 

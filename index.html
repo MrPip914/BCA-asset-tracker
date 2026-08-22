@@ -831,7 +831,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // backend actually reports (data.scriptVersion) and flags a mismatch —
 // catches a stuck deployment (edited-but-not-redeployed) automatically
 // instead of it silently dropping data until someone happens to notice.
-const FRONTEND_SCRIPT_VERSION = "v18 (2026-08-21) — Google Sign-In. The parameterless doGet no longer returns the inventory to anyone with the URL: it refuses with authFailed (still reporting scriptVersion, so the browser version check keeps working), and the full read moved to doPost({ op: 'read' }) so the ID token travels in the body instead of the query string. Every write now requires a verified Google identity whose email is on the authUsers allowlist in Config, with role editor; view-only is enforced there rather than by hiding buttons. OWNER_EMAIL is always an editor so lockout is impossible, and authUsers is preserved rather than overwritten when a save doesn't carry it — otherwise the wholesale Config rewrite would empty the allowlist. The anonymous ?panel= branch for panel.html is UNCHANGED and still anonymous by design. Previously: v17 (2026-08-20) — Combined deploy, superseding the separate v14/v15/v16 lines that were each pending on their own branch and would have silently erased one another if pasted in sequence. Contains all three: (v15) Assets gain parentId, one reference to the containing asset replacing the fixed roomId/buildingId pair so the hierarchy can be any depth — the old columns are KEPT and still written, so this is reversible and un-migrated rows still resolve; (v16) Assets gain campus, the name field of a Campus type above Building; (v14) doGet branches on ?panel=<label>, an anonymous read-only projection of ONE panel for the QR page panel.html, built by the PUBLIC_*_FIELDS whitelists so person/serial/hostname/purchase data and every other asset are unreachable through it. The public projection resolves a panel Room/Building by walking parentId (falling back to roomId/buildingId) rather than reading them directly, so it is correct both before and after the sheet is migrated. Parameterless doGet and doPost are otherwise unchanged.";
+const FRONTEND_SCRIPT_VERSION = "v19 (2026-08-21) — Auth failures now carry a `detail` naming WHICH check failed (unreachable Google, aud mismatch, unverified email, expired), returned to the client and shown on the sign-in screen; a silent bounce back to sign-in was undebuggable from outside. verifyIdToken_ returns {ok,detail} instead of a bare null. Previously v18: Google Sign-In. The parameterless doGet no longer returns the inventory to anyone with the URL: it refuses with authFailed (still reporting scriptVersion, so the browser version check keeps working), and the full read moved to doPost({ op: 'read' }) so the ID token travels in the body instead of the query string. Every write now requires a verified Google identity whose email is on the authUsers allowlist in Config, with role editor; view-only is enforced there rather than by hiding buttons. OWNER_EMAIL is always an editor so lockout is impossible, and authUsers is preserved rather than overwritten when a save doesn't carry it — otherwise the wholesale Config rewrite would empty the allowlist. The anonymous ?panel= branch for panel.html is UNCHANGED and still anonymous by design. Previously: v17 (2026-08-20) — Combined deploy, superseding the separate v14/v15/v16 lines that were each pending on their own branch and would have silently erased one another if pasted in sequence. Contains all three: (v15) Assets gain parentId, one reference to the containing asset replacing the fixed roomId/buildingId pair so the hierarchy can be any depth — the old columns are KEPT and still written, so this is reversible and un-migrated rows still resolve; (v16) Assets gain campus, the name field of a Campus type above Building; (v14) doGet branches on ?panel=<label>, an anonymous read-only projection of ONE panel for the QR page panel.html, built by the PUBLIC_*_FIELDS whitelists so person/serial/hostname/purchase data and every other asset are unreachable through it. The public projection resolves a panel Room/Building by walking parentId (falling back to roomId/buildingId) rather than reading them directly, so it is correct both before and after the sheet is migrated. Parameterless doGet and doPost are otherwise unchanged.";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -1803,6 +1803,7 @@ function AssetTracker() {
           endSession({
             reason: data.reason || "signin",
             message: data.error || "Sign in to use the asset tracker.",
+            detail: data.detail || "",
           });
           setLoading(false);
           return;
@@ -2120,6 +2121,7 @@ function AssetTracker() {
           endSession({
             reason: result.reason || "signin",
             message: result.error || "Your sign-in expired. Sign in again to keep working.",
+            detail: result.detail || "",
           });
           return;
         }
@@ -3641,6 +3643,17 @@ function AssetTracker() {
           {authError && !notAllowed && (
             <div style={{ fontSize: 13, color: C.danger, marginBottom: 14, lineHeight: 1.5 }}>
               {authError.message}
+            </div>
+          )}
+
+          {/* The backend's account of WHICH check failed. Shown rather than
+              swallowed because the alternative — bouncing silently back to this
+              screen — is undebuggable from the outside, and the details it can
+              report reveal nothing about whether an account exists or is
+              allowed. See verifyIdToken_ in AssetTrackerSync.gs. */}
+          {authError && authError.detail && (
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 10px", marginBottom: 14, textAlign: "left", lineHeight: 1.5, wordBreak: "break-word" }}>
+              {authError.detail}
             </div>
           )}
 
