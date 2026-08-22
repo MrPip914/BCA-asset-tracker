@@ -1110,10 +1110,20 @@ When you do:
 - Access changes aren't written to the audit log. The log is keyed by `assetLabel` and
   every row describes an asset event, so "Jane was made view-only" has nowhere natural to
   sit. Worth revisiting if who-changed-whose-access ever needs answering.
-- Individual edit controls are still rendered for view-only users in most places. Every
-  write funnels through `persist()`, which refuses and explains, and the backend refuses
-  independently — so nothing can actually be changed. But a viewer still sees buttons that
-  do nothing except produce a notice, which is a rough edge rather than a hole.
+- ~~Individual edit controls are still rendered for view-only users~~ — **done.** Edit
+  affordances are gated on `canEdit`, by cluster rather than per button. Shared components
+  (`ChildEntityTable`, `PanelDiagram`, `BreakersTabContent`) take a `canEdit` prop.
+  - **Hiding is still only cosmetic — `persist()` and `doPost` remain the control.** Anything
+    here can be undone from a browser console, so a missed control is a rough edge, never a
+    hole. Add new edit UI behind `canEdit`, but never rely on it alone.
+  - Deliberately still available to viewers: Columns (per-device visibility, never
+    persisted), Export, Copy link, the QR sticker, expand/collapse, search, sort, and
+    opening a breaker to read it. Empty panel slots still render — "nothing in slot 14" is
+    information a viewer wants, they just can't click it into existence.
+  - The breaker modal needed only its pencil gated: Save and Delete render solely while
+    `editing`, and the pencil is the only way in. Worth knowing before adding actions there.
+  - To test either role without a second Google account, temporarily force
+    `const canEdit = false` (it's one line) and use Sandbox mode.
 - `index.html` crossed 500KB with v18, so Babel Standalone now logs a "code generator has
   deoptimised the styling" note on every load. Harmless, but it means in-browser transpile
   time is no longer trivial — relevant to the long-standing "should this get a build step"
