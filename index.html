@@ -800,10 +800,64 @@ const GOOGLE_CLIENT_ID = "512657381831-4so7t5t2shqn8nbgrgktsg6s37podqji.apps.goo
 // stale-closure class of bug. The React copy below is for rendering only.
 let authIdToken = null;
 
+// Where the current token is kept so a page refresh doesn't cost a sign-in.
+//
+// This IS storing a credential in the browser, which was avoided at first on
+// the theory that Google's automatic re-issue (auto_select) would cover
+// refreshes. It doesn't reliably — Chrome's move to FedCM made that prompt
+// something you cannot depend on firing. The trade was taken deliberately: the
+// token is only good for THIS app, expires in about an hour on its own, and the
+// backend re-verifies it and re-checks the allowlist on every single request,
+// so a stolen one grants an hour of access to a school asset list rather than
+// anything durable. Signing out deletes it immediately.
+const AUTH_TOKEN_KEY = "asset-tracker-auth-token";
+
+// Reads the `exp` claim WITHOUT verifying anything. The server verifies, always
+// — this is only used to skip a round trip with a token we can already see is
+// stale. Never treat anything decoded here as trusted.
+function idTokenExpiry(token) {
+  try {
+    const payload = JSON.parse(atob(String(token).split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+    const exp = Number(payload.exp);
+    return isFinite(exp) ? exp * 1000 : 0;
+  } catch (e) {
+    return 0;
+  }
+}
+
+// Restores a stored token if it has meaningful life left, returning whether it
+// did. The 60-second margin stops a token that expires mid-flight from causing
+// a bounce that looks random to whoever is using it.
+function restoreAuthIdToken() {
+  try {
+    const stored = localStorage.getItem(AUTH_TOKEN_KEY);
+    if (!stored) return false;
+    if (idTokenExpiry(stored) < Date.now() + 60000) {
+      localStorage.removeItem(AUTH_TOKEN_KEY);
+      return false;
+    }
+    authIdToken = stored;
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 // Google ID tokens last about an hour. Rather than tracking that clock, the app
 // treats an authFailed response as "the token is stale" and re-prompts — the
 // server is the only thing whose opinion of expiry actually matters.
-function setAuthIdToken(token) { authIdToken = token || null; }
+function setAuthIdToken(token) {
+  authIdToken = token || null;
+  // Mirrored to storage here rather than at each call site so the two can never
+  // disagree — in particular, endSession()'s setAuthIdToken(null) is what makes
+  // signing out actually erase the stored credential rather than orphan it.
+  try {
+    if (token) localStorage.setItem(AUTH_TOKEN_KEY, token);
+    else localStorage.removeItem(AUTH_TOKEN_KEY);
+  } catch (e) {
+    /* private mode or storage full — the session just won't survive a refresh */
+  }
+}
 
 // Resolves with `window.google.accounts.id` once the GSI script has registered
 // it, or null if it never shows up. The script tag in <head> is not deferred, so
@@ -1699,6 +1753,25 @@ function AssetTracker() {
     loadData();
   };
 
+  // Resume a stored session before showing the sign-in screen. The backend
+  // re-verifies the token and re-checks the allowlist exactly as it would a
+  // fresh one, so a revoked, expired, or tampered token still lands on sign-in —
+  // this only skips the click when there is a live session to pick back up.
+  //
+  // Runs once, guarded by a ref rather than empty deps, because loadData() must
+  // not be called a second time if this component re-renders before the first
+  // response lands.
+  const restoreAttemptedRef = useRef(false);
+  useEffect(() => {
+    if (restoreAttemptedRef.current) return;
+    restoreAttemptedRef.current = true;
+    if (sandboxMode) return;
+    if (restoreAuthIdToken()) {
+      setAuthPending(true);
+      loadData();
+    }
+  }, []);
+
   useEffect(() => {
     if (authSatisfied) return undefined;
     let cancelled = false;
@@ -1722,6 +1795,11 @@ function AssetTracker() {
         // mid-session anyway and is worth something to an attacker meanwhile.
         auto_select: true,
         cancel_on_tap_outside: false,
+        // Chrome routes this through FedCM now; without opting in, the prompt
+        // is simply never shown on current versions. Kept as a best-effort
+        // second path — the stored token above is what actually makes a refresh
+        // work, because whether this fires is not something we control.
+        use_fedcm_for_prompt: true,
       });
       if (signInButtonRef.current) {
         googleId.renderButton(signInButtonRef.current, {
@@ -3676,7 +3754,13 @@ function AssetTracker() {
             </div>
           ) : (
             <div style={{ fontSize: 14, color: C.muted, marginBottom: 18, lineHeight: 1.5 }}>
-              Sign in with your Google account to view and edit the inventory.
+              {/* Swapped as TEXT, never by returning a different tree. The Google
+                  button is injected into a ref'd node by an effect keyed on
+                  authSatisfied, which doesn't change here — unmounting that node
+                  would lose the button with no way to get it back. */}
+              {authPending
+                ? "Signing you back in…"
+                : "Sign in with your Google account to view and edit the inventory."}
             </div>
           )}
 

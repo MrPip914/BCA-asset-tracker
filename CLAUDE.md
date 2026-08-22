@@ -215,6 +215,23 @@ per-device via `localStorage` (`SANDBOX_MODE_KEY`).
     touches the backend. The sign-in screen carries its own "Continue in Sandbox" link —
     the Sandbox pill lives in the header, which is now behind the gate, so without that link
     a signed-out browser could never reach sandbox mode at all.
+  - **The ID token IS stored in `localStorage`** (`AUTH_TOKEN_KEY`), and that was a
+    deliberate reversal. The original design stored nothing, on the theory that Google's
+    `auto_select` would silently re-issue a token on each load. It doesn't reliably —
+    Chrome's move to FedCM made that prompt something you cannot depend on firing, and in
+    practice every refresh landed back on the sign-in screen. `auto_select` and
+    `use_fedcm_for_prompt` are still set as a best-effort second path, but the stored token
+    is what actually makes a refresh work.
+    - Why it's an acceptable trade: the token is only valid for this app, expires on its
+      own in about an hour, and `doPost`/`handleAuthenticatedRead_` re-verify it with
+      Google AND re-check the allowlist on every single request. A stolen one buys an hour
+      of read/write on a school asset list, not durable access. Signing out deletes it.
+    - `restoreAuthIdToken()` discards a token within 60s of expiry without a round trip, so
+      a token dying mid-request can't produce a bounce that looks random. A restored token
+      that the backend rejects is cleared and the user lands on sign-in with the reason
+      shown — verified both paths by planting a bogus and an expired token.
+    - `idTokenExpiry()` decodes the `exp` claim WITHOUT verifying the signature. It exists
+      only to skip pointless round trips. Never treat anything it decodes as trusted.
   - **Local testing needs `http://localhost:<port>` registered** as an authorized JavaScript
     origin on the OAuth client. `file://` has no origin Google accepts, so double-clicking
     `index.html` shows the sign-in button and then fails.
