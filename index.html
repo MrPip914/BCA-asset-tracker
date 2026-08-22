@@ -1715,11 +1715,28 @@ function AssetTracker() {
       googleId.initialize({
         client_id: GOOGLE_CLIENT_ID,
         callback: (resp) => credentialHandlerRef.current && credentialHandlerRef.current(resp),
+        // Re-issues a token silently for someone who has already signed in and
+        // hasn't signed out, so a refresh doesn't cost a click. This is why no
+        // token is ever stored: Google mints a fresh one each load, which beats
+        // keeping an hour-lived credential in localStorage — that would expire
+        // mid-session anyway and is worth something to an attacker meanwhile.
+        auto_select: true,
+        cancel_on_tap_outside: false,
       });
       if (signInButtonRef.current) {
         googleId.renderButton(signInButtonRef.current, {
           theme: "outline", size: "large", text: "signin_with", shape: "pill", width: 260,
         });
+      }
+      // Asks for the automatic sign-in moment. Wrapped because the notification
+      // API around this has shifted with FedCM across Chrome versions and a
+      // throw here would take the whole sign-in screen down with it. If Google
+      // declines — no session, several accounts, previously signed out — nothing
+      // happens and the button behind it works exactly as before.
+      try {
+        googleId.prompt();
+      } catch (err) {
+        /* non-fatal — the rendered button is the fallback */
       }
     })();
     return () => { cancelled = true; };
@@ -1728,20 +1745,26 @@ function AssetTracker() {
   // Drops the current session back to the sign-in screen. Used both by the
   // Sign out button and by any authFailed response — an expired token and a
   // deliberate sign-out land in exactly the same state, so they share a path.
-  function endSession(error) {
+  // `manualSignOut` distinguishes the two ways a session ends, and the
+  // difference matters a lot in practice. Clicking Sign out must switch OFF
+  // Google's automatic re-issue, or the next render signs you straight back in
+  // and the button appears broken. An EXPIRED token must NOT: tokens last about
+  // an hour, so disabling auto-select there would demand a manual click every
+  // hour of a working day, which is the thing auto_select exists to prevent.
+  function endSession(error, manualSignOut) {
     setAuthIdToken(null);
     setAuth(null);
     setAuthPending(false);
     setCurrentUser(null);
     setAssets(null);
     setAuthError(error || null);
-    // Without this, Google silently re-issues the same account on the next
-    // render and an intentional sign-out bounces straight back in.
-    try {
-      if (window.google && window.google.accounts && window.google.accounts.id) {
-        window.google.accounts.id.disableAutoSelect();
-      }
-    } catch (e) { /* non-fatal — worst case the next sign-in is one extra click */ }
+    if (manualSignOut) {
+      try {
+        if (window.google && window.google.accounts && window.google.accounts.id) {
+          window.google.accounts.id.disableAutoSelect();
+        }
+      } catch (e) { /* non-fatal — worst case the next sign-in is one extra click */ }
+    }
   }
 
   // Which sandbox setting the current data was loaded for. Stamped here rather
@@ -3685,9 +3708,13 @@ function AssetTracker() {
             </div>
           )}
 
+          {/* manualSignOut below is essential, not just tidy: with automatic
+              re-issue left on, Google would immediately hand back the SAME
+              account that was just refused, and "use a different account"
+              would loop forever without ever offering a choice. */}
           {notAllowed && !authPending && (
             <button
-              onClick={() => endSession(null)}
+              onClick={() => endSession(null, true)}
               style={{ marginTop: 14, padding: "7px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 13, borderRadius: 10, color: C.ink, cursor: "pointer" }}
             >
               Use a different account
@@ -5758,7 +5785,7 @@ function AssetTracker() {
                 </span>
               )}
               <button
-                onClick={() => endSession(null)}
+                onClick={() => endSession(null, true)}
                 title="Sign out of the asset tracker"
                 style={{ background: "none", border: "none", padding: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted, textDecoration: "underline", cursor: "pointer" }}
               >
