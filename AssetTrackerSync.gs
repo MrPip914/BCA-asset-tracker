@@ -49,7 +49,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v21";
+const SCRIPT_VERSION = "v22";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -455,6 +455,142 @@ function authorizeIdentity_(identity, configMap) {
   };
 }
 
+// --- Sessions ----------------------------------------------------------------
+// Google's ID token lasts about an hour and browsers can't renew one silently
+// (Chrome's move to FedCM made auto_select undependable). So the token is used
+// ONCE, at sign-in, to establish who someone is; after that this script issues
+// its own session and the browser presents that instead.
+//
+// Sessions live in Script Properties, not in the spreadsheet, for two reasons:
+// anyone with the Sheet can read every tab, and doPost rewrites tabs wholesale —
+// a session table sitting in there would be both readable and destroyable by
+// ordinary saves.
+//
+// Stateful rather than a signed stateless token on purpose: a record that can be
+// deleted is what makes sign-out and revocation real. A signed token would be
+// slightly less code and impossible to withdraw before it expired.
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const SESSION_PREFIX = "session_";
+// Sliding expiry is only rewritten once the stored value has drifted by this
+// much. Without the throttle every single request would write a property —
+// pointless quota churn to move an expiry by a few seconds.
+const SESSION_TOUCH_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
+
+function sessionKey_(id) { return SESSION_PREFIX + id; }
+
+// Two UUIDs, not one: this is a bearer credential good for a week, and the extra
+// entropy costs nothing.
+function newSessionId_() {
+  return (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, "");
+}
+
+function createSession_(email) {
+  const props = PropertiesService.getScriptProperties();
+  sweepExpiredSessions_(props);
+  const id = newSessionId_();
+  props.setProperty(sessionKey_(id), JSON.stringify({
+    email: String(email).toLowerCase().trim(),
+    expires: Date.now() + SESSION_TTL_MS,
+  }));
+  return id;
+}
+
+// Returns { email, expires } or null. Deletes anything expired or unreadable as
+// it goes, so a bad record can't linger and can't be retried.
+function readSession_(sessionId) {
+  if (!sessionId || typeof sessionId !== "string") return null;
+  // Shape check before touching storage: sessionId lands in a property key, and
+  // this keeps a crafted value from being used to probe unrelated properties.
+  if (!/^[0-9a-f]{40,80}$/i.test(sessionId)) return null;
+  const props = PropertiesService.getScriptProperties();
+  const raw = props.getProperty(sessionKey_(sessionId));
+  if (!raw) return null;
+  let session;
+  try {
+    session = JSON.parse(raw);
+  } catch (err) {
+    props.deleteProperty(sessionKey_(sessionId));
+    return null;
+  }
+  if (!session || !session.email || !(Number(session.expires) > Date.now())) {
+    props.deleteProperty(sessionKey_(sessionId));
+    return null;
+  }
+  return session;
+}
+
+// Sliding expiry: any activity pushes the deadline back a full week, so someone
+// who uses the app regularly is never asked to sign in again, while a forgotten
+// device still ages out.
+function touchSession_(sessionId, session) {
+  const next = Date.now() + SESSION_TTL_MS;
+  if (next - Number(session.expires) < SESSION_TOUCH_THRESHOLD_MS) return;
+  PropertiesService.getScriptProperties().setProperty(sessionKey_(sessionId), JSON.stringify({
+    email: session.email,
+    expires: next,
+  }));
+}
+
+function deleteSession_(sessionId) {
+  if (!sessionId || typeof sessionId !== "string") return;
+  if (!/^[0-9a-f]{40,80}$/i.test(sessionId)) return;
+  try {
+    PropertiesService.getScriptProperties().deleteProperty(sessionKey_(sessionId));
+  } catch (err) { /* already gone */ }
+}
+
+// Ends every session belonging to an address — what makes removing someone from
+// the allowlist take effect on their devices rather than only on their next
+// request. (The per-request allowlist check already blocks them; this also
+// reclaims the storage and drops them to the sign-in screen promptly.)
+function deleteSessionsForEmail_(email) {
+  const target = String(email || "").toLowerCase().trim();
+  if (!target) return;
+  const props = PropertiesService.getScriptProperties();
+  const all = props.getProperties();
+  Object.keys(all).forEach(key => {
+    if (key.indexOf(SESSION_PREFIX) !== 0) return;
+    try {
+      const s = JSON.parse(all[key]);
+      if (s && String(s.email).toLowerCase() === target) props.deleteProperty(key);
+    } catch (err) {
+      props.deleteProperty(key);
+    }
+  });
+}
+
+// Expired records are only noticed when someone presents them, so without a
+// sweep an abandoned session would sit in storage forever. Runs at sign-in,
+// which is rare enough to be free and frequent enough to keep storage bounded.
+function sweepExpiredSessions_(props) {
+  try {
+    const all = props.getProperties();
+    const now = Date.now();
+    Object.keys(all).forEach(key => {
+      if (key.indexOf(SESSION_PREFIX) !== 0) return;
+      try {
+        const s = JSON.parse(all[key]);
+        if (!s || !(Number(s.expires) > now)) props.deleteProperty(key);
+      } catch (err) {
+        props.deleteProperty(key);
+      }
+    });
+  } catch (err) { /* non-fatal — a sweep that fails just leaves stale records */ }
+}
+
+// Resolves a request's sessionId to an authorized identity. The allowlist is
+// re-read on EVERY request, so removing someone or dropping them to view-only
+// takes effect on their next action rather than whenever their session expires.
+function authorizeSession_(sessionId, configMap) {
+  const session = readSession_(sessionId);
+  if (!session) {
+    return { ok: false, reason: "signin", error: "Your session has expired. Sign in again to continue." };
+  }
+  const auth = authorizeIdentity_({ email: session.email, name: "" }, configMap);
+  if (auth.ok) touchSession_(sessionId, session);
+  return auth;
+}
+
 function jsonOut_(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
 }
@@ -707,18 +843,12 @@ function doGet(e) {
   }, e);
 }
 
-// The authenticated full-inventory read, reached via doPost({ op: "read" }).
-// Takes its own lock, so doPost routes here BEFORE acquiring the write lock —
-// Apps Script's script lock is a cross-execution mutex, not a reentrant one, and
-// acquiring it twice in one execution would deadlock against itself.
-//
-// The lock matters for the same reason it does on the public panel branch:
-// writeTable_ clear()s a tab before rewriting it, so an unlocked read landing
-// mid-save can legitimately observe an empty tab.
-function handleAuthenticatedRead_(idToken, e) {
-  // Token verified BEFORE the lock — it's a network round trip to Google, and
-  // see authorizeIdentity_ for why the two halves are split.
-  const identity = verifyIdToken_(idToken);
+// Sign-in: the ONE place a Google ID token is accepted. Verifies it, checks the
+// allowlist, issues a week-long session, and returns the inventory in the same
+// response so signing in stays a single round trip.
+function handleSignIn_(body, e) {
+  // Verified outside the lock — it's a network round trip to Google.
+  const identity = verifyIdToken_(body.idToken);
   if (!identity.ok) {
     return respond_({
       ok: false,
@@ -729,13 +859,40 @@ function handleAuthenticatedRead_(idToken, e) {
       scriptVersion: SCRIPT_VERSION,
     }, e);
   }
+  return handleAuthenticatedRead_({ _identity: identity }, e);
+}
 
+// The authenticated full read. Reached two ways: from handleSignIn_ with a
+// freshly verified Google identity, or from doPost({op:"read"}) with a session
+// id. Either way the allowlist decides, and the response carries the session.
+//
+// Takes its own lock, so doPost routes here BEFORE acquiring the write lock —
+// Apps Script's script lock is a cross-execution mutex, not a reentrant one, and
+// acquiring it twice in one execution would deadlock against itself. The lock
+// matters for the same reason it does on the public panel branch: writeTable_
+// clear()s a tab before rewriting it, so an unlocked read landing mid-save can
+// legitimately observe an empty tab.
+function handleAuthenticatedRead_(body, e) {
   const lock = LockService.getScriptLock();
   lock.waitLock(10000);
   try {
     // Allowlist read under the same lock as the data: outside it, a Config
     // rewrite in flight would show an empty list and reject everyone.
-    const auth = authorizeIdentity_(identity, readConfigMap_());
+    const configMap = readConfigMap_();
+
+    // A brand-new sign-in mints a session; an existing one is resolved and slid
+    // forward. `sessionId` goes back either way so the client always holds the
+    // current one without needing to know which case it was.
+    let auth;
+    let sessionId;
+    if (body._identity) {
+      auth = authorizeIdentity_(body._identity, configMap);
+      if (auth.ok) sessionId = createSession_(auth.email);
+    } else {
+      sessionId = body.sessionId;
+      auth = authorizeSession_(sessionId, configMap);
+    }
+
     if (!auth.ok) {
       return respond_({
         ok: false,
@@ -863,6 +1020,10 @@ function handleAuthenticatedRead_(idToken, e) {
         role: auth.role,
         users: auth.users,
         ownerEmail: OWNER_EMAIL,
+        // The week-long session the browser stores and presents from here on.
+        // No Google credential is kept client-side at all any more — this is an
+        // opaque id that means nothing outside this script and can be deleted.
+        sessionId: sessionId,
       },
     };
 
@@ -886,23 +1047,24 @@ function doPost(e) {
     return jsonOut_({ ok: false, error: "Malformed request body." });
   }
 
-  // The authenticated full read. It's a POST purely so the ID token can ride in
-  // the body rather than the URL — nothing on this path writes anything.
-  if (body.op === "read") {
-    return handleAuthenticatedRead_(body.idToken, e);
+  // Sign-in — the only op that accepts a Google ID token. Returns a session plus
+  // the inventory in one response.
+  if (body.op === "signin") {
+    return handleSignIn_(body, e);
   }
 
-  // Verified outside the lock (network round trip); the allowlist half runs
-  // inside it, below.
-  const identity = verifyIdToken_(body.idToken);
-  if (!identity.ok) {
-    return jsonOut_({
-      ok: false,
-      authFailed: true,
-      reason: "signin",
-      error: "Your sign-in expired before this change could be saved. Sign in again and retry.",
-      detail: identity.detail,
-    });
+  // The authenticated full read. A POST purely so the session id rides in the
+  // body rather than the URL — nothing on this path writes inventory data.
+  if (body.op === "read") {
+    return handleAuthenticatedRead_(body, e);
+  }
+
+  // Sign out. Deliberately unconditional: an invalid or already-deleted session
+  // still returns ok, because "this session is gone" is exactly what the caller
+  // asked for and reporting failure would only invite a retry loop.
+  if (body.op === "signout") {
+    deleteSession_(body.sessionId);
+    return jsonOut_({ ok: true });
   }
 
   const lock = LockService.getScriptLock();
@@ -935,7 +1097,7 @@ function doPost(e) {
     //
     // View-only is enforced HERE, not by hiding buttons in the app. The UI does
     // hide them, but that's a courtesy — this is the rule.
-    const auth = authorizeIdentity_(identity, configMap);
+    const auth = authorizeSession_(body.sessionId, configMap);
     if (!auth.ok) {
       return jsonOut_({
         ok: false,
@@ -1115,12 +1277,23 @@ function doPost(e) {
         // user management, or any save that simply isn't about users, would
         // otherwise blank the list and lock everyone except OWNER_EMAIL out of
         // the app. Absent means "leave it alone", not "set it to empty".
-        configRows.push({
-          key: "authUsers",
-          value: JSON.stringify(
-            Array.isArray(body.authUsers) ? sanitizeAuthUsers_(body.authUsers) : readAuthUsers_(configMap)
-          ),
-        });
+        const previousAuthUsers = readAuthUsers_(configMap);
+        const nextAuthUsers = Array.isArray(body.authUsers)
+          ? sanitizeAuthUsers_(body.authUsers)
+          : previousAuthUsers;
+        // Anyone dropped from the list has their sessions ended right now rather
+        // than lingering for up to a week. Their next request would be refused
+        // either way — the allowlist is re-read on every one — but this returns
+        // them to the sign-in screen promptly instead of leaving a usable app on
+        // screen, and reclaims the storage.
+        if (Array.isArray(body.authUsers)) {
+          const stillListed = {};
+          nextAuthUsers.forEach(u => { stillListed[u.email] = true; });
+          previousAuthUsers.forEach(u => {
+            if (!stillListed[u.email]) deleteSessionsForEmail_(u.email);
+          });
+        }
+        configRows.push({ key: "authUsers", value: JSON.stringify(nextAuthUsers) });
         configRows.push({ key: "nextAssetNumber", value: JSON.stringify(nextAssetNumber) });
       } else {
         Object.keys(configMap).forEach(k => {

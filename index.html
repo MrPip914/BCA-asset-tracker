@@ -800,43 +800,49 @@ const GOOGLE_CLIENT_ID = "512657381831-4so7t5t2shqn8nbgrgktsg6s37podqji.apps.goo
 // stale-closure class of bug. The React copy below is for rendering only.
 let authIdToken = null;
 
-// Where the current token is kept so a page refresh doesn't cost a sign-in.
+// The week-long session issued by the backend after Google has confirmed who
+// you are once. This is what's stored and presented from then on — NOT a Google
+// credential. An earlier version kept the ID token here; that only bought an
+// hour (Google's limit, unrenewable in a browser since Chrome moved auto_select
+// behind FedCM) and, being a real Google token, was worth more if stolen.
 //
-// This IS storing a credential in the browser, which was avoided at first on
-// the theory that Google's automatic re-issue (auto_select) would cover
-// refreshes. It doesn't reliably — Chrome's move to FedCM made that prompt
-// something you cannot depend on firing. The trade was taken deliberately: the
-// token is only good for THIS app, expires in about an hour on its own, and the
-// backend re-verifies it and re-checks the allowlist on every single request,
-// so a stolen one grants an hour of access to a school asset list rather than
-// anything durable. Signing out deletes it immediately.
-const AUTH_TOKEN_KEY = "asset-tracker-auth-token";
+// A session id is strictly better on both counts: it lasts a week, it means
+// nothing outside this script, and because the backend holds the matching
+// record it can be destroyed — signing out or being removed from the access
+// list ends it immediately, which no self-expiring token allows.
+const SESSION_ID_KEY = "asset-tracker-session";
 
-// Reads the `exp` claim WITHOUT verifying anything. The server verifies, always
-// — this is only used to skip a round trip with a token we can already see is
-// stale. Never treat anything decoded here as trusted.
-function idTokenExpiry(token) {
+let sessionId = null;
+
+function setSessionId(id) {
+  sessionId = id || null;
+  // Mirrored to storage here rather than at each call site so the two can never
+  // disagree — endSession()'s setSessionId(null) is what makes signing out
+  // actually erase it rather than orphan it.
   try {
-    const payload = JSON.parse(atob(String(token).split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
-    const exp = Number(payload.exp);
-    return isFinite(exp) ? exp * 1000 : 0;
+    if (id) localStorage.setItem(SESSION_ID_KEY, id);
+    else localStorage.removeItem(SESSION_ID_KEY);
   } catch (e) {
-    return 0;
+    /* private mode or storage full — the session just won't survive a refresh */
   }
 }
 
-// Restores a stored token if it has meaningful life left, returning whether it
-// did. The 60-second margin stops a token that expires mid-flight from causing
-// a bounce that looks random to whoever is using it.
-function restoreAuthIdToken() {
+// No expiry check on this side, deliberately, unlike the ID token it replaced.
+// Only the server knows when a session really ends: it slides the expiry forward
+// on every request, and can revoke early. Guessing here would either log people
+// out who are still valid or pretend they're valid when they aren't.
+function restoreSessionId() {
   try {
-    const stored = localStorage.getItem(AUTH_TOKEN_KEY);
+    // v21 briefly stored the raw Google ID token under this key. Nothing reads
+    // it any more, but it's a real credential and leaving one sitting in every
+    // user's browser forever is careless. Removed on the first load of v22;
+    // harmless once it's gone.
+    localStorage.removeItem("asset-tracker-auth-token");
+  } catch (e) { /* nothing to clean up */ }
+  try {
+    const stored = localStorage.getItem(SESSION_ID_KEY);
     if (!stored) return false;
-    if (idTokenExpiry(stored) < Date.now() + 60000) {
-      localStorage.removeItem(AUTH_TOKEN_KEY);
-      return false;
-    }
-    authIdToken = stored;
+    sessionId = stored;
     return true;
   } catch (e) {
     return false;
@@ -846,18 +852,10 @@ function restoreAuthIdToken() {
 // Google ID tokens last about an hour. Rather than tracking that clock, the app
 // treats an authFailed response as "the token is stale" and re-prompts — the
 // server is the only thing whose opinion of expiry actually matters.
-function setAuthIdToken(token) {
-  authIdToken = token || null;
-  // Mirrored to storage here rather than at each call site so the two can never
-  // disagree — in particular, endSession()'s setAuthIdToken(null) is what makes
-  // signing out actually erase the stored credential rather than orphan it.
-  try {
-    if (token) localStorage.setItem(AUTH_TOKEN_KEY, token);
-    else localStorage.removeItem(AUTH_TOKEN_KEY);
-  } catch (e) {
-    /* private mode or storage full — the session just won't survive a refresh */
-  }
-}
+// Held only long enough to exchange it for a session at sign-in, then dropped.
+// Never stored: a Google ID token is a real credential for a real account, while
+// the session that replaces it is meaningless outside this script.
+function setAuthIdToken(token) { authIdToken = token || null; }
 
 // Resolves with `window.google.accounts.id` once the GSI script has registered
 // it, or null if it never shows up. The script tag in <head> is not deferred, so
@@ -891,7 +889,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v21";
+const FRONTEND_SCRIPT_VERSION = "v22";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -1766,7 +1764,7 @@ function AssetTracker() {
     if (restoreAttemptedRef.current) return;
     restoreAttemptedRef.current = true;
     if (sandboxMode) return;
-    if (restoreAuthIdToken()) {
+    if (restoreSessionId()) {
       setAuthPending(true);
       loadData();
     }
@@ -1830,7 +1828,28 @@ function AssetTracker() {
   // an hour, so disabling auto-select there would demand a manual click every
   // hour of a working day, which is the thing auto_select exists to prevent.
   function endSession(error, manualSignOut) {
+    // A deliberate sign-out destroys the session SERVER-side, which is the whole
+    // point of sessions being records rather than self-expiring tokens: without
+    // this the id would keep working for a week on anyone who copied it, and
+    // "Sign out" would mean nothing more than clearing this browser.
+    //
+    // Fire-and-forget: the local sign-out below must happen whether or not the
+    // network call lands, and making the user wait on it (or stranding them in a
+    // signed-in state because it failed) would both be worse. A session that
+    // outlives a failed call still expires on its own.
+    if (manualSignOut && sessionId) {
+      const dyingSession = sessionId;
+      try {
+        fetch(SHEET_API_URL, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain;charset=utf-8" },
+          body: JSON.stringify({ op: "signout", sessionId: dyingSession }),
+          keepalive: true,
+        }).catch(() => {});
+      } catch (e) { /* non-fatal — the session expires on its own regardless */ }
+    }
     setAuthIdToken(null);
+    setSessionId(null);
     setAuth(null);
     setAuthPending(false);
     setCurrentUser(null);
@@ -1894,11 +1913,14 @@ function AssetTracker() {
           // empty list, and the Config block is skipped because no domain was
           // written. The load then fails cleanly on "Malformed response" instead
           // of destroying the inventory.
-          body: JSON.stringify({
-            op: "read",
-            idToken: authIdToken,
-            _dirty: { assets: false, config: false, breakerTypes: false },
-          }),
+          // Two shapes, one request. A pending Google credential means this is a
+          // fresh sign-in, which is the only time an ID token is ever sent — the
+          // backend exchanges it for a session and returns both the session and
+          // the inventory together, so signing in stays one round trip. Every
+          // load after that presents the session instead.
+          body: JSON.stringify(authIdToken
+            ? { op: "signin", idToken: authIdToken, _dirty: { assets: false, config: false, breakerTypes: false } }
+            : { op: "read", sessionId: sessionId, _dirty: { assets: false, config: false, breakerTypes: false } }),
           cache: "no-store",
         });
         if (!res.ok) throw new Error("HTTP " + res.status);
@@ -1922,6 +1944,11 @@ function AssetTracker() {
       // this side. Absent in sandbox mode, which has no backend and no allowlist,
       // and where authSatisfied is already true.
       if (data.auth) {
+        // Adopt the session the backend just issued or sled forward, and drop
+        // the Google credential the moment it has been exchanged — it has done
+        // its one job and keeping it around is pure liability.
+        if (data.auth.sessionId) setSessionId(data.auth.sessionId);
+        setAuthIdToken(null);
         setAuth(data.auth);
         setCurrentUser(data.auth.name || data.auth.email);
         setAccessUsers(data.auth.users || []);
@@ -2084,7 +2111,7 @@ function AssetTracker() {
       // The ID token goes in the body, not a header: a custom header would make
       // this a non-simple CORS request, and the browser's preflight OPTIONS is
       // exactly what Apps Script can't answer — see the text/plain note above.
-      body: JSON.stringify({ ...payload, idToken: authIdToken }),
+      body: JSON.stringify({ ...payload, sessionId: sessionId }),
     });
     const text = await res.text();
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);

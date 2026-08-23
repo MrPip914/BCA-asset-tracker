@@ -215,23 +215,32 @@ per-device via `localStorage` (`SANDBOX_MODE_KEY`).
     touches the backend. The sign-in screen carries its own "Continue in Sandbox" link —
     the Sandbox pill lives in the header, which is now behind the gate, so without that link
     a signed-out browser could never reach sandbox mode at all.
-  - **The ID token IS stored in `localStorage`** (`AUTH_TOKEN_KEY`), and that was a
-    deliberate reversal. The original design stored nothing, on the theory that Google's
-    `auto_select` would silently re-issue a token on each load. It doesn't reliably —
-    Chrome's move to FedCM made that prompt something you cannot depend on firing, and in
-    practice every refresh landed back on the sign-in screen. `auto_select` and
-    `use_fedcm_for_prompt` are still set as a best-effort second path, but the stored token
-    is what actually makes a refresh work.
-    - Why it's an acceptable trade: the token is only valid for this app, expires on its
-      own in about an hour, and `doPost`/`handleAuthenticatedRead_` re-verify it with
-      Google AND re-check the allowlist on every single request. A stolen one buys an hour
-      of read/write on a school asset list, not durable access. Signing out deletes it.
-    - `restoreAuthIdToken()` discards a token within 60s of expiry without a round trip, so
-      a token dying mid-request can't produce a bounce that looks random. A restored token
-      that the backend rejects is cleared and the user lands on sign-in with the reason
-      shown — verified both paths by planting a bogus and an expired token.
-    - `idTokenExpiry()` decodes the `exp` claim WITHOUT verifying the signature. It exists
-      only to skip pointless round trips. Never treat anything it decodes as trusted.
+  - **Sessions (v22): the Google ID token is used ONCE and never stored.** `doPost`
+    exchanges it at `op:"signin"` for a script-issued session, and the browser presents
+    that from then on (`SESSION_ID_KEY` in `localStorage`).
+    - **Why not just keep the Google token:** it lasts about an hour and a browser cannot
+      renew one silently — Chrome's move to FedCM made `auto_select` undependable, so v21
+      (which did store it) sent people back to the sign-in screen constantly. A session
+      also can't be revoked if it's a self-expiring token; a record can.
+    - **Sessions live in Script Properties, NOT the Sheet.** Anyone with the Sheet can read
+      every tab, and `doPost` rewrites tabs wholesale — a session table there would be both
+      readable and destroyable by an ordinary save.
+    - **7 days, sliding** (`SESSION_TTL_MS`). Any request pushes the expiry back a full
+      week, so a regular user is never asked again while a forgotten device ages out. The
+      rewrite is throttled (`SESSION_TOUCH_THRESHOLD_MS`) so a property isn't written on
+      every single request just to move an expiry by seconds.
+    - **The allowlist is still re-read on EVERY request**, so removing someone or dropping
+      them to view-only takes effect on their next action, not when their session expires.
+      Removal additionally calls `deleteSessionsForEmail_` to end their sessions outright.
+    - **Sign out is real**: it POSTs `op:"signout"`, which deletes the record server-side.
+      Fire-and-forget on purpose — the local sign-out must happen whether or not the call
+      lands, and a session that outlives a failed call still expires on its own.
+    - `readSession_` shape-checks the id before it touches storage, because the id becomes
+      part of a property key.
+    - Expired records are only noticed when presented, so `sweepExpiredSessions_` runs at
+      sign-in to keep storage bounded.
+    - v22's first load also deletes the leftover `asset-tracker-auth-token` that v21 left
+      in every user's browser. Safe to remove that cleanup once nobody is on v21.
   - **Local testing needs `http://localhost:<port>` registered** as an authorized JavaScript
     origin on the OAuth client. `file://` has no origin Google accepts, so double-clicking
     `index.html` shows the sign-in button and then fails.
