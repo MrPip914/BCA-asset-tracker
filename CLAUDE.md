@@ -5,8 +5,19 @@ originally built as a Claude.ai artifact and migrated to a standalone static sit
 could connect to a live Google Sheets backend (Claude.ai's artifact sandbox blocks
 outbound network requests to arbitrary domains, which is why this migration happened).
 
+## Working here
+
+**A bug you find while doing something else goes in `BUGS.md`, not into the current
+session.** Log it, mention it in one line at the end of your response, and carry on with
+what was asked — Eric decides what gets fixed and when, and an unprioritized bug taking
+over the thread costs him that. The one exception is a genuine blocker: say so
+explicitly and name *which part* it blocks, not the whole task. Pass this instruction on
+to any session you spawn; they inherit the same tendency.
+
 ## Files
 
+- `BUGS.md` — known bugs, why they happen, whether fixing one needs an Apps Script
+  deploy, and what each blocks. Read it before starting anything substantial.
 - `index.html` — the entire app. No build step, no npm install. React, ReactDOM,
   lucide-react (icons), and xlsx (SheetJS, for the Excel export button) are all loaded
   from esm.sh/unpkg via an import map. Babel Standalone transpiles the JSX in-browser
