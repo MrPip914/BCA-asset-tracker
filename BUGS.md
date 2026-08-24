@@ -16,6 +16,25 @@ version that fixed them.
 
 ## Open
 
+### A failed sign-in hangs on "Checking your access…" forever
+**Found:** 2026-08-24, while testing v22 sign-in against a backend still running v21.
+**Needs a deploy:** no — `index.html` only.
+**Confirmed:** by the symptom plus reading the code path.
+
+`credentialHandlerRef` sets `authPending` true before calling `loadData()`. Every exit
+from `loadData()` clears it EXCEPT the `catch`, which sets `loadError` and stops. But the
+sign-in gate returns before the `loadError` screen is ever reached, so the user sits on
+"Checking your access…" with no error, no button, and no way forward but a reload.
+
+Any failure during sign-in produces this: backend unreachable, a non-JSON response, a
+version mismatch. It's what turned "your backend is out of date" into "the app is
+frozen", which cost a diagnosis round trip.
+
+Fix is one line — clear `authPending` in the `catch` — plus deciding what the gate should
+say when a sign-in attempt fails for a transport reason rather than an auth one.
+
+**Blocks:** nothing. But it will disguise the cause of any future sign-in problem.
+
 ### Custom column values are never saved
 **Found:** 2026-08-23, during the asset type editor design discussion.
 **Needs a deploy:** yes — the fix is in `AssetTrackerSync.gs`.
