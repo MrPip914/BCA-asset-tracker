@@ -145,12 +145,47 @@ their `DEFAULT_COLUMNS` position.
 3. **Remove the place columns** — Campus/Building/Room out of the list and filters,
    export given its own resolved columns, bulk move rewired onto the scope,
    `isComputedColumnFor()` retired.
-4. **Type editor** — now materially simpler, one fewer setting to design.
+4. **Type editor** — now materially simpler, one fewer setting to design. Two
+   decisions are still open, both put to Eric on 2026-08-24 and neither answered,
+   so a session picking this up starts by asking:
+   - **Renaming a type.** `asset.type` stores the type's NAME, and so does every
+     other type's `parentTypes`, so a rename needs a cascade over two reference
+     sites — the same shape as the room-rename cascade the id migration removed.
+     Three options: forbid renaming (consistent with "labels are never renamed"),
+     cascade it, or give types real ids first. The last is cheapest done BEFORE a
+     pile of user-created types exists.
+   - **Where a type's settings live.** Recommended: `TYPE_REGISTRY` stays the
+     shipped defaults and a `typeSettings` Config blob overlays it per key. An icon
+     is a React component and a module needs a render branch, so neither can be
+     data; everything else can. Note this needs a backend version of its own —
+     `doPost` writes a FIXED list of config keys and silently drops unknown ones,
+     so a `typeSettings` row would be erased by the next config save.
 
-Steps 1–3 are one backend deploy (a `name` column on the Assets tab), taken once at
-the end rather than per step. The legacy `room`/`building`/`campus` columns stay
+Step 3 needs no backend change. Step 1 shipped as backend **v23** (a `name` column
+on the Assets tab), deployed 2026-08-24. The legacy `room`/`building`/`campus` columns stay
 readable but stop being written, so the change is reversible; clearing them is a
 separate later step, exactly as with `roomId`/`buildingId`.
+
+## Testing setup
+
+The cloud sessions this was built in could not load the app at all: the environment's
+network policy blocked `esm.sh` and `unpkg.com`, so React and Babel never arrived, and
+`script.google.com` was blocked too. Everything was verified by transpiling the JSX and
+exercising the helpers against `MOCK_SNAPSHOT` — which is exactly how the mis-adopted
+names above reached the live sheet.
+
+Eric created a **Full Access** environment on 2026-08-24 to fix this. A session running
+there can open the app in a real browser and can read the deployed `scriptVersion` from
+the `/exec` URL, which needs no sign-in. It still cannot sign in to Google, so verifying
+the live Sheet stays a human step.
+
+Agreed but not yet built: a **local mock backend** — a small server speaking the same API
+as `AssetTrackerSync.gs`, backed by a JSON file, with a local copy of `index.html` pointed
+at it (generated per run, never committed). That covers the authenticated path, plus
+failure modes production can't be asked to produce: a save conflict, an expired session, a
+view-only user, the empty-assets guard, the "Backend outdated" banner. Rejected on the way
+there: disabling sign-in or adding a test back door on the live deployment — the repo is
+public, the backend URL is in it, and headless Google sign-in wouldn't have worked anyway.
 
 ## Deferred
 
