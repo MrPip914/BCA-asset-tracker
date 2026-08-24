@@ -441,15 +441,39 @@ function suggestedNameFor(asset, assets) {
 // "Room 102". Naming them in one pass produced "BCR0006 Mini Split", since
 // nameOf() was still falling back to the room's label when the mini split asked.
 // Hence stored names first, then places, then everything else.
+// Which old column held a given type's OWN name, before `name` existed. Gated by
+// type, and that gating is the whole point: the `room` column is a Room's name,
+// but on every OTHER asset it's a leftover from the pre-v9 schema still holding
+// the room it sits in ("Room 102"). Reading it ungated named every computer in
+// the building after its room. See the note in NAME_FIELD_PLAN.md — the sandbox
+// fixture had no such leftovers, so nothing caught it before the live sheet did.
+const LEGACY_NAME_COLUMNS = { Room: "room", Building: "building", Campus: "campus", "Bulk Item": "itemName" };
+function legacyNameOf(a) {
+  const key = LEGACY_NAME_COLUMNS[a?.type];
+  return key ? String(a[key] || "").trim() : "";
+}
+// Was this asset's stored name mis-adopted by the ungated version of the ladder
+// above? True only when the name is exactly one of the leftover place columns on
+// a type that column never named — i.e. precisely the rows that got it wrong.
+// A name someone actually typed is only caught if they typed the stale room
+// string verbatim onto that same asset, which isn't a case worth protecting.
+//
+// One-time repair: once a corrected name is saved, nothing matches this again.
+// Removable once no sheet still carries a name written by that first version.
+function hasMisadoptedName(a) {
+  const name = (a?.name || "").trim();
+  if (!name || legacyNameOf(a)) return false;
+  return [a.room, a.building, a.campus].some(v => String(v || "").trim() === name);
+}
 function adoptLegacyNames(list) {
-  const stillBlank = a => !(a.name || "").trim();
-  // 1. Whatever the asset was already called under the old per-type columns. A
-  //    Bulk Item takes a copy of its sub-type ("Chairs") — what it was called
+  const stillBlank = a => !(a.name || "").trim() || hasMisadoptedName(a);
+  // 1. Whatever the asset was already called under the old per-type columns.
+  //    A Bulk Item takes a copy of its sub-type ("Chairs") — what it was called
   //    before Sub-Type went back to being purely a category.
   const stored = list.map(a => {
     if (!stillBlank(a)) return a;
-    const legacy = a.room || a.building || a.campus || a.itemName || "";
-    return legacy ? { ...a, name: legacy } : a;
+    const legacy = legacyNameOf(a);
+    return legacy ? { ...a, name: legacy } : (a.name ? { ...a, name: "" } : a);
   });
   // 2. Places next, so a nameless room has a name of its own before anything
   //    inside it is named after it.
@@ -1136,8 +1160,8 @@ const MOCK_SNAPSHOT = {
     { label: "BCR0002", type: "Room", room: "Kitchen", parentId: "BCB0001", person: "Multiple teachers", notes: "", status: "Active" },
     { label: "BCR0018", type: "Room", room: "Storage Room", parentId: "BCB0001", person: "", notes: "", status: "Active" },
     { label: "BCR0020", type: "Room", room: "Room 101", parentId: "BCB0001", person: "Dillon Jacobsma", notes: "", status: "Active" },
-    { label: "BCA0001", type: "Computer", parentId: "BCR0006", brand: "Dell", model: "OptiPlex 7010", serial: "MOCK-CMP-001", person: "Jen Kramer", peripherals: "Keyboard, Mouse", notes: "", status: "Active" },
-    { label: "BCA0002", type: "Monitor", parentId: "BCR0006", brand: "Dell", model: "P2419H", serial: "MOCK-MON-001", person: "Jen Kramer", notes: "", status: "Active" },
+    { label: "BCA0001", type: "Computer", room: "Room 102", parentId: "BCR0006", brand: "Dell", model: "OptiPlex 7010", serial: "MOCK-CMP-001", person: "Jen Kramer", peripherals: "Keyboard, Mouse", notes: "", status: "Active" },
+    { label: "BCA0002", type: "Monitor", room: "Room 102", parentId: "BCR0006", brand: "Dell", model: "P2419H", serial: "MOCK-MON-001", person: "Jen Kramer", notes: "", status: "Active" },
     { label: "BCA0003", type: "Phone", parentId: "BCR0006", brand: "Cisco", model: "8841", serial: "MOCK-PHN-001", person: "Jen Kramer", notes: "", status: "Active" },
     { label: "BCA0011", type: "Phone", parentId: "BCR0008", brand: "Cisco", model: "8841", serial: "MOCK-PHN-002", person: "Aaron Cantrell", notes: "", status: "Active" },
     { label: "BCA0015", type: "Stream Deck", parentId: "BCR0008", brand: "Elgato", model: "Stream Deck MK.2", serial: "MOCK-SD-001", person: "Aaron Cantrell", notes: "", status: "Active" },
@@ -1488,7 +1512,7 @@ const MOCK_SNAPSHOT = {
     // an outdoor unit sits outside any one Room. Building 100 has 4 indoor zones
     // (Room 102, Kitchen, Storage Room, Room 101), so it gets a 4-zone outdoor
     // unit; the others each have a single zone.
-    { label: "BCA0093", type: "Condenser", parentId: "BCB0001", brand: "Mitsubishi", model: "MXZ-4C36NAHZ", serial: "", notes: "Outdoor condenser/compressor, 4-zone multi-split.", status: "Active", maintenanceItems: [
+    { label: "BCA0093", type: "Condenser", building: "Building 100", parentId: "BCB0001", brand: "Mitsubishi", model: "MXZ-4C36NAHZ", serial: "", notes: "Outdoor condenser/compressor, 4-zone multi-split.", status: "Active", maintenanceItems: [
       { task: "Inspection / cleaning", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
     ] },
     { label: "BCA0094", type: "Condenser", parentId: "BCB0002", brand: "Mitsubishi", model: "MUZ-GL15NA", serial: "", notes: "Outdoor condenser/compressor, single-zone.", status: "Active", maintenanceItems: [
@@ -2042,14 +2066,23 @@ function AssetTracker() {
       // zeros, which is exactly what such a backend compares against — so this
       // stays a no-op rather than a permanent conflict.
       rememberRevisions(data.revisions);
-      // Migrate column config: append any default columns added in newer app versions.
+      // Migrate column config: add any default columns introduced in newer app
+      // versions, at the position DEFAULT_COLUMNS puts them in rather than always
+      // just before `status`. That blanket rule sent `name` to the far right of an
+      // existing user's table — past a dozen columns, effectively invisible — even
+      // though it's the first column for anyone starting fresh. Anchoring on the
+      // nearest preceding default column that this user already has keeps the new
+      // column next to the ones it belongs with; a column with no such anchor (one
+      // that leads the default order, like `name`) goes to the front.
       let storedCols = data.columns && data.columns.length ? data.columns : DEFAULT_COLUMNS;
-      DEFAULT_COLUMNS.forEach(dc => {
-        if (!storedCols.some(c => c.key === dc.key)) {
-          const statusIdx = storedCols.findIndex(c => c.key === "status");
-          const insertAt = statusIdx === -1 ? storedCols.length : statusIdx;
-          storedCols = [...storedCols.slice(0, insertAt), dc, ...storedCols.slice(insertAt)];
+      DEFAULT_COLUMNS.forEach((dc, defaultIdx) => {
+        if (storedCols.some(c => c.key === dc.key)) return;
+        let insertAt = 0;
+        for (let i = defaultIdx - 1; i >= 0; i--) {
+          const anchor = storedCols.findIndex(c => c.key === DEFAULT_COLUMNS[i].key);
+          if (anchor !== -1) { insertAt = anchor + 1; break; }
         }
+        storedCols = [...storedCols.slice(0, insertAt), dc, ...storedCols.slice(insertAt)];
       });
       setColumns(storedCols);
       setChangeTypes(data.changeTypes && data.changeTypes.length ? data.changeTypes : DEFAULT_CHANGE_TYPES);

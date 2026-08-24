@@ -108,6 +108,34 @@ Two consequences worth naming rather than discovering later:
   suggestion instead, editable before save, so a new asset is named at creation and
   never relies on the fallback. A genuinely blank name still displays as the Asset ID.
 
+## What the first version got wrong
+
+Shipped 2026-08-24, found against the live sheet the same day. Recorded because
+the cause is a testing gap, not a typo.
+
+The backfill's first pass read `a.room || a.building || a.campus || a.itemName`
+ungated by type. On a Room the `room` column IS its name — but on every other
+asset it's a leftover from the pre-v9 schema still holding the room it sits in,
+kept and still written so v17 stays reversible. So every computer, monitor and
+phone was named after its room: "Room 102" instead of "Computer BCA0001".
+
+**The sandbox fixture didn't reproduce it**, which is why the tests passed. Its
+devices carry no legacy place columns at all — only its Rooms do — so the ungated
+read found nothing to go wrong with. `MOCK_SNAPSHOT` now gives a few devices the
+stale `room`/`building` values the live sheet actually has, so the fixture has
+the shape that broke it.
+
+Two fixes: `LEGACY_NAME_COLUMNS` gates each old column to the one type it named,
+and `hasMisadoptedName()` repairs names the broken version already wrote — a name
+equal to one of those leftover columns on a type that column never named is
+exactly the set that got it wrong. It's self-limiting (a corrected name stops
+matching) and removable once no sheet carries one.
+
+A second, smaller miss in the same release: a new default column was always
+inserted just before `status`, so `name` landed at the far right of an existing
+user's table while being first for anyone starting fresh. New columns now land at
+their `DEFAULT_COLUMNS` position.
+
 ## Sequence
 
 1. ~~**Add `name`**~~ — done: backend field, column, form input on every type, backfill
