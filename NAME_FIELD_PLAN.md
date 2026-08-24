@@ -1,7 +1,15 @@
 # The Name field — plan
 
-Status: **agreed design, not yet built** (Eric, 2026-08-24). Nothing in this
-document has been implemented. It is the prerequisite for the asset type editor.
+Status: **steps 1 and 2 built, 2026-08-24** (backend v23, undeployed). Step 3 and
+the type editor are still ahead. It is the prerequisite for the asset type editor.
+
+Steps 1 and 2 were **built together, not separately as planned.** They don't
+separate: the moment every asset has a name, the Type column's "show the name if
+this type has one" rule fires for everything, and the list reads "Computer
+BCA0012" in the Type column for every row. Step 1 alone is a visibly broken app.
+The same forced pulling `isComputedColumnFor` forward out of step 3 — leaving a
+Room's `room` field editable alongside the new Name would have put two competing
+name fields on the same form.
 
 ## The problem
 
@@ -102,10 +110,10 @@ Two consequences worth naming rather than discovering later:
 
 ## Sequence
 
-1. **Add `name`** — backend field, column, form input on every type, backfill ladder,
-   `nameOf()` reading one field.
-2. **Clean out Type / Sub-Type** — type word only, BULK badge removed, Sub-Type as
-   category only, `nameField` deleted from the registry.
+1. ~~**Add `name`**~~ — done: backend field, column, form input on every type, backfill
+   ladder, `nameOf()` reading one field.
+2. ~~**Clean out Type / Sub-Type**~~ — done: type word only, BULK badge removed, Sub-Type
+   as category only, `nameField` deleted from the registry.
 3. **Remove the place columns** — Campus/Building/Room out of the list and filters,
    export given its own resolved columns, bulk move rewired onto the scope,
    `isComputedColumnFor()` retired.

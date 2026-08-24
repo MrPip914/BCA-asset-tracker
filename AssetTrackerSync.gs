@@ -49,7 +49,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v22";
+const SCRIPT_VERSION = "v23";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -87,8 +87,15 @@ const SHEET_NAMES = {
 // parentId is empty). They are not maintained as a mirror of parentId, so once
 // an asset has been moved they can be stale — treat parentId as authoritative.
 // Dropping them is a separate later step, after a migration fills parentId in.
+// "name" is every asset's own optional display name, added in v23. It replaced
+// the per-type name columns below ("room" on a Room, "building" on a Building,
+// "campus" on a Campus, "itemName" on a Bulk Item), which are still read and
+// written unchanged so this version is reversible and un-migrated rows still
+// resolve — the frontend adopts them as the name when "name" is empty. Same
+// deal as roomId/buildingId above: not maintained as a mirror, so treat "name"
+// as authoritative once a row has been saved by a v23 client.
 const ASSET_FIELDS = [
-  "label", "type", "itemName", "screenSize", "hostname", "room", "building", "campus", "parentId", "roomId", "buildingId",
+  "label", "name", "type", "itemName", "screenSize", "hostname", "room", "building", "campus", "parentId", "roomId", "buildingId",
   "brand", "model", "serial", "person", "peripherals", "notes",
   "totalQuantity", "purchaseDate", "warrantyUntil", "status",
   "panelSlotCount", "panelLayout",
@@ -676,6 +683,16 @@ function respond_(payload, e) {
 // Circuits tabs later is invisible to this endpoint until someone deliberately
 // adds it to a whitelist. That's the opposite of a blacklist, which would start
 // leaking the moment a new field lands.
+// What an asset is called, for the public page. `name` (v23) with the old
+// per-type columns as the fallback, so a panel's location renders correctly both
+// before the sheet has been rewritten with names and after. Same shape as the
+// frontend's nameOf(), minus the label fallback: a blank location should read as
+// blank here, not as an Asset ID.
+function displayName_(row) {
+  if (!row) return "";
+  return String(row.name || row.room || row.building || row.campus || "").trim();
+}
+
 function publicPanelPayload_(requestedLabel) {
   const wanted = String(requestedLabel || "").trim().toUpperCase();
   if (!wanted) return { ok: false, error: "No panel specified." };
@@ -745,7 +762,7 @@ function publicPanelPayload_(requestedLabel) {
   // is exactly what this endpoint exists to avoid. Only rooms this panel actually
   // references are included — it's a lookup map, not a room directory.
   const roomNameById = {};
-  assetRows.forEach(a => { if (a.type === "Room") roomNameById[a.label] = a.room || ""; });
+  assetRows.forEach(a => { if (a.type === "Room") roomNameById[a.label] = displayName_(a); });
 
   const panel = pickPublic_(panelRow, PUBLIC_PANEL_FIELDS);
   // The "where am I" header. A panel's Room and Building are found by walking up
@@ -753,8 +770,8 @@ function publicPanelPayload_(requestedLabel) {
   // both — which the old direct roomId/buildingId lookup could not express.
   const panelRoom = nearestAncestorRow_(panelRow, byLabel, "Room");
   const panelBuilding = nearestAncestorRow_(panelRow, byLabel, "Building");
-  panel.roomName = panelRoom ? (panelRoom.room || "") : "";
-  panel.buildingName = panelBuilding ? (panelBuilding.building || "") : "";
+  panel.roomName = panelRoom ? displayName_(panelRoom) : "";
+  panel.buildingName = panelBuilding ? displayName_(panelBuilding) : "";
 
   const referencedRoomIds = {};
   breakers.forEach(b => b.circuits.forEach(c => (c.roomsServedIds || []).forEach(id => { referencedRoomIds[id] = true; })));
@@ -780,7 +797,7 @@ function publicPanelPayload_(requestedLabel) {
     const upstreamRoom = upstreamPanel ? nearestAncestorRow_(upstreamPanel, byLabel, "Room") : null;
     fedFrom = {
       panelLabel: upstreamLabel,
-      panelRoomName: upstreamRoom ? (upstreamRoom.room || "") : "",
+      panelRoomName: upstreamRoom ? displayName_(upstreamRoom) : "",
       circuitLabel: feedingCircuit.label || "",
       cells: feedingBreaker && feedingBreaker.cells
         ? String(feedingBreaker.cells).split(",").map(s => s.trim()).filter(Boolean)

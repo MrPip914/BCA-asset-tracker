@@ -78,20 +78,10 @@ const DEFAULT_BULK_ITEM_TYPES = [];
 //   onlyFields     — column keys that belong to THIS type. Any key named in any
 //                    entry's onlyFields becomes restricted app-wide (see
 //                    RESTRICTED_FIELDS below): no type that doesn't name it gets it.
-//   nameField      — which field holds this type's human-readable NAME, when it
-//                    isn't the label. A Room is called by its `room`, a Building
-//                    by its `building`, a Bulk Item by its `itemName` sub-type
-//                    ("Folding Chair"); an ordinary device has no name of its own
-//                    and is called by its Asset ID. That per-type ladder used to
-//                    be written out inline at three separate render sites (the
-//                    Maintenance overview's row name, exportToExcel's
-//                    displayRoom/displayBuilding, the list view's Type column) —
-//                    and, being hand-copied chains, they had already drifted
-//                    apart on what to show when the name field is empty — while
-//                    a fourth site (the detail header's title) never got the
-//                    ladder at all and showed a Room the literal word "Room".
-//                    One key here plus nameOf() makes it one chain, and makes a
-//                    future named type a one-line registry change, not a hunt.
+//   (There is deliberately no `nameField` key. Every asset carries one optional
+//    `name` field instead — see nameOf() — so a type does not declare where its
+//    name lives, and a user-created type gets a real name with no registry
+//    change at all.)
 //   parentTypes    — which types this type may sit INSIDE, as an array of type
 //                    names. This is what render sites branch on instead of
 //                    comparing type names, and it replaced `linkage` (the old
@@ -147,12 +137,12 @@ const TYPE_REGISTRY = {
   // A Room is a space, not a device — no brand/model/serial/etc. It sits in the
   // Building it's in, or inside another Room (a closet within a classroom).
   Room: {
-    locked: true, icon: DoorOpen, parentTypes: ["Building", "Room"], nameField: "room",
+    locked: true, icon: DoorOpen, parentTypes: ["Building", "Room"],
     excludedFields: ["brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
   },
   // One level up from a Room, with even less in common with a device asset.
   Building: {
-    locked: true, icon: Building2, parentTypes: ["Campus"], nameField: "building",
+    locked: true, icon: Building2, parentTypes: ["Campus"],
     excludedFields: ["brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
   },
   // A site — a group of Buildings, and the top of the tree. Added once the app
@@ -162,7 +152,7 @@ const TYPE_REGISTRY = {
   // the parent chain paying for itself: nothing else in the app needed telling
   // that the world got a level deeper.
   Campus: {
-    locked: true, icon: MapPin, parentTypes: [], nameField: "campus",
+    locked: true, icon: MapPin, parentTypes: [],
     excludedFields: ["brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
   },
   // Tables, chairs... not individually tagged or tied to one room — a pooled
@@ -171,7 +161,7 @@ const TYPE_REGISTRY = {
   // `itemName` is its sub-type, picked from the managed bulkItemTypes list
   // (e.g. "Folding Chair", "Cafeteria Table").
   "Bulk Item": {
-    locked: true, icon: Package, parentTypes: [], onlyFields: ["totalQuantity", "itemName"], nameField: "itemName",
+    locked: true, icon: Package, parentTypes: [], onlyFields: ["totalQuantity", "itemName"],
     excludedFields: ["hostname", "screenSize", "peripherals", "serial", "person"],
     modules: ["allocations"],
   },
@@ -305,16 +295,23 @@ function availableTabsFor(type) {
     "maintenance", "comments", "changes", "audit",
   ];
 }
-// What this asset is *called* — its type's nameField value (a Room's `room`, a
-// Building's `building`, a Bulk Item's `itemName`), falling back to the label
-// (its Asset ID) when the type has no name of its own, when the name field is
-// still blank, or when the type isn't registered at all — an unregistered
-// (user-added) type degrades to a plain device with no name, exactly like every
-// other registry lookup. The one place to change if a new type gains a name.
+// What this asset is *called*. ONE optional field on every asset, falling back
+// to the label (its Asset ID) when it's blank.
+//
+// This replaced a per-type `nameField` in the registry that pointed at a
+// different column for each named type — a Room's `room`, a Building's
+// `building`, a Campus's `campus`, a Bulk Item's `itemName` — which tangled two
+// separate questions together: the Room column meant "this room's name" on a
+// Room row and "the room this sits in" on every other row, and the Type column
+// printed a name where the type word belonged. Worse, only those four types
+// could be named at all, so a user-created type could never have one without a
+// new column AND a registry change.
+//
+// A name is DISPLAY ONLY and never identity: `label` remains the one stable key
+// (see CLAUDE.md's reference conventions), names need not be unique, and nothing
+// resolves a reference through one. That's what makes renaming free.
 function nameOf(asset) {
-  const key = TYPE_REGISTRY[asset?.type]?.nameField;
-  const name = key ? asset[key] : "";
-  return name || asset?.label || "";
+  return (asset?.name || "").trim() || asset?.label || "";
 }
 
 // Options for the structured per-asset change log
@@ -360,24 +357,23 @@ function fieldAppliesTo(key, type) {
 // happened to be editable; keeping them editable now would mean two ways to say
 // where something is, and one of them going stale.
 //
-// The exception is what makes this type-aware rather than a flat set: `room` and
-// `building` each double as one type's OWN NAME (a Room is called by its `room`,
-// a Building by its `building` — that's exactly what the registry's nameField
-// says). For that type the column is a real, stored, editable field and must
-// keep its form input; treating it as computed everywhere removes the only way
-// to name a Room at all.
+// These used to be type-AWARE (isComputedColumnFor), because `room` and
+// `building` each doubled as one type's own name — for a Room, the `room` column
+// was a real stored editable field, and treating it as computed removed the only
+// way to name a Room at all. The `name` field ended that: a Room is named like
+// everything else, so these three are now computed for every type without
+// exception, and nothing writes them from any form.
 const COMPUTED_COLUMNS = new Set(["room", "building", "campus"]);
-// Is this column one of the place columns at all? Type-independent — used where
-// the question is "does this column come from the chain" (the list cell, sorting,
-// the export) rather than "is it computed FOR THIS asset".
 function isComputedColumn(key) {
   return COMPUTED_COLUMNS.has(key);
 }
-// Is it computed for an asset of THIS type? False when the column is that type's
-// own name field (a Room's `room`), which is a real stored, editable value.
-function isComputedColumnFor(key, type) {
-  if (!COMPUTED_COLUMNS.has(key)) return false;
-  return TYPE_REGISTRY[type]?.nameField !== key;
+// Which place type each of those columns reports. Used only to tell a value read
+// off an ANCESTOR (italic in the list — "this desk is in Room 102") from one that
+// IS the asset ("this Room's own row"). An identity question, so comparing type
+// names here is correct — see CLAUDE.md on that distinction.
+const PLACE_COLUMN_TYPES = { room: "Room", building: "Building", campus: "Campus" };
+function isOwnPlaceColumn(key, type) {
+  return PLACE_COLUMN_TYPES[key] === type;
 }
 
 // Reads an asset stored in the OLD two-field shape (roomId for a device,
@@ -397,7 +393,76 @@ function adoptLegacyParentage(a) {
   return legacy ? { ...a, parentId: legacy } : a;
 }
 
+// Types that are bolted to the building rather than carried around. Used ONLY to
+// pick a sensible default name ("Room 102 Mini Split" reads better than "Mini
+// Split BCA0044"), never to gate behaviour — a wrong guess costs a retype, so
+// this deliberately isn't a registry setting yet. Promote it to one if the
+// suggestion turns out to earn its keep.
+const FIXED_IN_PLACE_TYPES = new Set(["Mini Split", "Condenser", "Electrical Panel"]);
+
+// The nearest place above an asset, by name — a Room for most things, a Building
+// for a Condenser, whatever the chain actually offers. Asked rather than assumed
+// so the suggestion is right at any depth and for any future place type.
+function nearestPlaceNameOf(asset, assets) {
+  const place = ancestorsOf(asset, assets).find(p => isPlaceType(p.type));
+  return place ? nameOf(place) : "";
+}
+
+// A default name for an asset that has none. Fixed equipment is called by where
+// it is, since that's how you'd ask for it ("the Room 102 mini split"); anything
+// portable is called by its type and Asset ID, since where it is today says
+// nothing about it tomorrow.
+//
+// This is a SUGGESTION, not a computed value: it's written into `name` once (at
+// the backfill below, or when a new asset is saved without one) and is ordinary
+// editable text from then on. So it can go stale — move that mini split and the
+// name still says Room 102. That's the deliberate trade: a name that silently
+// rewrote itself would make a real name indistinguishable from a placeholder.
+function suggestedNameFor(asset, assets) {
+  const type = (asset?.type || "").trim();
+  if (!type) return "";
+  if (FIXED_IN_PLACE_TYPES.has(type)) {
+    const place = nearestPlaceNameOf(asset, assets);
+    if (place) return `${place} ${type}`;
+  }
+  return `${type} ${asset.label || ""}`.trim();
+}
+
+// Gives every asset saved before the `name` field existed the name it was
+// already being displayed under, so nothing visibly changes on the first load
+// after this ships. Applied in loadData (after parentage is resolved, since the
+// fixed-equipment suggestion walks the chain); the first asset-domain save
+// writes the result in for every asset at once, exactly like the parentId
+// migration. The old per-type name columns are read HERE AND NOWHERE ELSE —
+// they stay in the sheet, unwritten, so this release is reversible.
+//
+// It takes a whole list rather than one asset because the passes depend on each
+// other: "Room 102 Mini Split" can only be built once the Room itself is called
+// "Room 102". Naming them in one pass produced "BCR0006 Mini Split", since
+// nameOf() was still falling back to the room's label when the mini split asked.
+// Hence stored names first, then places, then everything else.
+function adoptLegacyNames(list) {
+  const stillBlank = a => !(a.name || "").trim();
+  // 1. Whatever the asset was already called under the old per-type columns. A
+  //    Bulk Item takes a copy of its sub-type ("Chairs") — what it was called
+  //    before Sub-Type went back to being purely a category.
+  const stored = list.map(a => {
+    if (!stillBlank(a)) return a;
+    const legacy = a.room || a.building || a.campus || a.itemName || "";
+    return legacy ? { ...a, name: legacy } : a;
+  });
+  // 2. Places next, so a nameless room has a name of its own before anything
+  //    inside it is named after it.
+  const places = stored.map(a => (stillBlank(a) && isPlaceType(a.type)) ? { ...a, name: suggestedNameFor(a, stored) } : a);
+  // 3. Everything else, resolved against a list whose places are all named.
+  return places.map(a => stillBlank(a) ? { ...a, name: suggestedNameFor(a, places) } : a);
+}
+
 const DEFAULT_COLUMNS = [
+  // Every asset's own name, optional and freeform. Sits ahead of Type because
+  // it's what you scan for; Type answers "what kind of thing is this", which is
+  // a narrower question and no longer doubles as the name (see nameOf).
+  { key: "name", label: "Name", width: 200 },
   { key: "type", label: "Type", width: 140 },
   { key: "itemName", label: "Sub-Type", width: 150 },
   { key: "screenSize", label: "Screen Size", width: 110 },
@@ -426,7 +491,7 @@ const DEFAULT_COLUMNS = [
   { key: "notes", label: "Notes", width: 240 },
   { key: "label", label: "Asset ID", width: 110 },
   { key: "status", label: "Status", width: 100 },
-].map(c => ({ ...c, visible: ["type", "itemName", "parent", "person", "status"].includes(c.key), custom: false }));
+].map(c => ({ ...c, visible: ["name", "type", "itemName", "parent", "person", "status"].includes(c.key), custom: false }));
 
 const STATUS_OPTIONS = ["Active", "Archived"];
 const STATUS_FILTER_OPTIONS = ["All statuses", "Active", "Archived"];
@@ -546,15 +611,19 @@ function describeAudit(entry) {
 // nothing else to keep in sync. These resolve an id back to the current
 // display name at render time; a dangling id (its Room/Building was deleted)
 // resolves to "" rather than throwing.
+// Both go through nameOf() rather than reading a per-type column: since v23 an
+// asset's name lives in one `name` field, and the old `room`/`building` columns
+// are leftovers that stop being written. Reading them here would have shown the
+// pre-rename value everywhere a room is resolved from an id.
 function roomNameFor(roomId, assets) {
   if (!roomId) return "";
   const room = assets.find(a => a.type === "Room" && a.label === roomId);
-  return room ? room.room || "" : "";
+  return room ? nameOf(room) : "";
 }
 function buildingNameFor(buildingId, assets) {
   if (!buildingId) return "";
   const building = assets.find(a => a.type === "Building" && a.label === buildingId);
-  return building ? building.building || "" : "";
+  return building ? nameOf(building) : "";
 }
 
 // ---------- PARENT CHAIN ----------
@@ -749,7 +818,7 @@ function validateParentChoice(childLabel, childType, parentId, assets) {
 // one flat list. Any column not named here (custom user-added columns) falls
 // into a trailing "Custom Fields" group rather than being dropped.
 const DETAIL_FIELD_GROUPS = [
-  { title: "Overview", keys: ["type", "itemName", "screenSize", "totalQuantity", "label", "status"] },
+  { title: "Overview", keys: ["name", "type", "itemName", "screenSize", "totalQuantity", "label", "status"] },
   // Path leads: it's the one thing here that's actually stored and editable. The
   // computed Room/Building are filtered out before this runs; `room`/`building`
   // only reach here as a Room's / Building's OWN name.
@@ -889,7 +958,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v22";
+const FRONTEND_SCRIPT_VERSION = "v23";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -1956,9 +2025,14 @@ function AssetTracker() {
       }
       setAuthPending(false);
 
-      const loadedAssets = data.assets
+      const parented = data.assets
         .map(a => ({ comments: [], changes: [], allocations: [], status: "Active", building: "", itemName: "", purchaseDate: "", warrantyUntil: "", ...a }))
         .map(adoptLegacyParentage);
+      // Names are filled in over the already-parented list, because the
+      // suggestion for fixed equipment reads the chain above the asset ("Room 102
+      // Mini Split") — running it inside the first map would walk a list whose
+      // parentIds were still half-adopted.
+      const loadedAssets = adoptLegacyNames(parented);
       setAssets(loadedAssets);
       // No scriptVersion at all means an old backend that predates this check entirely —
       // still a real mismatch, not a "nothing to compare" case. In sandbox mode the
@@ -2632,10 +2706,15 @@ function AssetTracker() {
         at: new Date().toISOString(), by: currentUser || "", assetLabel: label,
         assetType: draft.type, action: "created",
       };
+      // Left blank, the Name takes the same suggestion the field shows as its
+      // placeholder — so a new asset is named at creation rather than relying on
+      // nameOf()'s Asset ID fallback forever. Typed over, whatever was typed wins.
+      const named = { ...stripDraftUiState(draft), label };
+      if (!(named.name || "").trim()) named.name = suggestedNameFor(named, assets);
       // `label` last, so the asset stores the trimmed value that was validated
       // above rather than the raw draft string.
       await persist(
-        [...assets, { comments: [], changes: [], allocations: [], ...stripDraftUiState(draft), label }],
+        [...assets, { comments: [], changes: [], allocations: [], ...named }],
         { auditLog: logAudit([createdEntry]), nextAssetNumber: advanceAssetNumber(label) }
       );
       cancelAdd();
@@ -2761,6 +2840,13 @@ function AssetTracker() {
       changes: [],
       allocations: [],
     };
+    // A name someone actually typed is worth copying; a default one isn't, since
+    // it names the source ("Computer BCA0001") and would be wrong on the copy the
+    // moment it exists. Comparing against the suggestion is what tells them apart
+    // — there's no flag saying which a name is, and there shouldn't be.
+    if ((copy.name || "").trim() === suggestedNameFor(source, assets)) {
+      copy.name = suggestedNameFor(copy, assets);
+    }
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: nextLabel,
       assetType: copy.type, action: "created",
@@ -3642,7 +3728,7 @@ function AssetTracker() {
         // The export keeps Room and Building as their own resolved columns even
         // though the list hides them by default — a spreadsheet is where you'd
         // pivot or group by building, and a single Path string can't be grouped.
-        if (isComputedColumnFor(c.key, a.type)) {
+        if (isComputedColumn(c.key)) {
           row[c.label] = computedPlaceValue(c.key, a, assets);
           return;
         }
@@ -4420,7 +4506,7 @@ function AssetTracker() {
   // here (rather than at each of the two form render sites) is what stops the
   // app offering two different ways to say where something is.
   function formColumnsFor(type) {
-    return columns.filter(c => fieldAppliesTo(c.key, type) && c.key !== "status" && !isComputedColumnFor(c.key, type));
+    return columns.filter(c => fieldAppliesTo(c.key, type) && c.key !== "status" && !isComputedColumn(c.key));
   }
 
   // ---------- DETAIL VIEW ----------
@@ -4450,14 +4536,13 @@ function AssetTracker() {
     // type that actually has one in its chain rather than being gated by
     // fieldAppliesTo — a Condenser has a Building but no Room, and an Unassigned
     // laptop has neither, and both fall out of the value being empty.
-    // The computed Room/Building columns are left OUT of the detail view
+    // The computed Room/Building/Campus columns are left OUT of the detail view
     // entirely — the Path field says where this asset is, in full, and repeating
-    // the same answer twice more in shortened form is noise. The `room` column
-    // on a Room (and `building` on a Building) is NOT computed — it's that
-    // asset's own name — and isComputedColumnFor is exactly that distinction, so
-    // it still shows and is still editable.
+    // the same answer twice more in shortened form is noise. There's no longer an
+    // exception for the type those columns used to name (a Room's `room`): a Room
+    // is named by the Name field like everything else.
     const visibleDetailColumns = columns.filter(c => (
-      !isComputedColumnFor(c.key, selectedAsset.type) && fieldAppliesTo(c.key, selectedAsset.type)
+      !isComputedColumn(c.key) && fieldAppliesTo(c.key, selectedAsset.type)
     ));
     const parentProblem = parentageProblem(selectedAsset, assets);
     const detailGroups = groupDetailColumns(visibleDetailColumns);
@@ -6142,7 +6227,10 @@ function AssetTracker() {
                     // the message never outlives the value it was complaining about.
                     onChange={v => { if (c.key === "label" && addError) setAddError(""); setDraft({ ...draft, [c.key]: v }); }}
                     wide={c.key === "notes"}
-                    placeholder={c.key === "screenSize" ? 'e.g. 24"' : undefined}
+                    // The Name placeholder previews exactly what saving blank
+                    // will store, so the default is visible before it's chosen
+                    // rather than appearing out of nowhere afterwards.
+                    placeholder={c.key === "screenSize" ? 'e.g. 24"' : c.key === "name" ? suggestedNameFor(draft, assets) : undefined}
                     type={c.key === "totalQuantity" ? "number" : undefined}
                   />
                 )
@@ -6258,18 +6346,8 @@ function AssetTracker() {
                   const isParentCol = c.key === "parent";
                   const computedValue = isPlaceCol ? computedPlaceValue(c.key, a, assets) : "";
                   // Italic marks a value read off an ANCESTOR rather than set on
-                  // this asset. isComputedColumnFor is false exactly when the
-                  // column IS this type's own name field (a Room's `room`), so it
-                  // already draws that line — no per-column type test needed.
-                  const isInherited = isPlaceCol && isComputedColumnFor(c.key, a.type);
-                  // The asset's name ONLY when it genuinely has one. nameOf()
-                  // falls back to the label, which is right nearly everywhere but
-                  // wrong in the Type column below — an Asset ID is neither a name
-                  // nor a Type. Empty covers both "this type has no nameField" and
-                  // "it has one but it's still blank" (a Room created without a
-                  // name, a Bulk Item before its sub-type is picked — the
-                  // bulkItemTypes list starts out empty, so that one is routine).
-                  const realName = nameOf(a) !== a.label ? nameOf(a) : "";
+                  // this asset — so not on a Room's own Room column.
+                  const isInherited = isPlaceCol && !isOwnPlaceColumn(c.key, a.type);
                   return (
                     <div
                       key={c.key}
@@ -6290,23 +6368,7 @@ function AssetTracker() {
                       title={isInherited && computedValue ? `Inherited from ${parentNameFor(a.parentId, assets)}` : undefined}
                     >
                       {Icon && <Icon size={15} style={{ flexShrink: 0, color: C.brand }} />}
-                      {isTypeCol && a.type === "Bulk Item" ? (
-                        <>
-                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{realName || a.type}</span>
-                          <span style={{ flexShrink: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, fontWeight: 700, letterSpacing: 0.5, color: C.accent, border: `1px solid ${C.accent}`, borderRadius: 3, padding: "1px 4px" }}>
-                            BULK
-                          </span>
-                        </>
-                      ) : isTypeCol && realName ? (
-                        // A named type (Room, Building) shows what it's called
-                        // rather than the literal word "Room"/"Building". Gated on
-                        // realName, not merely on the type HAVING a nameField, so a
-                        // type whose name hasn't been filled in yet falls through to
-                        // the plain type string below exactly like a nameless type
-                        // does — testing the registry alone would print the label
-                        // nameOf() fell back to, and "BCR0002" is not a Type.
-                        realName
-                      ) : isPlaceCol ? (
+                      {isPlaceCol ? (
                         computedValue || "—"
                       ) : isParentCol ? (
                         // "Unassigned" only where a parent is a thing this type

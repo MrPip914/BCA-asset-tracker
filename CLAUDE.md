@@ -333,24 +333,23 @@ new type meant editing all of them with nothing to catch a miss. Each entry may 
 - `onlyFields` — column keys belonging to this type. Any key named in *any* entry's
   `onlyFields` becomes restricted app-wide (`RESTRICTED_FIELDS`, derived from the registry,
   not declared separately): no type that doesn't name it gets it.
-- `nameField` — which field holds this type's human-readable **name**, when it isn't the
-  label: Room → `room`, Building → `building`, Bulk Item → `itemName` (its sub-type,
-  "Folding Chair"). Read it via **`nameOf(asset)`**, never inline — it returns that field's
-  value if non-empty and otherwise falls back to the asset's `label` (its Asset ID), which
-  is also what an ordinary device and any unregistered user-added type get, since neither
-  has a name of its own. This exists because that per-type ladder was previously hand-written inline at
-  **four** sites and had already drifted: the Maintenance overview's row name fell back to
-  the literal strings `"Bulk Item"`/`"Building"`/`"Room"`, `exportToExcel`'s
-  `displayRoom`/`displayBuilding` fell back to `""`, the list view's Type column fell back to
-  the literal type word, and the detail-view header had no ladder at all — so opening a Room
-  showed the word "Room" rather than which room it was. A fifth, partial instance (the Contents
-  tab's bulk-allocation rows, `bulk.itemName || "Bulk Item"`) was folded in at the same time:
-  it only ever handled the one type it could encounter, but it was the same question asked
-  outside the registry, which is exactly how the other copies drifted. All five now go through
-  `nameOf()`, converged on the label fallback, and a future named type is one registry key
-  instead of a hunt through render sites. **No code outside the registry should know which
-  field names a given type** — if you find yourself writing `.itemName ||` or `.room ||`, that's
-  the ladder growing back.
+- *(no `nameField` — removed in v23.)* Every asset carries one optional **`name`** field
+  instead, read via **`nameOf(asset)`**, which returns it if non-empty and otherwise falls
+  back to the asset's `label` (its Asset ID). A type no longer declares where its name
+  lives, which is what lets a user-created type have a real name with no registry change.
+  Until v23 this was a per-type key pointing at a different column each time (Room →
+  `room`, Building → `building`, Campus → `campus`, Bulk Item → `itemName`), and that
+  tangled two questions into the same columns: the Room column meant "this room's name" on
+  a Room row and "the room this sits in" on every other row, while the Type column printed
+  a name where the type word belonged. Only those four types could be named at all.
+  **A name is display only and never identity** — `label` remains the one stable key, names
+  need not be unique, and nothing resolves a reference through one, which is what makes
+  renaming free. **Nothing outside `nameOf()`/`adoptLegacyNames()` should read a per-type
+  name column** — writing `.itemName ||` or `.room ||` anywhere else is the old ladder
+  growing back. (`roomNameFor`/`buildingNameFor` were doing exactly that and were switched
+  to `nameOf()` in the same change; `panel.html`, `panel-qr-sheet.html` and the backend's
+  `displayName_()` read `name` with the legacy column as a fallback, since the public QR
+  page has to be right both before and after the sheet is rewritten.)
 - `parentTypes` — which types an asset of this type may sit **inside**, as an array of type
   names; `[]` means it takes no parent. This replaced the old `linkage` enum
   (`"room"`/`"building"`/`"allocations"`/`"none"`) when the fixed `roomId`/`buildingId` pair
@@ -384,25 +383,17 @@ matched a direct `roomId`) and was caught in browser testing, not by reading the
 (chairs, tables — not individually tagged) get a `totalQuantity` and an `itemName` instead, and
 are distributed across rooms via their own `allocations` array rather than a single `room` field.
 `itemName` ("Sub-Type" in the UI) is picked from its own managed list (`bulkItemTypes`) rather
-than freeform text, so it stays consistent — and the list view's Type column shows a Bulk Item's
-sub-type plus a small "BULK" badge instead of the literal "Bulk Item" for every row.
+than freeform text, so it stays consistent.
 
-That Type column generalizes via `nameField`: any type that has one shows the asset's name there
-(a Room row reads "Room 102", a Building row "Building 100"), while a type without one keeps
-showing the plain type string. It does **not** call `nameOf()` directly — the cell renderer
-derives a local `realName` (`nameOf(a) !== a.label ? nameOf(a) : ""`) and branches on that,
-because this is the one column where `nameOf()`'s label fallback is the wrong answer: an Asset
-ID is neither a name nor a Type. Testing only whether the *type* declares a `nameField` isn't
-enough either — that's true of a Room created without a name typed in, and of a Bulk Item before
-its sub-type is picked (`bulkItemTypes` starts out empty, so that case is routine, not exotic),
-and both would then print "BCR0002" where the type word belongs. `realName` collapses "type has
-no name field" and "has one, still blank" into the same falsy value, so both fall through to the
-plain type string. The Bulk Item case stays its own branch purely because of the BULK badge, and
-uses the same `realName || a.type`. The detail-view header does the same thing in its own shape: it prints `label` and
-then `titleText`, which is `"<name> (<type>)"` for a named asset ("Room 102 (Room)", "Chairs
-(Bulk Item)" — the pre-existing Bulk Item parenthetical, generalized) and otherwise the older
-`type · screenSize` / bare `type`. It's keyed on `nameOf(asset) !== asset.label` so a nameless
-asset can't render "BCA0082 BCA0082".
+**The Type column shows the type word and nothing else** — "Room", "Bulk Item", "Computer" —
+since v23. It used to print a Room's name there (via a local `realName`), and a Bulk Item's
+sub-type plus a small "BULK" badge; both are gone, along with the badge, which only existed
+because the column was showing "Chairs" and there was otherwise no way to tell what kind of
+row it was. Name now has its own column, visible by default and sitting ahead of Type. The
+Sub-Type column shows only the category. The detail-view header is unchanged in shape: it
+prints `label` and then `titleText`, which is `"<name> (<type>)"` for a named asset and
+otherwise the older `type · screenSize` / bare `type`, keyed on `nameOf(asset) !==
+asset.label` so a nameless asset can't render "BCA0082 BCA0082".
 
 **No native `<select>` appears anywhere in the app** — every single-select field uses the same
 custom modal picker (`SelectionModal`) instead: a centered card with a scrollable option list
@@ -427,9 +418,9 @@ not a second redundant header. `UserField`/`PeripheralsField` are deliberately N
 classroom it's inside. This replaced the fixed `roomId`/`buildingId` pair, which could only
 ever express two levels (Building contains Room contains equipment) because the hierarchy was
 baked into the field *names*. Now the hierarchy is ordinary data and can be any depth.
-`Room.room`/`Building.building` are untouched by this — they remain the *own* display name of
-that asset (the registry's `nameField`), the one genuinely plain string here, since a Room
-doesn't reference itself.
+An asset's own display name is untouched by this — it's a plain string on the asset (`name`
+since v23; `Room.room`/`Building.building` before that), the one genuinely plain string here,
+since a Room doesn't reference itself.
 
 Depth is unlimited by design (Eric's call, 2026-08-19): `Room`'s `parentTypes` names `Room`
 itself, which is what lets a closet nest inside a classroom. Nothing caps it, because a cap
@@ -639,14 +630,15 @@ that it would be effectively unreachable, since the Room column filter is hidden
 that Path replaced it. `moveFilteredTo` then updates whichever one the user was actually
 using, so they follow the assets they just moved instead of staring at the emptied room.
 
-**Room, Building and Campus are computed *columns*, and the distinction that keeps that honest is
-`isComputedColumnFor(key, type)`.** They're still sortable/filterable columns, but nothing
-writes them, so `formColumnsFor` drops them from the add/edit forms — the Parent field is what
-you edit instead, and keeping both editable would mean two ways to say where something is with
-one of them going stale. The exception is why the check takes a *type*: `room` and `building`
-each double as one type's own `nameField`, and for that type the column is a real stored
-editable field. Treating them as flatly computed removed the only way to name a Room at all —
-caught in browser testing, not by reading.
+**Room, Building and Campus are computed *columns*** (`isComputedColumn(key)`). They're still
+sortable/filterable, but nothing writes them, so `formColumnsFor` drops them from the add/edit
+forms — the Parent field is what you edit instead, and keeping both editable would mean two ways
+to say where something is with one of them going stale. Until v23 this check was type-AWARE
+(`isComputedColumnFor(key, type)`), because `room` and `building` each doubled as one type's own
+name and treating them as flatly computed removed the only way to name a Room at all. The `name`
+field ended that exception: a Room is named like everything else, so these three are computed for
+every type without exception. What survives of the old distinction is `isOwnPlaceColumn(key,
+type)`, used only to italicise a value read off an ANCESTOR rather than off the asset itself.
 
 **The list shows one `Path` column instead of separate Building and Room** (Eric's call,
 2026-08-19, having been shown the trade-off). Its column *key* is still `parent` — that's the
@@ -1017,6 +1009,16 @@ When you do:
 
 ## Known constraints / things to watch
 
+- **The repo is at v23 (the `name` field) and v23 is UNDEPLOYED as of 2026-08-24.** Until it's
+  pasted in and a **New version** deploy is created, the Assets tab has no `name` column, so a
+  name the app sends is dropped on write and every asset falls back to `adoptLegacyNames()` on
+  each load — i.e. names *display* correctly but don't persist, and a rename won't survive a
+  refresh. Same shape as the pre-v17 `parentId` window. No migration script: the first
+  asset-domain save after the deploy writes `name` for every asset at once. The legacy
+  `room`/`building`/`campus` columns stay readable and written, so the deploy is reversible.
+  Whether the versions between this and the last confirmed deploy are live was NOT checked in
+  the session that wrote this — the app's "Backend outdated" banner names both versions, which
+  is the only trustworthy answer. See the standing warning further down about exactly this.
 - **The repo is at v18 (Google Sign-In) and v18 is UNDEPLOYED as of 2026-08-21.** The live
   backend is still v17, which means the live app currently still serves the whole inventory
   to anyone with the URL — authentication is not in force until v18 is pasted in and a **New
