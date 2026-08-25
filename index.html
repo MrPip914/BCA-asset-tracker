@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
@@ -349,32 +349,19 @@ function fieldAppliesTo(key, type) {
   return !!entry?.onlyFields?.includes(key);
 }
 
-// Columns that are DERIVED from the parent chain rather than stored on the
-// asset. They're still real columns — you can show, sort and filter by Room and
-// Building exactly as before — but nothing writes them, so they never appear in
-// the add/edit forms, and the one thing you edit instead is Parent. Before the
-// parent chain existed these were two stored fields (roomId/buildingId) that
-// happened to be editable; keeping them editable now would mean two ways to say
-// where something is, and one of them going stale.
+// There is no such thing as a computed COLUMN any more. `isComputedColumn` and
+// `isOwnPlaceColumn` are gone with the Campus/Building/Room columns they
+// described: the list shows Path instead, so nothing needs to ask whether a
+// column is derived, nor to italicise a value read off an ancestor rather than
+// off the asset itself. Their type-aware ancestor, `isComputedColumnFor`, had
+// already been retired when `name` stopped those columns doubling as one type's
+// own name.
 //
-// These used to be type-AWARE (isComputedColumnFor), because `room` and
-// `building` each doubled as one type's own name — for a Room, the `room` column
-// was a real stored editable field, and treating it as computed removed the only
-// way to name a Room at all. The `name` field ended that: a Room is named like
-// everything else, so these three are now computed for every type without
-// exception, and nothing writes them from any form.
-const COMPUTED_COLUMNS = new Set(["room", "building", "campus"]);
-function isComputedColumn(key) {
-  return COMPUTED_COLUMNS.has(key);
-}
-// Which place type each of those columns reports. Used only to tell a value read
-// off an ANCESTOR (italic in the list — "this desk is in Room 102") from one that
-// IS the asset ("this Room's own row"). An identity question, so comparing type
-// names here is correct — see CLAUDE.md on that distinction.
-const PLACE_COLUMN_TYPES = { room: "Room", building: "Building", campus: "Campus" };
-function isOwnPlaceColumn(key, type) {
-  return PLACE_COLUMN_TYPES[key] === type;
-}
+// `computedPlaceValue`, which mapped one of those column keys to its value, went
+// with them: its four callers were the list cell, the detail view, sorting and
+// the export, and only the export still wants place names. That one asks
+// campusNameOf/buildingNameOf/roomNameOf directly, since it knows which three it
+// wants and no longer has a column key to dispatch on.
 
 // Reads an asset stored in the OLD two-field shape (roomId for a device,
 // buildingId for a Room or Condenser) as if it already had a parentId, so the
@@ -495,15 +482,14 @@ const DEFAULT_COLUMNS = [
   // "parent" because that's the field it edits — the form renders a picker for
   // the immediate parent here, while the list and detail read it out in full.
   { key: "parent", label: "Path", width: 240 },
-  // Building and Room are still real columns and still filterable/sortable —
-  // they're just hidden by default now that Path covers the same ground more
-  // completely. Kept (rather than deleted) for two reasons: their column filters
-  // are what the bulk "Move filtered to room" toolbar hangs off, and each is the
-  // NAME field of its own type, so the column has to exist for a Room to be
-  // nameable at all. Re-enable either from the Columns menu.
-  { key: "campus", label: "Campus", width: 150 },
-  { key: "building", label: "Building", width: 130 },
-  { key: "room", label: "Room", width: 130 },
+  // Campus, Building and Room are NOT columns. Path says the same thing more
+  // completely (it never drops the middle of a chain), and the two reasons they
+  // were kept when Path replaced them have both expired: each used to be the NAME
+  // field of its own type, which `name` took over in v23, and the Room filter used
+  // to be what the bulk "Move filtered to room" toolbar hung off, which now reads
+  // the HierarchyNav scope instead. They live on in the EXPORT, which builds them
+  // itself (see exportToExcel) rather than walking this list — a spreadsheet is
+  // where you group by building, and one Path string can't be grouped.
   { key: "person", label: "User", width: 170 },
   { key: "brand", label: "Brand", width: 120 },
   { key: "model", label: "Model", width: 180 },
@@ -516,6 +502,14 @@ const DEFAULT_COLUMNS = [
   { key: "label", label: "Asset ID", width: 110 },
   { key: "status", label: "Status", width: 100 },
 ].map(c => ({ ...c, visible: ["name", "type", "itemName", "parent", "person", "status"].includes(c.key), custom: false }));
+
+// Default columns that USED to exist and must be dropped from a stored column
+// config on load. The migration below only ever ADDS newly-introduced defaults,
+// so without this an existing sheet would keep Campus/Building/Room forever —
+// they'd stay in the Columns menu, and re-enabling one would render a column no
+// form can edit. Custom columns are never touched: a custom key is a real field
+// on every asset, so dropping one would hide stored data.
+const RETIRED_COLUMN_KEYS = new Set(["campus", "building", "room"]);
 
 const STATUS_OPTIONS = ["Active", "Archived"];
 const STATUS_FILTER_OPTIONS = ["All statuses", "Active", "Archived"];
@@ -752,17 +746,6 @@ function campusNameOf(asset, assets) {
   return c ? nameOf(c) : "";
 }
 
-// One place that turns a computed place column into its value, so the list cell,
-// the detail view, sorting and the export all read the chain the same way. Each
-// new level of the hierarchy (Campus was the first) adds one line here instead
-// of a branch at four separate render sites.
-function computedPlaceValue(key, asset, assets) {
-  if (key === "room") return roomNameOf(asset, assets);
-  if (key === "building") return buildingNameOf(asset, assets);
-  if (key === "campus") return campusNameOf(asset, assets);
-  return "";
-}
-
 // Where an asset sits, written out in full: the whole chain above it, outermost
 // first — "Building 100 › Room 101 › Storage Room". This is the list's one
 // location column, chosen over separate Building and Room columns so a deeply
@@ -843,10 +826,12 @@ function validateParentChoice(childLabel, childType, parentId, assets) {
 // into a trailing "Custom Fields" group rather than being dropped.
 const DETAIL_FIELD_GROUPS = [
   { title: "Overview", keys: ["name", "type", "itemName", "screenSize", "totalQuantity", "label", "status"] },
-  // Path leads: it's the one thing here that's actually stored and editable. The
-  // computed Room/Building are filtered out before this runs; `room`/`building`
-  // only reach here as a Room's / Building's OWN name.
-  { title: "Location & Assignment", keys: ["parent", "campus", "building", "room", "person"] },
+  // Path is the whole of "where is it" now — the Campus/Building/Room columns
+  // that used to sit beside it here are gone, along with the filter that kept
+  // them out of the editable form. A key naming a column that no longer exists
+  // would simply never match, but leaving them listed would suggest this view
+  // still has something to say about them.
+  { title: "Location & Assignment", keys: ["parent", "person"] },
   { title: "Device Details", keys: ["brand", "model", "serial", "hostname", "peripherals"] },
   { title: "Purchase & Warranty", keys: ["purchaseDate", "warrantyUntil"] },
   { title: "Notes", keys: ["notes"] },
@@ -1142,6 +1127,24 @@ const SANDBOX_DATA_KEY = "asset-tracker-sandbox-data";
 // from a different baseline; it's plain data, safe to edit directly.
 const MOCK_SNAPSHOT = {
   scriptVersion: FRONTEND_SCRIPT_VERSION,
+  // A column config as an OLDER client would have saved it — carrying the
+  // Campus/Building/Room columns that are now retired. Present so the sandbox
+  // exercises the removal path in loadData (RETIRED_COLUMN_KEYS) instead of
+  // starting from DEFAULT_COLUMNS, which has nothing to remove. The live sheet
+  // has a stored config exactly like this, so a fixture without one hides the
+  // only case that matters — the same blind spot that let the first version of
+  // the name backfill ship broken.
+  columns: [
+    { key: "name", label: "Name", width: 200, visible: true, custom: false },
+    { key: "type", label: "Type", width: 140, visible: true, custom: false },
+    { key: "itemName", label: "Sub-Type", width: 150, visible: true, custom: false },
+    { key: "parent", label: "Path", width: 240, visible: true, custom: false },
+    { key: "campus", label: "Campus", width: 150, visible: false, custom: false },
+    { key: "building", label: "Building", width: 130, visible: false, custom: false },
+    { key: "room", label: "Room", width: 130, visible: true, custom: false },
+    { key: "person", label: "User", width: 170, visible: true, custom: false },
+    { key: "status", label: "Status", width: 100, visible: true, custom: false },
+  ],
   assets: [
     // Two campuses, the top of the tree. BCC labels follow the fixture's existing
     // readable-prefix habit (BCB buildings, BCR rooms) — note that's a property of
@@ -1784,8 +1787,6 @@ function AssetTracker() {
   // those are *filters* (match one exact value). Both can be on at once and
   // simply intersect.
   const [scopeId, setScopeId] = useState("");
-  const [roomFilter, setRoomFilter] = useState(""); // "" = All rooms; otherwise a Room asset's label (id)
-  const [buildingFilter, setBuildingFilter] = useState(""); // "" = All buildings; otherwise a Building asset's label (id)
   const [typeFilter, setTypeFilter] = useState("All types");
   const [userFilter, setUserFilter] = useState("All users");
   const [statusFilter, setStatusFilter] = useState("Active");
@@ -2075,6 +2076,10 @@ function AssetTracker() {
       // column next to the ones it belongs with; a column with no such anchor (one
       // that leads the default order, like `name`) goes to the front.
       let storedCols = data.columns && data.columns.length ? data.columns : DEFAULT_COLUMNS;
+      // Drop columns retired in a newer app version before adding new ones, so a
+      // sheet last saved by an older client doesn't keep offering a column that
+      // nothing renders or edits any more (see RETIRED_COLUMN_KEYS).
+      storedCols = storedCols.filter(c => c.custom || !RETIRED_COLUMN_KEYS.has(c.key));
       DEFAULT_COLUMNS.forEach((dc, defaultIdx) => {
         if (storedCols.some(c => c.key === dc.key)) return;
         let insertAt = 0;
@@ -2418,23 +2423,6 @@ function AssetTracker() {
     return [...auditLog, ...entries];
   }
 
-  // Rooms as recognized by an actual Room asset — used to power the linked
-  // Room dropdown on every other asset type, the Room filter, and sorting.
-  // Every reference elsewhere in the app stores the Room asset's stable
-  // `label`, not this display name, so renaming a Room needs no cascade.
-  const roomAssets = useMemo(() => (assets || []).filter(a => a.type === "Room"), [assets]);
-  // Buildings as recognized by an actual Building asset — powers the linked
-  // Building dropdown on Room assets, same id-based reasoning as rooms above.
-  const buildingAssets = useMemo(() => (assets || []).filter(a => a.type === "Building"), [assets]);
-
-  const rooms = useMemo(() => (
-    ["", ...roomAssets.map(r => r.label).sort((x, y) => roomNameFor(x, assets).localeCompare(roomNameFor(y, assets)))]
-  ), [roomAssets, assets]);
-
-  const buildings = useMemo(() => (
-    ["", ...buildingAssets.map(b => b.label).sort((x, y) => buildingNameFor(x, assets).localeCompare(buildingNameFor(y, assets)))]
-  ), [buildingAssets, assets]);
-
   const types = useMemo(() => {
     if (!assets) return [];
     const set = new Set(assets.map(a => a.type || "Other"));
@@ -2453,13 +2441,6 @@ function AssetTracker() {
       // *inside* it, and listing it as one of its own contents reads as an error
       // (it's also what made the bulk move-to-room drag the room along).
       if (scopeId && !ancestorsOf(a, assets).some(p => p.label === scopeId)) return false;
-      // The Room filter matches anything with that Room ANYWHERE above it, not
-      // just a direct child — otherwise a device in a closet inside Room 102
-      // would vanish from a filter on Room 102, which is the opposite of what
-      // nesting is for. A direct-parent test was correct only while the chain
-      // was fixed at one level deep.
-      if (roomFilter && !(a.label === roomFilter || ancestorsOf(a, assets).some(p => p.label === roomFilter))) return false;
-      if (buildingFilter && effectiveBuildingId(a, assets) !== buildingFilter) return false;
       if (typeFilter !== "All types" && (a.type || "Other") !== typeFilter) return false;
       if (userFilter !== "All users" && !(a.person || "").split("/").map(s => s.trim()).includes(userFilter)) return false;
       if (statusFilter !== "All statuses" && (a.status || "Active") !== statusFilter) return false;
@@ -2474,7 +2455,6 @@ function AssetTracker() {
       const { key, dir } = sortConfig;
       const mult = dir === "desc" ? -1 : 1;
       const sortValue = x => {
-        if (isComputedColumn(key)) return computedPlaceValue(key, x, assets);
         // Sorting the Path column on the full outermost-first string groups a
         // building's contents together and orders rooms within it, which is what
         // sorting by location is for. Sorting on the immediate parent's name
@@ -2490,7 +2470,7 @@ function AssetTracker() {
       });
     }
     return list;
-  }, [assets, query, scopeId, roomFilter, buildingFilter, typeFilter, userFilter, statusFilter, sortConfig]);
+  }, [assets, query, scopeId, typeFilter, userFilter, statusFilter, sortConfig]);
 
   // Which of the filtered assets the bulk "Move filtered to room" action can
   // actually touch: only types that are allowed to sit inside a Room. Asking the
@@ -2507,15 +2487,16 @@ function AssetTracker() {
   // destination as well — restructuring the building rather than relocating
   // equipment. Caught in browser testing after the room filter became
   // chain-aware; it was harmless when the filter only ever matched a roomId.
-  // Which room the bulk move takes things OUT of. The scope chooser is the
-  // primary way to narrow to a room now (the Room column filter is hidden by
-  // default since Path replaced it), so keying this off roomFilter alone would
-  // have left the bulk move effectively unreachable. The scope wins when it IS a
-  // room; the column filter still works for anyone using it.
+  // Which room the bulk move takes things OUT of: the HierarchyNav scope, when
+  // you've navigated into a Room. This used to fall back to the Room column
+  // filter, which is gone — the scope was already the primary way to narrow to a
+  // room, and it's the better source anyway, since it matches nested rooms the
+  // way the filter did. No scope, or a scope that isn't a Room, means there's no
+  // single room to move things out of, so the toolbar doesn't offer the action.
   const bulkMoveSourceId = useMemo(() => {
     const scoped = scopeId ? (assets || []).find(a => a.label === scopeId) : null;
-    return scoped && scoped.type === "Room" ? scopeId : roomFilter;
-  }, [scopeId, roomFilter, assets]);
+    return scoped && scoped.type === "Room" ? scopeId : "";
+  }, [scopeId, assets]);
 
   const roomMovable = useMemo(
     () => filtered.filter(a => a.label !== bulkMoveSourceId && canBeParentOf("Room", a.type)),
@@ -2604,8 +2585,6 @@ function AssetTracker() {
 
   const filterConfigs = {
     type: { label: "Type", value: typeFilter, setValue: setTypeFilter, options: types },
-    room: { label: "Room", value: roomFilter, setValue: setRoomFilter, options: rooms, labelForOption: id => (id ? roomNameFor(id, assets) : "All rooms") },
-    building: { label: "Building", value: buildingFilter, setValue: setBuildingFilter, options: buildings, labelForOption: id => (id ? buildingNameFor(id, assets) : "All buildings") },
     person: { label: "User", value: userFilter, setValue: setUserFilter, options: users },
     status: { label: "Status", value: statusFilter, setValue: setStatusFilter, options: STATUS_FILTER_OPTIONS },
   };
@@ -2927,12 +2906,12 @@ function AssetTracker() {
       return { ...a, parentId: newRoomId };
     });
     await persist(next, { auditLog: entries.length ? logAudit(entries) : auditLog });
-    // Follow the things that just moved, using whichever mechanism the user was
-    // actually narrowing with — re-pointing the scope when they navigated there,
-    // the column filter when they filtered. Setting the wrong one would leave
-    // them looking at the now-empty room they moved out of.
-    if (scopeId && bulkMoveSourceId === scopeId) setScopeId(newRoomId);
-    else setRoomFilter(newRoomId);
+    // Follow the things that just moved by re-pointing the scope at the
+    // destination — otherwise the user is left looking at the now-empty room they
+    // moved out of. The scope is the only thing this can be: it's the only way to
+    // narrow to one room now that the Room column filter is gone, and
+    // bulkMoveSourceId reads it directly.
+    setScopeId(newRoomId);
     setMoveTarget("");
   }
 
@@ -3755,20 +3734,38 @@ function AssetTracker() {
     // raw label ids into the sheet. roomNameOf/buildingNameOf already handle the
     // "is this asset itself a Room/Building?" case by answering with its own
     // name, so the identity test that used to live here moved into them.
+    // Campus/Building/Room are export-only columns now: the list dropped them in
+    // favour of Path, but a spreadsheet is exactly where you'd group or pivot by
+    // building, and one Path string can't be grouped. They are written HERE
+    // rather than read out of `columns`, because that coupling is what would
+    // silently delete them from every export the moment the list stopped
+    // carrying them.
+    const writePlaceColumns = (row, a) => {
+      row.Campus = campusNameOf(a, assets);
+      row.Building = buildingNameOf(a, assets);
+      row.Room = roomNameOf(a, assets);
+    };
     const assetRows = assets.map(a => {
       const row = {};
       columns.forEach(c => {
-        // The export keeps Room and Building as their own resolved columns even
-        // though the list hides them by default — a spreadsheet is where you'd
-        // pivot or group by building, and a single Path string can't be grouped.
-        if (isComputedColumn(c.key)) {
-          row[c.label] = computedPlaceValue(c.key, a, assets);
+        // Handled before the fieldAppliesTo check, and the place columns written
+        // whether or not this type takes a parent, so every row inserts these
+        // four keys at the same point. Column ORDER comes from the first row that
+        // introduces a key, and the first asset is a Campus, which takes no
+        // parent — skip it there and Campus/Building/Room get appended after the
+        // last column instead of sitting next to Path where they're readable.
+        if (c.key === "parent") {
+          row[c.label] = fieldAppliesTo(c.key, a.type) ? (pathOf(a, assets) || UNASSIGNED_LABEL) : "";
+          writePlaceColumns(row, a);
           return;
         }
         if (!fieldAppliesTo(c.key, a.type)) { row[c.label] = ""; return; }
-        if (c.key === "parent") { row[c.label] = pathOf(a, assets) || UNASSIGNED_LABEL; return; }
         row[c.label] = a[c.key] || "";
       });
+      // A column config with no `parent` shouldn't cost the export its location
+      // columns — the whole point of writing them here is that they don't depend
+      // on what the list happens to show.
+      if (!("Room" in row)) writePlaceColumns(row, a);
       row["Comments logged"] = (a.comments || []).length;
       row["Changes logged"] = (a.changes || []).length;
       row["Total cost logged"] = (a.changes || []).reduce((sum, c) => sum + (parseFloat(c.cost) || 0), 0);
@@ -4539,7 +4536,7 @@ function AssetTracker() {
   // here (rather than at each of the two form render sites) is what stops the
   // app offering two different ways to say where something is.
   function formColumnsFor(type) {
-    return columns.filter(c => fieldAppliesTo(c.key, type) && c.key !== "status" && !isComputedColumn(c.key));
+    return columns.filter(c => fieldAppliesTo(c.key, type) && c.key !== "status");
   }
 
   // ---------- DETAIL VIEW ----------
@@ -4575,7 +4572,7 @@ function AssetTracker() {
     // exception for the type those columns used to name (a Room's `room`): a Room
     // is named by the Name field like everything else.
     const visibleDetailColumns = columns.filter(c => (
-      !isComputedColumn(c.key) && fieldAppliesTo(c.key, selectedAsset.type)
+      fieldAppliesTo(c.key, selectedAsset.type)
     ));
     const parentProblem = parentageProblem(selectedAsset, assets);
     const detailGroups = groupDetailColumns(visibleDetailColumns);
@@ -6369,18 +6366,7 @@ function AssetTracker() {
                   const isTypeCol = c.key === "type";
                   const Icon = isTypeCol ? iconFor(a.type) : null;
                   const applies = fieldAppliesTo(c.key, a.type);
-                  // Room and Building are read out of the parent chain: an asset
-                  // that IS one answers with its own name, anything else with the
-                  // nearest one above it. Italic marks the inherited case, which
-                  // is now every asset that isn't itself that kind of place —
-                  // previously only the Building column could be inherited, since
-                  // a Room was always stored directly on the asset.
-                  const isPlaceCol = isComputedColumn(c.key);
                   const isParentCol = c.key === "parent";
-                  const computedValue = isPlaceCol ? computedPlaceValue(c.key, a, assets) : "";
-                  // Italic marks a value read off an ANCESTOR rather than set on
-                  // this asset — so not on a Room's own Room column.
-                  const isInherited = isPlaceCol && !isOwnPlaceColumn(c.key, a.type);
                   return (
                     <div
                       key={c.key}
@@ -6389,8 +6375,7 @@ function AssetTracker() {
                         fontSize: c.key === "label" ? 12 : 13,
                         fontFamily: c.key === "label" ? "'IBM Plex Mono', monospace" : undefined,
                         fontWeight: c.key === "label" ? 600 : isTypeCol ? 500 : 400,
-                        fontStyle: isInherited && computedValue ? "italic" : "normal",
-                        color: c.key === "label" ? C.accent : (applies || computedValue) ? C.muted : C.border,
+                        color: c.key === "label" ? C.accent : applies ? C.muted : C.border,
                         overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                         display: "flex", alignItems: "center", gap: 8,
                         position: i === 0 ? "sticky" : "static",
@@ -6398,12 +6383,9 @@ function AssetTracker() {
                         background: i === 0 ? C.surface : "transparent",
                         zIndex: i === 0 ? 2 : "auto",
                       }}
-                      title={isInherited && computedValue ? `Inherited from ${parentNameFor(a.parentId, assets)}` : undefined}
                     >
                       {Icon && <Icon size={15} style={{ flexShrink: 0, color: C.brand }} />}
-                      {isPlaceCol ? (
-                        computedValue || "—"
-                      ) : isParentCol ? (
+                      {isParentCol ? (
                         // "Unassigned" only where a parent is a thing this type
                         // could have — a Building or a Bulk Item takes none, and
                         // labelling those "Unassigned" would read as a gap to fill

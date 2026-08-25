@@ -370,14 +370,16 @@ which correctly began including Rooms themselves once a Room could nest inside a
 Contents tab no longer asks the question at all — it walks the chain downwards
 (`descendantsOf()`), which is how the old Condenser special case disappeared.
 
-`roomMovable` also excludes **the filtered room itself**, and that exclusion is load-bearing
-rather than tidy-mindedness: the Room filter now matches the room *and* everything under it
-(that's what lets it find things nested deeper), and a Room is itself Room-movable, so without
-the exclusion every use of "move the devices in this room" quietly moved the room into the
-destination too — restructuring the building instead of relocating equipment. Nested rooms
-below it stay movable, which is the coherent reading of "everything in this room moves". The
-bug was introduced by making the filter chain-aware (it was harmless when the filter only ever
-matched a direct `roomId`) and was caught in browser testing, not by reading the diff.
+`roomMovable` also excludes **the room being moved out of**, and that exclusion is load-bearing
+rather than tidy-mindedness: the scope matches the room *and* everything under it (that's what
+lets it find things nested deeper), and a Room is itself Room-movable, so without the exclusion
+every use of "move the devices in this room" quietly moved the room into the destination too —
+restructuring the building instead of relocating equipment. Nested rooms below it stay movable,
+which is the coherent reading of "everything in this room moves". The bug was introduced by
+making the *Room filter* chain-aware, back when the filter was what this hung off (it was
+harmless while the filter only ever matched a direct `roomId`), and was caught in browser
+testing, not by reading the diff. The filter is gone and the scope replaced it, but the
+exclusion is the same rule about the same hazard.
 
 `fieldAppliesTo()` reads the registry — e.g. Room and Building assets don't have brand/model/serial; Bulk Items
 (chairs, tables — not individually tagged) get a `totalQuantity` and an `itemName` instead, and
@@ -624,21 +626,32 @@ somewhere you'd navigate to, to confirm it's empty — and nothing is "selectabl
 Sharing them would mean a predicate saying "everything" plus switches disabling the modal's own
 hiding rules: more configuration than the shared tree-walking is worth.
 
-`bulkMoveSourceId` is where the two mechanisms meet: the "Move filtered devices to room"
-toolbar keys off the scope when the scope IS a room, falling back to `roomFilter`. Without
-that it would be effectively unreachable, since the Room column filter is hidden by default now
-that Path replaced it. `moveFilteredTo` then updates whichever one the user was actually
-using, so they follow the assets they just moved instead of staring at the emptied room.
+`bulkMoveSourceId` is the "Move filtered devices to room" toolbar's source room, and it reads
+the scope alone: the scope when the scope IS a Room, otherwise nothing, in which case the
+toolbar doesn't render — with no single room to move out of, the action has no meaning. It used
+to fall back to `roomFilter`, which no longer exists; the scope was already the primary way to
+narrow to a room and is the better source anyway, since it matches nested rooms the way the
+filter did. `moveFilteredTo` then re-points the scope at the destination, so the user follows
+the assets they just moved instead of staring at the emptied room.
 
-**Room, Building and Campus are computed *columns*** (`isComputedColumn(key)`). They're still
-sortable/filterable, but nothing writes them, so `formColumnsFor` drops them from the add/edit
-forms — the Parent field is what you edit instead, and keeping both editable would mean two ways
-to say where something is with one of them going stale. Until v23 this check was type-AWARE
-(`isComputedColumnFor(key, type)`), because `room` and `building` each doubled as one type's own
-name and treating them as flatly computed removed the only way to name a Room at all. The `name`
-field ended that exception: a Room is named like everything else, so these three are computed for
-every type without exception. What survives of the old distinction is `isOwnPlaceColumn(key,
-type)`, used only to italicise a value read off an ANCESTOR rather than off the asset itself.
+**Room, Building and Campus are not columns at all** (removed 2026-08-25). They were computed
+columns — sortable and filterable but written by nothing — and the whole idea went with them,
+`isComputedColumn`, `isOwnPlaceColumn` and `computedPlaceValue` included. Path already says
+where something is, more completely; a second, partial answer beside it was the leftover.
+Their type-aware ancestor `isComputedColumnFor` had gone one step earlier, when `name` stopped
+those columns doubling as one type's own name — which is what made this removal possible at
+all, since before `name` the `room` column was the only way to name a Room.
+- **They survive in the Excel export**, which now builds them itself rather than walking
+  `columns` (see `exportToExcel`'s `writePlaceColumns`). That coupling is exactly what would
+  have deleted them from every export the moment the list stopped carrying them.
+- **A stored column config has to be cleaned on load** (`RETIRED_COLUMN_KEYS`): the column
+  migration only ever ADDED newly-introduced defaults, so an existing sheet would otherwise
+  keep offering all three forever. Custom columns are never touched — a custom key is a real
+  field on every asset, so dropping one would hide stored data.
+- `MOCK_SNAPSHOT` carries a stored column config *including* the retired three, so the sandbox
+  exercises that removal instead of starting from `DEFAULT_COLUMNS`, which has nothing to
+  remove. A fixture without one hides the only case that matters — the same blind spot that
+  let the first version of the name backfill ship broken.
 
 **The list shows one `Path` column instead of separate Building and Room** (Eric's call,
 2026-08-19, having been shown the trade-off). Its column *key* is still `parent` — that's the
@@ -646,11 +659,10 @@ field it edits — while the list and detail read it out in full via `pathOf()`,
 100 › Room 101 › Storage Room". A path is what makes deep nesting legible: with Building and
 Room columns alone, a panel in a closet in a classroom showed the closet and the building and
 silently dropped the classroom. The asset itself is not repeated in its own path. Building and
-Room columns still exist and are re-enablable from the Columns menu, just `visible: false` by
-default — deleting them would have taken their column filters with them, and the bulk "Move
-filtered to room" toolbar hangs off `roomFilter`. `exportToExcel` keeps them as their own
-resolved columns regardless, since a spreadsheet is where you'd group by building and a single
-path string can't be grouped.
+Room columns were kept, hidden, for a while after that — their filters were still load-bearing
+and each was still one type's own name — and were removed outright on 2026-08-25 once neither
+was true. `exportToExcel` still emits them as its own resolved columns, since a spreadsheet is
+where you'd group by building and a single path string can't be grouped.
 
 **Every asset's own `label` (its Asset ID, e.g. `BCA0082`) is the one field the whole app
 treats as a stable, unique identifier** — `Breaker.panelLabel`, `Circuit.feedsPanelLabel`,

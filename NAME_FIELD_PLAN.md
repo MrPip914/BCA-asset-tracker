@@ -1,6 +1,6 @@
 # The Name field — plan
 
-Status: **steps 1 and 2 built and deployed, backend v23** — confirmed live on 2026-08-25
+Status: **steps 1, 2 and 3 done; 3 needs no deploy. Backend v23** — confirmed live on 2026-08-25
 by reading `scriptVersion` back from the `/exec` URL. This header said "undeployed" while
 the Sequence section below said the opposite; the fetch settles it. Step 3 and the type
 editor are still ahead. It is the prerequisite for the asset type editor.
@@ -144,9 +144,15 @@ their `DEFAULT_COLUMNS` position.
    ladder, `nameOf()` reading one field.
 2. ~~**Clean out Type / Sub-Type**~~ — done: type word only, BULK badge removed, Sub-Type
    as category only, `nameField` deleted from the registry.
-3. **Remove the place columns** — Campus/Building/Room out of the list and filters,
-   export given its own resolved columns, bulk move rewired onto the scope,
-   `isComputedColumnFor()` retired.
+3. ~~**Remove the place columns**~~ — done 2026-08-25: Campus/Building/Room out of the list
+   and filters, export given its own resolved columns (built by `exportToExcel` itself, not
+   read off `columns` — that coupling was the trap), bulk move rewired onto the `HierarchyNav`
+   scope, and the whole computed-column idea retired (`isComputedColumn`, `isOwnPlaceColumn`
+   and `computedPlaceValue`, its type-aware ancestor `isComputedColumnFor` having gone in step
+   2). Two things the plan didn't anticipate: a stored column config needed cleaning on load
+   (`RETIRED_COLUMN_KEYS`) or an existing sheet would have kept all three forever, since the
+   column migration only ever added; and `MOCK_SNAPSHOT` had no stored column config at all,
+   so the sandbox couldn't reproduce the live shape until one was added.
 4. **Type editor** — now materially simpler, one fewer setting to design. **Carry the
    `itemName` → `subType` rename in with it** (Eric, 2026-08-25): the sheet column is still
    called `itemName` while every visible label says "Sub-Type", and the field now only carries
