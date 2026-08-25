@@ -1094,7 +1094,29 @@ When you do:
 
 ## Known constraints / things to watch
 
-- **The repo is at v24 and v24 is UNDEPLOYED as of 2026-08-25.** It bundles two things: the
+- **The repo is at v25 and v25 is UNDEPLOYED as of 2026-08-25. It is the first DESTRUCTIVE
+  version.** It deletes six columns from the Assets tab that were kept only to keep an earlier
+  change reversible: `roomId`/`buildingId` (replaced by `parentId` in v17), `room`/`building`/
+  `campus` (replaced by `name` in v23) and `itemName` (replaced by `subType` in v24).
+  - **`ASSET_FIELDS` is the schema.** `writeTable_` clears the tab and writes those headers, so
+    dropping a name from that list deletes the column on the next asset-domain save. The sheet's
+    version history is the only way back — that is the whole rollback story now.
+  - **What went with them, and can't be rebuilt.** `adoptLegacyParentage()` and
+    `adoptLegacySubType()` are gone (nothing left to adopt), and so is `hasMisadoptedName()` —
+    which matters most. It repaired names written by the broken first backfill by comparing a
+    name against `room`/`building`/`campus`, so with those columns deleted a wrong name can no
+    longer even be *detected*; it's just a name someone has to retype. That is why the removal
+    waited for a save that wrote every repaired name into the sheet.
+  - `LEGACY_NAME_COLUMNS` shrank to `NAME_FROM_FIELD` — one entry, Bulk Item → `subType`, which
+    isn't legacy at all but the live rule that a bulk item is called by its sub-type.
+  - **`panel.html` had to be fixed first.** Three sites there read `room`/`building` with no
+    `name` fallback, unlike the rest of the file. Harmless while the column was still written;
+    deleting it without fixing them would have blanked the location on every QR page.
+  - `MOCK_SNAPSHOT` no longer carries any legacy shape, because there is no longer one to
+    reproduce. Its places hold their names in `name`. Note the *stored column config* it carries
+    still uses the old keys — that's the column config, not the sheet's columns, and
+    `RETIRED_COLUMN_KEYS`/`RENAMED_COLUMN_KEYS` still have to handle it.
+- **v24 bundled the `typeSettings` Config key and the `subType` column.** It bundles two things: the
   `typeSettings` Config key (per-type overrides from the type editor) and the `subType` column
   (the Bulk Item sub-type, renamed from `itemName`). Until it's pasted in and a **New version**
   deploy is created:

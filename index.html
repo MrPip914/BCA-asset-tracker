@@ -479,28 +479,16 @@ function fieldAppliesTo(key, type) {
 // campusNameOf/buildingNameOf/roomNameOf directly, since it knows which three it
 // wants and no longer has a column key to dispatch on.
 
-// Reads an asset stored in the OLD two-field shape (roomId for a device,
-// buildingId for a Room or Condenser) as if it already had a parentId, so the
-// app works correctly against a sheet that hasn't been migrated yet. Applied on
-// load, so nothing past loadData() ever sees the old shape.
+// adoptLegacyParentage() is gone (v25). It read a pre-v15 roomId/buildingId as a
+// parentId for a sheet that hadn't been migrated; those columns were dropped from
+// ASSET_FIELDS in v25, so the backend no longer returns them and there is nothing
+// left to adopt. parentId is the only answer.
 //
-// This is what makes the migration safe to schedule rather than urgent: the same
-// build runs against old data and new, the backend keeps both sets of columns,
-// and a migrated asset is simply one where the answer is already stored. An
-// asset that has BOTH is not a conflict to resolve — parentId wins, because the
-// only way to have both is to have been migrated (or edited) since, and the old
-// columns are then leftovers nothing writes any more.
-function adoptLegacyParentage(a) {
-  if (a.parentId) return a;
-  // A type that takes no parent must not be GIVEN one by the migration. A Bulk
-  // Item is the case that bites: it spreads across rooms via allocations, but
-  // pre-v9 rows still carry a stale roomId, and adopting that produced an asset
-  // permanently flagged "its parent doesn't make sense" — with no Parent field on
-  // its form to fix it with, since a Bulk Item doesn't render one.
-  if (!typeTakesParent(a.type)) return a;
-  const legacy = a.roomId || a.buildingId || "";
-  return legacy ? { ...a, parentId: legacy } : a;
-}
+// Note what it also had to do, in case a similar migration is ever written: it
+// refused to adopt for a type whose parentTypes is empty. A Bulk Item takes no
+// parent but pre-v9 rows still carried a stale roomId, and adopting one produced
+// an asset permanently flagged as having an impossible parent, on a form with no
+// Parent field to fix it with.
 
 // Types that are bolted to the building rather than carried around. Used ONLY to
 // pick a sensible default name ("Room 102 Mini Split" reads better than "Mini
@@ -537,20 +525,7 @@ function suggestedNameFor(asset, assets) {
   return `${type} ${asset.label || ""}`.trim();
 }
 
-// Reads a Bulk Item saved before v24, when the sub-type field was called
-// `itemName`. Same shape as adoptLegacyParentage/adoptLegacyNames: applied on
-// load, so nothing past loadData sees the old key, and the same build is correct
-// against a migrated sheet and an un-migrated one. `subType` wins when both
-// exist, since having both means the row has been rewritten since the rename.
-//
-// The old column is deliberately still read (and still written by the backend),
-// so the change is reversible; clearing it is a separate later step, exactly as
-// with roomId/buildingId and the legacy name columns.
-function adoptLegacySubType(a) {
-  if ((a.subType || "").trim()) return a;
-  const legacy = (a.itemName || "").trim();
-  return legacy ? { ...a, subType: legacy } : a;
-}
+// adoptLegacySubType() is gone (v25) along with the `itemName` column it read.
 
 // Gives every asset saved before the `name` field existed the name it was
 // already being displayed under, so nothing visibly changes on the first load
@@ -571,47 +546,33 @@ function adoptLegacySubType(a) {
 // the room it sits in ("Room 102"). Reading it ungated named every computer in
 // the building after its room. See the note in NAME_FIELD_PLAN.md — the sandbox
 // fixture had no such leftovers, so nothing caught it before the live sheet did.
-const LEGACY_NAME_COLUMNS = { Room: "room", Building: "building", Campus: "campus", "Bulk Item": "subType" };
-function legacyNameOf(a) {
-  const key = LEGACY_NAME_COLUMNS[a?.type];
+// A Bulk Item is called by its sub-type ("Chairs") unless someone has given it a
+// name of its own. The only per-type naming rule left: this used to be a map of
+// four types onto the four legacy name columns, and Room/Building/Campus dropped
+// out of it when those columns were deleted in v25 — each of those is now named
+// like everything else, by `name`.
+const NAME_FROM_FIELD = { "Bulk Item": "subType" };
+function nameFromFieldOf(a) {
+  const key = NAME_FROM_FIELD[a?.type];
   return key ? String(a[key] || "").trim() : "";
 }
-// Was this asset's stored name mis-adopted by the ungated version of the ladder
-// above? True only when the name is exactly one of the leftover place columns on
-// a type that column never named — i.e. precisely the rows that got it wrong.
-// A name someone actually typed is only caught if they typed the stale room
-// string verbatim onto that same asset, which isn't a case worth protecting.
-//
-// One-time repair: once a corrected name is saved, nothing matches this again.
-// Removable once no sheet still carries a name written by that first version.
-function hasMisadoptedName(a) {
-  const name = (a?.name || "").trim();
-  if (!name) return false;
-  // A name matching this type's OWN legacy name column is correct by definition
-  // — that column is where the name was supposed to come from.
-  if (legacyNameOf(a) === name) return false;
-  // Every OTHER place column is a leftover this type was never named after, so a
-  // name equal to one is exactly what the broken first version wrote.
-  //
-  // This used to bail out whenever the type's own legacy column held anything at
-  // all, which skipped precisely the type that needed it most: a Bulk Item has
-  // BOTH its own sub-type AND a stale `room`, and the broken version read `room`
-  // first — so a bulk item called "Room 100" instead of "Chairs" was the one
-  // case the repair could never see.
-  const ownKey = LEGACY_NAME_COLUMNS[a?.type];
-  return ["room", "building", "campus"].some(
-    k => k !== ownKey && String(a[k] || "").trim() === name
-  );
-}
+
+// hasMisadoptedName() is gone (v25). It repaired names written by the first,
+// broken version of the backfill below, which read the stale place columns
+// ungated by type and so named a device after its room. It worked by comparing a
+// name against `room`/`building`/`campus` — the very columns v25 deleted — so it
+// cannot be reconstructed, and any name still wrong is now just a name someone
+// has to retype. That is why the removal waited until a save had written every
+// repaired name into the sheet.
 function adoptLegacyNames(list) {
-  const stillBlank = a => !(a.name || "").trim() || hasMisadoptedName(a);
-  // 1. Whatever the asset was already called under the old per-type columns.
-  //    A Bulk Item takes a copy of its sub-type ("Chairs") — what it was called
-  //    before Sub-Type went back to being purely a category.
+  const stillBlank = a => !(a.name || "").trim();
+  // 1. A Bulk Item with no name of its own takes a copy of its sub-type
+  //    ("Chairs"), which is what it was called before Sub-Type went back to
+  //    being purely a category.
   const stored = list.map(a => {
     if (!stillBlank(a)) return a;
-    const legacy = legacyNameOf(a);
-    return legacy ? { ...a, name: legacy } : (a.name ? { ...a, name: "" } : a);
+    const fromField = nameFromFieldOf(a);
+    return fromField ? { ...a, name: fromField } : a;
   });
   // 2. Places next, so a nameless room has a name of its own before anything
   //    inside it is named after it.
@@ -1153,7 +1114,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v24";
+const FRONTEND_SCRIPT_VERSION = "v25";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -1345,32 +1306,31 @@ const MOCK_SNAPSHOT = {
     // readable-prefix habit (BCB buildings, BCR rooms) — note that's a property of
     // this hand-written fixture only; the app itself issues BCA numbers for
     // everything and has no per-type prefix scheme.
-    { label: "BCC0001", type: "Campus", campus: "Brookside Christian Academy", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "The school site.", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
-    { label: "BCC0002", type: "Campus", campus: "Kramer Campus", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "Separate residential site — sample data behind the Electrical Map panel.", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
-    { label: "BCB0001", type: "Building", building: "Building 100", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
-    { label: "BCB0002", type: "Building", building: "Building 200", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
-    { label: "BCB0003", type: "Building", building: "Building 300", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
-    { label: "BCB0004", type: "Building", building: "Building 400", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
-    { label: "BCR0006", type: "Room", room: "Room 102", parentId: "BCB0001", person: "Jen Kramer", notes: "", status: "Active" },
-    { label: "BCR0008", type: "Room", room: "Room 200", parentId: "BCB0002", person: "Aaron Cantrell", notes: "", status: "Active" },
-    { label: "BCR0011", type: "Room", room: "Room 300", parentId: "BCB0003", person: "Denise Sloan", notes: "", status: "Active" },
-    { label: "BCR0014", type: "Room", room: "Room 400", parentId: "BCB0004", person: "Kelly Mackinga", notes: "", status: "Active" },
-    { label: "BCR0002", type: "Room", room: "Kitchen", parentId: "BCB0001", person: "Multiple teachers", notes: "", status: "Active" },
-    { label: "BCR0018", type: "Room", room: "Storage Room", parentId: "BCB0001", person: "", notes: "", status: "Active" },
-    { label: "BCR0020", type: "Room", room: "Room 101", parentId: "BCB0001", person: "Dillon Jacobsma", notes: "", status: "Active" },
-    { label: "BCA0001", type: "Computer", room: "Room 102", parentId: "BCR0006", brand: "Dell", model: "OptiPlex 7010", serial: "MOCK-CMP-001", person: "Jen Kramer", peripherals: "Keyboard, Mouse", notes: "", status: "Active" },
-    { label: "BCA0002", type: "Monitor", room: "Room 102", parentId: "BCR0006", brand: "Dell", model: "P2419H", serial: "MOCK-MON-001", person: "Jen Kramer", notes: "", status: "Active" },
+    { label: "BCC0001", type: "Campus", name: "Brookside Christian Academy", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "The school site.", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    { label: "BCC0002", type: "Campus", name: "Kramer Campus", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "Separate residential site — sample data behind the Electrical Map panel.", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    { label: "BCB0001", type: "Building", name: "Building 100", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    { label: "BCB0002", type: "Building", name: "Building 200", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    { label: "BCB0003", type: "Building", name: "Building 300", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    { label: "BCB0004", type: "Building", name: "Building 400", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    { label: "BCR0006", type: "Room", name: "Room 102", parentId: "BCB0001", person: "Jen Kramer", notes: "", status: "Active" },
+    { label: "BCR0008", type: "Room", name: "Room 200", parentId: "BCB0002", person: "Aaron Cantrell", notes: "", status: "Active" },
+    { label: "BCR0011", type: "Room", name: "Room 300", parentId: "BCB0003", person: "Denise Sloan", notes: "", status: "Active" },
+    { label: "BCR0014", type: "Room", name: "Room 400", parentId: "BCB0004", person: "Kelly Mackinga", notes: "", status: "Active" },
+    { label: "BCR0002", type: "Room", name: "Kitchen", parentId: "BCB0001", person: "Multiple teachers", notes: "", status: "Active" },
+    { label: "BCR0018", type: "Room", name: "Storage Room", parentId: "BCB0001", person: "", notes: "", status: "Active" },
+    { label: "BCR0020", type: "Room", name: "Room 101", parentId: "BCB0001", person: "Dillon Jacobsma", notes: "", status: "Active" },
+    { label: "BCA0001", type: "Computer", parentId: "BCR0006", brand: "Dell", model: "OptiPlex 7010", serial: "MOCK-CMP-001", person: "Jen Kramer", peripherals: "Keyboard, Mouse", notes: "", status: "Active" },
+    { label: "BCA0002", type: "Monitor", parentId: "BCR0006", brand: "Dell", model: "P2419H", serial: "MOCK-MON-001", person: "Jen Kramer", notes: "", status: "Active" },
     { label: "BCA0003", type: "Phone", parentId: "BCR0006", brand: "Cisco", model: "8841", serial: "MOCK-PHN-001", person: "Jen Kramer", notes: "", status: "Active" },
     { label: "BCA0011", type: "Phone", parentId: "BCR0008", brand: "Cisco", model: "8841", serial: "MOCK-PHN-002", person: "Aaron Cantrell", notes: "", status: "Active" },
     { label: "BCA0015", type: "Stream Deck", parentId: "BCR0008", brand: "Elgato", model: "Stream Deck MK.2", serial: "MOCK-SD-001", person: "Aaron Cantrell", notes: "", status: "Active" },
     { label: "BCA0024", type: "TV", parentId: "BCR0011", brand: "Samsung", model: "55\" QLED", serial: "MOCK-TV-001", person: "Denise Sloan", notes: "", status: "Active" },
     { label: "BCA0054", type: "DocuCam", parentId: "BCR0020", brand: "IPEVO", model: "V4K", serial: "MOCK-DC-001", person: "Dillon Jacobsma", notes: "", status: "Active" },
-    // Deliberately carries the exact damage the LIVE sheet has on its bulk item:
-    // a stale pre-v9 `room`/`roomId` pair left over from the old schema, and a
-    // `name` mis-adopted from that stale room by the first, broken version of the
-    // name backfill. Both of those are what a real un-migrated row looks like, and
-    // a fixture without them hides two bugs that only bite bulk items.
-    { label: "BCA0081", type: "Bulk Item", itemName: "Chairs", name: "Room 100", room: "Room 100", roomId: "BCR0006", parentId: "BCR0006", totalQuantity: "40", allocations: [{ roomId: "BCR0006", quantity: "20" }, { roomId: "BCR0008", quantity: "20" }], notes: "", status: "Active" },
+    // No `name` of its own, so it exercises the one naming rule left: a Bulk Item
+    // is called by its sub-type. The stale room/roomId/itemName this used to carry
+    // went with the columns themselves in v25 — there is no legacy shape left for
+    // a fixture to reproduce.
+    { label: "BCA0081", type: "Bulk Item", subType: "Chairs", totalQuantity: "40", allocations: [{ roomId: "BCR0006", quantity: "20" }, { roomId: "BCR0008", quantity: "20" }], notes: "", status: "Active" },
     // Every panel below follows the same design: mostly single-pole breakers
     // feeding room outlet/lighting circuits, plus exactly one of each other
     // BreakerType (Tandem, Quad, Split Double-Pole) for catalog variety, one
@@ -1715,7 +1675,7 @@ const MOCK_SNAPSHOT = {
     // an outdoor unit sits outside any one Room. Building 100 has 4 indoor zones
     // (Room 102, Kitchen, Storage Room, Room 101), so it gets a 4-zone outdoor
     // unit; the others each have a single zone.
-    { label: "BCA0093", type: "Condenser", building: "Building 100", parentId: "BCB0001", brand: "Mitsubishi", model: "MXZ-4C36NAHZ", serial: "", notes: "Outdoor condenser/compressor, 4-zone multi-split.", status: "Active", maintenanceItems: [
+    { label: "BCA0093", type: "Condenser", name: "Building 100", parentId: "BCB0001", brand: "Mitsubishi", model: "MXZ-4C36NAHZ", serial: "", notes: "Outdoor condenser/compressor, 4-zone multi-split.", status: "Active", maintenanceItems: [
       { task: "Inspection / cleaning", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
     ] },
     { label: "BCA0094", type: "Condenser", parentId: "BCB0002", brand: "Mitsubishi", model: "MUZ-GL15NA", serial: "", notes: "Outdoor condenser/compressor, single-zone.", status: "Active", maintenanceItems: [
@@ -1740,18 +1700,18 @@ const MOCK_SNAPSHOT = {
     // positions 1-9, so slots 10-12 sit empty and render as spares. The map
     // listing nine positions is NOT evidence the panel has nine slots — that
     // was assumed here once and corrected.
-    { label: "BCB0005", type: "Building", building: "Kramer Residence", parentId: "BCC0002", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "Two-storey house — sample data behind the Electrical Map panel.", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
-    { label: "BCR0021", type: "Room", room: "Kitchen (Upstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
-    { label: "BCR0022", type: "Room", room: "Dining Room (Upstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
-    { label: "BCR0023", type: "Room", room: "Living Room (Upstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
-    { label: "BCR0024", type: "Room", room: "Bathroom (Upstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
-    { label: "BCR0025", type: "Room", room: "James's Room (Downstairs)", parentId: "BCB0005", person: "James", notes: "", status: "Active" },
-    { label: "BCR0026", type: "Room", room: "Living Room (Downstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
-    { label: "BCR0027", type: "Room", room: "Office (Downstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
-    { label: "BCR0028", type: "Room", room: "Utility Room (Downstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
-    { label: "BCR0029", type: "Room", room: "Bathroom (Downstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
-    { label: "BCR0030", type: "Room", room: "Hall (Downstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
-    { label: "BCR0031", type: "Room", room: "Water Heater Closet", parentId: "BCB0005", person: "", notes: "", status: "Active" },
+    { label: "BCB0005", type: "Building", name: "Kramer Residence", parentId: "BCC0002", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "Two-storey house — sample data behind the Electrical Map panel.", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    { label: "BCR0021", type: "Room", name: "Kitchen (Upstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
+    { label: "BCR0022", type: "Room", name: "Dining Room (Upstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
+    { label: "BCR0023", type: "Room", name: "Living Room (Upstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
+    { label: "BCR0024", type: "Room", name: "Bathroom (Upstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
+    { label: "BCR0025", type: "Room", name: "James's Room (Downstairs)", parentId: "BCB0005", person: "James", notes: "", status: "Active" },
+    { label: "BCR0026", type: "Room", name: "Living Room (Downstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
+    { label: "BCR0027", type: "Room", name: "Office (Downstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
+    { label: "BCR0028", type: "Room", name: "Utility Room (Downstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
+    { label: "BCR0029", type: "Room", name: "Bathroom (Downstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
+    { label: "BCR0030", type: "Room", name: "Hall (Downstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
+    { label: "BCR0031", type: "Room", name: "Water Heater Closet", parentId: "BCB0005", person: "", notes: "", status: "Active" },
     {
       label: "BCA0097", type: "Electrical Panel", parentId: "BCR0028", brand: "", model: "", serial: "",
       notes: "Transcribed from the Electrical Map page. Positions 1A-9B on the handwritten map are cells 1a-9b here. Amp ratings are NOT from the source — 15A assumed for lighting-only circuits, 20A for everything else — so verify at the panel before relying on them.",
@@ -2262,12 +2222,7 @@ function AssetTracker() {
       applyTypeSettings(loadedTypeSettings);
 
       const parented = data.assets
-        .map(a => ({ comments: [], changes: [], allocations: [], status: "Active", building: "", subType: "", purchaseDate: "", warrantyUntil: "", ...a }))
-        .map(adoptLegacyParentage)
-        // Before the name backfill below, which reads a Bulk Item's sub-type to
-        // name it — running it after would name every pre-v24 bulk item after
-        // its Asset ID instead.
-        .map(adoptLegacySubType);
+        .map(a => ({ comments: [], changes: [], allocations: [], status: "Active", subType: "", purchaseDate: "", warrantyUntil: "", ...a }));
       // Names are filled in over the already-parented list, because the
       // suggestion for fixed equipment reads the chain above the asset ("Room 102
       // Mini Split") — running it inside the first map would walk a list whose

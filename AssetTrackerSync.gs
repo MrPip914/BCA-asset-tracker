@@ -49,7 +49,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v24";
+const SCRIPT_VERSION = "v25";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -81,25 +81,24 @@ const SHEET_NAMES = {
 // frontend both enforces the rules on entry and tolerates/flags parentage that
 // arrived some other way (a hand-edited sheet, a bulk script).
 //
-// "roomId"/"buildingId" are the PREVIOUS shape and are kept on purpose. They're
-// still read and written unchanged, so this version is reversible and rows that
-// were never migrated still resolve (the frontend falls back to them when
-// parentId is empty). They are not maintained as a mirror of parentId, so once
-// an asset has been moved they can be stale — treat parentId as authoritative.
-// Dropping them is a separate later step, after a migration fills parentId in.
-// "name" is every asset's own optional display name, added in v23. It replaced
-// the per-type name columns below ("room" on a Room, "building" on a Building,
-// "campus" on a Campus, the sub-type on a Bulk Item), which are still read and
-// written unchanged so this version is reversible and un-migrated rows still
-// resolve — the frontend adopts them as the name when "name" is empty. Same
-// deal as roomId/buildingId above: not maintained as a mirror, so treat "name"
-// as authoritative once a row has been saved by a v23 client.
-// "subType" is the Bulk Item sub-type, called "itemName" before v24 — renamed so
-// the sheet says what every label in the app already said. "itemName" is kept
-// and still written, on the same reversibility terms as everything above; the
-// frontend reads it when "subType" is empty, and clearing it is a later step.
+// "name" is every asset's own optional display name, added in v23. "subType" is
+// the Bulk Item sub-type, added in v24.
+//
+// SIX COLUMNS WERE DROPPED HERE IN v25, having been kept only so each change
+// that superseded them stayed reversible: "roomId"/"buildingId" (the pre-v15
+// two-level location, replaced by parentId), "room"/"building"/"campus" (the
+// per-type name columns, replaced by name), and "itemName" (replaced by
+// subType). Every one had been superseded for at least one deployed version, and
+// each row's replacement value was written by the whole-tab rewrite that follows
+// any save, so nothing was read from them any more.
+//
+// Removing a name from this list DELETES that column from the sheet on the next
+// asset-domain save — writeTable_ clears the tab and writes these headers. So
+// this list is the schema, and shortening it is a destructive migration: be sure
+// the replacement column is populated on every row first. The sheet's own
+// version history is the only way back.
 const ASSET_FIELDS = [
-  "label", "name", "type", "subType", "itemName", "screenSize", "hostname", "room", "building", "campus", "parentId", "roomId", "buildingId",
+  "label", "name", "type", "subType", "screenSize", "hostname", "parentId",
   "brand", "model", "serial", "person", "peripherals", "notes",
   "totalQuantity", "purchaseDate", "warrantyUntil", "status",
   "panelSlotCount", "panelLayout",
@@ -200,13 +199,11 @@ function pickPublic_(source, fields) {
   return out;
 }
 
-// Where a row sits, as the frontend's adoptLegacyParentage() reads it: parentId
-// when present, else the pre-v15 roomId/buildingId. Keeping the fallback here
-// means the public panel page shows the right room BEFORE the sheet has been
-// migrated, which matters because a QR sticker gets scanned by whoever is
-// standing at the panel, not by whoever knows what a migration is.
+// Where a row sits. This carried a roomId/buildingId fallback until v25, for the
+// window when the sheet still held the pre-v15 pair; those columns are gone, so
+// parentId is now the only answer there is.
 function effectiveParentId_(row) {
-  return String((row && (row.parentId || row.roomId || row.buildingId)) || "").trim();
+  return String((row && row.parentId) || "").trim();
 }
 
 // The nearest ancestor of a given type, walking up parentId. Loop-safe by the
@@ -694,7 +691,7 @@ function respond_(payload, e) {
 // blank here, not as an Asset ID.
 function displayName_(row) {
   if (!row) return "";
-  return String(row.name || row.room || row.building || row.campus || "").trim();
+  return String(row.name || "").trim();
 }
 
 function publicPanelPayload_(requestedLabel) {
