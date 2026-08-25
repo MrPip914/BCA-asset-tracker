@@ -492,6 +492,12 @@ function fieldAppliesTo(key, type) {
 // columns are then leftovers nothing writes any more.
 function adoptLegacyParentage(a) {
   if (a.parentId) return a;
+  // A type that takes no parent must not be GIVEN one by the migration. A Bulk
+  // Item is the case that bites: it spreads across rooms via allocations, but
+  // pre-v9 rows still carry a stale roomId, and adopting that produced an asset
+  // permanently flagged "its parent doesn't make sense" — with no Parent field on
+  // its form to fix it with, since a Bulk Item doesn't render one.
+  if (!typeTakesParent(a.type)) return a;
   const legacy = a.roomId || a.buildingId || "";
   return legacy ? { ...a, parentId: legacy } : a;
 }
@@ -580,8 +586,22 @@ function legacyNameOf(a) {
 // Removable once no sheet still carries a name written by that first version.
 function hasMisadoptedName(a) {
   const name = (a?.name || "").trim();
-  if (!name || legacyNameOf(a)) return false;
-  return [a.room, a.building, a.campus].some(v => String(v || "").trim() === name);
+  if (!name) return false;
+  // A name matching this type's OWN legacy name column is correct by definition
+  // — that column is where the name was supposed to come from.
+  if (legacyNameOf(a) === name) return false;
+  // Every OTHER place column is a leftover this type was never named after, so a
+  // name equal to one is exactly what the broken first version wrote.
+  //
+  // This used to bail out whenever the type's own legacy column held anything at
+  // all, which skipped precisely the type that needed it most: a Bulk Item has
+  // BOTH its own sub-type AND a stale `room`, and the broken version read `room`
+  // first — so a bulk item called "Room 100" instead of "Chairs" was the one
+  // case the repair could never see.
+  const ownKey = LEGACY_NAME_COLUMNS[a?.type];
+  return ["room", "building", "campus"].some(
+    k => k !== ownKey && String(a[k] || "").trim() === name
+  );
 }
 function adoptLegacyNames(list) {
   const stillBlank = a => !(a.name || "").trim() || hasMisadoptedName(a);
@@ -936,12 +956,15 @@ function effectiveBuildingId(asset, assets) {
 // which is exactly the case the UI flags rather than hides. A missing parent is
 // NOT invalid (that's Unassigned); a parent that no longer exists, or one of a
 // type this type may not sit inside, is.
-function parentageProblem(asset, assets) {
+function parentageProblem(asset, assets, typesList) {
   if (!asset || !asset.parentId) return null;
-  if (!typeTakesParent(asset.type)) return `A ${asset.type} doesn't sit inside anything, but this one has a parent.`;
+  // Type NAMES, not ids — since types got ids, `asset.type` is an id, which for
+  // a built-in reads like its name but for a user-created type is a raw uuid.
+  const own = typeNameOf(asset.type, typesList);
+  if (!typeTakesParent(asset.type)) return `A ${own} doesn't sit inside anything, but this one has a parent. Press Edit and then Save to clear it.`;
   const parent = (assets || []).find(a => a.label === asset.parentId);
   if (!parent) return `Its parent (${asset.parentId}) no longer exists.`;
-  if (!canBeParentOf(parent.type, asset.type)) return `A ${asset.type} can't sit inside a ${parent.type}.`;
+  if (!canBeParentOf(parent.type, asset.type)) return `A ${own} can't sit inside a ${typeNameOf(parent.type, typesList)}.`;
   // Asking ancestorsOf(asset) whether it contains `asset` can never say yes — it
   // seeds its visited set with asset.label and stops at the first repeat, so the
   // asset is excluded by construction. The loop this asset is actually part of is
@@ -968,13 +991,15 @@ function stripDraftUiState(draft) {
   return rest;
 }
 
-function validateParentChoice(childLabel, childType, parentId, assets) {
+function validateParentChoice(childLabel, childType, parentId, assets, typesList) {
   if (!parentId) return null;
-  if (!typeTakesParent(childType)) return `A ${childType} doesn't sit inside anything.`;
+  const own = typeNameOf(childType, typesList);
+  if (!typeTakesParent(childType)) return `A ${own} doesn't sit inside anything.`;
   const parent = (assets || []).find(a => a.label === parentId);
   if (!parent) return "That parent no longer exists — pick another.";
   if (!canBeParentOf(parent.type, childType)) {
-    return `A ${childType} can't sit inside a ${parent.type}. It can go in: ${parentTypesFor(childType).join(" or ")}.`;
+    const allowed = parentTypesFor(childType).map(t => typeNameOf(t, typesList)).join(" or ");
+    return `A ${own} can't sit inside a ${typeNameOf(parent.type, typesList)}. It can go in: ${allowed}.`;
   }
   if (wouldCreateCycle(childLabel, parentId, assets)) {
     return `That would put ${nameOf(parent)} inside itself — it's already somewhere below this asset.`;
@@ -1340,7 +1365,12 @@ const MOCK_SNAPSHOT = {
     { label: "BCA0015", type: "Stream Deck", parentId: "BCR0008", brand: "Elgato", model: "Stream Deck MK.2", serial: "MOCK-SD-001", person: "Aaron Cantrell", notes: "", status: "Active" },
     { label: "BCA0024", type: "TV", parentId: "BCR0011", brand: "Samsung", model: "55\" QLED", serial: "MOCK-TV-001", person: "Denise Sloan", notes: "", status: "Active" },
     { label: "BCA0054", type: "DocuCam", parentId: "BCR0020", brand: "IPEVO", model: "V4K", serial: "MOCK-DC-001", person: "Dillon Jacobsma", notes: "", status: "Active" },
-    { label: "BCA0081", type: "Bulk Item", itemName: "Chairs", totalQuantity: "40", allocations: [{ roomId: "BCR0006", quantity: "20" }, { roomId: "BCR0008", quantity: "20" }], notes: "", status: "Active" },
+    // Deliberately carries the exact damage the LIVE sheet has on its bulk item:
+    // a stale pre-v9 `room`/`roomId` pair left over from the old schema, and a
+    // `name` mis-adopted from that stale room by the first, broken version of the
+    // name backfill. Both of those are what a real un-migrated row looks like, and
+    // a fixture without them hides two bugs that only bite bulk items.
+    { label: "BCA0081", type: "Bulk Item", itemName: "Chairs", name: "Room 100", room: "Room 100", roomId: "BCR0006", parentId: "BCR0006", totalQuantity: "40", allocations: [{ roomId: "BCR0006", quantity: "20" }, { roomId: "BCR0008", quantity: "20" }], notes: "", status: "Active" },
     // Every panel below follows the same design: mostly single-pole breakers
     // feeding room outlet/lighting circuits, plus exactly one of each other
     // BreakerType (Tandem, Quad, Split Double-Pole) for catalog variety, one
@@ -2224,6 +2254,13 @@ function AssetTracker() {
       }
       setAuthPending(false);
 
+      // BEFORE the assets are mapped, not just before the setState: the load-time
+      // backfills below ask typeTakesParent and isPlaceType, and those read the
+      // module-level settings. Applied later, the first load after a settings
+      // change would adopt parents and names using the PREVIOUS rules.
+      const loadedTypeSettings = data.typeSettings && typeof data.typeSettings === "object" ? data.typeSettings : {};
+      applyTypeSettings(loadedTypeSettings);
+
       const parented = data.assets
         .map(a => ({ comments: [], changes: [], allocations: [], status: "Active", building: "", subType: "", purchaseDate: "", warrantyUntil: "", ...a }))
         .map(adoptLegacyParentage)
@@ -2295,10 +2332,6 @@ function AssetTracker() {
       setTypesList(ensureLockedTypes(adoptLegacyTypesList(
         Array.isArray(data.typesList) && data.typesList.length ? data.typesList : DEFAULT_TYPES
       )));
-      // Same ordering rule as in persist: mirror into the module-level copy
-      // before the setState that re-renders against it.
-      const loadedTypeSettings = data.typeSettings && typeof data.typeSettings === "object" ? data.typeSettings : {};
-      applyTypeSettings(loadedTypeSettings);
       setTypeSettings(loadedTypeSettings);
       // Absent/0/garbage all mean "never stored" — peekAssetNumber() seeds it
       // from the loaded assets instead, and the first asset created writes it.
@@ -2914,7 +2947,7 @@ function AssetTracker() {
         setAddError(`Asset ID "${conflict.label}" is already in use${what ? ` (${what})` : ""}. Asset IDs must be unique — pick a different one.`);
         return;
       }
-      const parentError = validateParentChoice(label, draft.type, draft.parentId, assets);
+      const parentError = validateParentChoice(label, draft.type, draft.parentId, assets, typesList);
       if (parentError) { setAddError(parentError); return; }
       setAddError("");
       const createdEntry = {
@@ -2936,8 +2969,19 @@ function AssetTracker() {
     } else {
       if (!draft.label?.trim() || !draft.type?.trim()) return;
       const original = selectedAsset;
-      const parentError = validateParentChoice(original.label, draft.type, draft.parentId, assets);
-      if (parentError) { setDraft({ ...draft, parentError }); return; }
+      // A type that takes no parent has no Parent field on its form, so a stored
+      // parentId is unreachable from the UI — refusing the save over it would be
+      // a dead end with nothing to click. Saving CLEARS it instead: for such a
+      // type, no parent is the only correct value, so this is a repair rather
+      // than a loss. This is how an asset damaged by the old migration (see
+      // adoptLegacyParentage) gets fixed — by opening it and pressing Save.
+      const draftToSave = typeTakesParent(draft.type) ? draft : { ...draft, parentId: "" };
+      const parentError = validateParentChoice(original.label, draftToSave.type, draftToSave.parentId, assets, typesList);
+      // parentError is shown BOTH inside ParentField and as a form-level line at
+      // the top of the form. The form-level copy is the one that matters here: a
+      // type with no Parent field renders no ParentField, so without it a refused
+      // save would look like a Save button that does nothing at all.
+      if (parentError) { setDraft({ ...draftToSave, parentError }); return; }
       const editEntries = [];
       // parentId holds a stable label (id), not the display name — an asset's own
       // name field is edited like any other field (below), and everything that
@@ -2946,10 +2990,10 @@ function AssetTracker() {
       // display still needs to resolve the id to a name, and an empty one reads
       // as "Unassigned" rather than a blank, so a move in or out of that state
       // is legible in the history.
-      Object.keys(draft).forEach(key => {
+      Object.keys(draftToSave).forEach(key => {
         if (key === "comments" || key === "changes" || key === "allocations" || key === "parentError") return;
         const oldVal = original[key] || "";
-        const newVal = draft[key] || "";
+        const newVal = draftToSave[key] || "";
         if (oldVal === newVal) return;
         const isParentField = key === "parentId";
         const fieldLabel = isParentField ? "Parent" : (columns.find(c => c.key === key)?.label || key);
@@ -2957,15 +3001,15 @@ function AssetTracker() {
         const to = isParentField ? (parentNameFor(newVal, assets) || UNASSIGNED_LABEL) : newVal;
         editEntries.push({
           at: new Date().toISOString(), by: currentUser || "", assetLabel: original.label,
-          assetType: draft.type || original.type, action: "edited", field: fieldLabel, from, to,
+          assetType: draftToSave.type || original.type, action: "edited", field: fieldLabel, from, to,
         });
       });
 
-      const next = assets.map(a => (a.label === selectedLabel ? { ...a, ...stripDraftUiState(draft) } : a));
+      const next = assets.map(a => (a.label === selectedLabel ? { ...a, ...stripDraftUiState(draftToSave) } : a));
       if (editNote.trim()) {
         editEntries.push({
           at: new Date().toISOString(), by: currentUser || "", assetLabel: original.label,
-          assetType: draft.type || original.type, action: "noted", note: editNote.trim(),
+          assetType: draftToSave.type || original.type, action: "noted", note: editNote.trim(),
         });
       }
       await persist(next, { auditLog: editEntries.length ? logAudit(editEntries) : auditLog });
@@ -4835,7 +4879,7 @@ function AssetTracker() {
     const visibleDetailColumns = columns.filter(c => (
       fieldAppliesTo(c.key, selectedAsset.type)
     ));
-    const parentProblem = parentageProblem(selectedAsset, assets);
+    const parentProblem = parentageProblem(selectedAsset, assets, typesList);
     const detailGroups = groupDetailColumns(visibleDetailColumns);
     // "label" is excluded here (but not from addFormColumns) — it's the one
     // field the whole app treats as a stable, unique identifier elsewhere
@@ -4936,7 +4980,12 @@ function AssetTracker() {
               <AlertTriangle size={16} style={{ color: C.danger, flexShrink: 0, marginTop: 1 }} />
               <div style={{ fontSize: 13, color: C.ink }}>
                 <b style={{ color: C.danger }}>This asset's parent doesn't make sense.</b>{" "}
-                {parentProblem} Edit it and pick a different parent, or set it to {UNASSIGNED_LABEL}.
+                {/* The generic advice only applies when there IS a Parent field
+                    to act on. For a type that takes no parent, picking a
+                    different one is impossible — parentageProblem says what to do
+                    instead (Edit, then Save, which clears it). */}
+                {parentProblem}
+                {typeTakesParent(selectedAsset.type) && ` Edit it and pick a different parent, or set it to ${UNASSIGNED_LABEL}.`}
               </div>
             </div>
           )}
@@ -5019,6 +5068,13 @@ function AssetTracker() {
             </div>
           ) : (
             <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 18, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)", marginBottom: 20 }}>
+              {/* Form-level copy of the parent error. ParentField shows it too,
+                  but only exists for a type that takes a parent — without this,
+                  a save refused over a stored parent that has no field to edit
+                  would look like a Save button that simply does nothing. */}
+              {draft.parentError && (
+                <div style={{ fontSize: 13, color: C.danger, marginBottom: 12 }}>{draft.parentError}</div>
+              )}
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12 }}>
                 {editFormColumns.map(c => (
                   c.key === "type" ? (

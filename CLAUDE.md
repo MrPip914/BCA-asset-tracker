@@ -565,6 +565,27 @@ is its own ancestor — it seeds its visited set with `asset.label` and stops at
 repeat — so the "is this in a loop" test has to be `wouldCreateCycle(asset.label,
 asset.parentId, ...)`, i.e. "would re-pointing it where it already points close a loop".
 
+**A type that takes no parent is never GIVEN one, and a stored one self-heals.** Three bugs met
+on the live sheet's Bulk Item (2026-08-25), all of which only bite a type with `parentTypes: []`:
+- `adoptLegacyParentage()` adopted a pre-v9 `roomId` as a `parentId` regardless of type. A Bulk
+  Item spreads across rooms via allocations and takes no parent, so this manufactured an asset
+  permanently flagged by `parentageProblem()`. It now returns early for such a type.
+- That flagged asset **could not be saved at all**. `saveDraft` refused on `validateParentChoice`
+  and wrote the message into `draft.parentError`, which renders *inside* `ParentField` — a field
+  a no-parent type doesn't have. Save appeared to do nothing, with no control to fix it. Now the
+  edit path CLEARS `parentId` for such a type instead of refusing (no parent is its only correct
+  value, so this is a repair), the error also renders at form level, and the banner's "pick a
+  different parent" advice is suppressed where picking one is impossible.
+- `hasMisadoptedName()` bailed out whenever the type's own legacy name column held anything,
+  which skipped the one type that has BOTH its own column and a stale `room`: the broken first
+  backfill read `room` first, so a bulk item called "Room 100" instead of "Chairs" was precisely
+  the case the repair could never see. It now ignores the type's own column and checks the rest.
+
+**Load order matters**: `applyTypeSettings()` runs BEFORE the assets are mapped, not just before
+its own `setState`. The load-time backfills ask `typeTakesParent` and `isPlaceType`, which read
+the module-level settings, so applying them later means the first load after a settings change
+adopts parents and names under the PREVIOUS rules.
+
 **Reading old data needs no migration**: `adoptLegacyParentage()` runs in `loadData()`'s map
 and reads a pre-v15 asset's `roomId`/`buildingId` as a `parentId`, so nothing past `loadData`
 ever sees the old shape and the same build is correct against a migrated sheet and an
