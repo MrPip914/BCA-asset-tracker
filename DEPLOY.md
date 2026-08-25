@@ -6,25 +6,43 @@ Deploy > Manage deployments > pencil > Version: New version > Deploy.
 
 `node deploy.mjs` does all of that, and then checks it worked.
 
+## Where to run it
+
+**Google Cloud Shell** is the path of least setup — a browser terminal, nothing installed
+locally, works on a phone. Open this link:
+
+<https://shell.cloud.google.com/cloudshell/open?cloudshell_git_repo=https://github.com/MrPip914/BCA-asset-tracker&cloudshell_tutorial=cloudshell-deploy.md>
+
+It clones the repo and opens `cloudshell-deploy.md` as a guided walkthrough with tap-to-run
+command buttons. Cloud Shell's `$HOME` persists between sessions, so the sign-in and the
+Script ID are entered **once ever** — later visits go straight to `node deploy.mjs`.
+($HOME is deleted after 120 days with no Cloud Shell use; you'd redo the two setup steps.)
+
+It also works on your own machine. Same commands, same result — the only difference is
+where the sign-in is stored.
+
 ## One-time setup
 
 1. **Turn on the Apps Script API** for your Google account (once, ever):
    <https://script.google.com/home/usersettings> — set "Google Apps Script API" to On.
 
-2. **Sign in**, from the repo folder:
+2. **Sign in:**
 
-       npx -y @google/clasp@3.4.0 login
+       npx -y @google/clasp@3.4.0 login          # on your own machine
+       npx -y @google/clasp@3.4.0 login --no-localhost   # in Cloud Shell
 
-   A browser opens; approve it. This writes a credential to your home folder
-   (`~/.clasprc.json` — *not* into this repo, which is public).
+   Approve in the browser. `--no-localhost` prints a link and asks you to paste back the
+   address you land on, which is what works where no browser can reach the terminal.
+   The credential is written to `~/.clasprc.json` — never into this repo, which is public.
 
-3. **Record the Script ID.** In the Apps Script editor: Project Settings > IDs > Script ID.
+3. **Record the Script ID** (Apps Script editor: Project Settings > IDs > Script ID):
 
-       cp deploy.config.example.json deploy.config.json
+       echo '{"scriptId":"YOUR_ID_HERE"}' > ~/.bca-asset-tracker-deploy.json
 
-   Paste the ID into `scriptId`. This file is gitignored.
-
-That's it. `deploy.config.json` and the credential both stay off GitHub.
+   `deploy.mjs` reads `./deploy.config.json` first and falls back to that home-directory
+   copy. The home copy is what survives Cloud Shell re-cloning the repo each visit;
+   `deploy.config.example.json` is the template if you'd rather keep it in the repo folder
+   (that path is gitignored).
 
 ## Deploying
 

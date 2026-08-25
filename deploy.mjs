@@ -59,18 +59,36 @@ function clasp(args, { cwd, json = false } = {}) {
 
 // ---------------------------------------------------------------- config
 
-const cfgPath = path.join(REPO, "deploy.config.json");
-if (!fs.existsSync(cfgPath)) {
+// Config is looked for in the repo first, then in the home directory. The home copy is
+// what makes Cloud Shell work: the repo is re-cloned fresh every visit (and the repo copy
+// is gitignored, so it is never in the clone), while $HOME persists between sessions.
+const HOME_CONFIG = path.join(os.homedir(), ".bca-asset-tracker-deploy.json");
+const REPO_CONFIG = path.join(REPO, "deploy.config.json");
+
+function loadConfig() {
+  for (const p of [REPO_CONFIG, HOME_CONFIG]) {
+    if (fs.existsSync(p)) {
+      try {
+        return JSON.parse(fs.readFileSync(p, "utf8"));
+      } catch {
+        die(`${p} is not valid JSON.`);
+      }
+    }
+  }
+  return {};
+}
+
+const cfg = loadConfig();
+const scriptId = process.env.GAS_SCRIPT_ID || cfg.scriptId;
+if (!scriptId || scriptId.startsWith("PASTE_")) {
   die(
-    "deploy.config.json not found. Create it with your Apps Script ID:\n\n" +
-      '    { "scriptId": "PASTE_SCRIPT_ID_HERE" }\n\n' +
-      "Find it in the Apps Script editor under Project Settings > IDs > Script ID.\n" +
+    "No Apps Script ID configured.\n\n" +
+      "Find it in the Apps Script editor under Project Settings > IDs > Script ID, then\n" +
+      "save it once (it persists, so this is a one-time step):\n\n" +
+      `    echo '{"scriptId":"YOUR_ID_HERE"}' > ${HOME_CONFIG}\n\n` +
       "See DEPLOY.md."
   );
 }
-const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
-const scriptId = process.env.GAS_SCRIPT_ID || cfg.scriptId;
-if (!scriptId || scriptId.startsWith("PASTE_")) die("No scriptId set in deploy.config.json.");
 
 // ------------------------------------------------- preflight: versions agree
 
