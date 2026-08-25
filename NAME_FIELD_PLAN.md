@@ -166,12 +166,19 @@ their `DEFAULT_COLUMNS` position.
    real names — if it doesn't, the rename is moot and the field goes instead. Two
    decisions are still open, both put to Eric on 2026-08-24 and neither answered,
    so a session picking this up starts by asking:
-   - **Renaming a type.** `asset.type` stores the type's NAME, and so does every
-     other type's `parentTypes`, so a rename needs a cascade over two reference
-     sites — the same shape as the room-rename cascade the id migration removed.
-     Three options: forbid renaming (consistent with "labels are never renamed"),
-     cascade it, or give types real ids first. The last is cheapest done BEFORE a
-     pile of user-created types exists.
+   - **Renaming a type — DECIDED 2026-08-25 (Eric): give types real ids first.**
+     `asset.type` stores the type's NAME, and so does every other type's
+     `parentTypes`, so renaming without ids needs a cascade over two reference
+     sites — the same shape as the room-rename cascade the id migration removed,
+     and the app has deliberately moved away from that pattern everywhere else.
+     The two rejected options were forbidding renaming (consistent with "labels
+     are never renamed", but a type name is a label people *read*, unlike an asset
+     id) and cascading it. Ids are cheapest now, while only a handful of types
+     exist and none are user-created — the cost grows with every type added, which
+     is the argument for doing it before the editor ships rather than after.
+     Once ids exist, a rename is an ordinary single-record field edit, and the
+     reference conventions in CLAUDE.md apply unchanged: references store the id,
+     names resolve at render time.
    - **Where a type's settings live.** Recommended: `TYPE_REGISTRY` stays the
      shipped defaults and a `typeSettings` Config blob overlays it per key. An icon
      is a React component and a module needs a render branch, so neither can be
