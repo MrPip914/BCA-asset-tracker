@@ -179,18 +179,58 @@ const TYPE_REGISTRY = {
 // `typesList`) and can hold types that aren't in the registry at all.
 const TYPE_OPTIONS = Object.keys(TYPE_REGISTRY);
 
+// A TYPE IS REFERENCED BY ID, NEVER BY THE NAME PEOPLE READ.
+//
+// `asset.type` holds a type's `id`, and so does every `parentTypes` entry and
+// every key in TYPE_REGISTRY. The id never changes; the `name` beside it is
+// ordinary editable text. That split is what makes renaming a type free: with
+// the name stored on every asset, "Computer" → "Workstation" would have to
+// rewrite every asset that said Computer plus every type that named it as a
+// possible parent — the same rename cascade the id migration removed for Rooms
+// (see CLAUDE.md's reference conventions), and the reason it wasn't offered.
+//
+// A BUILT-IN TYPE'S ID IS ITS ORIGINAL NAME — Room's id is the string "Room".
+// That looks like the thing this is meant to avoid and is the opposite: it means
+// every asset already on the sheet is already storing a valid id, so this needs
+// NO data migration and NO backend change, and every identity test the app
+// already makes (`a.type === "Room"`, which CLAUDE.md keeps as legitimate) keeps
+// working untouched. Only types created from here on get a generated id, since
+// only they have no historical name to preserve.
+const DEFAULT_TYPES = TYPE_OPTIONS.map(id => ({ id, name: id }));
+
+// Reads a type list saved before types had ids — a plain array of name strings —
+// as the object form. Same shape of fix as adoptLegacyParentage/adoptLegacyNames:
+// applied on load, so nothing past loadData ever sees the old form, and the same
+// build is correct against a migrated Config blob and an un-migrated one. The
+// name becomes the id, which is exactly right: that string is what every asset
+// is already storing.
+function adoptLegacyTypesList(list) {
+  return (list || []).map(t => (typeof t === "string" ? { id: t, name: t } : t));
+}
+
+// What a type is CALLED. Falls back to the id, which covers an asset whose type
+// was removed from the managed list — the id is the original name for a built-in
+// and a raw uuid for a user-created one, but showing something beats showing
+// nothing, and the asset's Type field is where it gets corrected.
+function typeNameOf(typeId, typesList) {
+  const found = (typesList || []).find(t => t.id === typeId);
+  return found ? found.name : (typeId || "");
+}
+
 // Locked types can't be removed in the type manager (see `locked` above).
-function isLockedType(type) {
-  return !!TYPE_REGISTRY[type]?.locked;
+function isLockedType(typeId) {
+  return !!TYPE_REGISTRY[typeId]?.locked;
 }
 // Puts back any locked type missing from a stored type list, in registry order,
 // so a list saved before a new structural type existed still offers it. See the
-// call site in loadData for why only LOCKED types are restored.
+// call site in loadData for why only LOCKED types are restored. A locked type
+// restored this way gets its default name; one the user has since renamed is
+// already present by id, so its name is left alone.
 function ensureLockedTypes(list) {
-  const have = new Set(list);
-  const missing = TYPE_OPTIONS.filter(t => isLockedType(t) && !have.has(t));
+  const have = new Set(list.map(t => t.id));
+  const missing = TYPE_OPTIONS.filter(id => isLockedType(id) && !have.has(id));
   if (missing.length === 0) return list; // reference-stable: persist()'s _dirty check compares by identity
-  return [...list, ...missing];
+  return [...list, ...missing.map(id => ({ id, name: id }))];
 }
 // Which types an asset of `type` may sit inside — the only thing render sites
 // should branch on, instead of comparing type names. A REGISTERED type always
@@ -1127,6 +1167,15 @@ const SANDBOX_DATA_KEY = "asset-tracker-sandbox-data";
 // from a different baseline; it's plain data, safe to edit directly.
 const MOCK_SNAPSHOT = {
   scriptVersion: FRONTEND_SCRIPT_VERSION,
+  // The type list in the OLD pre-id shape — a plain array of name strings, which
+  // is what the live sheet's Config holds. Present so the sandbox exercises
+  // adoptLegacyTypesList rather than falling through to DEFAULT_TYPES, which is
+  // already in the new shape and so proves nothing. Same reasoning as the stored
+  // column config below.
+  typesList: [
+    "Computer", "Monitor", "Phone", "TV", "DocuCam", "Stream Deck", "Mini Split",
+    "Condenser", "Room", "Building", "Campus", "Bulk Item", "Electrical Panel", "Other",
+  ],
   // A column config as an OLDER client would have saved it — carrying the
   // Campus/Building/Room columns that are now retired. Present so the sandbox
   // exercises the removal path in loadData (RETIRED_COLUMN_KEYS) instead of
@@ -1638,7 +1687,7 @@ function AssetTracker() {
   const [bulkItemTypes, setBulkItemTypes] = useState(DEFAULT_BULK_ITEM_TYPES);
   const [showBulkItemTypesManager, setShowBulkItemTypesManager] = useState(false);
   const [newBulkItemTypeName, setNewBulkItemTypeName] = useState("");
-  const [typesList, setTypesList] = useState(TYPE_OPTIONS);
+  const [typesList, setTypesList] = useState(DEFAULT_TYPES);
   const [showTypesManager, setShowTypesManager] = useState(false);
   const [newTypeName, setNewTypeName] = useState("");
   const [breakerTypes, setBreakerTypes] = useState(SEEDED_BREAKER_TYPES);
@@ -2106,7 +2155,9 @@ function AssetTracker() {
       // always a version gap and never a choice. An ordinary type the user
       // deliberately deleted stays deleted, which re-adding every entry in
       // TYPE_OPTIONS would undo on every single load.
-      setTypesList(ensureLockedTypes(Array.isArray(data.typesList) && data.typesList.length ? data.typesList : TYPE_OPTIONS));
+      setTypesList(ensureLockedTypes(adoptLegacyTypesList(
+        Array.isArray(data.typesList) && data.typesList.length ? data.typesList : DEFAULT_TYPES
+      )));
       // Absent/0/garbage all mean "never stored" — peekAssetNumber() seeds it
       // from the loaded assets instead, and the first asset created writes it.
       const storedNextNumber = Number(data.nextAssetNumber);
@@ -2423,11 +2474,13 @@ function AssetTracker() {
     return [...auditLog, ...entries];
   }
 
+  // Type filter options are type IDS, sorted by the name they currently show.
   const types = useMemo(() => {
     if (!assets) return [];
     const set = new Set(assets.map(a => a.type || "Other"));
-    return ["All types", ...Array.from(set).sort()];
-  }, [assets]);
+    return ["All types", ...Array.from(set).sort((x, y) =>
+      typeNameOf(x, typesList).localeCompare(typeNameOf(y, typesList)))];
+  }, [assets, typesList]);
 
   const users = useMemo(() => ["All users", ...usersList], [usersList]);
 
@@ -2584,7 +2637,7 @@ function AssetTracker() {
   const gridTemplate = visibleColumns.map(c => `${c.width}px`).join(" ") + " 36px";
 
   const filterConfigs = {
-    type: { label: "Type", value: typeFilter, setValue: setTypeFilter, options: types },
+    type: { label: "Type", value: typeFilter, setValue: setTypeFilter, options: types, labelForOption: id => (id === "All types" ? id : typeNameOf(id, typesList)) },
     person: { label: "User", value: userFilter, setValue: setUserFilter, options: users },
     status: { label: "Status", value: statusFilter, setValue: setStatusFilter, options: STATUS_FILTER_OPTIONS },
   };
@@ -3612,26 +3665,49 @@ function AssetTracker() {
     persist(assets, { bulkItemTypes: bulkItemTypes.filter(t => t !== name) });
   }
 
+  // Names don't have to be unique for correctness — nothing resolves a type
+  // through its name any more — but two types both reading "Printer" in the
+  // picker is a trap for the person choosing, so both add and rename refuse it.
+  function typeNameTaken(name, exceptId) {
+    const wanted = name.trim().toLowerCase();
+    return typesList.some(t => t.id !== exceptId && t.name.trim().toLowerCase() === wanted);
+  }
+
   function addType() {
     const name = newTypeName.trim();
-    if (!name || typesList.includes(name)) return;
+    if (!name || typeNameTaken(name)) return;
+    // A generated id, per the convention for anything that isn't an Asset and so
+    // has no label to be identified by (see CLAUDE.md). Only NEW types get one:
+    // a built-in keeps its original name as its id so existing assets stay valid.
+    const entry = { id: crypto.randomUUID(), name };
     // Insert before "Other" (if present) so it stays the catch-all at the end of
     // the picker, matching how new default columns get inserted before "status".
-    const otherIdx = typesList.indexOf("Other");
+    const otherIdx = typesList.findIndex(t => t.id === "Other");
     const nextTypesList = otherIdx === -1
-      ? [...typesList, name]
-      : [...typesList.slice(0, otherIdx), name, ...typesList.slice(otherIdx)];
+      ? [...typesList, entry]
+      : [...typesList.slice(0, otherIdx), entry, ...typesList.slice(otherIdx)];
     persist(assets, { typesList: nextTypesList });
     setNewTypeName("");
+  }
+
+  // Renaming changes ONLY the display name. Every asset of this type references
+  // it by id, so nothing else has to be found and rewritten — which is the whole
+  // reason ids were introduced before the type editor rather than after.
+  function renameType(id, name) {
+    const clean = name.trim();
+    if (!clean || typeNameTaken(clean, id)) return;
+    const current = typesList.find(t => t.id === id);
+    if (!current || current.name === clean) return;
+    persist(assets, { typesList: typesList.map(t => (t.id === id ? { ...t, name: clean } : t)) });
   }
 
   // Removing a type only takes it off the pick list — assets already using that
   // value keep it until someone edits them. A registry type marked `locked` can't
   // be removed at all, since Room/Building/Bulk Item/Electrical Panel have
   // structural dependencies elsewhere (field rules, Contents/Allocations/Breakers).
-  function removeType(name) {
-    if (isLockedType(name)) return;
-    persist(assets, { typesList: typesList.filter(t => t !== name) });
+  function removeType(id) {
+    if (isLockedType(id)) return;
+    persist(assets, { typesList: typesList.filter(t => t.id !== id) });
   }
 
   // --- Breaker Types (catalog) ------------------------------------------------
@@ -4338,19 +4414,24 @@ function AssetTracker() {
     />
   );
 
+  // Not ListManagerModal: that one manages a list of plain strings, where the
+  // string IS the item, so there is nothing to rename — editing an entry would
+  // mean deleting one value and adding another. A type is an id with a name
+  // attached, and renaming it is the whole point of giving types ids.
   const typesManagerModal = showTypesManager && (
-    <ListManagerModal
-      title="Manage asset types"
-      items={typesList}
+    <TypeManagerModal
+      types={typesList}
       newValue={newTypeName}
       onNewValueChange={setNewTypeName}
       onAdd={addType}
+      onRename={renameType}
       onRemove={removeType}
       onClose={() => { setShowTypesManager(false); setNewTypeName(""); }}
-      placeholder="New type name"
       isSaving={isSaving}
+      canEdit={canEdit}
       isLocked={isLockedType}
-      hint="Room, Building, Bulk Item, and Electrical Panel are built into the app and can't be removed."
+      nameTaken={typeNameTaken}
+      countFor={id => (assets || []).filter(a => a.type === id).length}
     />
   );
 
@@ -4559,9 +4640,10 @@ function AssetTracker() {
     // what lets a Room finally read "Room 300 (Room)" instead of just "Room",
     // which is all it showed before — the type name it shares with 20 others.
     const detailName = nameOf(selectedAsset);
+    const detailTypeName = typeNameOf(selectedAsset.type, typesList);
     const titleText = detailName !== selectedAsset.label
-      ? `${detailName} (${selectedAsset.type})`
-      : selectedAsset.screenSize ? `${selectedAsset.type} · ${selectedAsset.screenSize}` : selectedAsset.type;
+      ? `${detailName} (${detailTypeName})`
+      : selectedAsset.screenSize ? `${detailTypeName} · ${selectedAsset.screenSize}` : detailTypeName;
     // Room and Building are computed columns now, so they're shown for every
     // type that actually has one in its chain rather than being gated by
     // fieldAppliesTo — a Condenser has a Building but no Room, and an Unassigned
@@ -4761,7 +4843,7 @@ function AssetTracker() {
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12 }}>
                 {editFormColumns.map(c => (
                   c.key === "type" ? (
-                    <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v })} typeOptions={typesList} onManage={() => setShowTypesManager(true)} />
+                    <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v })} types={typesList} onManage={() => setShowTypesManager(true)} />
                   ) : c.key === "parent" ? (
                     <ParentField
                       key={c.key}
@@ -6213,7 +6295,7 @@ function AssetTracker() {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12 }}>
               {addFormColumns.map(c => (
                 c.key === "type" ? (
-                  <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v })} typeOptions={typesList} onManage={() => setShowTypesManager(true)} />
+                  <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v })} types={typesList} onManage={() => setShowTypesManager(true)} />
                 ) : c.key === "parent" ? (
                   <ParentField
                     key={c.key}
@@ -6391,6 +6473,11 @@ function AssetTracker() {
                         // labelling those "Unassigned" would read as a gap to fill
                         // rather than their normal, correct state.
                         applies ? (pathOf(a, assets) || UNASSIGNED_LABEL) : ""
+                      ) : isTypeCol ? (
+                        // The stored value is the type's id; what's shown is its
+                        // current name, which is what makes a rename take effect
+                        // everywhere at once.
+                        typeNameOf(a.type, typesList) || "—"
                       ) : (
                         applies ? (a[c.key] || "—") : ""
                       )}
@@ -6595,9 +6682,15 @@ function PickerTrigger({ value, placeholder, onClick, ariaLabel }) {
   );
 }
 
-function TypeField({ value, onChange, typeOptions, onManage }) {
+// `value` is a type's stable `id`, not the name shown in the picker — see the
+// DEFAULT_TYPES comment. The option list is ids too, with the name resolved for
+// display only, so renaming a type changes what this shows and nothing else.
+function TypeField({ value, onChange, types, onManage }) {
   const [open, setOpen] = useState(false);
-  const options = typeOptions.includes(value) || !value ? typeOptions : [value, ...typeOptions];
+  const ids = types.map(t => t.id);
+  // A type removed from the managed list stays selectable on the asset already
+  // using it, so opening the form doesn't silently blank its Type.
+  const options = ids.includes(value) || !value ? ids : [value, ...ids];
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>
@@ -6608,13 +6701,14 @@ function TypeField({ value, onChange, typeOptions, onManage }) {
           </button>
         )}
       </span>
-      <PickerTrigger value={value} placeholder="Select…" onClick={() => setOpen(true)} ariaLabel="Select type" />
+      <PickerTrigger value={typeNameOf(value, types)} placeholder="Select…" onClick={() => setOpen(true)} ariaLabel="Select type" />
       {open && (
         <SelectionModal
           title="Select type"
           options={options}
           value={value}
           onChange={onChange}
+          labelForOption={id => typeNameOf(id, types)}
           onClose={() => setOpen(false)}
           onManage={onManage}
           manageLabel="Manage asset types"
@@ -7220,6 +7314,145 @@ function Detail({ label, value, wide, italic }) {
 // its own: every one of these lists writes through the same persist(), so the
 // add/remove controls here disable and say "Saving…" for the same reason the
 // asset forms do. Guarding onAdd/onRemove in one place covers all six lists.
+// Manages the asset TYPE list: add, rename, remove. Separate from
+// ListManagerModal because a type is an { id, name } record rather than a bare
+// string — renaming one edits a field, where renaming a string would mean
+// swapping one list entry for another and orphaning every asset pointing at it.
+//
+// Renaming is safe precisely because nothing resolves a type through its name:
+// `asset.type` holds the id (see DEFAULT_TYPES), so this writes one field and
+// every asset follows automatically. That's why the row shows a live count of
+// assets using the type — it's reassurance that they come along, not a warning.
+//
+// Edit affordance follows the app's convention: an icon-only pencil at the
+// trailing edge of the row it edits (see CLAUDE.md).
+function TypeManagerModal({ types, newValue, onNewValueChange, onAdd, onRename, onRemove, onClose, isSaving, canEdit, isLocked, nameTaken, countFor }) {
+  const [confirmId, setConfirmId] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [draftName, setDraftName] = useState("");
+
+  // Entering edit mode reseeds from the stored name, so an abandoned rename
+  // can't leave a stale draft behind the next time the pencil is clicked —
+  // the same rule the breaker modal follows.
+  const startEdit = t => { setEditingId(t.id); setDraftName(t.name); setConfirmId(null); };
+  const cancelEdit = () => { setEditingId(null); setDraftName(""); };
+  const clean = draftName.trim();
+  const duplicate = !!editingId && !!clean && nameTaken(clean, editingId);
+  const canSaveEdit = !!clean && !duplicate && !isSaving;
+  const commitEdit = () => { if (!canSaveEdit) return; onRename(editingId, clean); cancelEdit(); };
+
+  return (
+    // zIndex 50, above SelectionModal's 40 — opened via the "manage" gear from
+    // inside the Type picker, so it must stack above it.
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 400, maxHeight: "76vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>Manage asset types</div>
+          <button onClick={onClose} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+        </div>
+        <div style={{ fontSize: 12, color: C.empty, marginBottom: 10 }}>
+          Renaming a type updates it everywhere — assets keep their type. Room, Building, Bulk Item, Campus and Electrical Panel are built into the app and can't be removed.
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
+          {types.map(t => {
+            const locked = isLocked ? isLocked(t.id) : false;
+            const inUse = countFor ? countFor(t.id) : 0;
+            if (editingId === t.id) {
+              return (
+                <div key={t.id} style={{ display: "flex", flexDirection: "column", gap: 4, padding: "6px 0" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <input
+                      autoFocus
+                      value={draftName}
+                      onChange={e => setDraftName(e.target.value)}
+                      onKeyDown={e => { if (e.key === "Enter") commitEdit(); if (e.key === "Escape") cancelEdit(); }}
+                      style={{ flex: 1, padding: "5px 8px", border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 14, fontFamily: "inherit", background: C.surface, color: C.ink }}
+                      aria-label={`Rename ${t.name}`}
+                    />
+                    <button
+                      onClick={commitEdit}
+                      disabled={!canSaveEdit}
+                      style={{ padding: "4px 10px", background: canSaveEdit ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontSize: 12, fontWeight: 600 }}
+                    >
+                      {isSaving ? "Saving…" : "Save"}
+                    </button>
+                    <button onClick={cancelEdit} style={{ padding: "4px 10px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12, color: C.ink }}>Cancel</button>
+                  </div>
+                  {duplicate && <span style={{ fontSize: 12, color: C.danger }}>Another type is already called "{clean}".</span>}
+                </div>
+              );
+            }
+            return (
+              <div key={t.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 14 }}>
+                {confirmId === t.id ? (
+                  <>
+                    <span style={{ color: C.danger, fontSize: 13 }}>
+                      Remove "{t.name}"?{inUse > 0 && ` ${inUse} asset(s) keep it.`}
+                    </span>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button onClick={() => setConfirmId(null)} style={{ padding: "3px 8px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12, color: C.ink }}>Cancel</button>
+                      <button
+                        onClick={() => { if (isSaving) return; onRemove(t.id); setConfirmId(null); }}
+                        disabled={isSaving}
+                        style={{ padding: "3px 8px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontSize: 12, fontWeight: 600 }}
+                      >
+                        {isSaving ? "Saving…" : "Delete"}
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <span style={{ display: "flex", alignItems: "center", gap: 6, opacity: locked ? 0.75 : 1, minWidth: 0 }}>
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.name}</span>
+                      {locked && <Lock size={11} style={{ flexShrink: 0 }} />}
+                      {inUse > 0 && <span style={{ fontSize: 11, color: C.empty, flexShrink: 0 }}>{inUse}</span>}
+                    </span>
+                    {canEdit && (
+                      <span style={{ display: "flex", alignItems: "center", gap: 2, flexShrink: 0 }}>
+                        {/* Renaming is allowed on locked types too: `locked` means
+                            the app depends on the type EXISTING (its field rules,
+                            its tabs), which is about the id, not what it's called. */}
+                        <button onClick={() => startEdit(t)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Edit ${t.name}`}>
+                          <Pencil size={14} color={C.muted} />
+                        </button>
+                        {!locked && (
+                          <button onClick={() => setConfirmId(t.id)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Remove ${t.name}`}>
+                            <Trash2 size={14} color={C.danger} />
+                          </button>
+                        )}
+                      </span>
+                    )}
+                  </>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {canEdit && (
+          <div style={{ display: "flex", gap: 6 }}>
+            <input
+              value={newValue}
+              onChange={e => onNewValueChange(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") onAdd(); }}
+              placeholder="New type name"
+              style={{ flex: 1, padding: "6px 8px", border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 13, fontFamily: "inherit", background: C.surface, color: C.ink }}
+            />
+            <button
+              onClick={onAdd}
+              disabled={isSaving}
+              style={{ padding: "6px 12px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 13, fontWeight: 600 }}
+            >
+              {isSaving ? "Saving…" : "Add"}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onRemove, onClose, placeholder, isLocked, hint, isSaving }) {
   const [confirmItem, setConfirmItem] = useState(null);
   return (
