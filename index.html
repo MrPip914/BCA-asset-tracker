@@ -158,10 +158,11 @@ const TYPE_REGISTRY = {
   // Tables, chairs... not individually tagged or tied to one room — a pooled
   // quantity, distributed across rooms via the Allocations tab instead. That
   // distribution is explicitly not parent/child, hence no parentTypes.
-  // `itemName` is its sub-type, picked from the managed bulkItemTypes list
-  // (e.g. "Folding Chair", "Cafeteria Table").
+  // `subType` is its sub-type, picked from the managed bulkItemTypes list
+  // (e.g. "Folding Chair", "Cafeteria Table"). Stored as `itemName` before v24;
+  // see adoptLegacySubType.
   "Bulk Item": {
-    locked: true, icon: Package, parentTypes: [], onlyFields: ["totalQuantity", "itemName"],
+    locked: true, icon: Package, parentTypes: [], onlyFields: ["totalQuantity", "subType"],
     excludedFields: ["hostname", "screenSize", "peripherals", "serial", "person"],
     modules: ["allocations"],
   },
@@ -412,7 +413,7 @@ function availableTabsFor(type) {
 //
 // This replaced a per-type `nameField` in the registry that pointed at a
 // different column for each named type — a Room's `room`, a Building's
-// `building`, a Campus's `campus`, a Bulk Item's `itemName` — which tangled two
+// `building`, a Campus's `campus`, a Bulk Item's sub-type — which tangled two
 // separate questions together: the Room column meant "this room's name" on a
 // Room row and "the room this sits in" on every other row, and the Type column
 // printed a name where the type word belonged. Worse, only those four types
@@ -530,6 +531,21 @@ function suggestedNameFor(asset, assets) {
   return `${type} ${asset.label || ""}`.trim();
 }
 
+// Reads a Bulk Item saved before v24, when the sub-type field was called
+// `itemName`. Same shape as adoptLegacyParentage/adoptLegacyNames: applied on
+// load, so nothing past loadData sees the old key, and the same build is correct
+// against a migrated sheet and an un-migrated one. `subType` wins when both
+// exist, since having both means the row has been rewritten since the rename.
+//
+// The old column is deliberately still read (and still written by the backend),
+// so the change is reversible; clearing it is a separate later step, exactly as
+// with roomId/buildingId and the legacy name columns.
+function adoptLegacySubType(a) {
+  if ((a.subType || "").trim()) return a;
+  const legacy = (a.itemName || "").trim();
+  return legacy ? { ...a, subType: legacy } : a;
+}
+
 // Gives every asset saved before the `name` field existed the name it was
 // already being displayed under, so nothing visibly changes on the first load
 // after this ships. Applied in loadData (after parentage is resolved, since the
@@ -549,7 +565,7 @@ function suggestedNameFor(asset, assets) {
 // the room it sits in ("Room 102"). Reading it ungated named every computer in
 // the building after its room. See the note in NAME_FIELD_PLAN.md — the sandbox
 // fixture had no such leftovers, so nothing caught it before the live sheet did.
-const LEGACY_NAME_COLUMNS = { Room: "room", Building: "building", Campus: "campus", "Bulk Item": "itemName" };
+const LEGACY_NAME_COLUMNS = { Room: "room", Building: "building", Campus: "campus", "Bulk Item": "subType" };
 function legacyNameOf(a) {
   const key = LEGACY_NAME_COLUMNS[a?.type];
   return key ? String(a[key] || "").trim() : "";
@@ -590,7 +606,7 @@ const DEFAULT_COLUMNS = [
   // a narrower question and no longer doubles as the name (see nameOf).
   { key: "name", label: "Name", width: 200 },
   { key: "type", label: "Type", width: 140 },
-  { key: "itemName", label: "Sub-Type", width: 150 },
+  { key: "subType", label: "Sub-Type", width: 150 },
   { key: "screenSize", label: "Screen Size", width: 110 },
   { key: "totalQuantity", label: "Total Qty", width: 100 },
   // One location column showing the whole chain (see pathOf). Its KEY is
@@ -616,7 +632,14 @@ const DEFAULT_COLUMNS = [
   { key: "notes", label: "Notes", width: 240 },
   { key: "label", label: "Asset ID", width: 110 },
   { key: "status", label: "Status", width: 100 },
-].map(c => ({ ...c, visible: ["name", "type", "itemName", "parent", "person", "status"].includes(c.key), custom: false }));
+].map(c => ({ ...c, visible: ["name", "type", "subType", "parent", "person", "status"].includes(c.key), custom: false }));
+
+// Default columns that were RENAMED. A stored config still calls the sub-type
+// column `itemName`; without this it would keep that column (reading a field
+// nothing writes any more) AND gain `subType` from the add pass below, showing
+// the same thing twice. Mapping the key preserves the user's position and width
+// for it, which dropping and re-adding would not.
+const RENAMED_COLUMN_KEYS = { itemName: "subType" };
 
 // Default columns that USED to exist and must be dropped from a stored column
 // config on load. The migration below only ever ADDS newly-introduced defaults,
@@ -635,7 +658,7 @@ function typeEditableFields(columns) {
 }
 
 // The restricted fields as SHIPPED — hostname, screenSize, totalQuantity,
-// itemName. The editor may hand one of these to another type, but it may not
+// subType. The editor may hand one of these to another type, but it may not
 // invent a new one: creating a genuinely new type-specific field is the deferred
 // per-type custom-fields work (see BUGS.md), and letting the editor write an
 // arbitrary key into onlyFields would restrict that field app-wide and quietly
@@ -963,7 +986,7 @@ function validateParentChoice(childLabel, childType, parentId, assets) {
 // one flat list. Any column not named here (custom user-added columns) falls
 // into a trailing "Custom Fields" group rather than being dropped.
 const DETAIL_FIELD_GROUPS = [
-  { title: "Overview", keys: ["name", "type", "itemName", "screenSize", "totalQuantity", "label", "status"] },
+  { title: "Overview", keys: ["name", "type", "subType", "screenSize", "totalQuantity", "label", "status"] },
   // Path is the whole of "where is it" now — the Campus/Building/Room columns
   // that used to sit beside it here are gone, along with the filter that kept
   // them out of the editable form. A key naming a column that no longer exists
@@ -1105,7 +1128,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v23";
+const FRONTEND_SCRIPT_VERSION = "v24";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -2202,8 +2225,12 @@ function AssetTracker() {
       setAuthPending(false);
 
       const parented = data.assets
-        .map(a => ({ comments: [], changes: [], allocations: [], status: "Active", building: "", itemName: "", purchaseDate: "", warrantyUntil: "", ...a }))
-        .map(adoptLegacyParentage);
+        .map(a => ({ comments: [], changes: [], allocations: [], status: "Active", building: "", subType: "", purchaseDate: "", warrantyUntil: "", ...a }))
+        .map(adoptLegacyParentage)
+        // Before the name backfill below, which reads a Bulk Item's sub-type to
+        // name it — running it after would name every pre-v24 bulk item after
+        // its Asset ID instead.
+        .map(adoptLegacySubType);
       // Names are filled in over the already-parented list, because the
       // suggestion for fixed equipment reads the chain above the asset ("Room 102
       // Mini Split") — running it inside the first map would walk a list whose
@@ -2227,6 +2254,14 @@ function AssetTracker() {
       // column next to the ones it belongs with; a column with no such anchor (one
       // that leads the default order, like `name`) goes to the front.
       let storedCols = data.columns && data.columns.length ? data.columns : DEFAULT_COLUMNS;
+      // Rename first, then drop retired columns, then add new defaults — a
+      // renamed key has to reach the add pass under its NEW name or that pass
+      // sees it as missing and inserts a duplicate.
+      storedCols = storedCols.map(c => (
+        !c.custom && RENAMED_COLUMN_KEYS[c.key]
+          ? { ...c, key: RENAMED_COLUMN_KEYS[c.key], label: DEFAULT_COLUMNS.find(d => d.key === RENAMED_COLUMN_KEYS[c.key])?.label || c.label }
+          : c
+      ));
       // Drop columns retired in a newer app version before adding new ones, so a
       // sheet last saved by an older client doesn't keep offering a column that
       // nothing renders or edits any more (see RETIRED_COLUMN_KEYS).
@@ -5014,11 +5049,11 @@ function AssetTracker() {
                       options={peripheralsList}
                       onManage={() => setShowPeripheralsManager(true)}
                     />
-                  ) : c.key === "itemName" ? (
+                  ) : c.key === "subType" ? (
                     <BulkTypeField
                       key={c.key}
-                      value={draft.itemName || ""}
-                      onChange={v => setDraft({ ...draft, itemName: v })}
+                      value={draft.subType || ""}
+                      onChange={v => setDraft({ ...draft, subType: v })}
                       options={bulkItemTypes}
                       onManage={() => setShowBulkItemTypesManager(true)}
                     />
@@ -6466,11 +6501,11 @@ function AssetTracker() {
                     options={peripheralsList}
                     onManage={() => setShowPeripheralsManager(true)}
                   />
-                ) : c.key === "itemName" ? (
+                ) : c.key === "subType" ? (
                   <BulkTypeField
                     key={c.key}
-                    value={draft.itemName || ""}
-                    onChange={v => setDraft({ ...draft, itemName: v })}
+                    value={draft.subType || ""}
+                    onChange={v => setDraft({ ...draft, subType: v })}
                     options={bulkItemTypes}
                     onManage={() => setShowBulkItemTypesManager(true)}
                   />

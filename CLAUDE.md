@@ -316,9 +316,52 @@ per-device via `localStorage` (`SANDBOX_MODE_KEY`).
 ## Data model
 
 Assets have a `type`, picked from a managed list (`typesList`, editable via the gear icon on
-the Type field — same pattern as peripherals/vendors/change types, seeded from `TYPE_OPTIONS`
-on a brand-new sheet: Computer, Monitor, Phone, TV, DocuCam, Stream Deck, Room, Building,
-Bulk Item, Electrical Panel, Other).
+the Type field, seeded from `TYPE_OPTIONS` on a brand-new sheet: Computer, Monitor, Phone, TV,
+DocuCam, Stream Deck, Room, Building, Bulk Item, Electrical Panel, Other).
+
+**A type is referenced by `id`, never by the name people read** (2026-08-25). `typesList` holds
+`{ id, name }`; `asset.type`, every `parentTypes` entry and every `TYPE_REGISTRY` key hold the
+id. That split is what makes renaming a type free — with the name stored on every asset,
+"Computer" → "Workstation" would have to rewrite every asset plus every type naming it as a
+parent, the same cascade the id migration removed for Rooms.
+- **A built-in type's id IS its original name** — Room's id is the string `"Room"`. That looks
+  like the thing ids are meant to avoid and is the opposite: every asset already on the sheet
+  is already storing a valid id, so this needed **no data migration and no backend change**
+  (`typesList` is a JSON blob in Config, so its shape is the frontend's business), and every
+  identity test the app makes (`a.type === "Room"`) keeps working. Only types created after
+  this get a generated id, since only they have no historical name to preserve.
+- `adoptLegacyTypesList()` reads the old plain-string array on load, same pattern as
+  `adoptLegacyParentage`/`adoptLegacyNames`. `typeNameOf(id, typesList)` resolves a name for
+  display, falling back to the id.
+- Names needn't be unique for correctness, but add and rename both refuse a duplicate: two
+  types both reading "Printer" in the picker is a trap for whoever is choosing.
+
+**Per-type settings are a user-editable overlay on `TYPE_REGISTRY`** (the type editor,
+2026-08-25). The registry is the shipped default and is never written to; overrides live in
+Config under `typeSettings` keyed by type id (backend v24) and are merged on top at read time
+via `typeEntryFor()`, so a built-in still works if its override is missing and "Reset to
+default" is just deleting it.
+- **`TYPE_SETTINGS` is a module-level variable, not React state, and that is a deliberate
+  trade with a real hazard.** `fieldAppliesTo`, `isPlaceType` and `parentTypesFor` are plain
+  functions called from ~100 render sites (several per table cell), so threading state through
+  them would be an enormous diff for no behavioural gain. React therefore does not know when it
+  changes: it is safe **only** because every write goes through `persist()`, which `setState`s
+  anyway, and `applyTypeSettings()` is called *before* that setState so the following render
+  reads the new values. **Anything that changes these settings without a setState will silently
+  show stale rules.** The two app-wide derived sets (restricted fields, place types) are
+  recomputed on change rather than per call, since `fieldAppliesTo` runs per cell.
+- **What the editor can't do, and why.** An icon is stored as a NAME from a curated map
+  (`TYPE_ICON_CHOICES`), since a React component can't survive JSON; an unknown name falls back
+  to the shipped icon. A ticked field enters `onlyFields` only when it is *already* restricted
+  app-wide (`SHIPPED_RESTRICTED_FIELDS`) — the editor must not mint a new restricted field,
+  because that would restrict it app-wide and quietly strip it from every type that hadn't
+  opted in; genuinely new per-type fields are the deferred custom-fields work in `BUGS.md`.
+  Modules stay uneditable: a tab body needs a render branch, so it can't be switched on by data.
+- **Editing is allowed on locked types.** `locked` means the app depends on the type *existing*
+  — its tabs, its field rules — which is about the id, not what it's called or what it holds.
+- Name and settings save in ONE `persist()`: both are the config domain, so two calls would mean
+  two full snapshot writes and a chance for the second to be rejected as a conflict with the
+  first.
 
 **Everything the app knows about a structurally special type lives in one `TYPE_REGISTRY`**
 near the top of `index.html`, keyed by type name. This replaced a set of parallel arrays
@@ -381,11 +424,20 @@ harmless while the filter only ever matched a direct `roomId`), and was caught i
 testing, not by reading the diff. The filter is gone and the scope replaced it, but the
 exclusion is the same rule about the same hazard.
 
-`fieldAppliesTo()` reads the registry — e.g. Room and Building assets don't have brand/model/serial; Bulk Items
-(chairs, tables — not individually tagged) get a `totalQuantity` and an `itemName` instead, and
-are distributed across rooms via their own `allocations` array rather than a single `room` field.
-`itemName` ("Sub-Type" in the UI) is picked from its own managed list (`bulkItemTypes`) rather
-than freeform text, so it stays consistent.
+`fieldAppliesTo()` reads the merged entry — e.g. Room and Building assets don't have
+brand/model/serial; Bulk Items (chairs, tables — not individually tagged) get a `totalQuantity`
+and a `subType` instead, and are distributed across rooms via their own `allocations` array
+rather than a single `room` field. `subType` ("Sub-Type" in the UI) is picked from its own
+managed list (`bulkItemTypes`) rather than freeform text, so it stays consistent.
+
+**`subType` was called `itemName` until v24.** Renamed so the sheet column says what every label
+in the app already said — the field carries only the category now, since `name` took the naming
+half of its old double duty in v23. Done the way `parentId` and `name` were: `subType` is
+written, `itemName` is still read as a fallback (`adoptLegacySubType()`) and still written by the
+backend, so the change is reversible and un-migrated rows resolve; clearing the old column is a
+separate later step. A stored column config maps the old key to the new one on load
+(`RENAMED_COLUMN_KEYS`) — without that it would keep the dead `itemName` column *and* gain
+`subType` from the add pass, showing the same thing twice.
 
 **The Type column shows the type word and nothing else** — "Room", "Bulk Item", "Computer" —
 since v23. It used to print a Room's name there (via a local `realName`), and a Bulk Item's
@@ -1021,7 +1073,22 @@ When you do:
 
 ## Known constraints / things to watch
 
-- **The backend is v23 (the `name` field), confirmed deployed on 2026-08-25** by fetching the
+- **The repo is at v24 and v24 is UNDEPLOYED as of 2026-08-25.** It bundles two things: the
+  `typeSettings` Config key (per-type overrides from the type editor) and the `subType` column
+  (the Bulk Item sub-type, renamed from `itemName`). Until it's pasted in and a **New version**
+  deploy is created:
+  - Type settings do not persist. `doPost` writes a FIXED list of config keys and drops
+    unknown ones, so a `typeSettings` row would be discarded on every save — the editor works
+    in-session and forgets on reload. Renaming a type is unaffected: that lives in `typesList`,
+    which the live backend already stores.
+  - A Bulk Item's `subType` is dropped on write and read back from `itemName` on every load
+    (`adoptLegacySubType()`), so sub-types *display* correctly but a change to one doesn't
+    survive a refresh. Same shape as the pre-v17 `parentId` window.
+  - Sandbox mode is unaffected either way — it never touches the backend.
+  - No migration script: every save rewrites the whole Assets tab, so the first asset-domain
+    save after the deploy fills `subType` in for every bulk item at once. `itemName` is kept and
+    still written, so the deploy is reversible; clearing it is a separate later step.
+- **The backend was v23 (the `name` field), confirmed deployed on 2026-08-25** by fetching the
   `/exec` URL and reading `scriptVersion` back — which is the check the standing warning below
   asks for, not a line taken on faith. It supersedes every "UNDEPLOYED" note that used to sit
   here: v23 being live means v18 through v22 are too, since a deployment serves one version of

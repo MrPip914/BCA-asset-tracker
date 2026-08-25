@@ -1,9 +1,14 @@
 # The Name field — plan
 
-Status: **steps 1, 2 and 3 done; 3 needs no deploy. Backend v23** — confirmed live on 2026-08-25
-by reading `scriptVersion` back from the `/exec` URL. This header said "undeployed" while
-the Sequence section below said the opposite; the fetch settles it. Step 3 and the type
-editor are still ahead. It is the prerequisite for the asset type editor.
+Status: **all four steps built, 2026-08-25.**
+
+- Steps 1 and 2 (the `name` field) shipped as backend **v23**, confirmed live on 2026-08-25 by
+  reading `scriptVersion` back from the `/exec` URL rather than trusting a note — two notes
+  here and in CLAUDE.md had said "undeployed" since the day of the deploy.
+- Step 3 (removing the place columns) needed no backend change and is live with the frontend.
+- Step 4 (the type editor) needs backend **v24**, which is **NOT deployed**. See the Known
+  constraints entry in CLAUDE.md for what degrades until it is: type settings don't persist,
+  and a Bulk Item's sub-type displays but doesn't survive a refresh.
 
 Steps 1 and 2 were **built together, not separately as planned.** They don't
 separate: the moment every asset has a name, the Type column's "show the name if
@@ -153,38 +158,21 @@ their `DEFAULT_COLUMNS` position.
    (`RETIRED_COLUMN_KEYS`) or an existing sheet would have kept all three forever, since the
    column migration only ever added; and `MOCK_SNAPSHOT` had no stored column config at all,
    so the sandbox couldn't reproduce the live shape until one was added.
-4. **Type editor** — now materially simpler, one fewer setting to design. **Carry the
-   `itemName` → `subType` rename in with it** (Eric, 2026-08-25): the sheet column is still
-   called `itemName` while every visible label says "Sub-Type", and the field now only carries
-   the category, since `name` took the naming half in v23. It needs a backend version, and so
-   does the type editor, so bundling them costs one paste-and-redeploy instead of two. Do it
-   the way `parentId` and `name` were done — write `subType`, keep reading `itemName` as a
-   fallback, clear the old column later — so no step of it is one-way. Note the frontend key
-   is also a column key, so a device's saved column-visibility choice for `itemName` won't
-   carry over; it falls back to the server default, which is visible, so nothing disappears.
-   Left open deliberately: whether Sub-Type earns its keep at all now that bulk items have
-   real names — if it doesn't, the rename is moot and the field goes instead. Two
-   decisions are still open, both put to Eric on 2026-08-24 and neither answered,
-   so a session picking this up starts by asking:
-   - **Renaming a type — DECIDED 2026-08-25 (Eric): give types real ids first.**
-     `asset.type` stores the type's NAME, and so does every other type's
-     `parentTypes`, so renaming without ids needs a cascade over two reference
-     sites — the same shape as the room-rename cascade the id migration removed,
-     and the app has deliberately moved away from that pattern everywhere else.
-     The two rejected options were forbidding renaming (consistent with "labels
-     are never renamed", but a type name is a label people *read*, unlike an asset
-     id) and cascading it. Ids are cheapest now, while only a handful of types
-     exist and none are user-created — the cost grows with every type added, which
-     is the argument for doing it before the editor ships rather than after.
-     Once ids exist, a rename is an ordinary single-record field edit, and the
-     reference conventions in CLAUDE.md apply unchanged: references store the id,
-     names resolve at render time.
-   - **Where a type's settings live.** Recommended: `TYPE_REGISTRY` stays the
-     shipped defaults and a `typeSettings` Config blob overlays it per key. An icon
-     is a React component and a module needs a render branch, so neither can be
-     data; everything else can. Note this needs a backend version of its own —
-     `doPost` writes a FIXED list of config keys and silently drops unknown ones,
-     so a `typeSettings` row would be erased by the next config save.
+4. ~~**Type editor**~~ — built 2026-08-25, in three parts:
+   - **Types got real ids first** (Eric's call, see the decision recorded below). `typesList`
+     is now `[{ id, name }]`; a built-in type's id is its original name, so no data migration
+     and no backend change were needed for this part.
+   - **The editor itself** — name, icon, what the type can sit inside, which fields it has.
+     Overrides live in a `typeSettings` Config blob merged over `TYPE_REGISTRY`; modules stay
+     uneditable since a tab body needs a render branch.
+   - **`itemName` → `subType`**, carried in as planned so both backend changes share one
+     deploy.
+   Both backend changes are **v24, undeployed** — see the Known constraints entry in CLAUDE.md
+   for exactly what degrades until it's pasted in.
+
+   Still open, deliberately: per-type custom FIELDS (blocked by the custom-column bug in
+   BUGS.md — the editor can hand an existing restricted field to another type but can't mint a
+   new one), and whether Sub-Type earns its keep at all now that bulk items have real names.
 
 Step 3 needs no backend change. Step 1 shipped as backend **v23** (a `name` column
 on the Assets tab), live and re-confirmed 2026-08-25. The legacy `room`/`building`/`campus` columns stay

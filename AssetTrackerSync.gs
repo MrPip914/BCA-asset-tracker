@@ -49,7 +49,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v23";
+const SCRIPT_VERSION = "v24";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -89,13 +89,17 @@ const SHEET_NAMES = {
 // Dropping them is a separate later step, after a migration fills parentId in.
 // "name" is every asset's own optional display name, added in v23. It replaced
 // the per-type name columns below ("room" on a Room, "building" on a Building,
-// "campus" on a Campus, "itemName" on a Bulk Item), which are still read and
+// "campus" on a Campus, the sub-type on a Bulk Item), which are still read and
 // written unchanged so this version is reversible and un-migrated rows still
 // resolve — the frontend adopts them as the name when "name" is empty. Same
 // deal as roomId/buildingId above: not maintained as a mirror, so treat "name"
 // as authoritative once a row has been saved by a v23 client.
+// "subType" is the Bulk Item sub-type, called "itemName" before v24 — renamed so
+// the sheet says what every label in the app already said. "itemName" is kept
+// and still written, on the same reversibility terms as everything above; the
+// frontend reads it when "subType" is empty, and clearing it is a later step.
 const ASSET_FIELDS = [
-  "label", "name", "type", "itemName", "screenSize", "hostname", "room", "building", "campus", "parentId", "roomId", "buildingId",
+  "label", "name", "type", "subType", "itemName", "screenSize", "hostname", "room", "building", "campus", "parentId", "roomId", "buildingId",
   "brand", "model", "serial", "person", "peripherals", "notes",
   "totalQuantity", "purchaseDate", "warrantyUntil", "status",
   "panelSlotCount", "panelLayout",
@@ -1014,6 +1018,10 @@ function handleAuthenticatedRead_(body, e) {
       usersList: config.usersList || null,
       bulkItemTypes: config.bulkItemTypes || null,
       typesList: config.typesList || null,
+      // Per-type overrides of the app's built-in type settings, keyed by type id
+      // (see TYPE_SETTINGS in index.html). An object, not a list, unlike every
+      // other managed key here.
+      typeSettings: config.typeSettings || null,
       // Monotonic counter for the next BCA asset number to issue — see
       // peekAssetNumber() in index.html. Not a managed list like the rest of
       // Config, just a number that has to survive asset deletion (deriving it
@@ -1288,6 +1296,7 @@ function doPost(e) {
         configRows.push({ key: "usersList", value: JSON.stringify(body.usersList || []) });
         configRows.push({ key: "bulkItemTypes", value: JSON.stringify(body.bulkItemTypes || []) });
         configRows.push({ key: "typesList", value: JSON.stringify(body.typesList || []) });
+        configRows.push({ key: "typeSettings", value: JSON.stringify(body.typeSettings || {}) });
         // The access allowlist, PRESERVED from the sheet unless this save
         // explicitly carries one. Every other key above is rewritten from the
         // posted body, which is exactly the hazard here: a client that predates
