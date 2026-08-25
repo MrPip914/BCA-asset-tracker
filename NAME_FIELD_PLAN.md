@@ -1,7 +1,9 @@
 # The Name field — plan
 
-Status: **steps 1 and 2 built, 2026-08-24** (backend v23, undeployed). Step 3 and
-the type editor are still ahead. It is the prerequisite for the asset type editor.
+Status: **steps 1 and 2 built and deployed, backend v23** — confirmed live on 2026-08-25
+by reading `scriptVersion` back from the `/exec` URL. This header said "undeployed" while
+the Sequence section below said the opposite; the fetch settles it. Step 3 and the type
+editor are still ahead. It is the prerequisite for the asset type editor.
 
 Steps 1 and 2 were **built together, not separately as planned.** They don't
 separate: the moment every asset has a name, the Type column's "show the name if
@@ -145,7 +147,17 @@ their `DEFAULT_COLUMNS` position.
 3. **Remove the place columns** — Campus/Building/Room out of the list and filters,
    export given its own resolved columns, bulk move rewired onto the scope,
    `isComputedColumnFor()` retired.
-4. **Type editor** — now materially simpler, one fewer setting to design. Two
+4. **Type editor** — now materially simpler, one fewer setting to design. **Carry the
+   `itemName` → `subType` rename in with it** (Eric, 2026-08-25): the sheet column is still
+   called `itemName` while every visible label says "Sub-Type", and the field now only carries
+   the category, since `name` took the naming half in v23. It needs a backend version, and so
+   does the type editor, so bundling them costs one paste-and-redeploy instead of two. Do it
+   the way `parentId` and `name` were done — write `subType`, keep reading `itemName` as a
+   fallback, clear the old column later — so no step of it is one-way. Note the frontend key
+   is also a column key, so a device's saved column-visibility choice for `itemName` won't
+   carry over; it falls back to the server default, which is visible, so nothing disappears.
+   Left open deliberately: whether Sub-Type earns its keep at all now that bulk items have
+   real names — if it doesn't, the rename is moot and the field goes instead. Two
    decisions are still open, both put to Eric on 2026-08-24 and neither answered,
    so a session picking this up starts by asking:
    - **Renaming a type.** `asset.type` stores the type's NAME, and so does every
@@ -162,7 +174,7 @@ their `DEFAULT_COLUMNS` position.
      so a `typeSettings` row would be erased by the next config save.
 
 Step 3 needs no backend change. Step 1 shipped as backend **v23** (a `name` column
-on the Assets tab), deployed 2026-08-24. The legacy `room`/`building`/`campus` columns stay
+on the Assets tab), live and re-confirmed 2026-08-25. The legacy `room`/`building`/`campus` columns stay
 readable but stop being written, so the change is reversible; clearing them is a
 separate later step, exactly as with `roomId`/`buildingId`.
 
@@ -174,10 +186,24 @@ network policy blocked `esm.sh` and `unpkg.com`, so React and Babel never arrive
 exercising the helpers against `MOCK_SNAPSHOT` — which is exactly how the mis-adopted
 names above reached the live sheet.
 
-Eric created a **Full Access** environment on 2026-08-24 to fix this. A session running
-there can open the app in a real browser and can read the deployed `scriptVersion` from
-the `/exec` URL, which needs no sign-in. It still cannot sign in to Google, so verifying
-the live Sheet stays a human step.
+Eric created a **Full Access** environment on 2026-08-24 to fix this. Reading the deployed
+`scriptVersion` from the `/exec` URL works there (no sign-in needed), and that is how v23
+was confirmed live on 2026-08-25. It still cannot sign in to Google, so verifying the live
+Sheet stays a human step.
+
+Opening the app in a real browser there works, but **not** by simply loading `index.html`:
+the session's outbound HTTPS goes through a proxy that `curl` uses happily and **Chromium
+cannot use at all** — every request dies with `ERR_CONNECTION_RESET` once the tunnel is up,
+so React, Babel and the fonts never arrive and the page stays blank. Not a TLS-version,
+ALPN or post-quantum issue; all three were ruled out against a logging shim.
+
+What does work, and what steps 1 and 2 were finally verified against on 2026-08-25: mirror
+the five esm.sh modules and Babel Standalone to local files with `curl`, generate a copy of
+`index.html` whose import map points at them, and serve it over `http://127.0.0.1`. Drop the
+fonts and the `accounts.google.com` script — Sandbox needs neither, and the sign-in screen's
+"Continue in Sandbox" link still works without GSI loaded. Generated per run, never
+committed, per the local-copy rule above. Worth turning into a committed script the next
+time a session needs it, rather than rediscovering the proxy behaviour from a blank page.
 
 Agreed but not yet built: a **local mock backend** — a small server speaking the same API
 as `AssetTrackerSync.gs`, backed by a JSON file, with a local copy of `index.html` pointed

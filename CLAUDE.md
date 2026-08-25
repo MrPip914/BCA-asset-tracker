@@ -1009,21 +1009,22 @@ When you do:
 
 ## Known constraints / things to watch
 
-- **The repo is at v23 (the `name` field) and v23 is UNDEPLOYED as of 2026-08-24.** Until it's
-  pasted in and a **New version** deploy is created, the Assets tab has no `name` column, so a
-  name the app sends is dropped on write and every asset falls back to `adoptLegacyNames()` on
-  each load — i.e. names *display* correctly but don't persist, and a rename won't survive a
-  refresh. Same shape as the pre-v17 `parentId` window. No migration script: the first
-  asset-domain save after the deploy writes `name` for every asset at once. The legacy
-  `room`/`building`/`campus` columns stay readable and written, so the deploy is reversible.
-  Whether the versions between this and the last confirmed deploy are live was NOT checked in
-  the session that wrote this — the app's "Backend outdated" banner names both versions, which
-  is the only trustworthy answer. See the standing warning further down about exactly this.
-- **The repo is at v18 (Google Sign-In) and v18 is UNDEPLOYED as of 2026-08-21.** The live
-  backend is still v17, which means the live app currently still serves the whole inventory
-  to anyone with the URL — authentication is not in force until v18 is pasted in and a **New
-  version** deploy is created on the existing deployment. Until then the frontend here and
-  the live backend disagree and the app will not load against production.
+- **The backend is v23 (the `name` field), confirmed deployed on 2026-08-25** by fetching the
+  `/exec` URL and reading `scriptVersion` back — which is the check the standing warning below
+  asks for, not a line taken on faith. It supersedes every "UNDEPLOYED" note that used to sit
+  here: v23 being live means v18 through v22 are too, since a deployment serves one version of
+  the whole script.
+  - This corrects two notes that said the opposite. `NAME_FIELD_PLAN.md` contradicted *itself*
+    (its status header said undeployed, its Sequence section said deployed), and the entry here
+    said undeployed while admitting it had not checked. Both were written the day the deploy
+    happened, which is exactly when such a line goes stale.
+  - So `name` persists normally now. `adoptLegacyNames()` still runs and still matters — it is
+    what names any row last written before the deploy, until a save rewrites it. The legacy
+    `room`/`building`/`campus` columns stay readable, so the deploy remains reversible;
+    clearing them is a separate later step that has NOT been done.
+- **v18 (Google Sign-In) is live** — it predates the v23 deploy confirmed above, so
+  authentication is in force and the inventory is no longer served to anyone with the URL.
+  The rest of this entry is kept because the guard it describes is still load-bearing.
   - **The mismatch was nearly destructive, and the guard against it is load-bearing.** v18's
     `index.html` POSTs `op:"read"`, which a v17 backend doesn't recognise and treats as an
     ordinary save. A read payload carries no assets, and `_dirty` absent means "rewrite
