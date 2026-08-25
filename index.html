@@ -77,7 +77,7 @@ const DEFAULT_BULK_ITEM_TYPES = [];
 //   excludedFields — column keys this type doesn't get at all.
 //   onlyFields     — column keys that belong to THIS type. Any key named in any
 //                    entry's onlyFields becomes restricted app-wide (see
-//                    RESTRICTED_FIELDS below): no type that doesn't name it gets it.
+//                    restrictedFields() below): no type that doesn't name it gets it.
 //   (There is deliberately no `nameField` key. Every asset carries one optional
 //    `name` field instead — see nameOf() — so a type does not declare where its
 //    name lives, and a user-created type gets a real name with no registry
@@ -174,6 +174,18 @@ const TYPE_REGISTRY = {
   Other: { parentTypes: ["Room"] },
 };
 
+// The icons a user can pick for a type, by name. A name rather than a component
+// because a setting has to survive JSON: the component is looked up here at
+// render time (see iconFor). Deliberately a small curated set — every one is
+// already imported at the top of this file, so the picker can't reference an
+// icon the app doesn't bundle, and a stored name that isn't here falls back to
+// the shipped icon rather than rendering nothing.
+const TYPE_ICON_CHOICES = {
+  Computer: HardDrive, Monitor, Phone, TV: Tv, Camera, Printer, Package, Zap,
+  Door: DoorOpen, Building: Building2, Campus: MapPin, Wrench, Lock, Archive,
+  Unknown: HelpCircle,
+};
+
 // Starter/fallback type list for a brand-new sheet, in registry order. The live
 // list is managed via the gear icon on the Type field (persisted as Config's
 // `typesList`) and can hold types that aren't in the registry at all.
@@ -208,6 +220,64 @@ function adoptLegacyTypesList(list) {
   return (list || []).map(t => (typeof t === "string" ? { id: t, name: t } : t));
 }
 
+// USER-EDITED TYPE SETTINGS, LAYERED OVER THE SHIPPED DEFAULTS.
+//
+// TYPE_REGISTRY is what the app ships with and is never written to. What the
+// user changes in the type editor lives in Config under `typeSettings`, keyed by
+// type id, and is merged ON TOP of the registry entry at read time. So a
+// built-in type keeps working if its settings row is missing or is thrown away,
+// and "reset to default" is just deleting the override.
+//
+// WHY THIS IS A MODULE-LEVEL VARIABLE AND NOT REACT STATE. `fieldAppliesTo`,
+// `isPlaceType`, `parentTypesFor` and friends are plain functions called from
+// something like a hundred render sites, several of them per table cell.
+// Threading the settings through all of them would be a very large diff for no
+// behavioural gain, so instead `applyTypeSettings` sets this one variable.
+//
+// The hazard that creates, stated plainly: React does not know this changed, so
+// setting it does NOT by itself re-render anything. It is safe only because
+// every write goes through persist(), which calls setTypesSettings and so
+// re-renders anyway — and applyTypeSettings is called BEFORE that setState, so
+// the render that follows reads the new values. Anything that changes these
+// settings without a setState will silently show stale rules; don't add one.
+let TYPE_SETTINGS = {};
+// The two app-wide sets derived from every entry at once. Recomputed when the
+// settings change rather than on every call, since fieldAppliesTo runs per cell.
+let DERIVED_TYPE_SETS = { restrictedFields: new Set(), placeTypes: new Set() };
+function recomputeDerivedTypeSets() {
+  const ids = new Set([...Object.keys(TYPE_REGISTRY), ...Object.keys(TYPE_SETTINGS)]);
+  const restricted = new Set();
+  const places = new Set();
+  ids.forEach(id => {
+    const entry = typeEntryFor(id) || {};
+    (entry.onlyFields || []).forEach(k => restricted.add(k));
+    (entry.parentTypes || []).forEach(t => places.add(t));
+  });
+  DERIVED_TYPE_SETS = { restrictedFields: restricted, placeTypes: places };
+}
+function applyTypeSettings(next) {
+  TYPE_SETTINGS = next && typeof next === "object" ? next : {};
+  recomputeDerivedTypeSets();
+}
+// Populate the derived sets from the shipped registry alone, so they're correct
+// before any Config has loaded (and in sandbox, which may never load settings).
+applyTypeSettings({});
+
+// The effective settings for a type: shipped defaults with the user's overrides
+// on top. Null for a type that is neither registered nor customised — i.e. a
+// plain user-created type, which is exactly the generic-device fallback every
+// helper below already had.
+function typeEntryFor(typeId) {
+  const base = TYPE_REGISTRY[typeId];
+  const over = TYPE_SETTINGS[typeId];
+  if (!base && !over) return null;
+  return { ...(base || {}), ...(over || {}) };
+}
+// Is this type's setting user-modified? Drives the editor's "Reset to default".
+function typeHasOverrides(typeId) {
+  return !!TYPE_SETTINGS[typeId];
+}
+
 // What a type is CALLED. Falls back to the id, which covers an asset whose type
 // was removed from the managed list — the id is the original name for a built-in
 // and a raw uuid for a user-created one, but showing something beats showing
@@ -239,7 +309,7 @@ function ensureLockedTypes(list) {
 // rather than a visible mistake. Only an UNREGISTERED (user-added) type falls
 // back, and it falls back to a generic room-dwelling device.
 function parentTypesFor(type) {
-  const entry = TYPE_REGISTRY[type];
+  const entry = typeEntryFor(type);
   return entry ? (entry.parentTypes || []) : DEFAULT_PARENT_TYPES;
 }
 // Does this type take a parent at all? False for a Building (top of the tree)
@@ -267,11 +337,10 @@ function canBeParentOf(parentType, childType) {
 // what's on them. Deriving it is also the cheapest possible version of the
 // "move place-ness into the type settings" work, done here because Campus forced
 // the issue rather than as a refactor pass of its own.
-const PLACE_TYPES = new Set(
-  Object.values(TYPE_REGISTRY).flatMap(entry => entry.parentTypes || [])
-);
+// Derived from every type's parentTypes, INCLUDING user overrides, so making a
+// type able to hold something turns that something into a place immediately.
 function isPlaceType(type) {
-  return PLACE_TYPES.has(type);
+  return DERIVED_TYPE_SETS.placeTypes.has(type);
 }
 
 // What each sub-item module IS — its tab label and how to count what's in it.
@@ -310,8 +379,11 @@ const ASSET_MODULES = {
 
 // Which sub-item modules this type owns. An unregistered (user-added) type owns
 // none — it's a plain device.
+// Not user-editable: a module needs a render branch for its tab body, so it
+// can't be turned on by data alone. Read through the merged entry anyway, so
+// the day one becomes settable nothing here has to change.
 function modulesFor(type) {
-  return TYPE_REGISTRY[type]?.modules || [];
+  return typeEntryFor(type)?.modules || [];
 }
 // Does this type own a given module? The one thing render sites should ask,
 // rather than naming the type that happens to own it today.
@@ -320,7 +392,7 @@ function hasModule(type, moduleKey) {
 }
 // Which detail tab opens first for this type.
 function defaultTabFor(type) {
-  return TYPE_REGISTRY[type]?.defaultTab || "details";
+  return typeEntryFor(type)?.defaultTab || "details";
 }
 
 // Every tab this type gets, in display order — the common ones every asset has,
@@ -371,9 +443,12 @@ const MAINTENANCE_FREQUENCIES = [
 // only the types that name it get it. Derived from the registry rather than
 // declared as a second parallel list, so introducing a type-specific field is a
 // one-line change to one entry and can't drift out of sync.
-const RESTRICTED_FIELDS = new Set(
-  Object.values(TYPE_REGISTRY).flatMap(entry => entry.onlyFields || [])
-);
+// Recomputed with the user's overrides applied (see DERIVED_TYPE_SETS), so
+// granting a field to one type restricts it app-wide exactly as a shipped
+// onlyFields entry does.
+function restrictedFields() {
+  return DERIVED_TYPE_SETS.restrictedFields;
+}
 // Does `key` apply to an asset of `type`? Explicit exclusions win first, then the
 // restricted-field rule; anything else is a common field present on every type.
 // An unregistered (user-added) type excludes nothing and owns no restricted field
@@ -383,9 +458,9 @@ function fieldAppliesTo(key, type) {
   // something — a Building (top of the tree) and a Bulk Item (spreads across
   // rooms via allocations) get no Parent picker at all.
   if (key === "parent") return typeTakesParent(type);
-  const entry = TYPE_REGISTRY[type];
+  const entry = typeEntryFor(type);
   if (entry?.excludedFields?.includes(key)) return false;
-  if (!RESTRICTED_FIELDS.has(key)) return true; // common field, applies to every type
+  if (!restrictedFields().has(key)) return true; // common field, applies to every type
   return !!entry?.onlyFields?.includes(key);
 }
 
@@ -551,6 +626,24 @@ const DEFAULT_COLUMNS = [
 // on every asset, so dropping one would hide stored data.
 const RETIRED_COLUMN_KEYS = new Set(["campus", "building", "room"]);
 
+// The fields the type editor lets you switch on and off for a type. Everything
+// else in DEFAULT_COLUMNS is structural and not a per-type choice: name, type,
+// parent and label identify the asset, and status is the archive flag.
+const TYPE_STRUCTURAL_FIELDS = new Set(["name", "type", "parent", "label", "status"]);
+function typeEditableFields(columns) {
+  return columns.filter(c => !TYPE_STRUCTURAL_FIELDS.has(c.key));
+}
+
+// The restricted fields as SHIPPED — hostname, screenSize, totalQuantity,
+// itemName. The editor may hand one of these to another type, but it may not
+// invent a new one: creating a genuinely new type-specific field is the deferred
+// per-type custom-fields work (see BUGS.md), and letting the editor write an
+// arbitrary key into onlyFields would restrict that field app-wide and quietly
+// strip it from every type that hadn't opted in.
+const SHIPPED_RESTRICTED_FIELDS = new Set(
+  Object.values(TYPE_REGISTRY).flatMap(entry => entry.onlyFields || [])
+);
+
 const STATUS_OPTIONS = ["Active", "Archived"];
 const STATUS_FILTER_OPTIONS = ["All statuses", "Active", "Archived"];
 const MAINTENANCE_STATUS_FILTER_OPTIONS = [
@@ -588,8 +681,13 @@ const SAVE_IN_PROGRESS_MESSAGE = "Still saving the last change — try again in 
 
 // Registry types without an `icon` (and every user-added type) fall back to a
 // generic question mark.
+// A user-chosen icon is stored as a NAME from TYPE_ICON_CHOICES, not a component
+// — a component can't survive a round trip through JSON. A shipped entry still
+// carries its component directly.
 function iconFor(type) {
-  return TYPE_REGISTRY[type]?.icon || HelpCircle;
+  const entry = typeEntryFor(type);
+  if (entry?.iconName && TYPE_ICON_CHOICES[entry.iconName]) return TYPE_ICON_CHOICES[entry.iconName];
+  return entry?.icon || HelpCircle;
 }
 function slugify(name) {
   return "col_" + name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 30) || "col_field";
@@ -1688,6 +1786,10 @@ function AssetTracker() {
   const [showBulkItemTypesManager, setShowBulkItemTypesManager] = useState(false);
   const [newBulkItemTypeName, setNewBulkItemTypeName] = useState("");
   const [typesList, setTypesList] = useState(DEFAULT_TYPES);
+  // Per-type overrides of the shipped registry, keyed by type id. Mirrored into
+  // the module-level TYPE_SETTINGS by applyTypeSettings — see the hazard note
+  // there: every write must go through persist(), which does both.
+  const [typeSettings, setTypeSettings] = useState({});
   const [showTypesManager, setShowTypesManager] = useState(false);
   const [newTypeName, setNewTypeName] = useState("");
   const [breakerTypes, setBreakerTypes] = useState(SEEDED_BREAKER_TYPES);
@@ -2158,6 +2260,11 @@ function AssetTracker() {
       setTypesList(ensureLockedTypes(adoptLegacyTypesList(
         Array.isArray(data.typesList) && data.typesList.length ? data.typesList : DEFAULT_TYPES
       )));
+      // Same ordering rule as in persist: mirror into the module-level copy
+      // before the setState that re-renders against it.
+      const loadedTypeSettings = data.typeSettings && typeof data.typeSettings === "object" ? data.typeSettings : {};
+      applyTypeSettings(loadedTypeSettings);
+      setTypeSettings(loadedTypeSettings);
       // Absent/0/garbage all mean "never stored" — peekAssetNumber() seeds it
       // from the loaded assets instead, and the first asset created writes it.
       const storedNextNumber = Number(data.nextAssetNumber);
@@ -2315,6 +2422,7 @@ function AssetTracker() {
       usersList: nextUsersList = usersList,
       bulkItemTypes: nextBulkItemTypes = bulkItemTypes,
       typesList: nextTypesList = typesList,
+      typeSettings: nextTypeSettings = typeSettings,
       breakerTypes: nextBreakerTypes = breakerTypes,
       nextAssetNumber: nextNumberToIssue = nextAssetNumber,
       // Defaults to undefined, NOT to the current list, which is the opposite of
@@ -2348,7 +2456,8 @@ function AssetTracker() {
       assets: nextAssets !== assets,
       config: nextColumns !== columns || nextChangeTypes !== changeTypes || nextVendors !== vendors
         || nextPeripheralsList !== peripheralsList || nextUsersList !== usersList || nextBulkItemTypes !== bulkItemTypes
-        || nextTypesList !== typesList || nextNumberToIssue !== nextAssetNumber
+        || nextTypesList !== typesList || nextTypeSettings !== typeSettings
+        || nextNumberToIssue !== nextAssetNumber
         || nextAuthUsers !== undefined,
       breakerTypes: nextBreakerTypes !== breakerTypes,
     };
@@ -2368,13 +2477,19 @@ function AssetTracker() {
       setUsersList(nextUsersList);
       setBulkItemTypes(nextBulkItemTypes);
       setTypesList(nextTypesList);
+      // Before the setState, per the ordering rule in the TYPE_SETTINGS comment:
+      // the re-render this setState causes is what makes the new rules visible,
+      // so the module-level copy has to be current by the time it runs.
+      applyTypeSettings(nextTypeSettings);
+      setTypeSettings(nextTypeSettings);
       setBreakerTypes(nextBreakerTypes);
       setNextAssetNumber(nextNumberToIssue);
       if (nextAuthUsers !== undefined) setAccessUsers(nextAuthUsers);
       const payload = {
         assets: nextAssets, columns: nextColumns, changeTypes: nextChangeTypes,
         vendors: nextVendors, auditLog: nextAuditLog, peripheralsList: nextPeripheralsList, usersList: nextUsersList,
-        bulkItemTypes: nextBulkItemTypes, typesList: nextTypesList, breakerTypes: nextBreakerTypes,
+        bulkItemTypes: nextBulkItemTypes, typesList: nextTypesList,
+        typeSettings: nextTypeSettings, breakerTypes: nextBreakerTypes,
         nextAssetNumber: nextNumberToIssue, _dirty: dirty,
         // Spread conditionally so the key is genuinely ABSENT on an ordinary
         // save, not present-but-undefined — JSON.stringify drops undefined
@@ -3690,15 +3805,41 @@ function AssetTracker() {
     setNewTypeName("");
   }
 
-  // Renaming changes ONLY the display name. Every asset of this type references
-  // it by id, so nothing else has to be found and rewritten — which is the whole
-  // reason ids were introduced before the type editor rather than after.
-  function renameType(id, name) {
-    const clean = name.trim();
-    if (!clean || typeNameTaken(clean, id)) return;
-    const current = typesList.find(t => t.id === id);
-    if (!current || current.name === clean) return;
-    persist(assets, { typesList: typesList.map(t => (t.id === id ? { ...t, name: clean } : t)) });
+  // One save for the whole type editor. Name lives in typesList (it's what the
+  // picker lists), the rest in typeSettings (it's an override of the shipped
+  // registry) — but they're one edit to the user, so they go in ONE persist():
+  // both are the config domain, so two calls would mean two full snapshot writes
+  // and two chances for the second to be refused as a conflict with the first.
+  function saveTypeSettings(id, draft) {
+    const name = (draft.name || "").trim();
+    if (!name || typeNameTaken(name, id)) return;
+    const fields = typeEditableFields(columns).map(c => c.key);
+    const nextTypesList = typesList.map(t => (t.id === id ? { ...t, name } : t));
+    const nextTypeSettings = {
+      ...typeSettings,
+      [id]: {
+        iconName: draft.iconName || undefined,
+        parentTypes: draft.parentTypes,
+        // Unchecked fields become exclusions; checked ones only appear in
+        // onlyFields when they're restricted app-wide to begin with. See
+        // SHIPPED_RESTRICTED_FIELDS for why the editor can't mint a new one.
+        excludedFields: fields.filter(k => !draft.fields.includes(k)),
+        onlyFields: fields.filter(k => draft.fields.includes(k) && SHIPPED_RESTRICTED_FIELDS.has(k)),
+      },
+    };
+    persist(assets, { typesList: nextTypesList, typeSettings: nextTypeSettings });
+  }
+
+  // Drops the override so the type falls back to what the app ships. For a
+  // user-created type that means the generic-device defaults, which is what it
+  // had before anyone opened the editor. The NAME is deliberately left alone —
+  // it isn't an override of anything, and resetting a renamed built-in back to
+  // "Computer" is a separate thought from resetting its fields.
+  function resetTypeSettings(id) {
+    if (!typeSettings[id]) return;
+    const nextTypeSettings = { ...typeSettings };
+    delete nextTypeSettings[id];
+    persist(assets, { typeSettings: nextTypeSettings });
   }
 
   // Removing a type only takes it off the pick list — assets already using that
@@ -4424,7 +4565,8 @@ function AssetTracker() {
       newValue={newTypeName}
       onNewValueChange={setNewTypeName}
       onAdd={addType}
-      onRename={renameType}
+      onSave={saveTypeSettings}
+      onReset={resetTypeSettings}
       onRemove={removeType}
       onClose={() => { setShowTypesManager(false); setNewTypeName(""); }}
       isSaving={isSaving}
@@ -4432,6 +4574,8 @@ function AssetTracker() {
       isLocked={isLockedType}
       nameTaken={typeNameTaken}
       countFor={id => (assets || []).filter(a => a.type === id).length}
+      fieldOptions={typeEditableFields(columns)}
+      hasOverrides={typeHasOverrides}
     />
   );
 
@@ -7326,127 +7470,216 @@ function Detail({ label, value, wide, italic }) {
 //
 // Edit affordance follows the app's convention: an icon-only pencil at the
 // trailing edge of the row it edits (see CLAUDE.md).
-function TypeManagerModal({ types, newValue, onNewValueChange, onAdd, onRename, onRemove, onClose, isSaving, canEdit, isLocked, nameTaken, countFor }) {
+function TypeManagerModal({
+  types, newValue, onNewValueChange, onAdd, onSave, onReset, onRemove, onClose,
+  isSaving, canEdit, isLocked, nameTaken, countFor, fieldOptions, hasOverrides,
+}) {
   const [confirmId, setConfirmId] = useState(null);
-  const [editingId, setEditingId] = useState(null);
-  const [draftName, setDraftName] = useState("");
+  const [draft, setDraft] = useState(null); // { id, name, iconName, parentTypes, fields }
 
-  // Entering edit mode reseeds from the stored name, so an abandoned rename
-  // can't leave a stale draft behind the next time the pencil is clicked —
-  // the same rule the breaker modal follows.
-  const startEdit = t => { setEditingId(t.id); setDraftName(t.name); setConfirmId(null); };
-  const cancelEdit = () => { setEditingId(null); setDraftName(""); };
-  const clean = draftName.trim();
-  const duplicate = !!editingId && !!clean && nameTaken(clean, editingId);
-  const canSaveEdit = !!clean && !duplicate && !isSaving;
-  const commitEdit = () => { if (!canSaveEdit) return; onRename(editingId, clean); cancelEdit(); };
+  // Seeds the form from the type's EFFECTIVE settings (shipped defaults with any
+  // override already applied), so the boxes show what's actually in force rather
+  // than what was last typed. Reseeded on every open, so an abandoned edit can't
+  // leave a stale draft behind — the same rule the breaker modal follows.
+  const startEdit = t => {
+    const entry = typeEntryFor(t.id) || {};
+    setDraft({
+      id: t.id,
+      name: t.name,
+      iconName: entry.iconName || "",
+      parentTypes: entry.parentTypes || (TYPE_REGISTRY[t.id] ? [] : DEFAULT_PARENT_TYPES),
+      fields: fieldOptions.filter(f => fieldAppliesTo(f.key, t.id)).map(f => f.key),
+    });
+    setConfirmId(null);
+  };
+  const cancelEdit = () => setDraft(null);
+
+  const clean = (draft?.name || "").trim();
+  const duplicate = !!draft && !!clean && nameTaken(clean, draft.id);
+  const canSave = !!clean && !duplicate && !isSaving;
+  const toggle = (list, v) => (list.includes(v) ? list.filter(x => x !== v) : [...list, v]);
+
+  const chip = (on, label, key, onClick) => (
+    <button
+      key={key}
+      type="button"
+      onClick={onClick}
+      style={{
+        padding: "4px 10px", borderRadius: 999, fontSize: 12,
+        border: `1px solid ${on ? C.brand : C.border}`,
+        background: on ? C.brand : "transparent",
+        color: on ? "#fff" : C.muted, fontWeight: on ? 600 : 400,
+      }}
+    >
+      {label}
+    </button>
+  );
 
   return (
     // zIndex 50, above SelectionModal's 40 — opened via the "manage" gear from
     // inside the Type picker, so it must stack above it.
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }}>
-      <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 400, maxHeight: "76vh", overflowY: "auto" }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 460, maxHeight: "80vh", overflowY: "auto" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>Manage asset types</div>
-          <button onClick={onClose} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
-        </div>
-        <div style={{ fontSize: 12, color: C.empty, marginBottom: 10 }}>
-          Renaming a type updates it everywhere — assets keep their type. Room, Building, Bulk Item, Campus and Electrical Panel are built into the app and can't be removed.
-        </div>
-
-        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
-          {types.map(t => {
-            const locked = isLocked ? isLocked(t.id) : false;
-            const inUse = countFor ? countFor(t.id) : 0;
-            if (editingId === t.id) {
-              return (
-                <div key={t.id} style={{ display: "flex", flexDirection: "column", gap: 4, padding: "6px 0" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <input
-                      autoFocus
-                      value={draftName}
-                      onChange={e => setDraftName(e.target.value)}
-                      onKeyDown={e => { if (e.key === "Enter") commitEdit(); if (e.key === "Escape") cancelEdit(); }}
-                      style={{ flex: 1, padding: "5px 8px", border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 14, fontFamily: "inherit", background: C.surface, color: C.ink }}
-                      aria-label={`Rename ${t.name}`}
-                    />
-                    <button
-                      onClick={commitEdit}
-                      disabled={!canSaveEdit}
-                      style={{ padding: "4px 10px", background: canSaveEdit ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontSize: 12, fontWeight: 600 }}
-                    >
-                      {isSaving ? "Saving…" : "Save"}
-                    </button>
-                    <button onClick={cancelEdit} style={{ padding: "4px 10px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12, color: C.ink }}>Cancel</button>
-                  </div>
-                  {duplicate && <span style={{ fontSize: 12, color: C.danger }}>Another type is already called "{clean}".</span>}
-                </div>
-              );
-            }
-            return (
-              <div key={t.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 14 }}>
-                {confirmId === t.id ? (
-                  <>
-                    <span style={{ color: C.danger, fontSize: 13 }}>
-                      Remove "{t.name}"?{inUse > 0 && ` ${inUse} asset(s) keep it.`}
-                    </span>
-                    <div style={{ display: "flex", gap: 6 }}>
-                      <button onClick={() => setConfirmId(null)} style={{ padding: "3px 8px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12, color: C.ink }}>Cancel</button>
-                      <button
-                        onClick={() => { if (isSaving) return; onRemove(t.id); setConfirmId(null); }}
-                        disabled={isSaving}
-                        style={{ padding: "3px 8px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontSize: 12, fontWeight: 600 }}
-                      >
-                        {isSaving ? "Saving…" : "Delete"}
-                      </button>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <span style={{ display: "flex", alignItems: "center", gap: 6, opacity: locked ? 0.75 : 1, minWidth: 0 }}>
-                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.name}</span>
-                      {locked && <Lock size={11} style={{ flexShrink: 0 }} />}
-                      {inUse > 0 && <span style={{ fontSize: 11, color: C.empty, flexShrink: 0 }}>{inUse}</span>}
-                    </span>
-                    {canEdit && (
-                      <span style={{ display: "flex", alignItems: "center", gap: 2, flexShrink: 0 }}>
-                        {/* Renaming is allowed on locked types too: `locked` means
-                            the app depends on the type EXISTING (its field rules,
-                            its tabs), which is about the id, not what it's called. */}
-                        <button onClick={() => startEdit(t)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Edit ${t.name}`}>
-                          <Pencil size={14} color={C.muted} />
-                        </button>
-                        {!locked && (
-                          <button onClick={() => setConfirmId(t.id)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Remove ${t.name}`}>
-                            <Trash2 size={14} color={C.danger} />
-                          </button>
-                        )}
-                      </span>
-                    )}
-                  </>
-                )}
-              </div>
-            );
-          })}
-        </div>
-
-        {canEdit && (
-          <div style={{ display: "flex", gap: 6 }}>
-            <input
-              value={newValue}
-              onChange={e => onNewValueChange(e.target.value)}
-              onKeyDown={e => { if (e.key === "Enter") onAdd(); }}
-              placeholder="New type name"
-              style={{ flex: 1, padding: "6px 8px", border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 13, fontFamily: "inherit", background: C.surface, color: C.ink }}
-            />
-            <button
-              onClick={onAdd}
-              disabled={isSaving}
-              style={{ padding: "6px 12px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 13, fontWeight: 600 }}
-            >
-              {isSaving ? "Saving…" : "Add"}
-            </button>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>
+            {draft ? `Edit type` : "Manage asset types"}
           </div>
+          <button onClick={draft ? cancelEdit : onClose} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+        </div>
+
+        {draft ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Name</span>
+              <input
+                autoFocus
+                value={draft.name}
+                onChange={e => setDraft({ ...draft, name: e.target.value })}
+                style={{ padding: "6px 8px", border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 14, fontFamily: "inherit", background: C.surface, color: C.ink }}
+                aria-label="Type name"
+              />
+              {duplicate && <span style={{ fontSize: 12, color: C.danger }}>Another type is already called "{clean}".</span>}
+            </label>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Icon</span>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {Object.entries(TYPE_ICON_CHOICES).map(([key, Ico]) => {
+                  const on = draft.iconName === key;
+                  return (
+                    <button
+                      key={key} type="button" aria-label={`Icon ${key}`}
+                      onClick={() => setDraft({ ...draft, iconName: on ? "" : key })}
+                      style={{ padding: 7, borderRadius: 8, display: "flex", border: `1px solid ${on ? C.brand : C.border}`, background: on ? C.brand : "transparent" }}
+                    >
+                      <Ico size={15} color={on ? "#fff" : C.muted} />
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Can sit inside</span>
+              <div style={{ fontSize: 12, color: C.empty }}>
+                Nothing ticked means this type has no Parent field at all — right for a Campus, or for something pooled across rooms.
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {types.map(t => chip(
+                  draft.parentTypes.includes(t.id), t.name, t.id,
+                  () => setDraft({ ...draft, parentTypes: toggle(draft.parentTypes, t.id) })
+                ))}
+              </div>
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Fields</span>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {fieldOptions.map(f => chip(
+                  draft.fields.includes(f.key), f.label, f.key,
+                  () => setDraft({ ...draft, fields: toggle(draft.fields, f.key) })
+                ))}
+              </div>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: 8, borderTop: `1px solid ${C.border}`, paddingTop: 12 }}>
+              <button
+                onClick={() => { if (!canSave) return; onSave(draft.id, draft); cancelEdit(); }}
+                disabled={!canSave}
+                style={{ padding: "6px 14px", background: canSave ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontSize: 13, fontWeight: 600 }}
+              >
+                {isSaving ? "Saving…" : "Save"}
+              </button>
+              <button onClick={cancelEdit} style={{ padding: "6px 12px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 13, color: C.ink }}>Cancel</button>
+              {hasOverrides(draft.id) && (
+                <button
+                  onClick={() => { if (isSaving) return; onReset(draft.id); cancelEdit(); }}
+                  style={{ marginLeft: "auto", padding: "6px 12px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12, color: C.muted }}
+                >
+                  Reset to default
+                </button>
+              )}
+            </div>
+          </div>
+        ) : (
+          <>
+            <div style={{ fontSize: 12, color: C.empty, marginBottom: 10 }}>
+              Renaming a type updates it everywhere — assets keep their type. Room, Building, Bulk Item, Campus and Electrical Panel are built into the app and can't be removed.
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
+              {types.map(t => {
+                const locked = isLocked ? isLocked(t.id) : false;
+                const inUse = countFor ? countFor(t.id) : 0;
+                const Ico = iconFor(t.id);
+                return (
+                  <div key={t.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 14 }}>
+                    {confirmId === t.id ? (
+                      <>
+                        <span style={{ color: C.danger, fontSize: 13 }}>
+                          Remove "{t.name}"?{inUse > 0 && ` ${inUse} asset(s) keep it.`}
+                        </span>
+                        <div style={{ display: "flex", gap: 6 }}>
+                          <button onClick={() => setConfirmId(null)} style={{ padding: "3px 8px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12, color: C.ink }}>Cancel</button>
+                          <button
+                            onClick={() => { if (isSaving) return; onRemove(t.id); setConfirmId(null); }}
+                            disabled={isSaving}
+                            style={{ padding: "3px 8px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontSize: 12, fontWeight: 600 }}
+                          >
+                            {isSaving ? "Saving…" : "Delete"}
+                          </button>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <span style={{ display: "flex", alignItems: "center", gap: 6, opacity: locked ? 0.75 : 1, minWidth: 0 }}>
+                          <Ico size={14} color={C.brand} style={{ flexShrink: 0 }} />
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.name}</span>
+                          {locked && <Lock size={11} style={{ flexShrink: 0 }} />}
+                          {inUse > 0 && <span style={{ fontSize: 11, color: C.empty, flexShrink: 0 }}>{inUse}</span>}
+                          {hasOverrides(t.id) && <span style={{ fontSize: 10, color: C.accent, flexShrink: 0, fontFamily: "'IBM Plex Mono', monospace" }}>EDITED</span>}
+                        </span>
+                        {canEdit && (
+                          <span style={{ display: "flex", alignItems: "center", gap: 2, flexShrink: 0 }}>
+                            {/* Editing is allowed on locked types too: `locked`
+                                means the app depends on the type EXISTING (its
+                                tabs, its field rules), which is about the id, not
+                                what it's called or what it holds. */}
+                            <button onClick={() => startEdit(t)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Edit ${t.name}`}>
+                              <Pencil size={14} color={C.muted} />
+                            </button>
+                            {!locked && (
+                              <button onClick={() => setConfirmId(t.id)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Remove ${t.name}`}>
+                                <Trash2 size={14} color={C.danger} />
+                              </button>
+                            )}
+                          </span>
+                        )}
+                      </>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {canEdit && (
+              <div style={{ display: "flex", gap: 6 }}>
+                <input
+                  value={newValue}
+                  onChange={e => onNewValueChange(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter") onAdd(); }}
+                  placeholder="New type name"
+                  style={{ flex: 1, padding: "6px 8px", border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 13, fontFamily: "inherit", background: C.surface, color: C.ink }}
+                />
+                <button
+                  onClick={onAdd}
+                  disabled={isSaving}
+                  style={{ padding: "6px 12px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 13, fontWeight: 600 }}
+                >
+                  {isSaving ? "Saving…" : "Add"}
+                </button>
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
