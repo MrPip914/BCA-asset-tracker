@@ -911,6 +911,21 @@ and read by `parseRelated()`/`relatedRoleFor()`.
   "Monitor BCA0002 (Monitor)" since `adoptLegacyNames` already builds names in that shape;
   only a **deleted** asset gets `"<type> <label>"`, since there the stored type is the one
   thing left. That fallback is load-bearing: audit entries deliberately outlive their assets.
+- **Lookup goes through `auditIndex`, a `useMemo` keyed on `auditLog`** — two Maps of
+  `label -> positions in auditLog`, one for the entry's subject and one for every id in
+  its `related`. Not premature: the two lists live in the detail view's **render body**,
+  so before this they were re-derived on every render of that view — every keystroke in
+  the edit form, whether or not the Audit tab was even open — and each pass walked the
+  whole append-only log calling `parseRelated()` on every row. Measured: 100k entries was
+  ~26ms per pass on a desktop (~100ms on a phone), versus ~0.2ms from the index. It stores
+  **positions, not entries**, because the log's append order IS its chronological order —
+  so merging the two maps and sorting the numbers descending reproduces the old
+  `.filter().reverse()` ordering without comparing timestamps.
+  - **The ceiling is the full-snapshot load, not this lookup, and it always was.** `doGet`
+    returns the entire AuditLog every time; at ~208 bytes/entry that is ~2MB at 10k entries
+    and ~10MB at 50k. `related` adds ~25 of those bytes. So audit-log pruning (already on
+    the deferred list) is what eventually bites, and it bites the payload long before any
+    filter gets slow.
 - **The named assets are LINKS** (`auditSegments()`): "Computer BCA0001 moved out →
   Room 101" opens either one. Frontend-only — the ids were already in `related`, so this
   needed no backend change and no new version. The pairing is **structural, not a search

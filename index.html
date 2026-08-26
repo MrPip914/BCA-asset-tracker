@@ -3021,6 +3021,42 @@ function AssetTracker() {
 
   const selectedAsset = assets ? assets.find(a => a.label === selectedLabel) : null;
 
+  // label -> positions in auditLog, built once per change to the log rather than
+  // by scanning it per asset per render.
+  //
+  // This is not premature. The two lists the Audit tab needs are computed in the
+  // detail view's RENDER BODY, so they were re-derived on every render of that
+  // view -- every keystroke in the edit form, whether or not the Audit tab was
+  // even open -- and each pass walked the whole log calling parseRelated() on
+  // every row. The log is append-only and never pruned, so that cost only ever
+  // grows. Measured at 100k entries it was ~26ms per pass on a desktop, which is
+  // roughly 100ms on a phone: fine once, janky per keystroke.
+  //
+  // Positions rather than entries, for two reasons: it stays small, and the
+  // append order IS the chronological order, so merging the two maps and sorting
+  // the numbers descending reproduces the old `.filter().reverse()` ordering
+  // exactly, without comparing timestamps.
+  const auditIndex = useMemo(() => {
+    const bySubject = new Map();
+    const byRelated = new Map();
+    const add = (map, key, i) => {
+      if (!key) return;
+      const arr = map.get(key);
+      if (arr) arr.push(i); else map.set(key, [i]);
+    };
+    auditLog.forEach((e, i) => {
+      add(bySubject, e.assetLabel, i);
+      parseRelated(e.related).forEach(r => add(byRelated, r.id, i));
+    });
+    return { bySubject, byRelated };
+  }, [auditLog]);
+
+  // Also memoized because it walks every asset's parent chain, and it likewise
+  // sat in the render body.
+  const selectedDescendantLabels = useMemo(() => (
+    selectedAsset ? new Set(descendantsOf(selectedAsset, assets).map(a => a.label)) : new Set()
+  ), [selectedAsset, assets]);
+
   function openDetail(asset, initialTab) {
     setSelectedLabel(asset.label);
     setView("detail");
@@ -5099,10 +5135,11 @@ function AssetTracker() {
     // names it as an associated resource -- things that moved in or out, a
     // quantity allocated here, a circuit that serves it. Merged into one list,
     // newest first, because they are all equally this asset's news.
-    const assetAuditEntries = auditLog
-      .filter(e => e.assetLabel === selectedAsset.label || relatedRoleFor(e, selectedAsset.label))
-      .slice()
-      .reverse();
+    const relatedIdx = auditIndex.byRelated.get(selectedAsset.label) || [];
+    const assetAuditEntries = [...new Set([
+      ...(auditIndex.bySubject.get(selectedAsset.label) || []),
+      ...relatedIdx,
+    ])].sort((a, b) => b - a).map(i => auditLog[i]);
     // Activity on what is INSIDE it, collapsed by default. Deliberately not
     // gated on type: it keys off descendantsOf(), so a Building shows its rooms'
     // activity and a Campus its buildings', with no type test to keep in step.
@@ -5111,11 +5148,17 @@ function AssetTracker() {
     // moved away takes its edit history with it. Its move stays above regardless,
     // since that entry names this asset by id. So the asset's own history is
     // durable and this section is a snapshot, which is the honest split.
-    const descendantLabels = new Set(descendantsOf(selectedAsset, assets).map(a => a.label));
-    const contentsAuditEntries = descendantLabels.size === 0 ? [] : auditLog
-      .filter(e => descendantLabels.has(e.assetLabel) && !relatedRoleFor(e, selectedAsset.label))
-      .slice()
-      .reverse();
+    // Subtracting the entries already shown above is what stops a row that both
+    // names this asset and happened to something inside it appearing twice.
+    const alreadyShown = new Set(relatedIdx);
+    const contentsAuditEntries = [];
+    selectedDescendantLabels.forEach(label => {
+      (auditIndex.bySubject.get(label) || []).forEach(i => {
+        if (!alreadyShown.has(i)) contentsAuditEntries.push(i);
+      });
+    });
+    contentsAuditEntries.sort((a, b) => b - a);
+    const contentsAuditRows = contentsAuditEntries.map(i => auditLog[i]);
     // Never-performed items sort first (need scheduling attention); the rest by
     // ascending next-due date, which naturally puts the most-overdue on top.
     const maintenanceItems = (selectedAsset.maintenanceItems || [])
@@ -5935,7 +5978,7 @@ function AssetTracker() {
                   <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>No edits recorded yet.</div>
                 ) : assetAuditEntries.map(row)}
 
-                {contentsAuditEntries.length > 0 && (
+                {contentsAuditRows.length > 0 && (
                   <>
                     <button
                       type="button"
@@ -5950,9 +5993,9 @@ function AssetTracker() {
                       aria-expanded={showContentsAudit}
                     >
                       {showContentsAudit ? <ChevronDown size={14} color={C.muted} /> : <ChevronRight size={14} color={C.muted} />}
-                      Activity on contents ({contentsAuditEntries.length})
+                      Activity on contents ({contentsAuditRows.length})
                     </button>
-                    {showContentsAudit && contentsAuditEntries.map(row)}
+                    {showContentsAudit && contentsAuditRows.map(row)}
                   </>
                 )}
               </div>
