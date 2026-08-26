@@ -23,11 +23,22 @@ to any session you spawn; they inherit the same tendency.
   from esm.sh/unpkg via an import map. Babel Standalone transpiles the JSX in-browser
   at load time. To edit: just edit the JSX inline inside the `<script type="text/babel">`
   block and reload — no build/compile step exists or is needed.
-- `AssetTrackerSync.gs` — Google Apps Script backend, pasted into the Apps Script editor
-  bound to a Google Sheet, deployed as a Web App. This is NOT part of the static site
-  deploy — it lives entirely inside Google's infrastructure. If you change this file,
-  you must re-paste it into the Apps Script editor and create a **new deployment
-  version** (Deploy > Manage deployments > pencil icon > Version: New version > Deploy).
+- `AssetTrackerSync.gs` — Google Apps Script backend, deployed as a Web App bound to a
+  Google Sheet. This is NOT part of the static site deploy — it lives entirely inside
+  Google's infrastructure. **Deploy it with `node deploy.mjs`** (see `DEPLOY.md`), which
+  pushes this file, cuts a new version, repoints the existing deployment so the `/exec`
+  URL is unchanged, and then fetches the live `/exec` to confirm the backend really is
+  reporting the new version. Needs a one-time `clasp login` wherever it runs; Google's
+  Apps Script API rejects service accounts, so it always acts as Eric — but that only
+  rules out an unattended *robot*, not a browser. **Google Cloud Shell is the intended
+  home** (`cloudshell-deploy.md` is a tap-to-run walkthrough; the link is in `DEPLOY.md`):
+  its `$HOME` persists, so the sign-in and Script ID are entered once ever and later
+  deploys are one command from a phone. A Claude Code cloud session is NOT a viable
+  host — the sign-in is blocked there as credential handling, which is why the config
+  falls back to `~/.bca-asset-tracker-deploy.json` rather than a repo file that a fresh
+  clone would not carry. The manual equivalent — paste into the Apps Script
+  editor, then Deploy > Manage deployments > pencil icon > Version: New version > Deploy —
+  still works and is the fallback if the tooling breaks.
   Just saving the script does not update the live `/exec` URL. This exact mistake
   happened once already (silently — Maintenance and Breakers/Circuits both appeared
   to work in-session but never actually reached the sheet, for several redeploy
