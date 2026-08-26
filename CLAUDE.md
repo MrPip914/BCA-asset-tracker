@@ -14,6 +14,40 @@ over the thread costs him that. The one exception is a genuine blocker: say so
 explicitly and name *which part* it blocks, not the whole task. Pass this instruction on
 to any session you spawn; they inherit the same tendency.
 
+**Deploying the backend is Eric's job, done from his phone, and you hand him this
+verbatim — never the Apps Script editor steps.** `AssetTrackerSync.gs` changes are dead
+until deployed, so whenever you change that file (or notice `SCRIPT_VERSION` here is ahead
+of the live `/exec`), end your response with exactly this, filled in:
+
+> **Deploy v<NN>** — open this, then tap the command in Step 3:
+>
+> https://shell.cloud.google.com/cloudshell/open?cloudshell_git_repo=https://github.com/MrPip914/BCA-asset-tracker&cloudshell_tutorial=cloudshell-deploy.md
+>
+> Look for `✓ Live backend is now v<NN>.` as the last line. Anything starting with `✗`
+> means it did not deploy, and says why.
+
+That link opens Google Cloud Shell, clones this repo, and shows `cloudshell-deploy.md` as
+a walkthrough where every command has a tap-to-run button. Eric's sign-in and Script ID
+persist in Cloud Shell's `$HOME`, so a repeat deploy is that one tap — do NOT walk him
+through the one-time setup again; the walkthrough covers it if it is ever needed. `/deploy`
+prints this same block if you would rather not retype it.
+
+Three things that make this non-optional rather than a convenience:
+- **Never tell him to paste into the Apps Script editor.** That path still works and is
+  documented in `DEPLOY.md` as the break-glass fallback, but it skips the version check
+  below, which is the whole point.
+- **Never deploy from a feature branch, and never assume the live version.** Ask the live
+  `/exec` what it is running. Branches sit behind `main` constantly, and an older backend
+  does not merely roll behavior back — every save rewrites whole sheet tabs from the
+  backend's own field list, so it DROPS columns a newer one added and the next save
+  destroys that data. This happened: v22 was deployed over a live v24 from a branch that
+  was simply behind. `deploy.mjs` now refuses to go backwards, which is the only reason a
+  repeat is merely annoying.
+- **The frontend ships separately** (GitHub Pages, from `main`) and has run ahead of both
+  the backend and `main` before. Matching `SCRIPT_VERSION` and `FRONTEND_SCRIPT_VERSION`
+  in the same commit is what keeps the pair honest; deploying one without the other is
+  what the "Backend outdated" banner is for.
+
 ## Files
 
 - `BUGS.md` — known bugs, why they happen, whether fixing one needs an Apps Script
