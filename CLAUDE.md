@@ -880,6 +880,78 @@ rediscover them:
   mirroring a relationship the other side already records — it's just a second copy to keep
   in sync, and the one that goes stale.
 
+**Audit entries name the OTHER assets they concern, in `related` (backend v27).** An entry
+is stamped with the asset it happened TO (`assetLabel`), but most also concern somewhere
+else: the room something moved out of and the one it moved into, the room a quantity was
+allocated to, the rooms a circuit serves. `related` is a comma-joined string of
+`label:role` pairs — `"BCR0006:from,BCR0020:to"` — built by **`relate({ from, to, ... })`**
+and read by `parseRelated()`/`relatedRoleFor()`.
+- **Ids, resolved at render — the audit log was the last holdout.** It stored display
+  *names* (`parentNameFor(oldVal)` at write time, `room: roomNameFor(roomId)`), which is the
+  one thing "Reference conventions" above forbids everywhere else. So "which entries involve
+  Room 101" could only be a string match: ambiguous between two rooms of the same name, and
+  stale the moment one was renamed. `from`/`to` still hold names — that is this entry's own
+  wording — but the ids are what the rooms are found by.
+- **The ROLE, not just the id, and that was the whole design question.** One row has to read
+  correctly from every asset it names: the same move is "moved out" from one room and "moved
+  in" from the other, and a created-in-a-room-and-assigned-to-someone entry will be "created
+  here" from the room and "assigned to Jane" from the person. A bare id list says an entry is
+  relevant but not *how*, which is not enough to word it. Roles: `from`/`to` (a move), `at`
+  (where it happened — created/archived/deleted), `serves`/`feeds` (a circuit), and
+  `assigned`/`unassigned`, **reserved unused for when users become assets**. Reserving them
+  costs nothing now; adding them later means rewriting AuditLog, the one table with no
+  rewrite path. Encoding the role also *removed* the separate `fromId`/`toId` columns an
+  earlier draft had — the role already says which way a reference points, so three new
+  columns collapsed to one.
+- **`describeAuditFor(entry, viewerLabel, assets, typesList)`** renders an entry as the
+  *viewer* sees it and **falls through to `describeAudit()` whenever the viewer IS the
+  subject**, so every pre-existing call site is untouched. A subject with no role (reached
+  via the contents section below) still gets named — "Serial changed from A to B" is useless
+  in a room holding nine devices. The subject is `nameOf()`, and appending its type would say
+  "Monitor BCA0002 (Monitor)" since `adoptLegacyNames` already builds names in that shape;
+  only a **deleted** asset gets `"<type> <label>"`, since there the stored type is the one
+  thing left. That fallback is load-bearing: audit entries deliberately outlive their assets.
+- **Lookup goes through `auditIndex`, a `useMemo` keyed on `auditLog`** — two Maps of
+  `label -> positions in auditLog`, one for the entry's subject and one for every id in
+  its `related`. Not premature: the two lists live in the detail view's **render body**,
+  so before this they were re-derived on every render of that view — every keystroke in
+  the edit form, whether or not the Audit tab was even open — and each pass walked the
+  whole append-only log calling `parseRelated()` on every row. Measured: 100k entries was
+  ~26ms per pass on a desktop (~100ms on a phone), versus ~0.2ms from the index. It stores
+  **positions, not entries**, because the log's append order IS its chronological order —
+  so merging the two maps and sorting the numbers descending reproduces the old
+  `.filter().reverse()` ordering without comparing timestamps.
+  - **The ceiling is the full-snapshot load, not this lookup, and it always was.** `doGet`
+    returns the entire AuditLog every time; at ~208 bytes/entry that is ~2MB at 10k entries
+    and ~10MB at 50k. `related` adds ~25 of those bytes. So audit-log pruning (already on
+    the deferred list) is what eventually bites, and it bites the payload long before any
+    filter gets slow.
+- **The named assets are LINKS** (`auditSegments()`): "Computer BCA0001 moved out →
+  Room 101" opens either one. Frontend-only — the ids were already in `related`, so this
+  needed no backend change and no new version. The pairing is **structural, not a search
+  for room-shaped words**: `related` says which id plays which role, and each role has a
+  fixed home in the entry's own text (a parent move's `from` text IS its `from` id, an
+  allocation's `room` IS its one id). Candidates that don't appear in the sentence simply
+  never match, which is what lets the subject's own wording and the viewer-relative
+  wording be fed one candidate list without either knowing which it got. Matching is
+  longest-first and position-by-position, so "Room 10" can't win a spot "Room 101" starts
+  at and a name appearing twice links twice. **Two things are never linked**: a value like
+  "Unassigned" or an em dash, which name no asset, and an id whose asset is gone — audit
+  entries outlive their assets, so that link would open nothing. `describeAudit()` still
+  returns a plain string, which is what the Excel export needs.
+- **The Audit tab is two sections**: the asset's own history (its entries plus every entry
+  naming it), then **"Activity on contents"**, collapsed, keyed off `descendantsOf()`. No type
+  test anywhere — a Building gets its rooms' activity and a Campus its buildings' for free.
+  The contents section is a **live** view of current containment, so something that has since
+  moved away takes its edit history with it; its *move* stays in the top section forever,
+  since that entry names the room by id. The asset's own history is durable; the contents
+  section is a snapshot.
+- **Backfill**: `backfillAuditIds_()` in the .gs, run ONCE by hand from the Apps Script
+  editor after deploying — deliberately unreachable from `doGet`/`doPost` and never on a
+  trigger, since it rewrites history. Best effort by design: a name matching nothing leaves
+  `related` empty and the entry stays out of the associated views, which beats guessing.
+  Ambiguity takes the first match, accepted only because the sheet is sample data.
+
 Every asset carries: `comments` (freeform notes), `changes` (structured: type/vendor/
 cost/note — its own managed lists, editable via gear-icon "manage" buttons), and is
 covered by a global `auditLog` that automatically records creates/edits/archives/
@@ -1167,13 +1239,27 @@ When you do:
 
 ## Known constraints / things to watch
 
-- **The repo is at v26 and v26 is UNDEPLOYED as of 2026-08-25.** It makes the Assets tab's
+- **The repo is at v27 and v27 is UNDEPLOYED as of 2026-08-26.** It adds the `related` column
+  to AuditLog (see "Audit entries name the OTHER assets they concern" under Data model) and
+  fixes `appendNewRows_` so that column's header actually gets written. Until it's deployed,
+  a `related` value the app sends is dropped on write, so the associated-resource views work
+  in-session and forget on reload — the same shape of window as the pre-v17 `parentId` one.
+  Sandbox is unaffected, as ever, and is where the whole feature was built and verified.
+  - After deploying, run **`backfillAuditIds_()` once from the Apps Script editor** to fill
+    `related` on the existing history. It refuses to run until the `related` column exists,
+    so let one save land first.
+- **v26 is DEPLOYED, confirmed 2026-08-26** by fetching the `/exec` URL and reading
+  `scriptVersion` back (it reports the version even on the `authFailed` response, which is what
+  makes that check possible without a sign-in). It makes the Assets tab's
   column set dynamic — the fixed `ASSET_FIELDS` plus the custom columns named in Config — which
   is what makes a custom column's value persist at all (see the Fixed entry in `BUGS.md`), and
-  therefore what unblocks per-type custom fields. Until it's pasted in and a **New version**
-  deploy is created, a value typed into any custom column, including a per-type field, is still
-  dropped on save. The column and the type settings persist normally; only the VALUES don't.
-  Sandbox is unaffected, as ever.
+  therefore what unblocks per-type custom fields. Custom column values, including per-type
+  fields, now persist normally.
+  - **This entry said UNDEPLOYED for a day after it went live, and cost a session real work** —
+    a scope was written around "deploy v26 first" that was pure fiction. That is the standing
+    warning a few entries down being proven again: *don't take a hardcoded "the live backend is
+    vN" line here on faith, including this one.* One `curl` of the `/exec` URL settles it in a
+    second, and the answer comes back even unauthenticated. Check before planning around it.
   - `test-backend-fields.js` in the repo root unit-tests `customColumnKeys_` directly. Worth
     keeping the habit: Sandbox never contacts Apps Script and the live backend needs a sign-in,
     so browser testing structurally cannot cover a backend write path.
@@ -1182,6 +1268,15 @@ When you do:
   DESTRUCTIVE version: it deleted six columns from the Assets tab that were kept only to keep an earlier
   change reversible: `roomId`/`buildingId` (replaced by `parentId` in v17), `room`/`building`/
   `campus` (replaced by `name` in v23) and `itemName` (replaced by `subType` in v24).
+  - **AuditLog is the ONE tab this does not apply to** (see `appendNewRows_`, fixed in v27).
+    It is append-only, so its header row was written once and never again — meaning adding a
+    column to its field list did NOT widen the stored header, and `readTable_` (which keys off
+    the *sheet's* headers) read the new column back as `obj[""]`, colliding every such column
+    onto one key and losing the data. Silently, with `SCRIPT_VERSION` still matching its
+    frontend — the version check cannot see this, because the script really is the version it
+    claims. `appendNewRows_` now widens a narrow stored header (never shrinks it: dropping a
+    column would strand the values under it). Covered by `test-backend-fields.js`, which is the
+    only place it *can* be covered — Sandbox never contacts Apps Script.
   - **`ASSET_FIELDS` is the schema.** `writeTable_` clears the tab and writes those headers, so
     dropping a name from that list deletes the column on the next asset-domain save. The sheet's
     version history is the only way back — that is the whole rollback story now. Treat any future

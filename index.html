@@ -747,6 +747,64 @@ function maintenanceStatusOf(item) {
   if (daysUntil <= 14) return "due-soon";
   return "ok";
 }
+// ---------- AUDIT: ASSOCIATED RESOURCES ----------
+// An audit entry is stamped with the asset it happened TO (`assetLabel`), but
+// most entries also concern OTHER assets: the room something moved out of and
+// the one it moved into, the room a quantity was allocated to, the rooms a
+// circuit serves. Recording those makes the log readable from the other end --
+// open a room and see what came and went.
+//
+// Stored as one comma-joined string of `label:role` pairs, matching the way a
+// circuit already stores its rooms in one cell. The ROLE is what makes a single
+// row legible from every asset it names: the same move is "moved out" read from
+// one room and "moved in" read from the other, and a create-in-a-room-assigned-
+// to-someone entry is "created here" from the room and "assigned to Jane" from
+// the person. A bare list of ids can say an entry is relevant but not how, which
+// is not enough to word it.
+//
+// The role vocabulary is deliberately open-ended -- `assigned`/`unassigned` are
+// unused until users become assets, and cost nothing to reserve now. Adding them
+// later would mean rewriting AuditLog, the one table with no rewrite path.
+// The wording for each role lives in describeAuditFor(), not in a map here:
+// several roles need the OTHER end of the move to read correctly, which a
+// role->string table cannot supply.
+
+// Build an entry's `related` string. Takes { role: id } or { role: [ids] } so a
+// call site names the relationship rather than assembling pair strings itself --
+// the pairing rule then exists once instead of at each of the ten sites that
+// need it, which is the mistake CLAUDE.md records nameOf() being introduced to
+// undo. Falsy ids drop out, so an unset parent needs no guard at the call site.
+function relate(pairs) {
+  return Object.entries(pairs || {})
+    .flatMap(([role, ids]) => (Array.isArray(ids) ? ids : [ids])
+      .filter(Boolean)
+      .map(id => `${id}:${role}`))
+    .join(",");
+}
+
+// The inverse. Tolerates a missing value (every row written before v27), a bare
+// label with no role (nothing writes one, but a hand-edited sheet could), and
+// stray whitespace.
+function parseRelated(related) {
+  return String(related || "")
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(pair => {
+      const i = pair.lastIndexOf(":");
+      return i === -1 ? { id: pair, role: "at" } : { id: pair.slice(0, i), role: pair.slice(i + 1) };
+    })
+    .filter(r => r.id);
+}
+
+// Does this entry concern `label` as an associated resource? (Its own
+// `assetLabel` is asked separately -- that is the entry's subject, not an
+// association.)
+function relatedRoleFor(entry, label) {
+  const hit = parseRelated(entry.related).find(r => r.id === label);
+  return hit ? hit.role : null;
+}
+
 function describeAudit(entry) {
   if (entry.action === "created") return "Asset created";
   if (entry.action === "deleted") return "Asset permanently deleted";
@@ -777,6 +835,144 @@ function describeAudit(entry) {
   // breaker_edited / circuit_edited fall through to the generic case below —
   // their field/from/to are already in the "X changed from A to B" shape.
   return `${entry.field} changed from "${entry.from || "—"}" to "${entry.to || "—"}"`;
+}
+
+// describeAudit() writes an entry from its SUBJECT's point of view, which is the
+// right reading on that asset's own Audit tab and backwards everywhere else: on
+// Room 101, "Parent changed from Room 101 to Room 205" describes something that
+// left. This renders the same entry as the VIEWER sees it, keyed on the role the
+// viewer plays in it, and falls through to describeAudit() whenever the viewer
+// IS the subject -- so every existing call site is untouched.
+//
+// The subject is named by nameOf() on the asset the label points at, falling
+// back to the BARE LABEL when there is no such asset. That fallback is load
+// bearing, not defensive: audit entries deliberately outlive the assets they
+// describe (a permanently deleted asset keeps its history), so the common case
+// for a `deleted` entry is that the lookup finds nothing.
+function describeAuditFor(entry, viewerLabel, assets, typesList) {
+  if (!viewerLabel || entry.assetLabel === viewerLabel) return describeAudit(entry);
+  // No role means the viewer is not named by the entry at all -- it reached this
+  // view through the contents section, i.e. it happened to something sitting
+  // inside the viewer. Still needs the subject named: "Serial changed from A to
+  // B" is useless in a room holding nine devices.
+  const role = relatedRoleFor(entry, viewerLabel);
+
+  // Since v23 every asset carries a `name`, and adoptLegacyNames gives a nameless
+  // one the name it was already displayed under -- "Monitor BCA0002". So nameOf()
+  // alone reads correctly here and appending the type would say Monitor twice.
+  // Only when the asset is GONE is there nothing but a label, and there the
+  // entry's own stored type is the one thing left worth adding; it is built in
+  // the same shape suggestedNameFor() would have used, so a deleted asset reads
+  // like a live one rather than as a bare id.
+  const subjectAsset = (assets || []).find(a => a.label === entry.assetLabel);
+  const deadType = subjectAsset ? "" : typeNameOf(entry.assetType, typesList);
+  const subject = subjectAsset
+    ? nameOf(subjectAsset)
+    : `${deadType} ${entry.assetLabel}`.trim();
+
+  // The other end of a move, so "moved out" can say where to. Absent on an
+  // entry that only names one side (an allocation, a create).
+  const otherId = parseRelated(entry.related).find(r => r.id !== viewerLabel && (r.role === "from" || r.role === "to"));
+  const otherName = otherId ? (parentNameFor(otherId.id, assets) || otherId.id) : "";
+
+  if (role === "from") return otherName ? `${subject} moved out → ${otherName}` : `${subject} moved out`;
+  if (role === "to") return otherName ? `${subject} moved in ← ${otherName}` : `${subject} moved in`;
+  if (role === "serves") return `${subject} — circuit serves here`;
+  if (role === "feeds") return `${subject} — circuit feeds this panel`;
+  if (role === "assigned") return `${subject} assigned`;
+  if (role === "unassigned") return `${subject} unassigned`;
+  // Everything else -- role "at", and the no-role contents case. The entry's own
+  // wording already reads correctly ("Asset created", "Serial changed from A to
+  // B"); all it lacks is which asset, since the viewer is not it. Lowercasing the
+  // first letter keeps "BCA0001 — asset created" reading as one sentence.
+  const own = describeAudit(entry);
+  return `${subject} — ${own.charAt(0).toLowerCase()}${own.slice(1)}`;
+}
+
+// How an inline "open that asset" link looks. Matches the "Fed by Panel X" link
+// in the breaker modal, which was the first one of these.
+const AUDIT_LINK_STYLE = {
+  background: "none", border: "none", padding: 0, font: "inherit",
+  color: C.brandDark, fontWeight: 700, cursor: "pointer", textDecoration: "underline",
+};
+
+// describeAuditFor() produces the sentence; this says which spans of it name an
+// asset worth opening. Returns an array of segments -- plain strings, plus
+// { text, label } for the parts that should be links.
+//
+// The pairing is STRUCTURAL rather than a search for room-shaped words: `related`
+// says which ids the entry names and in what role, and each role has a fixed home
+// in the entry's own text -- a parent move's `from` text IS its `from` id, an
+// allocation's `room` IS its single id. So this decorates spans it already knows
+// are there. Candidates that don't appear in the sentence simply never match,
+// which is what lets both the subject's own wording and the viewer-relative
+// wording be fed the same list without either needing to know which it got.
+//
+// Two things are deliberately never linked: a value like "Unassigned" or an em
+// dash, which name no asset, and an id whose asset is gone -- audit entries
+// outlive the assets they describe, so a link there would open nothing.
+function auditSegments(entry, viewerLabel, assets, typesList) {
+  const text = describeAuditFor(entry, viewerLabel, assets, typesList);
+  const byLabel = l => (assets || []).find(a => a.label === l);
+  const links = [];
+  const add = (t, label) => {
+    const str = String(t || "");
+    if (!str || !label || str === UNASSIGNED_LABEL || str === "—") return;
+    if (!byLabel(label)) return;
+    links.push({ text: str, label });
+  };
+
+  const isSubjectView = !viewerLabel || entry.assetLabel === viewerLabel;
+  const related = parseRelated(entry.related);
+  const roleId = role => (related.find(r => r.role === role) || {}).id;
+
+  // The sentence leads with the subject whenever the viewer is not it, named
+  // exactly the way describeAuditFor named it.
+  if (!isSubjectView) {
+    const subj = byLabel(entry.assetLabel);
+    if (subj) add(nameOf(subj), entry.assetLabel);
+    // A viewer-relative move prints the other end by a name resolved NOW, not
+    // from the stored text.
+    const other = related.find(r => r.id !== viewerLabel && (r.role === "from" || r.role === "to"));
+    if (other) add(parentNameFor(other.id, assets), other.id);
+  }
+
+  // The names the entry stored for its own wording, each tied to the id playing
+  // the matching role.
+  if (entry.action === "edited" && entry.field === "Parent") {
+    add(entry.from, roleId("from"));
+    add(entry.to, roleId("to"));
+  } else if (entry.action === "allocated") {
+    add(entry.room, roleId("to"));
+  } else if (entry.action === "unallocated") {
+    add(entry.room, roleId("from"));
+  } else if (entry.action === "circuit_edited" || entry.action === "circuit_added" || entry.action === "circuit_removed") {
+    // Rooms served are printed as a comma-joined list of names; each resolves
+    // through its own id, so a deleted one drops out of the links by itself.
+    related.filter(r => r.role === "serves" || r.role === "feeds")
+      .forEach(r => add(nameOf(byLabel(r.id) || {}), r.id));
+  }
+
+  if (!links.length) return [text];
+  // Longest first so "Room 10" can never win a position that "Room 101" starts
+  // at. Scanning position by position (rather than replacing) keeps a name that
+  // appears twice linked in both places.
+  const sorted = [...links].sort((a, b) => b.text.length - a.text.length);
+  const out = [];
+  let buf = "";
+  for (let i = 0; i < text.length; ) {
+    const hit = sorted.find(l => text.startsWith(l.text, i));
+    if (hit) {
+      if (buf) { out.push(buf); buf = ""; }
+      out.push({ text: hit.text, label: hit.label });
+      i += hit.text.length;
+    } else {
+      buf += text[i];
+      i++;
+    }
+  }
+  if (buf) out.push(buf);
+  return out;
 }
 // Every asset already has a stable, unique `label` — Room/Building references
 // elsewhere in the app store that label (an id), not the mutable display
@@ -1127,7 +1323,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v26";
+const FRONTEND_SCRIPT_VERSION = "v27";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -1791,7 +1987,34 @@ const MOCK_SNAPSHOT = {
     },
   ],
   breakerTypes: SEEDED_BREAKER_TYPES,
-  auditLog: [],
+  // Enough history to exercise BOTH audit sections without a backend, since the
+  // whole point of Sandbox is building this before a redeploy. Deliberately
+  // covers the three shapes that behave differently:
+  //   - a move, which names two rooms and must read "out" from one and "in" from
+  //     the other off this ONE row;
+  //   - a create, which names one room with role `at`;
+  //   - an edit naming nobody, which must appear only under its own asset and
+  //     under its room's "activity on contents".
+  auditLog: [
+    {
+      at: "2026-08-10T16:20:00.000Z", by: "Eric", assetLabel: "BCA0001", assetType: "Computer",
+      action: "created", related: relate({ at: "BCR0008" }),
+    },
+    {
+      at: "2026-08-18T15:05:00.000Z", by: "Eric", assetLabel: "BCA0001", assetType: "Computer",
+      action: "edited", field: "Serial", from: "MOCK-CMP-000", to: "MOCK-CMP-001", related: "",
+    },
+    {
+      at: "2026-08-22T17:40:00.000Z", by: "Eric", assetLabel: "BCA0001", assetType: "Computer",
+      action: "edited", field: "Parent", from: "Room 200", to: "Room 102",
+      related: relate({ from: "BCR0008", to: "BCR0006" }),
+    },
+    {
+      at: "2026-08-24T18:12:00.000Z", by: "Eric", assetLabel: "BCA0002", assetType: "Monitor",
+      action: "edited", field: "Parent", from: "Unassigned", to: "Room 102",
+      related: relate({ to: "BCR0006" }),
+    },
+  ],
 };
 
 function AssetTracker() {
@@ -1978,6 +2201,9 @@ function AssetTracker() {
   const [moveTarget, setMoveTarget] = useState("");
   const [activeFilterCol, setActiveFilterCol] = useState(null);
   const [showToolbarMenu, setShowToolbarMenu] = useState(false);
+  // Collapsed by default: contents activity is context, not the asset's own
+  // history, and on a building it can be far longer than the history above it.
+  const [showContentsAudit, setShowContentsAudit] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [draft, setDraft] = useState({});
   const [showAdd, setShowAdd] = useState(false);
@@ -2795,6 +3021,42 @@ function AssetTracker() {
 
   const selectedAsset = assets ? assets.find(a => a.label === selectedLabel) : null;
 
+  // label -> positions in auditLog, built once per change to the log rather than
+  // by scanning it per asset per render.
+  //
+  // This is not premature. The two lists the Audit tab needs are computed in the
+  // detail view's RENDER BODY, so they were re-derived on every render of that
+  // view -- every keystroke in the edit form, whether or not the Audit tab was
+  // even open -- and each pass walked the whole log calling parseRelated() on
+  // every row. The log is append-only and never pruned, so that cost only ever
+  // grows. Measured at 100k entries it was ~26ms per pass on a desktop, which is
+  // roughly 100ms on a phone: fine once, janky per keystroke.
+  //
+  // Positions rather than entries, for two reasons: it stays small, and the
+  // append order IS the chronological order, so merging the two maps and sorting
+  // the numbers descending reproduces the old `.filter().reverse()` ordering
+  // exactly, without comparing timestamps.
+  const auditIndex = useMemo(() => {
+    const bySubject = new Map();
+    const byRelated = new Map();
+    const add = (map, key, i) => {
+      if (!key) return;
+      const arr = map.get(key);
+      if (arr) arr.push(i); else map.set(key, [i]);
+    };
+    auditLog.forEach((e, i) => {
+      add(bySubject, e.assetLabel, i);
+      parseRelated(e.related).forEach(r => add(byRelated, r.id, i));
+    });
+    return { bySubject, byRelated };
+  }, [auditLog]);
+
+  // Also memoized because it walks every asset's parent chain, and it likewise
+  // sat in the render body.
+  const selectedDescendantLabels = useMemo(() => (
+    selectedAsset ? new Set(descendantsOf(selectedAsset, assets).map(a => a.label)) : new Set()
+  ), [selectedAsset, assets]);
+
   function openDetail(asset, initialTab) {
     setSelectedLabel(asset.label);
     setView("detail");
@@ -2802,6 +3064,10 @@ function AssetTracker() {
     setEditNote("");
     setCommentDraft("");
     setChangeDraft({ changeType: "", vendor: "", cost: "", note: "" });
+    // Collapse the contents-activity section again. Navigating to a different
+    // asset should not carry over a section the user expanded on the last one --
+    // same reasoning as the breaker-modal reset below it.
+    setShowContentsAudit(false);
     // Electrical Panels open straight to Breakers — that's the tab worth
     // seeing first for a panel, not the mostly-empty generic Details fields.
     // A requested tab this type doesn't have falls back to its default rather
@@ -2921,6 +3187,8 @@ function AssetTracker() {
       const createdEntry = {
         at: new Date().toISOString(), by: currentUser || "", assetLabel: label,
         assetType: draft.type, action: "created",
+        // Where it was created, so the room shows the arrival.
+        related: relate({ at: draft.parentId }),
       };
       // Left blank, the Name takes the same suggestion the field shows as its
       // placeholder — so a new asset is named at creation rather than relying on
@@ -2970,6 +3238,9 @@ function AssetTracker() {
         editEntries.push({
           at: new Date().toISOString(), by: currentUser || "", assetLabel: original.label,
           assetType: draftToSave.type || original.type, action: "edited", field: fieldLabel, from, to,
+          // Only a parent change names other assets. from/to hold display names
+          // for this entry's own wording; the ids are how the two rooms find it.
+          related: isParentField ? relate({ from: oldVal, to: newVal }) : "",
         });
       });
 
@@ -3021,6 +3292,7 @@ function AssetTracker() {
     const deletedEntry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: label,
       assetType: asset ? asset.type : "", action: "deleted",
+      related: relate({ at: asset ? asset.parentId : "" }),
     };
     await persist(assets.filter(a => a.label !== label), { auditLog: logAudit([deletedEntry]) });
     setConfirmDelete(null);
@@ -3033,6 +3305,7 @@ function AssetTracker() {
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: label,
       assetType: asset ? asset.type : "", action: "archived",
+      related: relate({ at: asset ? asset.parentId : "" }),
     };
     const next = assets.map(a => (a.label === label ? { ...a, status: "Archived" } : a));
     await persist(next, { auditLog: logAudit([entry]) });
@@ -3045,6 +3318,7 @@ function AssetTracker() {
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: label,
       assetType: asset ? asset.type : "", action: "restored",
+      related: relate({ at: asset ? asset.parentId : "" }),
     };
     const next = assets.map(a => (a.label === label ? { ...a, status: "Active" } : a));
     await persist(next, { auditLog: logAudit([entry]) });
@@ -3077,6 +3351,7 @@ function AssetTracker() {
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: nextLabel,
       assetType: copy.type, action: "created",
+      related: relate({ at: copy.parentId }),
     };
     await persist([...assets, copy], { auditLog: logAudit([entry]), nextAssetNumber: advanceAssetNumber(nextLabel) });
     openDetail(copy);
@@ -3116,6 +3391,7 @@ function AssetTracker() {
       entries.push({
         at: new Date().toISOString(), by: currentUser || "", assetLabel: a.label,
         assetType: a.type, action: "edited", field: "Parent",
+        related: relate({ from: a.parentId, to: newRoomId }),
         from: parentNameFor(a.parentId, assets) || UNASSIGNED_LABEL, to: newRoomName,
       });
       return { ...a, parentId: newRoomId };
@@ -3206,6 +3482,7 @@ function AssetTracker() {
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel,
       assetType: selectedAsset.type, action: "allocated", room: roomNameFor(roomId, assets), quantity: qty,
+      related: relate({ to: roomId }),
       previousQuantity: existingForRoom ? existingForRoom.quantity : null,
     };
     const next = assets.map(a => (a.label === selectedLabel ? { ...a, allocations: nextAllocations } : a));
@@ -3222,6 +3499,7 @@ function AssetTracker() {
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel,
       assetType: selectedAsset.type, action: "unallocated", room: roomNameFor(roomId, assets), quantity: existingForRoom ? existingForRoom.quantity : 0,
+      related: relate({ from: roomId }),
     };
     const next = assets.map(a => (a.label === selectedLabel ? { ...a, allocations: nextAllocations } : a));
     await persist(next, { auditLog: logAudit([entry]) });
@@ -3630,6 +3908,7 @@ function AssetTracker() {
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
       action: "circuit_added", field: circuit.label, from: circuitLocationLabel(breakerId),
+      related: relate({ serves: roomsServedIds, feeds: feedsPanelLabel }),
       to: feedsPanelLabel ? `Feeds ${feedsPanelLabel}` : `Serves ${roomsServedIds.map(id => roomNameFor(id, assets)).join(", ")}`,
     };
     persist(updatePanelCircuits(nextBreakers, nextUnassigned), { auditLog: logAudit([entry]) });
@@ -3647,9 +3926,11 @@ function AssetTracker() {
     const original = circuitsIn(breakerId).find(c => c.id === id);
     if (!original) return "Circuit not found.";
     const updated = { ...original, label: draft.label.trim(), notes: (draft.notes || "").trim(), roomsServedIds, feedsPanelLabel };
-    const mk = (field, from, to) => ({
+    // `related` defaults to none: of the four things editable here, only the two
+    // that name other assets pass one.
+    const mk = (field, from, to, related = "") => ({
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
-      action: "circuit_edited", field: `${original.label} — ${field}`, from, to,
+      action: "circuit_edited", field: `${original.label} — ${field}`, from, to, related,
     });
     const entries = [];
     if (original.label !== updated.label) entries.push(mk("Label", original.label, updated.label));
@@ -3657,9 +3938,15 @@ function AssetTracker() {
     if ((original.roomsServedIds || []).join(",") !== roomsServedIds.join(",")) {
       const fromNames = (original.roomsServedIds || []).map(rid => roomNameFor(rid, assets)).join(", ");
       const toNames = roomsServedIds.map(rid => roomNameFor(rid, assets)).join(", ");
-      entries.push(mk("Rooms served", fromNames || "—", toNames || "—"));
+      // The UNION of both sides, so a room that just LOST this circuit sees the
+      // change too -- it is as much that room's news as the one that gained it.
+      const bothEnds = [...new Set([...(original.roomsServedIds || []), ...roomsServedIds])];
+      entries.push(mk("Rooms served", fromNames || "—", toNames || "—", relate({ serves: bothEnds })));
     }
-    if ((original.feedsPanelLabel || "") !== feedsPanelLabel) entries.push(mk("Feeds sub-panel", original.feedsPanelLabel || "—", feedsPanelLabel || "—"));
+    if ((original.feedsPanelLabel || "") !== feedsPanelLabel) {
+      entries.push(mk("Feeds sub-panel", original.feedsPanelLabel || "—", feedsPanelLabel || "—",
+        relate({ feeds: [original.feedsPanelLabel || "", feedsPanelLabel] })));
+    }
     const nextBreakers = breakerId
       ? existing.map(b => (b.id === breakerId ? { ...b, circuits: (b.circuits || []).map(c => (c.id === id ? updated : c)) } : b))
       : null;
@@ -3680,6 +3967,7 @@ function AssetTracker() {
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
       action: "circuit_removed", field: circuit.label, from: circuitLocationLabel(breakerId),
+      related: relate({ serves: circuit.roomsServedIds || [], feeds: circuit.feedsPanelLabel || "" }),
     };
     persist(updatePanelCircuits(nextBreakers, nextUnassigned), { auditLog: logAudit([entry]) });
   }
@@ -4843,7 +5131,34 @@ function AssetTracker() {
     const comments = [...(selectedAsset.comments || [])].reverse();
     const changeEntries = [...(selectedAsset.changes || [])].reverse();
     const totalLoggedCost = (selectedAsset.changes || []).reduce((sum, c) => sum + (parseFloat(c.cost) || 0), 0);
-    const assetAuditEntries = auditLog.filter(e => e.assetLabel === selectedAsset.label).slice().reverse();
+    // THIS asset's own history: entries stamped with it, plus every entry that
+    // names it as an associated resource -- things that moved in or out, a
+    // quantity allocated here, a circuit that serves it. Merged into one list,
+    // newest first, because they are all equally this asset's news.
+    const relatedIdx = auditIndex.byRelated.get(selectedAsset.label) || [];
+    const assetAuditEntries = [...new Set([
+      ...(auditIndex.bySubject.get(selectedAsset.label) || []),
+      ...relatedIdx,
+    ])].sort((a, b) => b - a).map(i => auditLog[i]);
+    // Activity on what is INSIDE it, collapsed by default. Deliberately not
+    // gated on type: it keys off descendantsOf(), so a Building shows its rooms'
+    // activity and a Campus its buildings', with no type test to keep in step.
+    //
+    // Note this is a LIVE view of current containment -- something that has since
+    // moved away takes its edit history with it. Its move stays above regardless,
+    // since that entry names this asset by id. So the asset's own history is
+    // durable and this section is a snapshot, which is the honest split.
+    // Subtracting the entries already shown above is what stops a row that both
+    // names this asset and happened to something inside it appearing twice.
+    const alreadyShown = new Set(relatedIdx);
+    const contentsAuditEntries = [];
+    selectedDescendantLabels.forEach(label => {
+      (auditIndex.bySubject.get(label) || []).forEach(i => {
+        if (!alreadyShown.has(i)) contentsAuditEntries.push(i);
+      });
+    });
+    contentsAuditEntries.sort((a, b) => b - a);
+    const contentsAuditRows = contentsAuditEntries.map(i => auditLog[i]);
     // Never-performed items sort first (need scheduling attention); the rest by
     // ascending next-due date, which naturally puts the most-overdue on top.
     const maintenanceItems = (selectedAsset.maintenanceItems || [])
@@ -5629,22 +5944,63 @@ function AssetTracker() {
             </>
           )}
 
-          {detailTab === "audit" && (
-            assetAuditEntries.length === 0 ? (
-              <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>No edits recorded yet.</div>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {assetAuditEntries.map((entry, i) => (
-                  <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "9px 14px" }}>
-                    <div style={{ fontSize: 13, color: C.ink, marginBottom: 3 }}>{describeAudit(entry)}</div>
-                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.placeholder }}>
-                      {formatWhen(entry.at)}{entry.by ? ` · ${entry.by}` : ""}
-                    </div>
-                  </div>
-                ))}
+          {detailTab === "audit" && (() => {
+            // One row renderer for both sections. describeAuditFor() falls
+            // through to describeAudit() when the viewer IS the entry's subject,
+            // so the asset's own entries read exactly as they always have.
+            const row = (entry, i) => (
+              <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "9px 14px" }}>
+                <div style={{ fontSize: 13, color: C.ink, marginBottom: 3 }}>
+                  {auditSegments(entry, selectedAsset.label, assets, typesList).map((seg, k) => (
+                    typeof seg === "string" ? <React.Fragment key={k}>{seg}</React.Fragment> : (
+                      <button
+                        key={k}
+                        onClick={() => {
+                          const target = assets.find(a => a.label === seg.label);
+                          if (target) openDetail(target);
+                        }}
+                        style={AUDIT_LINK_STYLE}
+                        title={`Open ${seg.label}`}
+                      >
+                        {seg.text}
+                      </button>
+                    )
+                  ))}
+                </div>
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.placeholder }}>
+                  {formatWhen(entry.at)}{entry.by ? ` · ${entry.by}` : ""}
+                </div>
               </div>
-            )
-          )}
+            );
+            return (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {assetAuditEntries.length === 0 ? (
+                  <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>No edits recorded yet.</div>
+                ) : assetAuditEntries.map(row)}
+
+                {contentsAuditRows.length > 0 && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setShowContentsAudit(v => !v)}
+                      style={{
+                        display: "flex", alignItems: "center", gap: 6, width: "100%",
+                        background: "none", border: "none", borderTop: `1px solid ${C.border}`,
+                        padding: "12px 2px 6px", marginTop: 4, cursor: "pointer",
+                        fontFamily: "'IBM Plex Mono', monospace", fontSize: 11,
+                        letterSpacing: 0.5, textTransform: "uppercase", color: C.muted,
+                      }}
+                      aria-expanded={showContentsAudit}
+                    >
+                      {showContentsAudit ? <ChevronDown size={14} color={C.muted} /> : <ChevronRight size={14} color={C.muted} />}
+                      Activity on contents ({contentsAuditRows.length})
+                    </button>
+                    {showContentsAudit && contentsAuditRows.map(row)}
+                  </>
+                )}
+              </div>
+            );
+          })()}
         </div>
 
         {confirmDelete && (() => {
