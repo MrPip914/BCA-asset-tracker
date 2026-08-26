@@ -49,7 +49,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v27";
+const SCRIPT_VERSION = "v28";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -99,7 +99,11 @@ const SHEET_NAMES = {
 // version history is the only way back.
 const ASSET_FIELDS = [
   "label", "name", "type", "subType", "screenSize", "hostname", "parentId",
-  "brand", "model", "serial", "person", "peripherals", "notes",
+  // `personIds` (v28) is the assignment: comma-joined labels of User assets, the
+  // app's first many-to-many between assets. `person` is the pre-v28 slash-joined
+  // list of NAMES, kept and still written so the change stays reversible and an
+  // un-migrated row still resolves -- same shape as parentId/roomId in v17.
+  "brand", "model", "serial", "person", "personIds", "peripherals", "notes",
   "totalQuantity", "purchaseDate", "warrantyUntil", "status",
   "panelSlotCount", "panelLayout",
 ];
@@ -1015,6 +1019,9 @@ function handleAuthenticatedRead_(body, e) {
       const label = a.label;
       return {
         ...a,
+        // Stored comma-joined in one cell (same as a circuit's roomsServed);
+        // handed to the app as an array so nothing downstream re-parses it.
+        personIds: String(a.personIds || "").split(",").map(s => s.trim()).filter(Boolean),
         comments: commentRows.filter(c => c.assetLabel === label).map(c => ({ text: c.text, at: c.at, by: c.by })),
         changes: changeRows.filter(c => c.assetLabel === label).map(c => ({
           changeType: c.changeType, vendor: c.vendor, cost: c.cost, note: c.note, at: c.at, by: c.by,
@@ -1257,7 +1264,13 @@ function doPost(e) {
     if (dirty.assets) {
       // Assets tab: flat fields only, plus any custom columns (see
       // customColumnKeys_ — without them, custom column values are dropped).
-      writeTable_(SHEET_NAMES.assets, ASSET_FIELDS.concat(customColumnKeys_(body.columns, configMap)), assets);
+      // personIds arrives as an array and has to be flattened explicitly: leaving
+      // it to setValues' own stringification would work by accident today and
+      // silently change shape the day the separator or the type did.
+      const assetRows_ = assets.map(a => (
+        Array.isArray(a.personIds) ? Object.assign({}, a, { personIds: a.personIds.join(",") }) : a
+      ));
+      writeTable_(SHEET_NAMES.assets, ASSET_FIELDS.concat(customColumnKeys_(body.columns, configMap)), assetRows_);
 
       // Child tables, flattened out with the parent asset's label as the key.
       const commentRows = [];

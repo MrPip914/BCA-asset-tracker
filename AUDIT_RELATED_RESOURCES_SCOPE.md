@@ -1,7 +1,8 @@
 # Audit entries on associated resources — scope
 
-**Status:** **Phase 1 BUILT** (2026-08-26), verified in Sandbox in a real browser; backend
-v27 undeployed. Phases 2-3 still scoped only. Eric's calls recorded inline.
+**Status:** **Phases 1 and 2 BUILT** (2026-08-26), each verified in Sandbox in a real
+browser. v27 deployed; **v28 undeployed**. Phase 3 landed with Phase 2 — the reserved
+`assigned`/`unassigned` roles needed no renderer change. Eric's calls recorded inline.
 **Rebased onto main 2026-08-26** (v23→v26: the generic `name` field, type ids, the
 type editor, six deleted columns, `deploy.mjs`). Both findings below survived that
 intact; what changed around them is marked **[v26]**.
