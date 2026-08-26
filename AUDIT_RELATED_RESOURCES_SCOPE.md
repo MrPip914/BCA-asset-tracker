@@ -51,10 +51,8 @@ function appendNewRows_(name, headers, rows) {
 ```
 
 `readTable_` keys each row off **the file's own header row**, not the passed
-array. So on the live sheet — which is not empty — adding `relatedIds`/`fromId`/
-`toId` to the header array would append values into three columns whose header
-cells are still blank, and every one would read back as `obj[""]`, colliding with
-each other and vanishing.
+array. So on the live sheet — which is not empty — adding a `related` column to the header array would append values into a column whose header
+cell is still blank, and it would read back as `obj[""]` and vanish.
 
 It would fail **silently**, and the `SCRIPT_VERSION` / `FRONTEND_SCRIPT_VERSION`
 check would not catch it: both versions would match while the ids quietly went
@@ -78,60 +76,87 @@ if (storedWidth < headers.length) {
 
 ### Data shape
 
-Three new fields on an audit entry, three new columns at the **end** of the
+**One** new field on an audit entry, **one** new column at the **end** of the
 AuditLog header array (order matters — see the trap above):
 
 | Field | Type | Meaning |
 |---|---|---|
-| `relatedIds` | comma-joined labels | Every asset this entry is *also* about. The queryable index. |
-| `fromId` | label or `""` | Where the subject came from, when the field is a reference. |
-| `toId` | label or `""` | Where it went. |
+| `related` | comma-joined `label:role` pairs | Every asset this entry is also about, and how. |
 
-`fromId`/`toId` are always also members of `relatedIds`. The redundancy is
-deliberate and has one job: `relatedIds` answers *"does this entry concern me"*,
-`fromId`/`toId` answer *"in which direction"*, which is what lets Room A say
-"moved out" and Room B say "moved in" about the same entry. Allocations and
-`roomsServed` have related ids with no direction at all, which is why the generic
-array is the index rather than a derived from/to pair.
+e.g. `BCR0002:from,BCR0005:to` for a move, or `BCR0005:at,BCU0001:assigned` for
+an asset created in a room and given to someone.
+
+**Roles, not a bare list of ids** — this is the one revision Eric's question
+forced, and it is much cheaper now than in phase 2:
+
+- `from` / `to` — a move out of / into this asset
+- `at` — this asset was simply where it happened (created, archived, deleted)
+- `serves` / `feeds` — a circuit's rooms served, and the sub-panel it feeds
+- `assigned` / `unassigned` — phase 2, a person gaining or losing an asset
+
+A bare list can answer *"does this entry concern me"* but not *"in what way"*,
+and the two views of one entry need different wording — "created here" read from
+a Room, "assigned to Jane" read from a person, from the identical row. In phase 1
+every entry involves only one *kind* of reference, so a single `fromId`/`toId`
+pair would have been enough and the gap would not have shown up until users
+landed — at which point the fix means revisiting the history log a second time.
+That is the one table in this app with **no rewrite path** (see Backfill below),
+so a second pass there is the expensive kind of mistake.
+
+It is already needed in phase 1 regardless, in a smaller way: a circuit entry can
+name both the rooms it serves and the sub-panel it feeds — two different
+relationships in one row.
+
+Encoding the role alongside the id also **removes** the separate `fromId`/`toId`
+columns proposed earlier, since a role already says which direction a reference
+points. Three new columns collapse to one — the role-tagged version is the
+simpler design, not the more elaborate one.
 
 Comma-joining matches `Circuit.roomsServed`, which already stores a list of
-labels in one cell — no new serialization convention.
+labels in one cell. Labels are `BCA####`-shaped so the `:` separator is
+unambiguous; a label validator should keep it that way.
 
 ### One helper, so no call site can forget
 
-The from/to-must-be-in-relatedIds rule is exactly the kind of invariant this
-codebase keeps getting bitten by when it's restated at each call site (see the
-`nameOf()` entry in `CLAUDE.md` — the same ladder hand-written at four sites, and
-already drifted at three of them). So it gets a function:
+Building `label:role` pairs by hand at 10 call sites is exactly the kind of
+invariant this codebase keeps getting bitten by when it's restated per site (see
+the `nameOf()` entry in `CLAUDE.md` — the same ladder hand-written at four sites,
+already drifted at three). So it gets a function:
 
 ```js
-// Attach the asset references an audit entry is about. fromId/toId carry the
-// direction of a move; alsoIds covers references with no direction (an
-// allocation's room, a circuit's rooms served). Every id given ends up in
-// relatedIds, which is the ONLY thing the associated-resource views query --
-// so no call site can index an entry by forgetting to repeat itself.
-function relate({ fromId = "", toId = "", alsoIds = [] } = {}) {
-  const all = [fromId, toId, ...alsoIds].filter(Boolean);
-  return { fromId, toId, relatedIds: [...new Set(all)] };
+// The asset references an audit entry is about, each tagged with the role it
+// plays -- "from"/"to" for a move, "at" for where something happened,
+// "serves"/"feeds" for a circuit, "assigned"/"unassigned" for a person.
+//
+// The role is what lets ONE row read correctly from every asset it names: a
+// created-in-a-room-and-given-to-someone entry is "created here" from the room
+// and "assigned to Jane" from the person. A bare id list can only say that the
+// entry is relevant, which is not enough to word it.
+//
+// Falsy ids drop out, so a call site can pass an unset parent without guarding.
+function relate(pairs) {
+  return Object.entries(pairs)
+    .flatMap(([role, ids]) => (Array.isArray(ids) ? ids : [ids]).filter(Boolean).map(id => `${id}:${role}`))
+    .join(",");
 }
 ```
 
-Used as `{ ...stamp, action: "edited", ...relate({ fromId, toId }) }`.
+Used as `{ ...stamp, action: "edited", related: relate({ from: oldParent, to: newParent }) }`.
 
 ### Call sites to update (~10 of 24)
 
-| Site | Action | Ids |
+| Site | Action | Related |
 |---|---|---|
-| `saveDraft()` edit, `parentId` key | `edited` | `fromId` = old parent, `toId` = new parent |
-| `saveDraft()` add | `created` | `toId` = `draft.parentId` |
-| `archiveAsset` / restore / `deleteAsset` | `archived`/`restored`/`deleted` | `alsoIds` = `[parentId]` |
-| `duplicateAsset()` | `created` | `toId` = copy's `parentId` |
-| `moveFilteredTo()` (bulk) | `edited` | `fromId`/`toId` |
-| `saveAllocation()` | `allocated` | `toId` = `roomId` |
-| `removeAllocation()` | `unallocated` | `fromId` = `roomId` |
-| `addCircuit()` | `circuit_added` | `alsoIds` = `roomsServedIds` + `feedsPanelLabel` |
-| `saveCircuitEdit()` rooms-served diff | `circuit_edited` | `alsoIds` = union(old, new) |
-| `deleteCircuit()` | `circuit_removed` | `alsoIds` = `roomsServedIds` |
+| `saveDraft()` edit, `parentId` key | `edited` | `{ from: oldParent, to: newParent }` |
+| `saveDraft()` add | `created` | `{ at: draft.parentId }` |
+| `archiveAsset` / restore / `deleteAsset` | `archived`/`restored`/`deleted` | `{ at: parentId }` |
+| `duplicateAsset()` | `created` | `{ at: copy.parentId }` |
+| `moveFilteredTo()` (bulk) | `edited` | `{ from, to }` |
+| `saveAllocation()` | `allocated` | `{ to: roomId }` |
+| `removeAllocation()` | `unallocated` | `{ from: roomId }` |
+| `addCircuit()` | `circuit_added` | `{ serves: roomsServedIds, feeds: feedsPanelLabel }` |
+| `saveCircuitEdit()` rooms-served diff | `circuit_edited` | `{ serves: union(old, new) }` |
+| `deleteCircuit()` | `circuit_removed` | `{ serves: roomsServedIds }` |
 
 The remaining 14 (maintenance, breaker, comment, note, plain field edits) get
 nothing — they concern one asset only.
@@ -148,7 +173,7 @@ fallback for rows written before this change; new rows resolve `toId` at render.
 **Eric's call: contents activity, collapsed.**
 
 1. **This asset's history** — expanded. `assetLabel === asset.label` (its own
-   edits) plus entries whose `relatedIds` include its label (things moving in and
+   edits) plus entries whose `related` names it (things moving in and
    out, allocations, circuits). One merged, reverse-chronological list.
 
 2. **Activity on contents** — collapsed, with a count. Entries whose `assetLabel`
@@ -175,8 +200,11 @@ from Room 101 to Room 205"). Read from Room 101 that's backwards. So:
 function describeAuditFor(entry, viewerLabel, assets) { ... }
 ```
 
-Yielding, on Room 101: `BCA0001 (Dell OptiPlex) moved out → Room 205`, and on
-Room 205: `BCA0001 (Dell OptiPlex) moved in ← Room 101`.
+The viewer's own **role** in the entry is what picks the wording — `from` reads
+"moved out", `to` reads "moved in", `at` reads "created here", `assigned` reads
+"assigned to". So on Room 101: `BCA0001 (Dell OptiPlex) moved out → Room 205`,
+on Room 205: `BCA0001 (Dell OptiPlex) moved in ← Room 101`, and on Jane, from an
+entry that names her *and* a room: `BCA0001 (Dell OptiPlex) assigned to you`.
 
 The subject's name comes from `nameOf()` on the asset found by label, **falling
 back to the bare label when it isn't found** — audit entries deliberately outlive
@@ -206,7 +234,7 @@ The constraint: **AuditLog has no rewrite path.** `doPost` only ever calls
 
 - **Recommended:** a one-off `backfillAuditIds_()` function in the Apps Script
   editor, run once from the editor. Reads Assets + AuditLog, resolves names to
-  labels, writes the three columns back. No new endpoint, no permanent surface.
+  labels, writes the `related` column back. No new endpoint, no permanent surface.
 - **Rejected:** a new `op` in `doPost` — a permanent API surface for a one-time
   job, on the endpoint where the 2026-08-21 data-loss incident happened.
 - **Rejected:** a PowerShell script against `SHEET_API_URL` like the v9
@@ -247,12 +275,15 @@ makes phase 2 cheap rather than duplicated.**
 
 Four reasons:
 
-1. **No rework.** `relatedIds` holds asset labels and knows nothing about types.
-   When a user becomes an asset, its label goes in the same array and the Audit
-   tab renders it with no change. The plumbing is built once. This is the whole
-   reason to name the field `relatedIds` and not `relatedRoomIds`, and to keep
-   the two Audit sections type-agnostic — the sequencing only pays off if phase 1
-   is written generically, which is what's specified above.
+1. **No rework.** `related` holds asset labels and knows nothing about types.
+   When a user becomes an asset, its label goes in the same column with an
+   `assigned`/`unassigned` role and the Audit tab renders it with no change. The
+   plumbing is built once. That is the whole reason the column is generic rather
+   than room-shaped, why the role vocabulary is open-ended, and why both Audit
+   sections avoid type tests — the sequencing only pays off if phase 1 is written
+   this way, which is what's specified above. **Eric's multi-association question
+   is what pinned this down**: without roles, phase 2 would have had to revisit
+   the one table that cannot be rewritten.
 
 2. **It isn't the same kind of change.** `person` is a slash-joined *multi-value*
    string (`"Jane Smith/Bob Lee"`). Turning that into asset references is a
