@@ -172,6 +172,24 @@ const TYPE_REGISTRY = {
     locked: true, icon: Zap, parentTypes: ["Room"], excludedFields: ["peripherals"],
     modules: ["breakers"], defaultTab: "breakers",
   },
+  // A person. Users became records (v28) so an asset can point AT one by id
+  // instead of storing a name string -- which is what gives a person a detail
+  // page, an audit history, and a rename that costs nothing. Deliberately NOT
+  // the sign-in allowlist (`authUsers`): that answers "who may open the app",
+  // this answers "whose desk is this on", and the app wants people in the
+  // inventory who never sign in -- a student, or someone who has left whose
+  // history is still worth keeping. Linking the two is a later question.
+  //
+  // No parent: a person is not contained by anything this app models. No device
+  // fields, and no `person` field of its own -- a user is not assigned to a user.
+  // Locked because personIds now reference it structurally.
+  User: {
+    locked: true, icon: UserCircle, parentTypes: [],
+    excludedFields: [
+      "brand", "model", "serial", "peripherals", "hostname", "screenSize",
+      "purchaseDate", "warrantyUntil", "person", "subType", "totalQuantity",
+    ],
+  },
   Other: { parentTypes: ["Room"] },
 };
 
@@ -436,6 +454,42 @@ function availableTabsFor(type) {
 // A name is DISPLAY ONLY and never identity: `label` remains the one stable key
 // (see CLAUDE.md's reference conventions), names need not be unique, and nothing
 // resolves a reference through one. That's what makes renaming free.
+// ---------- USER ASSIGNMENT ----------
+// Which people an asset is assigned to. Two shapes coexist by design, and the
+// switch between them is a deliberate one-time act rather than a load-time
+// rewrite (see convertUsersToAssets):
+//
+//   personIds  (v28) an array of User asset LABELS -- the real reference
+//   person     (pre-v28) a slash-joined string of NAMES -- kept, still written
+//
+// Until the conversion is run there are no User assets to point at, so the app
+// keeps behaving exactly as it did: `person` is read and written, and nothing is
+// half-migrated. After it, ids win and `person` is carried along as the
+// reversible copy, the same way roomId/buildingId trailed parentId through v17.
+// Nothing outside these two helpers should read either field.
+function personLabelsOf(asset) {
+  const ids = asset && asset.personIds;
+  return Array.isArray(ids) ? ids.filter(Boolean) : [];
+}
+
+// Display names, whichever shape the asset is in. A label with no User asset
+// behind it resolves to "(deleted user)" rather than vanishing -- an assignment
+// that points nowhere is worth seeing, not hiding.
+function personNamesOf(asset, assets) {
+  const ids = personLabelsOf(asset);
+  if (ids.length) {
+    return ids.map(id => {
+      const u = (assets || []).find(a => a.label === id);
+      return u ? nameOf(u) : "(deleted user)";
+    });
+  }
+  return String((asset && asset.person) || "").split("/").map(s => s.trim()).filter(Boolean);
+}
+
+function personTextOf(asset, assets) {
+  return personNamesOf(asset, assets).join(", ");
+}
+
 function nameOf(asset) {
   return (asset?.name || "").trim() || asset?.label || "";
 }
@@ -1323,7 +1377,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v27";
+const FRONTEND_SCRIPT_VERSION = "v28";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -1528,6 +1582,11 @@ const MOCK_SNAPSHOT = {
     { label: "BCR0002", type: "Room", name: "Kitchen", parentId: "BCB0001", person: "Multiple teachers", notes: "", status: "Active" },
     { label: "BCR0018", type: "Room", name: "Storage Room", parentId: "BCB0001", person: "", notes: "", status: "Active" },
     { label: "BCR0020", type: "Room", name: "Room 101", parentId: "BCB0001", person: "Dillon Jacobsma", notes: "", status: "Active" },
+    // Deliberately PRE-conversion: every assignment is still a legacy `person`
+    // name and there are no User records. That is the state a real sheet is in
+    // the moment v28 ships, so the sandbox exercises the conversion button
+    // rather than starting past it -- the same reasoning as the stored column
+    // config carrying retired keys.
     { label: "BCA0001", type: "Computer", parentId: "BCR0006", brand: "Dell", model: "OptiPlex 7010", serial: "MOCK-CMP-001", person: "Jen Kramer", peripherals: "Keyboard, Mouse", notes: "", status: "Active" },
     { label: "BCA0002", type: "Monitor", parentId: "BCR0006", brand: "Dell", model: "P2419H", serial: "MOCK-MON-001", person: "Jen Kramer", notes: "", status: "Active" },
     { label: "BCA0003", type: "Phone", parentId: "BCR0006", brand: "Cisco", model: "8841", serial: "MOCK-PHN-001", person: "Jen Kramer", notes: "", status: "Active" },
@@ -2859,7 +2918,41 @@ function AssetTracker() {
       typeNameOf(x, typesList).localeCompare(typeNameOf(y, typesList)))];
   }, [assets, typesList]);
 
-  const users = useMemo(() => ["All users", ...usersList], [usersList]);
+  // The User assets, and whether the app is in "users are records" mode at all.
+  // One boolean rather than a migration flag in Config: the presence of a User
+  // asset IS the fact, so it cannot disagree with reality, and a sheet that has
+  // never been converted needs no marker saying so.
+  const userAssets = useMemo(
+    () => (assets || []).filter(a => a.type === "User" && a.status !== "Archived"),
+    [assets]
+  );
+  // Every name the app knows that has no User record yet -- what the conversion
+  // would create, and zero once it has finished.
+  const unconvertedUserNames = useMemo(() => {
+    const known = new Set((assets || []).filter(a => a.type === "User").map(nameOf));
+    return [...new Set([
+      ...usersList,
+      ...(assets || []).flatMap(a => String(a.person || "").split("/").map(x => x.trim())),
+    ].filter(Boolean))].filter(n => !known.has(n));
+  }, [assets, usersList]);
+
+  // "Users are records" means the conversion is COMPLETE, not that some User
+  // asset happens to exist. Getting this wrong is not cosmetic: the edit form
+  // reads ids in this mode, so an asset still carrying only a legacy name would
+  // render as unassigned and the next save would wipe the assignment. Flipping
+  // only when nothing is left unconverted means there is never a half state --
+  // the app is wholly on names or wholly on ids.
+  const usersAreAssets = useMemo(
+    () => (assets || []).some(a => a.type === "User") && unconvertedUserNames.length === 0,
+    [assets, unconvertedUserNames]
+  );
+
+  // Names for the pick lists and the User filter, from whichever shape is live.
+  const userNames = useMemo(() => (
+    usersAreAssets ? userAssets.map(nameOf).sort((a, b) => a.localeCompare(b)) : usersList
+  ), [usersAreAssets, userAssets, usersList]);
+
+  const users = useMemo(() => ["All users", ...userNames], [userNames]);
 
   const filtered = useMemo(() => {
     if (!assets) return [];
@@ -2872,7 +2965,7 @@ function AssetTracker() {
       // (it's also what made the bulk move-to-room drag the room along).
       if (scopeId && !ancestorsOf(a, assets).some(p => p.label === scopeId)) return false;
       if (typeFilter !== "All types" && (a.type || "Other") !== typeFilter) return false;
-      if (userFilter !== "All users" && !(a.person || "").split("/").map(s => s.trim()).includes(userFilter)) return false;
+      if (userFilter !== "All users" && !personNamesOf(a, assets).includes(userFilter)) return false;
       if (statusFilter !== "All statuses" && (a.status || "Active") !== statusFilter) return false;
       if (!q) return true;
       // Searching matches the whole chain above an asset, so typing a building
@@ -3228,6 +3321,28 @@ function AssetTracker() {
       // is legible in the history.
       Object.keys(draftToSave).forEach(key => {
         if (key === "comments" || key === "changes" || key === "allocations" || key === "parentError") return;
+        // personIds is the one ARRAY among the flat fields, so it can't go
+        // through the `||""` string compare below -- two equal arrays are never
+        // ===, which would log an edit on every save. It also writes the legacy
+        // `person` names alongside, and names the people on both sides so the
+        // change lands in THEIR history as well as this asset's.
+        if (key === "personIds") {
+          const before = personLabelsOf(original);
+          const after = (draftToSave.personIds || []).filter(Boolean);
+          if (before.join(",") === after.join(",")) return;
+          const nameFor = id => { const u = assets.find(x => x.label === id); return u ? nameOf(u) : "(deleted user)"; };
+          editEntries.push({
+            at: new Date().toISOString(), by: currentUser || "", assetLabel: original.label,
+            assetType: draftToSave.type || original.type, action: "edited", field: "User",
+            from: before.map(nameFor).join(", ") || "—",
+            to: after.map(nameFor).join(", ") || "—",
+            related: relate({
+              unassigned: before.filter(id => !after.includes(id)),
+              assigned: after.filter(id => !before.includes(id)),
+            }),
+          });
+          return;
+        }
         const oldVal = original[key] || "";
         const newVal = draftToSave[key] || "";
         if (oldVal === newVal) return;
@@ -3244,7 +3359,17 @@ function AssetTracker() {
         });
       });
 
-      const next = assets.map(a => (a.label === selectedLabel ? { ...a, ...stripDraftUiState(draftToSave) } : a));
+      // `person` trails `personIds` rather than being edited directly, so the
+      // legacy column stays truthful for as long as it is still written (and so
+      // a rollback to v27 shows the right names, which is the point of keeping
+      // it). personNamesOf reads ids first, so this is a copy, never a source.
+      const savedDraft = stripDraftUiState(draftToSave);
+      if (Array.isArray(savedDraft.personIds)) {
+        savedDraft.person = savedDraft.personIds
+          .map(id => { const u = assets.find(x => x.label === id); return u ? nameOf(u) : ""; })
+          .filter(Boolean).join("/");
+      }
+      const next = assets.map(a => (a.label === selectedLabel ? { ...a, ...savedDraft } : a));
       if (editNote.trim()) {
         editEntries.push({
           at: new Date().toISOString(), by: currentUser || "", assetLabel: original.label,
@@ -3272,6 +3397,11 @@ function AssetTracker() {
     assets.forEach(a => {
       if (a.label === asset.label) return;
       if (a.parentId === asset.label) refs.push(a.label);
+      // An assignment dangles exactly like a parent does. Archiving a User is the
+      // normal way to retire someone -- it keeps their history and every
+      // assignment intact -- so this only blocks the permanent delete, which is
+      // already the heavily-confirmed path.
+      if (personLabelsOf(a).includes(asset.label)) refs.push(`${a.label} (assigned)`);
       (a.allocations || []).forEach(al => { if (al.roomId === asset.label) refs.push(`${a.label} (allocation)`); });
       (a.breakers || []).forEach(b => (b.circuits || []).forEach(c => {
         if ((c.roomsServedIds || []).includes(asset.label)) refs.push(`${a.label} Slot ${slotsLabel_(b)} (circuit "${c.label}")`);
@@ -3361,14 +3491,26 @@ function AssetTracker() {
   async function reassignFilteredTo(newUser) {
     if (!newUser.trim()) return;
     const targets = new Set(filtered.filter(a => fieldAppliesTo("person", a.type)).map(a => a.label));
+    // Once users are records the target is a label; before that it is still the
+    // raw name, and both paths write `person` so the sheet stays readable either
+    // way. `related` names the people involved, which is what puts the change in
+    // THEIR audit history as well as the asset's.
+    const toUser = usersAreAssets ? userAssets.find(u => nameOf(u) === newUser) : null;
     const entries = [];
     const next = assets.map(a => {
-      if (!targets.has(a.label) || a.person === newUser) return a;
+      if (!targets.has(a.label)) return a;
+      const fromNames = personNamesOf(a, assets);
+      if (fromNames.length === 1 && fromNames[0] === newUser) return a;
+      const fromIds = personLabelsOf(a);
       entries.push({
         at: new Date().toISOString(), by: currentUser || "", assetLabel: a.label,
-        assetType: a.type, action: "edited", field: "User", from: a.person || "", to: newUser,
+        assetType: a.type, action: "edited", field: "User",
+        from: fromNames.join(", ") || "—", to: newUser,
+        related: relate({ unassigned: fromIds, assigned: toUser ? toUser.label : "" }),
       });
-      return { ...a, person: newUser };
+      return toUser
+        ? { ...a, personIds: [toUser.label], person: newUser }
+        : { ...a, person: newUser };
     });
     await persist(next, { auditLog: entries.length ? logAudit(entries) : auditLog });
     setUserFilter(newUser);
@@ -4089,6 +4231,68 @@ function AssetTracker() {
     persist(assets, { peripheralsList: peripheralsList.filter(p => p !== name) });
   }
 
+  // ONE-TIME: turn every name the app knows about into a real User asset, and
+  // re-point every assignment at it by id.
+  //
+  // Deliberately a button rather than something loadData() does on its own.
+  // Creating assets means issuing labels from `nextAssetNumber`, and that
+  // counter lives in the Config domain behind the revision check -- so a
+  // load-time conversion running in several browsers at once would race to
+  // claim the same numbers, and the loser's User assets would collide with the
+  // winner's. One deliberate click, through persist() like every other write,
+  // has none of that: it is audited, it is conflict-checked, and it either
+  // lands whole or not at all.
+  //
+  // Idempotent: a name that already has a record is reused rather than
+  // duplicated, so a partial run (or a name added later) can just be re-run.
+  // `person` is left in place on purpose -- see personNamesOf.
+  function convertUsersToAssets() {
+    if (savingRef.current) return;
+    if (!assets) return;
+    const wanted = [...new Set([
+      ...usersList,
+      ...assets.flatMap(a => String(a.person || "").split("/").map(x => x.trim())),
+    ].filter(Boolean))].sort((a, b) => a.localeCompare(b));
+
+    const byName = new Map((assets || []).filter(a => a.type === "User").map(u => [nameOf(u), u.label]));
+    let counter = peekAssetNumber();
+    const created = [];
+    wanted.forEach(name => {
+      if (byName.has(name)) return;
+      const label = assetLabelForNumber(counter++);
+      byName.set(name, label);
+      created.push({
+        label, type: "User", name, status: "Active",
+        comments: [], changes: [], allocations: [],
+      });
+    });
+
+    const stamp = { at: new Date().toISOString(), by: currentUser || "" };
+    const entries = created.map(u => ({
+      ...stamp, assetLabel: u.label, assetType: "User", action: "created", related: "",
+    }));
+
+    const next = [...assets, ...created].map(a => {
+      if (personLabelsOf(a).length) return a;              // already by id
+      const names = String(a.person || "").split("/").map(x => x.trim()).filter(Boolean);
+      if (!names.length) return a;
+      const ids = names.map(n => byName.get(n)).filter(Boolean);
+      if (!ids.length) return a;
+      // Deliberately NOT audited per asset. Nobody's assignment changed here --
+      // the same people are on the same things; only the way it is stored moved
+      // from a name to a reference. An entry per asset would read "User changed
+      // from Jen Kramer to Jen Kramer" across the whole inventory, which is
+      // noise that buries the entries that do mean something. The User records
+      // being created IS logged, which is the part that actually happened.
+      return { ...a, personIds: ids };
+    });
+
+    persist(next, {
+      auditLog: entries.length ? logAudit(entries) : auditLog,
+      nextAssetNumber: Math.max(counter, peekAssetNumber()),
+    });
+  }
+
   function addUser() {
     const name = newUserName.trim();
     if (!name || usersList.includes(name)) return;
@@ -4338,7 +4542,7 @@ function AssetTracker() {
           return;
         }
         if (!fieldAppliesTo(c.key, a.type)) { row[c.label] = ""; return; }
-        row[c.label] = a[c.key] || "";
+        row[c.label] = c.key === "person" ? personTextOf(a, assets) : (a[c.key] || "");
       });
       // A column config with no `parent` shouldn't cost the export its location
       // columns — the whole point of writing them here is that they don't depend
@@ -4891,7 +5095,16 @@ function AssetTracker() {
   const usersManagerModal = showUsersManager && (
     <ListManagerModal
       title="Manage users"
-      items={usersList}
+      items={usersAreAssets ? userNames : usersList}
+      readOnly={usersAreAssets}
+      note={usersAreAssets
+        ? "Users are records now — add, rename or archive them like any other asset."
+        : null}
+      action={unconvertedUserNames.length && canEdit ? {
+        label: `Convert ${unconvertedUserNames.length} name${unconvertedUserNames.length === 1 ? "" : "s"} to records`,
+        hint: "Gives each person their own page and history. Assignments keep working either way.",
+        onClick: convertUsersToAssets,
+      } : null}
       newValue={newUserName}
       onNewValueChange={setNewUserName}
       onAdd={addUser}
@@ -5317,6 +5530,7 @@ function AssetTracker() {
                           // own name (the computed ones were filtered out above),
                           // so it falls through to the plain stored value.
                           c.key === "parent" ? (pathOf(selectedAsset, assets) || UNASSIGNED_LABEL)
+                          : c.key === "person" ? personTextOf(selectedAsset, assets)
                           : selectedAsset[c.key]
                         }
                         wide={c.key === "notes" || c.key === "parent"}
@@ -5401,9 +5615,10 @@ function AssetTracker() {
                   ) : c.key === "person" ? (
                     <UserField
                       key={c.key}
-                      value={draft.person || ""}
-                      onChange={v => setDraft({ ...draft, person: v })}
-                      userOptions={usersList}
+                      value={usersAreAssets ? (draft.personIds || []) : (draft.person || "")}
+                      onChange={v => setDraft(usersAreAssets ? { ...draft, personIds: v } : { ...draft, person: v })}
+                      userOptions={userNames}
+                      userAssets={usersAreAssets ? userAssets : undefined}
                       onManage={() => setShowUsersManager(true)}
                     />
                   ) : c.key === "peripherals" ? (
@@ -6894,9 +7109,10 @@ function AssetTracker() {
                 ) : c.key === "person" ? (
                   <UserField
                     key={c.key}
-                    value={draft.person || ""}
-                    onChange={v => setDraft({ ...draft, person: v })}
-                    userOptions={usersList}
+                    value={usersAreAssets ? (draft.personIds || []) : (draft.person || "")}
+                    onChange={v => setDraft(usersAreAssets ? { ...draft, personIds: v } : { ...draft, person: v })}
+                    userOptions={userNames}
+                    userAssets={usersAreAssets ? userAssets : undefined}
                     onManage={() => setShowUsersManager(true)}
                   />
                 ) : c.key === "peripherals" ? (
@@ -7063,6 +7279,10 @@ function AssetTracker() {
                         // current name, which is what makes a rename take effect
                         // everywhere at once.
                         typeNameOf(a.type, typesList) || "—"
+                      ) : c.key === "person" ? (
+                        // Stored as ids since v28; the names are resolved now, so
+                        // renaming a person updates every row at once.
+                        applies ? (personTextOf(a, assets) || "—") : ""
                       ) : (
                         applies ? (a[c.key] || "—") : ""
                       )}
@@ -7792,15 +8012,34 @@ function BulkTypeField({ value, onChange, options, onManage }) {
   );
 }
 
-function UserField({ value, onChange, userOptions, onManage }) {
-  const selected = (value || "").split("/").map(s => s.trim()).filter(Boolean);
-  // Include any legacy/custom names already on this asset that aren't in the
-  // managed list, so editing never silently drops someone.
-  const allOptions = [...userOptions, ...selected.filter(s => !userOptions.includes(s))];
+// Chip multi-select for who an asset is assigned to. Deliberately NOT a
+// PickerField: several people can share one device, so this is a toggle group,
+// not a dropdown.
+//
+// Two modes, because users only became records in v28 and a sheet converts on a
+// deliberate click rather than on load (see convertUsersToAssets):
+//   userAssets given -> options are User ASSETS, the value is an array of labels
+//   otherwise        -> options are plain names, the value is the old
+//                       slash-joined string, byte for byte as before v28
+// The caller picks by passing userAssets or not, so neither path has to know the
+// other exists.
+function UserField({ value, onChange, userOptions, userAssets, onManage }) {
+  const byAsset = Array.isArray(userAssets);
+  const selected = byAsset
+    ? (Array.isArray(value) ? value.filter(Boolean) : [])
+    : (value || "").split("/").map(s => s.trim()).filter(Boolean);
+  // Include anyone already on this asset who isn't in the list any more -- a
+  // removed managed name, or a User record since archived -- so editing another
+  // field never silently drops them.
+  const allOptions = byAsset
+    ? [...userAssets.map(u => ({ key: u.label, label: nameOf(u) })),
+       ...selected.filter(l => !userAssets.some(u => u.label === l))
+                  .map(l => ({ key: l, label: "(archived or deleted user)" }))]
+    : [...userOptions, ...selected.filter(s => !userOptions.includes(s))].map(n => ({ key: n, label: n }));
 
-  function toggle(opt) {
-    const next = selected.includes(opt) ? selected.filter(s => s !== opt) : [...selected, opt];
-    onChange(next.join("/"));
+  function toggle(key) {
+    const next = selected.includes(key) ? selected.filter(s => s !== key) : [...selected, key];
+    onChange(byAsset ? next : next.join("/"));
   }
 
   return (
@@ -7816,12 +8055,12 @@ function UserField({ value, onChange, userOptions, onManage }) {
       ) : (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
           {allOptions.map(opt => {
-            const active = selected.includes(opt);
+            const active = selected.includes(opt.key);
             return (
               <button
-                key={opt}
+                key={opt.key}
                 type="button"
-                onClick={() => toggle(opt)}
+                onClick={() => toggle(opt.key)}
                 style={{
                   padding: "6px 12px", borderRadius: 14, fontSize: 13, fontWeight: active ? 600 : 500,
                   border: `1.5px solid ${active ? C.brand : C.border}`,
@@ -7829,7 +8068,7 @@ function UserField({ value, onChange, userOptions, onManage }) {
                   color: active ? "#fff" : C.ink,
                 }}
               >
-                {opt}
+                {opt.label}
               </button>
             );
           })}
@@ -8183,7 +8422,12 @@ function TypeManagerModal({
   );
 }
 
-function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onRemove, onClose, placeholder, isLocked, hint, isSaving }) {
+// `readOnly` hides the add row and the per-item delete: used once users became
+// records, where the list is a VIEW of User assets and the real add/rename/
+// archive live on the asset itself. `action` is an optional one-shot button --
+// the users conversion, which belongs here because this is where someone goes
+// looking for the user list.
+function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onRemove, onClose, placeholder, isLocked, hint, isSaving, readOnly, note, action }) {
   const [confirmItem, setConfirmItem] = useState(null);
   return (
     // zIndex 50, above SelectionModal's 40 — this modal is frequently opened via the
@@ -8196,6 +8440,24 @@ function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onR
           <button onClick={onClose} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
         </div>
         {hint && <div style={{ fontSize: 12, color: C.empty, marginBottom: 10 }}>{hint}</div>}
+        {note && <div style={{ fontSize: 12, color: C.empty, marginBottom: 10 }}>{note}</div>}
+        {action && (
+          <div style={{ marginBottom: 14 }}>
+            <button
+              onClick={() => { if (isSaving) return; action.onClick(); }}
+              disabled={isSaving}
+              style={{
+                width: "100%", padding: "8px 12px", borderRadius: 10, fontSize: 13, fontWeight: 600,
+                border: "none", background: isSaving ? C.border : C.brand, color: "#fff",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+              }}
+            >
+              {isSaving ? <Loader2 size={14} className="spin" /> : null}
+              {isSaving ? "Saving…" : action.label}
+            </button>
+            {action.hint && <div style={{ fontSize: 11, color: C.empty, marginTop: 6 }}>{action.hint}</div>}
+          </div>
+        )}
         {items.length === 0 && (
           <div style={{ fontSize: 13, color: C.empty, marginBottom: 12 }}>Nothing added yet.</div>
         )}
@@ -8221,7 +8483,7 @@ function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onR
               ) : (
                 <>
                   <span style={{ display: "flex", alignItems: "center", gap: 6, opacity: locked ? 0.6 : 1 }}>{item} {locked && <Lock size={11} />}</span>
-                  {locked ? (
+                  {locked || readOnly ? (
                     <span />
                   ) : (
                     <button onClick={() => setConfirmItem(item)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}>
@@ -8234,6 +8496,7 @@ function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onR
             );
           })}
         </div>
+        {!readOnly && (
         <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 14, display: "flex", gap: 6 }}>
           <input
             value={newValue}
@@ -8244,6 +8507,7 @@ function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onR
           />
           <button onClick={onAdd} disabled={isSaving} style={{ padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600 }}>{isSaving ? "Saving…" : "Add"}</button>
         </div>
+        )}
       </div>
     </div>
   );

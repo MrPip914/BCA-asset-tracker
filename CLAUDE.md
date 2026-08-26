@@ -880,6 +880,49 @@ rediscover them:
   mirroring a relationship the other side already records — it's just a second copy to keep
   in sync, and the one that goes stale.
 
+**Users are assets (backend v28).** A person has a record, a detail page, and an audit
+history, and an asset points AT one by id (`personIds`, an array of User labels) instead
+of storing a name string. This is the app's **first many-to-many between assets** — one
+device can have several users — which is why it wasn't the single-valued `parentId`
+collapse and got its own phase.
+- **Deliberately NOT the sign-in allowlist.** `authUsers` answers "who may open the app";
+  a User asset answers "whose desk is this on". The app wants people in the inventory who
+  never sign in — a student, or someone who has left whose history is still worth keeping.
+  Linking them is a later question, and Eric's explicit call (2026-08-26) was to keep them
+  apart for now.
+- **Retiring someone is ARCHIVING them** (Eric's call), which keeps their history and every
+  assignment intact. `canDeleteAsset` therefore blocks the permanent delete of a User who
+  is still assigned to anything, exactly like a Room that still holds something.
+- **The mode switch is ALL-OR-NOTHING, and that is load-bearing.** `usersAreAssets` means
+  the conversion is *complete* (`unconvertedUserNames.length === 0`), not that some User
+  record happens to exist. An earlier version meant the latter and had a real bug: in id
+  mode the edit form reads `personIds`, so an asset still carrying only a legacy `person`
+  name rendered as **unassigned**, and the next save wiped the assignment. Found in browser
+  testing, not by reading the diff.
+- **`person` (the pre-v28 slash-joined names) is kept and still written**, trailing
+  `personIds` the way `roomId`/`buildingId` trailed `parentId` through v17 — so the change
+  is reversible and an un-migrated row still resolves. `personNamesOf()` reads ids first and
+  falls back to it; **nothing outside `personLabelsOf`/`personNamesOf` should read either
+  field.**
+- **Conversion is a BUTTON, not a load-time rewrite** (`convertUsersToAssets`, in the users
+  manager). Creating assets means issuing labels from `nextAssetNumber`, which lives in the
+  Config domain behind the revision check — so a load-time conversion running in several
+  browsers at once would race for the same numbers and one set of User assets would collide
+  with the other. One deliberate click goes through `persist()` like every other write:
+  audited, conflict-checked, all-or-nothing. Idempotent, so a name added later just re-runs it.
+  - The conversion does **not** log a per-asset audit entry. Nobody's assignment changed —
+    only its storage did — and an entry per asset would read "User changed from Jen Kramer
+    to Jen Kramer" across the whole inventory, burying the entries that mean something. The
+    User records being *created* is logged, which is the part that actually happened.
+- **`assigned`/`unassigned` were reserved in v27 and are now live**, with no change to the
+  audit renderer — which is the payoff the role-tagging was for. Reassigning a device writes
+  `related: "<oldUser>:unassigned,<newUser>:assigned"`, so it lands in both people's history:
+  "Phone BCA0003 unassigned" on one, "Phone BCA0003 assigned" on the other.
+- `UserField` has two modes (labels vs. names) chosen by whether `userAssets` is passed, so
+  neither path knows the other exists. It stays a chip toggle rather than a `PickerField`
+  because several people can share one device.
+- New Users get ordinary `BCA` labels — there is no per-type prefix scheme, same as Rooms.
+
 **Audit entries name the OTHER assets they concern, in `related` (backend v27).** An entry
 is stamped with the asset it happened TO (`assetLabel`), but most also concern somewhere
 else: the room something moved out of and the one it moved into, the room a quantity was
@@ -1239,7 +1282,15 @@ When you do:
 
 ## Known constraints / things to watch
 
-- **The repo is at v27 and v27 is UNDEPLOYED as of 2026-08-26.** It adds the `related` column
+- **The repo is at v28 and v28 is UNDEPLOYED as of 2026-08-26.** It adds the `personIds`
+  column to Assets (see "Users are assets" under Data model). Until it's deployed, a
+  `personIds` value the app sends is dropped on write and assignments read back from the
+  legacy `person` column, so the conversion appears to work in-session and forgets on
+  reload. **Do not run the conversion against the live sheet until v28 is deployed** — it
+  would create the User assets (those persist) while the assignments pointing at them would
+  not, leaving records nothing refers to. Sandbox is unaffected, as ever.
+- **v27 is DEPLOYED, confirmed 2026-08-26** by fetching the `/exec` URL and reading
+  `scriptVersion` back. It adds the `related` column
   to AuditLog (see "Audit entries name the OTHER assets they concern" under Data model) and
   fixes `appendNewRows_` so that column's header actually gets written. Until it's deployed,
   a `related` value the app sends is dropped on write, so the associated-resource views work
