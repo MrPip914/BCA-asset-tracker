@@ -305,6 +305,33 @@ per-device via `localStorage` (`SANDBOX_MODE_KEY`).
   the one thing that lived there besides the count (clearing an active sort) moved to a small ×
   chip next to the sort arrow on the sorted column's own header; on Maintenance, the overdue
   count that lived there is now a standalone badge above the table.
+- **The header's account controls are one dropdown, and About is where the app names its
+  own version** (2026-08-26). The top-right used to carry four separate controls beside the
+  Sandbox pill — the name/identity tag, an `Access` link, a `View only` badge, `Sign out`.
+  They're one `accountMenu` now (`showAccountMenu`), built like the toolbar hamburger
+  (fixed-inset click-catcher + absolutely positioned card): an identity block at the top
+  (name, email or "Sandbox — local data", Editor/View only), then Set name (sandbox only),
+  Access (editors, real backend only), About, Sign out. Sandbox and signed-in are the same
+  menu rather than two, which is what let sandbox's "Set name" stop being a second
+  person-shaped button in the corner.
+  - **The `View only` badge deliberately stayed OUTSIDE the menu.** It exists to explain why
+    the edit controls a viewer expects aren't there, and an explanation you have to open a
+    menu to find doesn't do that. The menu shows the role too; the duplication is the point.
+  - **About answers "which build is this browser actually running?"**, which nothing in the
+    app could answer before — the only version string was `FRONTEND_SCRIPT_VERSION`, and it
+    is a *backend contract*, not a build id. It shows four version-ish facts because they go
+    stale independently: `APP_VERSION` (this file's build), `document.lastModified` (what the
+    browser says the file's date is — no discipline needed, so it catches a cached page even
+    when the bump was forgotten), the backend version this build expects, and what the
+    deployed backend reports. Plus data source (Sheet vs Sandbox), identity, and role.
+  - **`APP_VERSION` is hand-bumped, `YYYY-MM-DD.N`, and is NOT `FRONTEND_SCRIPT_VERSION`.**
+    Keeping one constant for both would answer the question wrongly: the script version only
+    moves when `AssetTrackerSync.gs` changes, so every frontend-only change would leave it
+    identical. Bump `APP_VERSION` whenever `index.html` changes in a way worth verifying
+    landed. A stale value here is only a misleading label — never dropped data, which is what
+    a stale `FRONTEND_SCRIPT_VERSION` costs.
+  - The build string is repeated on the **sign-in screen**, since About sits behind the gate
+    and "which build is this?" is often asked precisely because you can't get past it.
 - **Per-column filter + sort is a shared pattern, not duplicated per table**: `ColumnHeaderCell`
   (Filter icon + click-to-cycle sort + clear-sort × chip) and `ColumnFilterModal` (option list +
   Sort A→Z/Z→A) are generic, parameterized by a `filterConfigs` map (`{ [colKey]: { label, value,

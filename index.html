@@ -50,7 +50,7 @@ import {
   Search, Plus, X, Pencil, Trash2, Save, ChevronRight, ChevronDown, ArrowLeft, MessageSquare,
   Monitor, Phone, Tv, Camera, HardDrive, HelpCircle, Columns3, Lock, Filter, Check, DoorOpen, Download,
   Wrench, UserCircle, Settings, History, Archive, ArchiveRestore, Building2, Package, Copy, Zap, Repeat, ArrowLeftRight, Menu,
-  FlaskConical, RotateCcw, AlertTriangle, Loader2, Printer, MapPin, QrCode,
+  FlaskConical, RotateCcw, AlertTriangle, Loader2, Printer, MapPin, QrCode, Info, LogOut, Users,
 } from "lucide-react";
 
 // Starter managed peripherals/users/bulk-item-type lists — empty until the school
@@ -1128,6 +1128,24 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
 const FRONTEND_SCRIPT_VERSION = "v26";
+// The version of THIS file — shown in About (the account menu), so "is my browser
+// actually running the build I just deployed, or a cached one?" is answerable in
+// two clicks instead of by reading view-source.
+//
+// Deliberately NOT the same number as FRONTEND_SCRIPT_VERSION above: that one is
+// a contract with the backend and only moves when AssetTrackerSync.gs changes,
+// so most frontend-only changes would leave it identical and answer the question
+// wrongly. Date-plus-counter (`YYYY-MM-DD.N`) rather than a running integer,
+// because a date tells you at a glance whether what loaded is roughly what you
+// just pushed even if the bump itself was forgotten.
+//
+// **Bump this whenever index.html changes in a way you'd want to verify landed.**
+// There is no build step to derive it from, so it's a hand-edited string like
+// FRONTEND_SCRIPT_VERSION — but unlike that one, a stale value here is only a
+// misleading label, never dropped data. About also shows the browser-reported
+// file date (document.lastModified), which needs no discipline at all and is the
+// cross-check when this number looks wrong.
+const APP_VERSION = "2026-08-26.1";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -1950,6 +1968,11 @@ function AssetTracker() {
   const [accessUsers, setAccessUsers] = useState([]);
   const [showAccessManager, setShowAccessManager] = useState(false);
   const [accessDraft, setAccessDraft] = useState({ email: "", name: "", role: "editor", error: "" });
+  // The header's one account dropdown (identity, Access, About, Sign out) and the
+  // About panel it opens. Two flags rather than one object because they aren't
+  // opened or closed together — About outlives the menu that launched it.
+  const [showAccountMenu, setShowAccountMenu] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
 
   const authSatisfied = sandboxMode || !!auth;
   // View-only users are stopped in persist() and again in the backend. Buttons
@@ -4252,6 +4275,13 @@ function AssetTracker() {
               <FlaskConical size={12} />
               Continue in Sandbox (local test data)
             </button>
+            {/* About lives behind the sign-in gate, and "which build is this?" is
+                a question you may well be asking BECAUSE you can't get past this
+                screen — so the build string is repeated here, where nothing else
+                is reachable. */}
+            <div style={{ marginTop: 14, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: C.placeholder }}>
+              build {APP_VERSION}
+            </div>
           </div>
         </div>
       </div>
@@ -4350,6 +4380,168 @@ function AssetTracker() {
       {isSaving ? <Loader2 size={12} className="spin" /> : <AlertTriangle size={12} />}
       {isSaving ? "Saving…" : "Save failed"}
     </span>
+  );
+
+  // ---------- Account menu + About -------------------------------------------
+  // The header's top-right used to be four separate controls (name, Access,
+  // View only, Sign out) sitting next to the Sandbox pill. They're one dropdown
+  // now, which is also where "About" could go — the app previously reported no
+  // version of itself anywhere, so "is this browser running the build I just
+  // pushed?" could only be answered by reading view-source.
+  //
+  // About shows FOUR version-ish facts rather than one, because they go stale
+  // independently: the app build (a hand-bumped string, so it can lag), the file
+  // date the browser reports (needs no discipline — catches a cached page even
+  // when the bump was forgotten), the backend contract this build expects, and
+  // what the deployed backend actually reports. The pair at the end is the same
+  // comparison the "Backend outdated" header pill makes, spelled out.
+  const backendVersionText = sandboxMode
+    ? "not contacted (Sandbox)"
+    : (backendScriptVersion || "not reported");
+  const aboutRows = [
+    { label: "App build", value: APP_VERSION, mono: true },
+    { label: "File loaded", value: document.lastModified, mono: true, hint: "When the browser says this copy of index.html was last modified. If it's older than your last deploy, you're on a cached page — reload with Ctrl+Shift+R." },
+    { label: "Backend expected", value: FRONTEND_SCRIPT_VERSION, mono: true },
+    { label: "Backend deployed", value: backendVersionText, mono: true, danger: !sandboxMode && backendScriptVersion && backendScriptVersion !== FRONTEND_SCRIPT_VERSION },
+    { label: "Data source", value: sandboxMode ? "Sandbox — local fixture data" : "Google Sheet (live)" },
+    { label: "Signed in", value: sandboxMode ? (currentUser || "not set") : (auth ? auth.email : "—") },
+    { label: "Access", value: sandboxMode ? "editor (sandbox)" : (canEdit ? "editor" : "view-only") },
+  ];
+  const aboutModal = showAbout && (
+    <div
+      onClick={() => setShowAbout(false)}
+      style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", zIndex: 70, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{ background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 12, width: "100%", maxWidth: 460, maxHeight: "86vh", overflowY: "auto", padding: 22, boxShadow: "0 8px 28px rgba(42,52,57,0.28)" }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+          <Info size={17} style={{ color: C.brand }} />
+          <div style={{ fontWeight: 700, fontSize: 16, color: C.ink }}>About BCA Asset Tracker</div>
+        </div>
+        <div style={{ fontSize: 13, color: C.muted, marginBottom: 18, lineHeight: 1.5 }}>
+          What this browser has loaded, and what it's talking to.
+        </div>
+
+        <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden", marginBottom: 16 }}>
+          {aboutRows.map((r, i) => (
+            <div
+              key={r.label}
+              title={r.hint || undefined}
+              style={{ display: "flex", alignItems: "baseline", gap: 12, padding: "9px 12px", borderTop: i === 0 ? "none" : `1px solid ${C.border}` }}
+            >
+              <div style={{ flex: "0 0 130px", fontSize: 12, color: C.muted }}>{r.label}</div>
+              <div style={{
+                flex: 1, minWidth: 0, fontSize: 13, wordBreak: "break-word",
+                fontFamily: r.mono ? "'IBM Plex Mono', monospace" : undefined,
+                color: r.danger ? C.danger : C.ink, fontWeight: r.danger ? 700 : 400,
+              }}>
+                {r.value}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.55, marginBottom: 18 }}>
+          {backendVersionText === FRONTEND_SCRIPT_VERSION
+            ? "Frontend and backend versions match."
+            : sandboxMode
+              ? "Sandbox mode makes no network call, so there's no backend version to compare."
+              : "The deployed backend doesn't match what this build expects — some saves may not persist. Redeploy AssetTrackerSync.gs (Deploy › Manage deployments › New version)."}
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+          <button
+            onClick={() => setShowAbout(false)}
+            style={{ background: C.brand, color: "#fff", border: "none", borderRadius: 8, padding: "8px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  // One trigger for both modes: signed in it shows the server-resolved identity,
+  // in Sandbox the typed name tag (which has no sign-in but still authors audit
+  // rows). Sandbox's "Set name" therefore lives in here too, rather than leaving
+  // a second person-shaped button in the corner.
+  const accountLabel = sandboxMode ? (currentUser || "Set name") : (auth ? (auth.name || auth.email) : "");
+  const accountMenu = (sandboxMode || auth) && (
+    <div style={{ position: "relative", flexShrink: 0 }}>
+      <button
+        onClick={() => setShowAccountMenu(v => !v)}
+        aria-haspopup="menu"
+        aria-expanded={showAccountMenu}
+        title={sandboxMode ? "Sandbox identity and app info" : `Signed in as ${auth.email}\nAccess: ${canEdit ? "editor" : "view-only"}`}
+        style={{
+          display: "flex", alignItems: "center", gap: 5, background: showAccountMenu ? C.hover : "none",
+          border: "none", padding: "4px 6px", borderRadius: 8, cursor: "pointer",
+          fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: C.muted, maxWidth: 200,
+        }}
+      >
+        <UserCircle size={14} style={{ color: C.brand, flexShrink: 0 }} />
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{accountLabel}</span>
+        <ChevronDown size={12} style={{ flexShrink: 0 }} />
+      </button>
+      {showAccountMenu && (
+        <>
+          <div onClick={() => setShowAccountMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
+          <div
+            role="menu"
+            style={{ position: "absolute", right: 0, top: "100%", marginTop: 6, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, minWidth: 210, overflow: "hidden", padding: 4 }}
+          >
+            <div style={{ padding: "8px 12px 10px", borderBottom: `1px solid ${C.border}`, marginBottom: 4 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: C.ink, overflow: "hidden", textOverflow: "ellipsis" }}>
+                {sandboxMode ? (currentUser || "No name set") : (auth.name || auth.email)}
+              </div>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted, overflow: "hidden", textOverflow: "ellipsis" }}>
+                {sandboxMode ? "Sandbox — local data" : auth.email}
+              </div>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: canEdit ? C.muted : C.accent, marginTop: 4 }}>
+                {canEdit ? "Editor" : "View only"}
+              </div>
+            </div>
+
+            {sandboxMode && (
+              <button
+                onClick={() => { setShowAccountMenu(false); setNameInput(currentUser || ""); setShowNamePrompt(true); }}
+                className="icon-btn"
+                style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
+              >
+                <UserCircle size={15} /> Set name
+              </button>
+            )}
+            {!sandboxMode && canEdit && (
+              <button
+                onClick={() => { setShowAccountMenu(false); setShowAccessManager(true); }}
+                className="icon-btn"
+                style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
+              >
+                <Users size={15} /> Access
+              </button>
+            )}
+            <button
+              onClick={() => { setShowAccountMenu(false); setShowAbout(true); }}
+              className="icon-btn"
+              style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
+            >
+              <Info size={15} /> About
+            </button>
+            {!sandboxMode && auth && (
+              <button
+                onClick={() => { setShowAccountMenu(false); endSession(null, true); }}
+                className="icon-btn"
+                style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
+              >
+                <LogOut size={15} /> Sign out
+              </button>
+            )}
+          </div>
+        </>
+      )}
+    </div>
   );
 
   const nameModal = showNamePrompt && (
@@ -4915,6 +5107,7 @@ function AssetTracker() {
         {peripheralsManagerModal}
         {usersManagerModal}
         {accessManagerModal}
+        {aboutModal}
         {bulkItemTypesManagerModal}
         {typesManagerModal}
         {breakerTypesManagerModal}
@@ -6228,6 +6421,7 @@ function AssetTracker() {
       {peripheralsManagerModal}
       {usersManagerModal}
         {accessManagerModal}
+        {aboutModal}
       {bulkItemTypesManagerModal}
       {typesManagerModal}
       {breakerTypesManagerModal}
@@ -6283,53 +6477,20 @@ function AssetTracker() {
             </button>
           )}
           {saveStatusPill}
-          {/* Sandbox keeps the old typed name tag — it has no sign-in, but audit
-              entries still want an author. A signed-in session shows the identity
-              the SERVER resolved, and it isn't editable: the whole point is that
-              it can't be whatever someone types. */}
-          {sandboxMode ? (
-            <button
-              onClick={() => { setNameInput(currentUser || ""); setShowNamePrompt(true); }}
-              style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", padding: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: C.muted }}
+          {/* Identity, Access, About and Sign out are one dropdown (accountMenu,
+              defined above) rather than four controls strung across the corner.
+              The View-only badge stays OUTSIDE it on purpose: it explains why the
+              edit controls a viewer expects aren't there, and an explanation that
+              only appears after you open a menu doesn't do that job. */}
+          {!canEdit && (
+            <span
+              title="You can browse the inventory but not change it. Ask an editor if you need to make changes."
+              style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, border: `1px solid ${C.accent}`, borderRadius: 10, padding: "2px 7px" }}
             >
-              <UserCircle size={14} style={{ color: C.brand }} />
-              {currentUser || "Set name"}
-            </button>
-          ) : auth && (
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span
-                title={`Signed in as ${auth.email}\nAccess: ${canEdit ? "editor" : "view-only"}`}
-                style={{ display: "flex", alignItems: "center", gap: 5, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: C.muted }}
-              >
-                <UserCircle size={14} style={{ color: C.brand }} />
-                {auth.name || auth.email}
-              </span>
-              {canEdit && (
-                <button
-                  onClick={() => setShowAccessManager(true)}
-                  title="Manage who can sign in to the asset tracker"
-                  style={{ background: "none", border: "none", padding: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted, textDecoration: "underline", cursor: "pointer" }}
-                >
-                  Access
-                </button>
-              )}
-              {!canEdit && (
-                <span
-                  title="You can browse the inventory but not change it. Ask an editor if you need to make changes."
-                  style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, border: `1px solid ${C.accent}`, borderRadius: 10, padding: "2px 7px" }}
-                >
-                  View only
-                </span>
-              )}
-              <button
-                onClick={() => endSession(null, true)}
-                title="Sign out of the asset tracker"
-                style={{ background: "none", border: "none", padding: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted, textDecoration: "underline", cursor: "pointer" }}
-              >
-                Sign out
-              </button>
-            </div>
+              View only
+            </span>
           )}
+          {accountMenu}
           {backendScriptVersion && backendScriptVersion !== FRONTEND_SCRIPT_VERSION && (
             <span
               style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.danger }}
