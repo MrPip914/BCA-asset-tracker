@@ -992,6 +992,14 @@ and read by `parseRelated()`/`relatedRoleFor()`.
     and ~10MB at 50k. `related` adds ~25 of those bytes. So audit-log pruning (already on
     the deferred list) is what eventually bites, and it bites the payload long before any
     filter gets slow.
+- **User names in an assignment entry are links too**, which needed one exception worth
+  understanding. The people who actually moved come from `related` by id, like everything
+  else. But someone already on the asset who *stays* has no id in that entry, and linking
+  only the changed name read as arbitrary rather than as emphasis — so the remaining names
+  are matched by NAME. That is safe **here and nowhere else**: this decorates text already
+  on screen, it does not resolve a reference. An unmatched name stays plain, and an
+  AMBIGUOUS one (two people sharing a name) is deliberately left plain, since there is no
+  honest way to pick which page it opens.
 - **The named assets are LINKS** (`auditSegments()`): "Computer BCA0001 moved out →
   Room 101" opens either one. Frontend-only — the ids were already in `related`, so this
   needed no backend change and no new version. The pairing is **structural, not a search
