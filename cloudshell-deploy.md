@@ -46,8 +46,11 @@ won't be asked again.
 ## Step 3: Deploy
 
 ```sh
-node deploy.mjs
+git pull --ff-only && node deploy.mjs
 ```
+
+The `git pull` matters: Cloud Shell reuses the copy of the project from your last visit,
+so without it you could deploy a version that has since been superseded.
 
 This uploads the script, publishes a new version, keeps the same `/exec` URL, and then
 confirms the live backend is reporting the new version.
