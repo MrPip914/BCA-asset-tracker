@@ -59,5 +59,80 @@ eq('null body and null config', f(null, null), []);
 
 console.log(`\nASSET_FIELDS has ${ASSET_FIELDS.length} fields; none of the six removed ones:`,
   ['room','building','campus','roomId','buildingId','itemName'].filter(k => ASSET_FIELDS.includes(k)).length === 0);
+
+// --- appendNewRows_ header reconcile (v27) -----------------------------------
+//
+// The AuditLog tab is the only one not rewritten by writeTable_, so its header
+// row is written once and then left alone. Adding a column to AUDIT_FIELDS
+// therefore has to widen that stored header, or appended values land under a
+// blank header cell -- and readTable_, which keys off the SHEET's headers, reads
+// every such column back as obj[""]. Nothing throws and the version check still
+// matches, so this is only catchable here.
+const auditSrc = src.slice(src.indexOf('const AUDIT_FIELDS = ['), src.indexOf('];', src.indexOf('const AUDIT_FIELDS = [')) + 2);
+
+// Minimal fake of the Sheets API surface appendNewRows_ actually touches.
+function fakeSheet(rows) {
+  const grid = rows.map(r => r.slice());
+  return {
+    grid,
+    getLastRow: () => grid.length,
+    getLastColumn: () => (grid.length ? grid[0].length : 0),
+    getRange(row, col, numRows, numCols) {
+      return {
+        setNumberFormat() { return this; },
+        setValues(vals) {
+          for (let i = 0; i < numRows; i++) {
+            const r = row - 1 + i;
+            while (grid.length <= r) grid.push([]);
+            for (let j = 0; j < numCols; j++) grid[r][col - 1 + j] = vals[i][j];
+          }
+          return this;
+        },
+      };
+    },
+  };
+}
+
+const appendMod = {};
+new Function('module', 'getSheet_', auditSrc + '\n' + grab('appendNewRows_') +
+  '\nmodule.AUDIT_FIELDS = AUDIT_FIELDS; module.append = appendNewRows_;'
+)(appendMod, () => appendMod._sheet);
+const { append, AUDIT_FIELDS } = appendMod;
+
+eq('`related` is the LAST audit column (positions of stored rows must not shift)',
+   AUDIT_FIELDS[AUDIT_FIELDS.length - 1], 'related');
+
+// A tab created before `related` existed: 12 headers, one data row.
+const old = ['assetLabel','assetType','action','field','from','to','room','quantity','previousQuantity','note','at','by'];
+appendMod._sheet = fakeSheet([old.slice(), ['BCA0001','Computer','edited','Parent','A','B','','','','','2026-01-01','eric']]);
+append('AuditLog', AUDIT_FIELDS, [
+  { assetLabel: 'BCA0001' },
+  { assetLabel: 'BCA0002', action: 'edited', field: 'Parent', related: 'BCR0002:from,BCR0005:to', at: '2026-08-26', by: 'eric' },
+]);
+eq('a narrow stored header is widened to the new field list',
+   appendMod._sheet.grid[0], AUDIT_FIELDS);
+eq('the new column lands under its own header, not a blank one',
+   appendMod._sheet.grid[2][AUDIT_FIELDS.indexOf('related')], 'BCR0002:from,BCR0005:to');
+eq('the pre-existing row keeps its original column positions',
+   appendMod._sheet.grid[1].slice(0, 12), ['BCA0001','Computer','edited','Parent','A','B','','','','','2026-01-01','eric']);
+
+// An empty tab still gets its headers, as before.
+appendMod._sheet = fakeSheet([]);
+append('AuditLog', AUDIT_FIELDS, [{ assetLabel: 'BCA0003', related: 'BCR0001:at' }]);
+eq('an empty tab is given the full header row', appendMod._sheet.grid[0], AUDIT_FIELDS);
+
+// Already-wide header: nothing to do, and nothing clobbered.
+appendMod._sheet = fakeSheet([AUDIT_FIELDS.slice(), ['BCA0001','','','','','','','','','','','','keep-me']]);
+append('AuditLog', AUDIT_FIELDS, [{ assetLabel: 'BCA0001' }, { assetLabel: 'BCA0004' }]);
+eq('an already-wide header leaves existing values alone',
+   appendMod._sheet.grid[1][AUDIT_FIELDS.indexOf('related')], 'keep-me');
+
+// Never shrink: this is an append-only log, so a shorter list must not drop a
+// column that already holds values.
+appendMod._sheet = fakeSheet([AUDIT_FIELDS.slice(), ['BCA0001','','','','','','','','','','','','keep-me']]);
+append('AuditLog', old, [{ assetLabel: 'BCA0001' }, { assetLabel: 'BCA0005' }]);
+eq('a shorter field list does not narrow the stored header',
+   appendMod._sheet.grid[0].length, AUDIT_FIELDS.length);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

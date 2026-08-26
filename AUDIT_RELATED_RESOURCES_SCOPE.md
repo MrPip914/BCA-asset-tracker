@@ -1,6 +1,7 @@
 # Audit entries on associated resources — scope
 
-**Status:** scoped, not built. Eric's calls recorded inline.
+**Status:** **Phase 1 BUILT** (2026-08-26), verified in Sandbox in a real browser; backend
+v27 undeployed. Phases 2-3 still scoped only. Eric's calls recorded inline.
 **Rebased onto main 2026-08-26** (v23→v26: the generic `name` field, type ids, the
 type editor, six deleted columns, `deploy.mjs`). Both findings below survived that
 intact; what changed around them is marked **[v26]**.
@@ -310,18 +311,14 @@ shorter field list and drops columns a newer one added. That guard exists becaus
 it already happened once (v24 live, v22 pushed over it). Working the guard is the
 guard doing its job; the number simply has to be right.
 
-**Deploy v26 before starting v27.** As of 2026-08-25 the live backend is **v25**
-and **v26 is undeployed** — it makes the Assets column set dynamic, which is what
-makes a custom column's value persist at all. Building the audit work on top
-stacks a second unshipped schema change behind the first, so a single eventual
-deploy would carry two versions' worth at once, with one version string to
-describe both. That is precisely the v14/v15/v16 pile-up `CLAUDE.md` records,
-where each branch called itself the next version and the version check reported a
-match while the deployed script was missing one of the changes.
-
-It costs nothing to avoid: deploy v26, confirm it, then build v27 on a known-live
-base. Phase 1 is built and tried entirely in Sandbox regardless, so this gates
-only the final deploy step, not the work.
+**[verified 2026-08-26] v26 is live.** An earlier draft of this section said to
+deploy v26 first, on the strength of a line in `CLAUDE.md` that said it was
+undeployed. Fetching the `/exec` URL says otherwise — it reports `v26`, and it
+reports the version even on the unauthenticated `authFailed` response, so the
+check takes a second and needs no sign-in. There is no sequencing gate: v27 builds
+straight on a live v26. Recorded here because the retracted advice was confidently
+written, and the file it came from carries an explicit warning against trusting
+exactly that kind of line.
 
 Then v27 ships as one deploy: the `appendNewRows_` header reconcile, the `related`
 column, and the backfill run. `SCRIPT_VERSION` → `"v27"` and
