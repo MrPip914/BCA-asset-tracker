@@ -26,6 +26,18 @@ of the live `/exec`), end your response with exactly this, filled in:
 > Look for `✓ Live backend is now v<NN>.` as the last line. Anything starting with `✗`
 > means it did not deploy, and says why.
 
+**To deploy a BRANCH** (testing a backend change before merging — the normal case for
+unmerged work, since Sandbox cannot cover a write path), give him the same link plus the
+one command that switches to it, and say plainly that this is the production URL:
+
+> Open the link above, then tap the terminal and run:
+>
+> `git fetch origin && git checkout -B <branch> origin/<branch> && node deploy.mjs`
+>
+> This is the URL the school's app uses, so your branch is live for everyone until you
+> deploy something else. To undo: `git checkout -B main origin/main && ALLOW_DOWNGRADE=1
+> node deploy.mjs`.
+
 That link opens Google Cloud Shell, clones this repo, and shows `cloudshell-deploy.md` as
 a walkthrough where every command has a tap-to-run button. Eric's sign-in and Script ID
 persist in Cloud Shell's `$HOME`, so a repeat deploy is that one tap — do NOT walk him
@@ -36,13 +48,19 @@ Three things that make this non-optional rather than a convenience:
 - **Never tell him to paste into the Apps Script editor.** That path still works and is
   documented in `DEPLOY.md` as the break-glass fallback, but it skips the version check
   below, which is the whole point.
-- **Never deploy from a feature branch, and never assume the live version.** Ask the live
-  `/exec` what it is running. Branches sit behind `main` constantly, and an older backend
-  does not merely roll behavior back — every save rewrites whole sheet tabs from the
-  backend's own field list, so it DROPS columns a newer one added and the next save
-  destroys that data. This happened: v22 was deployed over a live v24 from a branch that
-  was simply behind. `deploy.mjs` now refuses to go backwards, which is the only reason a
-  repeat is merely annoying.
+- **Never deploy anything OLDER than what is live, and never assume what that is.** Ask
+  the live `/exec`. An older backend does not merely roll behavior back — every save
+  rewrites whole sheet tabs from the backend's own field list, so it DROPS columns a newer
+  one added and the next save destroys that data. This happened: v22 was deployed over a
+  live v24 from a branch that was simply behind `main`. `deploy.mjs` refuses to go
+  backwards, which is the only reason a repeat is merely annoying.
+  - **Deploying from a branch is allowed and is sometimes the point** — Eric needs to test
+    a backend change before merging, since Sandbox mode never contacts Apps Script and so
+    cannot cover a write path at all. An earlier version of this rule said "never deploy
+    from a feature branch", which conflated *behind* with *unmerged* and left him told to
+    merge untested code. Branch-ness is not the hazard; being behind is.
+  - What IS true: the production `/exec` is the one the school uses, so pushing an
+    untested branch there is testing in production. Say so plainly rather than refusing.
 - **The frontend ships separately** (GitHub Pages, from `main`) and has run ahead of both
   the backend and `main` before. Matching `SCRIPT_VERSION` and `FRONTEND_SCRIPT_VERSION`
   in the same commit is what keeps the pair honest; deploying one without the other is

@@ -27,5 +27,14 @@ Do this:
 > Look for `✓ Live backend is now v<NN>.` as the last line. Anything starting with `✗`
 > means it did not deploy, and says why.
 
+If `$ARGUMENTS` names a branch, deploy that branch instead: read its `SCRIPT_VERSION`,
+and give him the link plus this command, with the branch filled in —
+
+> `git fetch origin && git checkout -B <branch> origin/<branch> && node deploy.mjs`
+
+— and one line saying this is the URL the school's app uses, so the branch is live for
+everyone until something else is deployed. Do not refuse a branch deploy: it is the only
+way to exercise a backend write path, because Sandbox mode never contacts Apps Script.
+
 Add one line naming what is in this version, so he knows what he is shipping. Nothing
 else — no setup walkthrough (his sign-in persists in Cloud Shell), no editor fallback.
