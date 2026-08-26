@@ -6,9 +6,9 @@ Status: **all four steps built, 2026-08-25.**
   reading `scriptVersion` back from the `/exec` URL rather than trusting a note — two notes
   here and in CLAUDE.md had said "undeployed" since the day of the deploy.
 - Step 3 (removing the place columns) needed no backend change and is live with the frontend.
-- Step 4 (the type editor) needs backend **v24**, which is **NOT deployed**. See the Known
-  constraints entry in CLAUDE.md for what degrades until it is: type settings don't persist,
-  and a Bulk Item's sub-type displays but doesn't survive a refresh.
+- Step 4 (the type editor) shipped as backend **v24**, and **v25** then deleted the six
+  superseded columns from the Assets tab. Both are deployed — v25 confirmed live on
+  2026-08-25 by reading `scriptVersion` back from `/exec`.
 
 Steps 1 and 2 were **built together, not separately as planned.** They don't
 separate: the moment every asset has a name, the Type column's "show the name if
@@ -216,7 +216,8 @@ public, the backend URL is in it, and headless Google sign-in wouldn't have work
 
 ## Deferred
 
-- Deleting the legacy name columns from the sheet.
+- ~~Deleting the legacy name columns from the sheet.~~ Done in v25, along with
+  `roomId`/`buildingId` and `itemName` — see the Known constraints entry in CLAUDE.md.
 - Per-type custom fields — still blocked by the custom-column bug in BUGS.md, but no
   longer blocking anything else.
 - "Fixed in place" as a real per-type setting rather than a list used once by the

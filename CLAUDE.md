@@ -1094,13 +1094,16 @@ When you do:
 
 ## Known constraints / things to watch
 
-- **The repo is at v25 and v25 is UNDEPLOYED as of 2026-08-25. It is the first DESTRUCTIVE
-  version.** It deletes six columns from the Assets tab that were kept only to keep an earlier
+- **v25 is DEPLOYED, confirmed 2026-08-25** by fetching the `/exec` URL and reading
+  `scriptVersion` back, and the six columns are gone from the live sheet. It was the first
+  DESTRUCTIVE version: it deleted six columns from the Assets tab that were kept only to keep an earlier
   change reversible: `roomId`/`buildingId` (replaced by `parentId` in v17), `room`/`building`/
   `campus` (replaced by `name` in v23) and `itemName` (replaced by `subType` in v24).
   - **`ASSET_FIELDS` is the schema.** `writeTable_` clears the tab and writes those headers, so
     dropping a name from that list deletes the column on the next asset-domain save. The sheet's
-    version history is the only way back — that is the whole rollback story now.
+    version history is the only way back — that is the whole rollback story now. Treat any future
+    removal from that list the same way: confirm the replacement column is populated on every
+    row, and deploy only after a save has written it.
   - **What went with them, and can't be rebuilt.** `adoptLegacyParentage()` and
     `adoptLegacySubType()` are gone (nothing left to adopt), and so is `hasMisadoptedName()` —
     which matters most. It repaired names written by the broken first backfill by comparing a
@@ -1116,7 +1119,9 @@ When you do:
     reproduce. Its places hold their names in `name`. Note the *stored column config* it carries
     still uses the old keys — that's the column config, not the sheet's columns, and
     `RETIRED_COLUMN_KEYS`/`RENAMED_COLUMN_KEYS` still have to handle it.
-- **v24 bundled the `typeSettings` Config key and the `subType` column.** It bundles two things: the
+- **v24 (the `typeSettings` Config key and the `subType` column) is live**, superseded by the
+  v25 deploy above — a deployment serves one version of the whole script. Kept for what it
+  records. It bundled two things: the
   `typeSettings` Config key (per-type overrides from the type editor) and the `subType` column
   (the Bulk Item sub-type, renamed from `itemName`). Until it's pasted in and a **New version**
   deploy is created:
