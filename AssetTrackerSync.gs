@@ -49,7 +49,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v22";
+const SCRIPT_VERSION = "v26";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -81,18 +81,64 @@ const SHEET_NAMES = {
 // frontend both enforces the rules on entry and tolerates/flags parentage that
 // arrived some other way (a hand-edited sheet, a bulk script).
 //
-// "roomId"/"buildingId" are the PREVIOUS shape and are kept on purpose. They're
-// still read and written unchanged, so this version is reversible and rows that
-// were never migrated still resolve (the frontend falls back to them when
-// parentId is empty). They are not maintained as a mirror of parentId, so once
-// an asset has been moved they can be stale — treat parentId as authoritative.
-// Dropping them is a separate later step, after a migration fills parentId in.
+// "name" is every asset's own optional display name, added in v23. "subType" is
+// the Bulk Item sub-type, added in v24.
+//
+// SIX COLUMNS WERE DROPPED HERE IN v25, having been kept only so each change
+// that superseded them stayed reversible: "roomId"/"buildingId" (the pre-v15
+// two-level location, replaced by parentId), "room"/"building"/"campus" (the
+// per-type name columns, replaced by name), and "itemName" (replaced by
+// subType). Every one had been superseded for at least one deployed version, and
+// each row's replacement value was written by the whole-tab rewrite that follows
+// any save, so nothing was read from them any more.
+//
+// Removing a name from this list DELETES that column from the sheet on the next
+// asset-domain save — writeTable_ clears the tab and writes these headers. So
+// this list is the schema, and shortening it is a destructive migration: be sure
+// the replacement column is populated on every row first. The sheet's own
+// version history is the only way back.
 const ASSET_FIELDS = [
-  "label", "type", "itemName", "screenSize", "hostname", "room", "building", "campus", "parentId", "roomId", "buildingId",
+  "label", "name", "type", "subType", "screenSize", "hostname", "parentId",
   "brand", "model", "serial", "person", "peripherals", "notes",
   "totalQuantity", "purchaseDate", "warrantyUntil", "status",
   "panelSlotCount", "panelLayout",
 ];
+
+// The Assets tab's real column set: the fixed schema above PLUS whatever custom
+// columns the user has added. Custom columns live in Config's `columns` blob, so
+// ASSET_FIELDS alone can never know about them — and writeTable_ writes only the
+// columns it is handed, which is why anything typed into a custom column used to
+// be silently dropped on save while the column itself went on appearing.
+//
+// Read needs no equivalent: readTable_ ignores the header list it is given and
+// returns whatever the sheet actually holds, so a column that gets WRITTEN comes
+// back on its own.
+//
+// Prefers the columns carried by this request, falling back to what Config
+// already holds — an old client, or any direct API call, posts assets without a
+// column list, and dropping the custom columns in that case would delete real
+// data from the sheet.
+function customColumnKeys_(bodyColumns, configMap) {
+  let columns = Array.isArray(bodyColumns) ? bodyColumns : null;
+  if (!columns) {
+    try {
+      const stored = configMap && configMap.columns;
+      columns = Array.isArray(stored) ? stored : JSON.parse(stored || "[]");
+    } catch (err) {
+      columns = [];
+    }
+  }
+  const keys = [];
+  (columns || []).forEach(c => {
+    const key = c && c.custom && c.key ? String(c.key) : "";
+    // Never let a custom key shadow a schema field or duplicate another —
+    // writeTable_ would write that column twice and readTable_ would keep only
+    // the last one.
+    if (key && ASSET_FIELDS.indexOf(key) === -1 && keys.indexOf(key) === -1) keys.push(key);
+  });
+  return keys;
+}
+
 
 // Breakers are scoped to a Panel asset (panelLabel); Circuits are scoped to a
 // Breaker (breakerId), not directly to the Panel — chain is Circuit -> Breaker
@@ -189,13 +235,11 @@ function pickPublic_(source, fields) {
   return out;
 }
 
-// Where a row sits, as the frontend's adoptLegacyParentage() reads it: parentId
-// when present, else the pre-v15 roomId/buildingId. Keeping the fallback here
-// means the public panel page shows the right room BEFORE the sheet has been
-// migrated, which matters because a QR sticker gets scanned by whoever is
-// standing at the panel, not by whoever knows what a migration is.
+// Where a row sits. This carried a roomId/buildingId fallback until v25, for the
+// window when the sheet still held the pre-v15 pair; those columns are gone, so
+// parentId is now the only answer there is.
 function effectiveParentId_(row) {
-  return String((row && (row.parentId || row.roomId || row.buildingId)) || "").trim();
+  return String((row && row.parentId) || "").trim();
 }
 
 // The nearest ancestor of a given type, walking up parentId. Loop-safe by the
@@ -676,6 +720,16 @@ function respond_(payload, e) {
 // Circuits tabs later is invisible to this endpoint until someone deliberately
 // adds it to a whitelist. That's the opposite of a blacklist, which would start
 // leaking the moment a new field lands.
+// What an asset is called, for the public page. `name` (v23) with the old
+// per-type columns as the fallback, so a panel's location renders correctly both
+// before the sheet has been rewritten with names and after. Same shape as the
+// frontend's nameOf(), minus the label fallback: a blank location should read as
+// blank here, not as an Asset ID.
+function displayName_(row) {
+  if (!row) return "";
+  return String(row.name || "").trim();
+}
+
 function publicPanelPayload_(requestedLabel) {
   const wanted = String(requestedLabel || "").trim().toUpperCase();
   if (!wanted) return { ok: false, error: "No panel specified." };
@@ -745,7 +799,7 @@ function publicPanelPayload_(requestedLabel) {
   // is exactly what this endpoint exists to avoid. Only rooms this panel actually
   // references are included — it's a lookup map, not a room directory.
   const roomNameById = {};
-  assetRows.forEach(a => { if (a.type === "Room") roomNameById[a.label] = a.room || ""; });
+  assetRows.forEach(a => { if (a.type === "Room") roomNameById[a.label] = displayName_(a); });
 
   const panel = pickPublic_(panelRow, PUBLIC_PANEL_FIELDS);
   // The "where am I" header. A panel's Room and Building are found by walking up
@@ -753,8 +807,8 @@ function publicPanelPayload_(requestedLabel) {
   // both — which the old direct roomId/buildingId lookup could not express.
   const panelRoom = nearestAncestorRow_(panelRow, byLabel, "Room");
   const panelBuilding = nearestAncestorRow_(panelRow, byLabel, "Building");
-  panel.roomName = panelRoom ? (panelRoom.room || "") : "";
-  panel.buildingName = panelBuilding ? (panelBuilding.building || "") : "";
+  panel.roomName = panelRoom ? displayName_(panelRoom) : "";
+  panel.buildingName = panelBuilding ? displayName_(panelBuilding) : "";
 
   const referencedRoomIds = {};
   breakers.forEach(b => b.circuits.forEach(c => (c.roomsServedIds || []).forEach(id => { referencedRoomIds[id] = true; })));
@@ -780,7 +834,7 @@ function publicPanelPayload_(requestedLabel) {
     const upstreamRoom = upstreamPanel ? nearestAncestorRow_(upstreamPanel, byLabel, "Room") : null;
     fedFrom = {
       panelLabel: upstreamLabel,
-      panelRoomName: upstreamRoom ? (upstreamRoom.room || "") : "",
+      panelRoomName: upstreamRoom ? displayName_(upstreamRoom) : "",
       circuitLabel: feedingCircuit.label || "",
       cells: feedingBreaker && feedingBreaker.cells
         ? String(feedingBreaker.cells).split(",").map(s => s.trim()).filter(Boolean)
@@ -997,6 +1051,10 @@ function handleAuthenticatedRead_(body, e) {
       usersList: config.usersList || null,
       bulkItemTypes: config.bulkItemTypes || null,
       typesList: config.typesList || null,
+      // Per-type overrides of the app's built-in type settings, keyed by type id
+      // (see TYPE_SETTINGS in index.html). An object, not a list, unlike every
+      // other managed key here.
+      typeSettings: config.typeSettings || null,
       // Monotonic counter for the next BCA asset number to issue — see
       // peekAssetNumber() in index.html. Not a managed list like the rest of
       // Config, just a number that has to survive asset deletion (deriving it
@@ -1163,8 +1221,9 @@ function doPost(e) {
     }
 
     if (dirty.assets) {
-      // Assets tab: flat fields only.
-      writeTable_(SHEET_NAMES.assets, ASSET_FIELDS, assets);
+      // Assets tab: flat fields only, plus any custom columns (see
+      // customColumnKeys_ — without them, custom column values are dropped).
+      writeTable_(SHEET_NAMES.assets, ASSET_FIELDS.concat(customColumnKeys_(body.columns, configMap)), assets);
 
       // Child tables, flattened out with the parent asset's label as the key.
       const commentRows = [];
@@ -1271,6 +1330,7 @@ function doPost(e) {
         configRows.push({ key: "usersList", value: JSON.stringify(body.usersList || []) });
         configRows.push({ key: "bulkItemTypes", value: JSON.stringify(body.bulkItemTypes || []) });
         configRows.push({ key: "typesList", value: JSON.stringify(body.typesList || []) });
+        configRows.push({ key: "typeSettings", value: JSON.stringify(body.typeSettings || {}) });
         // The access allowlist, PRESERVED from the sheet unless this save
         // explicitly carries one. Every other key above is rewritten from the
         // posted body, which is exactly the hazard here: a client that predates
