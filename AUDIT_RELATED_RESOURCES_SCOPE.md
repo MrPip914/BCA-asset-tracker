@@ -1,6 +1,9 @@
 # Audit entries on associated resources — scope
 
 **Status:** scoped, not built. Eric's calls recorded inline.
+**Rebased onto main 2026-08-26** (v23→v26: the generic `name` field, type ids, the
+type editor, six deleted columns, `deploy.mjs`). Both findings below survived that
+intact; what changed around them is marked **[v26]**.
 **Goal:** open a Room (or any container) and see the audit entries for things that
 happened *to it* — a computer moved in from Room A, chairs allocated, a circuit
 pointed at it — not just entries stamped with that asset's own label.
@@ -59,6 +62,13 @@ check would not catch it: both versions would match while the ids quietly went
 nowhere. That is the same class of failure the version check exists for, in the
 one spot the version check can't see.
 
+**[v26] This is now the ONLY tab with this problem, which makes it easier to
+forget.** v25 established that `ASSET_FIELDS` *is* the schema — `writeTable_`
+clears its tab and rewrites the headers every save, so adding a column there is
+self-applying and dropping one deletes it. AuditLog is the one tab not written
+that way. So the mental model that now holds everywhere else ("edit the field
+list, the sheet follows") is precisely wrong here, and silently so.
+
 **Fix:** make `appendNewRows_` reconcile the header row — if the stored one is
 narrower than `headers`, rewrite it. Three lines, and it makes every future audit
 column safe instead of just this one.
@@ -69,6 +79,12 @@ if (storedWidth < headers.length) {
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
 }
 ```
+
+**[v26] Unit-test it in `test-backend-fields.js`.** That file exists because
+Sandbox never contacts Apps Script and the live backend needs a sign-in, so a
+backend write path is structurally untestable in the browser. A header-reconcile
+bug is exactly the kind that would otherwise only surface in production, on the
+one table that can't be rewritten to fix it.
 
 ---
 
@@ -210,6 +226,14 @@ The subject's name comes from `nameOf()` on the asset found by label, **falling
 back to the bare label when it isn't found** — audit entries deliberately outlive
 the assets they describe, so a permanently deleted asset's move must still render.
 
+**[v26] Two simplifications from main.** `nameOf()` is now just
+`asset.name || asset.label` rather than a per-type ladder, so there is no naming
+rule left to get wrong here. And an entry's `assetType` now holds a type **id**,
+not a name — so display goes through `typeNameOf(entry.assetType, typesList)`,
+and renaming a type no longer strands the entries logged under its old name. The
+same id reasoning this document applies to rooms, applied one level up, already
+shipped.
+
 ### Performance
 
 The audit log is append-only and never pruned (`CLAUDE.md` lists pruning as
@@ -254,21 +278,60 @@ wrong same-named room** — accepted, because the current sheet is sample data a
 a well-formed structure matters more than which "Kitchen" a fake move points at.
 Worth re-reading this line before running anything similar against real history.
 
+**[v26] Expect a lower match rate than this table implies.** Two things on main
+work against it. The six columns deleted in v25 mean a place's name now lives only
+in `name`, so matching is against that one field rather than `room`/`building`/
+`campus` — fine in itself. But v23's *first* name backfill was broken, and
+`hasMisadoptedName()` — the repair that could detect a wrong one — was deleted with
+those columns. So some live place names may simply be wrong, and an audit row
+naming the old value will not match anything. It fails the safe way (no id
+written, entry stays invisible) rather than mis-filing, which is the right failure
+for a best-effort pass.
+
+**[v26] The one-off function now ships with the deploy.** `deploy.mjs` pushes the
+whole `AssetTrackerSync.gs` via clasp, so `backfillAuditIds_()` is uploaded as part
+of the v27 deploy and is then run once from the editor — no separate paste step.
+It can't be invoked *by* `deploy.mjs` (that only pushes, versions and verifies), so
+running it stays a deliberate manual act, which for a one-shot data rewrite is the
+property you want. Leave it in place afterwards as inert, or strip it in a later
+version; don't wire it to a trigger.
+
 Also update `MOCK_SNAPSHOT` by hand with a few id-carrying audit entries, so
 Sandbox has fixture data matching the new shape (per the Sandbox section of
 `CLAUDE.md`) and the whole feature can be built before any redeploy.
 
-### Deploy
+### Deploy — and a sequencing decision that comes first
 
-`SCRIPT_VERSION` → `"v23"` and `FRONTEND_SCRIPT_VERSION` to match, in the same
-commit. Ships as one deploy: the `appendNewRows_` header fix, the three columns,
-and the backfill run.
+**This is `v27`, not `v23`.** The original draft said v23; main has since shipped
+v23, v24, v25 and v26. Left uncorrected, `deploy.mjs` would have **refused the
+deploy outright** — it compares the repo's `SCRIPT_VERSION` against the live one
+and dies on a downgrade, because an older backend rewrites sheet tabs from its own
+shorter field list and drops columns a newer one added. That guard exists because
+it already happened once (v24 live, v22 pushed over it). Working the guard is the
+guard doing its job; the number simply has to be right.
+
+**Deploy v26 before starting v27.** As of 2026-08-25 the live backend is **v25**
+and **v26 is undeployed** — it makes the Assets column set dynamic, which is what
+makes a custom column's value persist at all. Building the audit work on top
+stacks a second unshipped schema change behind the first, so a single eventual
+deploy would carry two versions' worth at once, with one version string to
+describe both. That is precisely the v14/v15/v16 pile-up `CLAUDE.md` records,
+where each branch called itself the next version and the version check reported a
+match while the deployed script was missing one of the changes.
+
+It costs nothing to avoid: deploy v26, confirm it, then build v27 on a known-live
+base. Phase 1 is built and tried entirely in Sandbox regardless, so this gates
+only the final deploy step, not the work.
+
+Then v27 ships as one deploy: the `appendNewRows_` header reconcile, the `related`
+column, and the backfill run. `SCRIPT_VERSION` → `"v27"` and
+`FRONTEND_SCRIPT_VERSION` to match, in the same commit.
 
 **Effort: M–L.**
 
 ---
 
-## Phase 2 — Users as assets
+## Phase 2 — Users as assets  [re-estimated **M–L**, was L–XL]
 
 **Eric asked: same chunk, or separate? Recommendation: separate, and phase 1
 makes phase 2 cheap rather than duplicated.**
@@ -299,20 +362,42 @@ Four reasons:
 4. **Phase 1 delivers the stated example on its own.** "Move a computer from Room
    A to Room B and see it from either room" is done at the end of phase 1.
 
+**[v26] The type editor did half of this already.** The original L–XL assumed
+building a User type in code. Main's type editor now creates a type from the UI —
+name, icon, what it can sit inside, and its own custom fields — and every asset
+already has a generic `name`, so a User record with its own detail page and the
+standard tabs (Audit included, since that is a common tab) needs **no code at
+all**. Note the editor deliberately cannot add *modules*, because a tab body needs
+a render branch and can't be switched on by data — but users need no module, only
+the common tabs.
+
+What's left is the part that was always the real work, and it is unchanged: one
+asset can have several users, so `person` becomes a many-to-many. That is why this
+is still M–L rather than S, and still its own phase.
+
 Phase 2 sketch (not scoped in detail here):
 
-- `User` registry entry with `nameField: "personName"`, `parentTypes: []`.
+- A `User` type — **created in the type editor, not in the registry**: an icon, no
+  parent types, and its name held in the generic `name` field like every other
+  asset. Only a type needing a *module* still requires a registry entry.
 - `person` becomes `personIds` — an array of user labels, the app's first
   many-to-many between assets. `UserField` becomes a chip picker over User
   assets; it already tolerates unmanaged names, which is the migration path.
-- A read-time adopter in `loadData()`'s map — same trick as
-  `adoptLegacyParentage()` — so old name strings resolve without a migration
-  script and the same build is correct against a migrated and an un-migrated
-  sheet.
+- A read-time adopter in `loadData()`'s map, so old name strings resolve without a
+  migration script and one build stays correct against a migrated and an
+  un-migrated sheet. **[v26] Note the precedents it would follow —
+  `adoptLegacyParentage()` and `adoptLegacySubType()` — were deleted in v25 once
+  nothing was left to adopt.** So this is the pattern to copy, not a helper to
+  extend; and it comes with the reminder that an adopter is temporary by design and
+  gets removed on the version that deletes the column it read.
 - `usersList` (managed list) retires into the asset list.
-- Users get a detail page with all the standard tabs, including Audit, for free.
+- **[v26] Type ids make this safer than it would have been.** `asset.type` holds an
+  id, not a name, so a User type can be renamed later — to "Person", "Staff" —
+  without rewriting a single asset or stranding any audit entry logged under the
+  old word.
 
-**Effort: L–XL**, mostly the many-to-many and the `person` migration.
+**Effort: M–L**, essentially all of it the many-to-many `person` migration — the
+record, the page and the tabs come from the type editor.
 
 ## Phase 3 — user history
 
