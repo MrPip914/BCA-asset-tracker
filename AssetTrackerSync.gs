@@ -49,7 +49,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v26";
+const SCRIPT_VERSION = "v28";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -99,7 +99,11 @@ const SHEET_NAMES = {
 // version history is the only way back.
 const ASSET_FIELDS = [
   "label", "name", "type", "subType", "screenSize", "hostname", "parentId",
-  "brand", "model", "serial", "person", "peripherals", "notes",
+  // `personIds` (v28) is the assignment: comma-joined labels of User assets, the
+  // app's first many-to-many between assets. `person` is the pre-v28 slash-joined
+  // list of NAMES, kept and still written so the change stays reversible and an
+  // un-migrated row still resolves -- same shape as parentId/roomId in v17.
+  "brand", "model", "serial", "person", "personIds", "peripherals", "notes",
   "totalQuantity", "purchaseDate", "warrantyUntil", "status",
   "panelSlotCount", "panelLayout",
 ];
@@ -191,6 +195,22 @@ const CIRCUIT_FIELDS = ["id", "breakerId", "panelLabel", "label", "roomsServed",
 // cells at placement time in the frontend. Global/shared across all panels,
 // not scoped to any one asset — its own flat tab, like Breakers/Circuits.
 const BREAKER_TYPE_FIELDS = ["id", "name", "slotSpan", "members"];
+
+// AuditLog's columns. `related` is LAST and any future column must be too: this
+// is the one tab written by appendNewRows_ rather than writeTable_, so its header
+// row is not rewritten on every save and existing rows keep their column
+// positions. Inserting a name mid-list would shift every stored row's meaning.
+//
+// This list was duplicated at the doGet read and the doPost append until v27.
+// They have to agree exactly -- readTable_ keys off the sheet's own header row,
+// so a name in one and not the other reads back as undefined with no error.
+const AUDIT_FIELDS = [
+  "assetLabel", "assetType", "action", "field", "from", "to",
+  "room", "quantity", "previousQuantity", "note", "at", "by",
+  // v27: comma-joined `label:role` pairs naming the OTHER assets an entry
+  // concerns and how -- "BCR0002:from,BCR0005:to". See relate() in index.html.
+  "related",
+];
 
 // --- Public panel view (anonymous, read-only) --------------------------------
 // Physical panels carry QR stickers pointing at panel.html?p=<label>, which any
@@ -685,7 +705,24 @@ function writeTable_(name, headers, rows) {
 function appendNewRows_(name, headers, rows) {
   const sheet = getSheet_(name);
   const lastRow = sheet.getLastRow();
-  if (lastRow === 0) {
+  // Write the header row when the tab is empty -- and ALSO widen it when a new
+  // column has been added to `headers` since the tab was created.
+  //
+  // Without the second case this function fails silently and unrecoverably. It
+  // appends values positionally against `headers`, while readTable_ keys each row
+  // off the SHEET's own header row; so a column appended under a blank header
+  // cell reads back as obj[""], every such column collides on that one key, and
+  // the data is gone. Nothing throws, and SCRIPT_VERSION still matches its
+  // frontend -- the version check cannot see this, because the script is exactly
+  // the version it claims to be.
+  //
+  // This is the only tab not written by writeTable_ (which clears and rewrites
+  // its headers every save), so it is the only place where "add the field to the
+  // list and the sheet follows" -- true everywhere else since v25 -- is wrong.
+  // Widening only, never shrinking: this tab is an append-only log and dropping a
+  // column would strand the values already under it.
+  const storedWidth = lastRow === 0 ? 0 : sheet.getLastColumn();
+  if (storedWidth < headers.length) {
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
   }
   const existingCount = Math.max(lastRow - 1, 0);
@@ -968,10 +1005,7 @@ function handleAuthenticatedRead_(body, e) {
     const breakerRows = readTable_(SHEET_NAMES.breakers, BREAKER_FIELDS);
     const circuitRows = readTable_(SHEET_NAMES.circuits, CIRCUIT_FIELDS);
     const breakerTypeRows = readTable_(SHEET_NAMES.breakerTypes, BREAKER_TYPE_FIELDS);
-    const auditRows = readTable_(SHEET_NAMES.audit, [
-      "assetLabel", "assetType", "action", "field", "from", "to",
-      "room", "quantity", "previousQuantity", "note", "at", "by",
-    ]);
+    const auditRows = readTable_(SHEET_NAMES.audit, AUDIT_FIELDS);
     const configRows = readTable_(SHEET_NAMES.config, ["key", "value"]);
 
     const config = {};
@@ -985,6 +1019,9 @@ function handleAuthenticatedRead_(body, e) {
       const label = a.label;
       return {
         ...a,
+        // Stored comma-joined in one cell (same as a circuit's roomsServed);
+        // handed to the app as an array so nothing downstream re-parses it.
+        personIds: String(a.personIds || "").split(",").map(s => s.trim()).filter(Boolean),
         comments: commentRows.filter(c => c.assetLabel === label).map(c => ({ text: c.text, at: c.at, by: c.by })),
         changes: changeRows.filter(c => c.assetLabel === label).map(c => ({
           changeType: c.changeType, vendor: c.vendor, cost: c.cost, note: c.note, at: c.at, by: c.by,
@@ -1031,6 +1068,10 @@ function handleAuthenticatedRead_(body, e) {
       room: r.room || undefined, quantity: r.quantity === "" ? undefined : r.quantity,
       previousQuantity: r.previousQuantity === "" ? undefined : r.previousQuantity,
       note: r.note || undefined,
+      // Absent on every row written before v27, and on any row the backfill
+      // could not resolve -- an entry with no related assets is the norm, not an
+      // error, so this stays undefined rather than an empty string.
+      related: r.related || undefined,
       at: r.at, by: r.by,
     }));
 
@@ -1223,7 +1264,13 @@ function doPost(e) {
     if (dirty.assets) {
       // Assets tab: flat fields only, plus any custom columns (see
       // customColumnKeys_ — without them, custom column values are dropped).
-      writeTable_(SHEET_NAMES.assets, ASSET_FIELDS.concat(customColumnKeys_(body.columns, configMap)), assets);
+      // personIds arrives as an array and has to be flattened explicitly: leaving
+      // it to setValues' own stringification would work by accident today and
+      // silently change shape the day the separator or the type did.
+      const assetRows_ = assets.map(a => (
+        Array.isArray(a.personIds) ? Object.assign({}, a, { personIds: a.personIds.join(",") }) : a
+      ));
+      writeTable_(SHEET_NAMES.assets, ASSET_FIELDS.concat(customColumnKeys_(body.columns, configMap)), assetRows_);
 
       // Child tables, flattened out with the parent asset's label as the key.
       const commentRows = [];
@@ -1288,7 +1335,7 @@ function doPost(e) {
     // whole — ever-growing — history on every save.
     appendNewRows_(
       SHEET_NAMES.audit,
-      ["assetLabel", "assetType", "action", "field", "from", "to", "room", "quantity", "previousQuantity", "note", "at", "by"],
+      AUDIT_FIELDS,
       body.auditLog || []
     );
 
@@ -1375,6 +1422,106 @@ function doPost(e) {
     return jsonOut_({ ok: true, revisions: revisions });
   } catch (err) {
     return jsonOut_({ ok: false, error: err.message });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// --- One-off: backfill `related` on pre-v27 audit rows ------------------------
+//
+// RUN THIS ONCE, BY HAND, FROM THE APPS SCRIPT EDITOR, after deploying v27.
+// It is deliberately not reachable through doGet/doPost and must never be put on
+// a trigger: it rewrites existing history, which is the one thing every other
+// path in this file is careful not to do.
+//
+// WHY IT HAS TO EXIST AT ALL. Every audit row written before v27 recorded a
+// place by its display NAME ("Room 101"), because that is what the frontend
+// resolved before storing. Names are ambiguous (two rooms can share one) and
+// mutable (a rename detaches the history silently), which is exactly why every
+// other reference in this app stores a label. This maps those names back to
+// labels so a room can find its own entries.
+//
+// IT IS BEST EFFORT AND FAILS INVISIBLY, ON PURPOSE. A name that matches nothing
+// leaves `related` empty and the entry simply stays out of the associated views,
+// which is the honest outcome -- better than guessing. Two known reasons a name
+// won't match: a place renamed since the entry was written, and the v23 name
+// backfill that wrote some wrong names in the first place (the repair that could
+// detect those, hasMisadoptedName(), went with the columns deleted in v25).
+//
+// AMBIGUITY TAKES THE FIRST MATCH, which can file an entry under the wrong
+// same-named room. Accepted deliberately for the current sheet, which is sample
+// data -- a well-formed structure matters more here than which of two identically
+// named rooms a sample move points at. THINK AGAIN BEFORE RUNNING THIS AGAINST
+// HISTORY ANYONE RELIES ON.
+//
+// Safe to re-run: rows that already have a `related` value are left alone.
+function backfillAuditIds_() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const assetRows = readTable_(SHEET_NAMES.assets, ASSET_FIELDS);
+    // name -> label, first writer wins (see the ambiguity note above).
+    const labelByName = {};
+    assetRows.forEach(a => {
+      const nm = String(a.name || "").trim();
+      if (nm && !(nm in labelByName)) labelByName[nm] = a.label;
+    });
+    const resolve = nm => {
+      const key = String(nm || "").trim();
+      if (!key || key === "Unassigned") return "";
+      return labelByName[key] || "";
+    };
+
+    const sheet = getSheet_(SHEET_NAMES.audit);
+    const values = sheet.getDataRange().getValues();
+    if (values.length < 2) return "AuditLog is empty; nothing to do.";
+
+    const headers = values[0].map(String);
+    const relatedCol = headers.indexOf("related");
+    if (relatedCol === -1) {
+      // The v27 deploy widens this header on the first save. Refuse rather than
+      // write into a column that isn't there.
+      throw new Error("No `related` column on AuditLog yet — deploy v27 and let one save run first.");
+    }
+    const col = name => headers.indexOf(name);
+    const iAction = col("action"), iField = col("field");
+    const iFrom = col("from"), iTo = col("to"), iRoom = col("room");
+
+    let filled = 0, skipped = 0, unmatched = 0;
+    const out = [];
+    for (let r = 1; r < values.length; r++) {
+      const row = values[r];
+      if (String(row[relatedCol] || "").trim()) { out.push([row[relatedCol]]); skipped++; continue; }
+
+      const action = String(row[iAction] || "");
+      const field = String(row[iField] || "");
+      const pairs = [];
+
+      if (action === "edited" && field === "Parent") {
+        const f = resolve(row[iFrom]), t = resolve(row[iTo]);
+        if (f) pairs.push(f + ":from");
+        if (t) pairs.push(t + ":to");
+      } else if (action === "allocated") {
+        const t = resolve(row[iRoom]);
+        if (t) pairs.push(t + ":to");
+      } else if (action === "unallocated") {
+        const f = resolve(row[iRoom]);
+        if (f) pairs.push(f + ":from");
+      } else if (action === "circuit_edited" && field.indexOf("Rooms served") !== -1) {
+        // The stored value is a comma-joined list of names.
+        String(row[iTo] || "").split(",").forEach(nm => {
+          const id = resolve(nm);
+          if (id) pairs.push(id + ":serves");
+        });
+      }
+
+      if (pairs.length) filled++;
+      else if (action === "allocated" || action === "unallocated" || (action === "edited" && field === "Parent")) unmatched++;
+      out.push([pairs.join(",")]);
+    }
+
+    sheet.getRange(2, relatedCol + 1, out.length, 1).setNumberFormat("@").setValues(out);
+    return `Backfill done: ${filled} rows filled, ${unmatched} place rows unmatched, ${skipped} already had a value.`;
   } finally {
     lock.releaseLock();
   }

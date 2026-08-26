@@ -46,8 +46,11 @@ won't be asked again.
 ## Step 3: Deploy
 
 ```sh
-node deploy.mjs
+git pull --ff-only && node deploy.mjs
 ```
+
+The `git pull` matters: Cloud Shell reuses the copy of the project from your last visit,
+so without it you could deploy a version that has since been superseded.
 
 This uploads the script, publishes a new version, keeps the same `/exec` URL, and then
 confirms the live backend is reporting the new version.
@@ -61,6 +64,35 @@ Two failures it will stop on deliberately:
   disagree. They must be bumped together. Nothing was uploaded.
 * **Backend not reporting the new version** — the upload worked but the deployment didn't
   take. This is the silent failure the check exists to catch.
+
+## Testing a branch before it's merged
+
+Sandbox mode never contacts Apps Script, so a backend change cannot be tested any other
+way — you have to deploy it. That is supported. Just know this is the **same URL the
+school's app uses**, so while your branch is deployed, that is what everyone is running.
+
+Replace `BRANCH-NAME` with the branch, then run:
+
+```sh
+git fetch origin && git checkout -B BRANCH-NAME origin/BRANCH-NAME && node deploy.mjs
+```
+
+The deploy prints which branch it is shipping and warns you when it isn't `main`.
+
+## Putting it back
+
+If the branch turns out to be broken, go back to `main`:
+
+```sh
+git checkout -B main origin/main && ALLOW_DOWNGRADE=1 node deploy.mjs
+```
+
+`ALLOW_DOWNGRADE=1` is needed because `main` is *older* than the branch you just deployed,
+and going backwards is blocked by default — an older backend drops columns a newer one
+added. That is exactly why it asks you to be explicit. Here it is the right thing to do,
+**as long as nothing has saved data using the new version's columns yet.** If it has,
+going back will drop those columns on the next save. When in doubt, fix forward with a new
+version rather than rolling back.
 
 ## Done
 

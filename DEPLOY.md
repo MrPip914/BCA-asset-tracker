@@ -77,6 +77,24 @@ v24 was live and v22 was pushed over it from a branch that was simply behind.
 
 If a rollback is genuinely what you want: `ALLOW_DOWNGRADE=1 node deploy.mjs`.
 
+## Deploying a branch
+
+Sandbox mode never contacts Apps Script, so a backend change cannot be exercised without
+deploying it. Deploying an unmerged branch is therefore supported and expected:
+
+    git fetch origin && git checkout -B <branch> origin/<branch> && node deploy.mjs
+
+The deploy names the branch it is shipping and warns when it isn't `main`. There is only
+one deployment, so **while your branch is deployed, that is what the school's app runs.**
+
+To put it back:
+
+    git checkout -B main origin/main && ALLOW_DOWNGRADE=1 node deploy.mjs
+
+The override is needed because `main` is older than what you just deployed. That is safe
+only while nothing has saved data using the newer version's columns — once it has, rolling
+back drops them on the next save, and fixing forward with a new version is the safer move.
+
 ## Things worth knowing
 
 - **The editor stops being a place to edit.** Every deploy overwrites the live code with

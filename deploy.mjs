@@ -105,7 +105,29 @@ if (backendVersion !== frontendVersion) {
       `"Backend outdated" warning. Fix them and re-run.`
   );
 }
-console.log(`Deploying ${backendVersion}`);
+// Which branch this is, so the output never leaves it ambiguous what is being shipped to
+// the URL the school uses. Deploying a branch is allowed on purpose - it is the only way
+// to exercise a backend write path, since Sandbox mode never contacts Apps Script - but it
+// is testing in production, so it says so rather than quietly proceeding.
+const branch = (() => {
+  const r = spawnSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+    cwd: REPO,
+    encoding: "utf8",
+  });
+  return r.status === 0 ? (r.stdout || "").trim() : null;
+})();
+
+console.log(`Deploying ${backendVersion}${branch ? ` from branch "${branch}"` : ""}`);
+
+if (branch && branch !== "main") {
+  console.log(
+    `\n  ! This is the PRODUCTION backend - the one the school's app uses.\n` +
+      `    Testing an unmerged branch here is testing in production. That is a\n` +
+      `    supported thing to do; just know that is what is happening.\n` +
+      `    To undo: check out main and re-run with ALLOW_DOWNGRADE=1 (going back to\n` +
+      `    an older version is blocked by default, for the reason in DEPLOY.md).`
+  );
+}
 
 // -------------------------------------- stage: pull live project, swap in our file
 

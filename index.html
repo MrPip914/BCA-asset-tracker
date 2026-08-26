@@ -172,6 +172,24 @@ const TYPE_REGISTRY = {
     locked: true, icon: Zap, parentTypes: ["Room"], excludedFields: ["peripherals"],
     modules: ["breakers"], defaultTab: "breakers",
   },
+  // A person. Users became records (v28) so an asset can point AT one by id
+  // instead of storing a name string -- which is what gives a person a detail
+  // page, an audit history, and a rename that costs nothing. Deliberately NOT
+  // the sign-in allowlist (`authUsers`): that answers "who may open the app",
+  // this answers "whose desk is this on", and the app wants people in the
+  // inventory who never sign in -- a student, or someone who has left whose
+  // history is still worth keeping. Linking the two is a later question.
+  //
+  // No parent: a person is not contained by anything this app models. No device
+  // fields, and no `person` field of its own -- a user is not assigned to a user.
+  // Locked because personIds now reference it structurally.
+  User: {
+    locked: true, icon: UserCircle, parentTypes: [],
+    excludedFields: [
+      "brand", "model", "serial", "peripherals", "hostname", "screenSize",
+      "purchaseDate", "warrantyUntil", "person", "subType", "totalQuantity",
+    ],
+  },
   Other: { parentTypes: ["Room"] },
 };
 
@@ -314,7 +332,21 @@ function ensureLockedTypes(list) {
   const have = new Set(list.map(t => t.id));
   const missing = TYPE_OPTIONS.filter(id => isLockedType(id) && !have.has(id));
   if (missing.length === 0) return list; // reference-stable: persist()'s _dirty check compares by identity
-  return [...list, ...missing.map(id => ({ id, name: id }))];
+  // Put each one back where the registry says it belongs, rather than appending.
+  // Appending is what User did on arrival: it landed below "Other" at the very
+  // bottom of the picker, reading as an afterthought instead of a peer of Room
+  // and Building — and on a stored list it was the ONE entry below the catch-all,
+  // which is where the eye stops looking. Existing entries keep their order; a
+  // missing type slots in before the next registry sibling already present, so
+  // only the new arrival moves.
+  const out = [...list];
+  missing.forEach(id => {
+    const after = TYPE_OPTIONS.slice(TYPE_OPTIONS.indexOf(id) + 1);
+    const at = out.findIndex(t => after.includes(t.id));
+    const entry = { id, name: id };
+    if (at === -1) out.push(entry); else out.splice(at, 0, entry);
+  });
+  return out;
 }
 // Which types an asset of `type` may sit inside — the only thing render sites
 // should branch on, instead of comparing type names. A REGISTERED type always
@@ -436,6 +468,42 @@ function availableTabsFor(type) {
 // A name is DISPLAY ONLY and never identity: `label` remains the one stable key
 // (see CLAUDE.md's reference conventions), names need not be unique, and nothing
 // resolves a reference through one. That's what makes renaming free.
+// ---------- USER ASSIGNMENT ----------
+// Which people an asset is assigned to. Two shapes coexist by design, and the
+// switch between them is a deliberate one-time act rather than a load-time
+// rewrite (see convertUsersToAssets):
+//
+//   personIds  (v28) an array of User asset LABELS -- the real reference
+//   person     (pre-v28) a slash-joined string of NAMES -- kept, still written
+//
+// Until the conversion is run there are no User assets to point at, so the app
+// keeps behaving exactly as it did: `person` is read and written, and nothing is
+// half-migrated. After it, ids win and `person` is carried along as the
+// reversible copy, the same way roomId/buildingId trailed parentId through v17.
+// Nothing outside these two helpers should read either field.
+function personLabelsOf(asset) {
+  const ids = asset && asset.personIds;
+  return Array.isArray(ids) ? ids.filter(Boolean) : [];
+}
+
+// Display names, whichever shape the asset is in. A label with no User asset
+// behind it resolves to "(deleted user)" rather than vanishing -- an assignment
+// that points nowhere is worth seeing, not hiding.
+function personNamesOf(asset, assets) {
+  const ids = personLabelsOf(asset);
+  if (ids.length) {
+    return ids.map(id => {
+      const u = (assets || []).find(a => a.label === id);
+      return u ? nameOf(u) : "(deleted user)";
+    });
+  }
+  return String((asset && asset.person) || "").split("/").map(s => s.trim()).filter(Boolean);
+}
+
+function personTextOf(asset, assets) {
+  return personNamesOf(asset, assets).join(", ");
+}
+
 function nameOf(asset) {
   return (asset?.name || "").trim() || asset?.label || "";
 }
@@ -747,6 +815,64 @@ function maintenanceStatusOf(item) {
   if (daysUntil <= 14) return "due-soon";
   return "ok";
 }
+// ---------- AUDIT: ASSOCIATED RESOURCES ----------
+// An audit entry is stamped with the asset it happened TO (`assetLabel`), but
+// most entries also concern OTHER assets: the room something moved out of and
+// the one it moved into, the room a quantity was allocated to, the rooms a
+// circuit serves. Recording those makes the log readable from the other end --
+// open a room and see what came and went.
+//
+// Stored as one comma-joined string of `label:role` pairs, matching the way a
+// circuit already stores its rooms in one cell. The ROLE is what makes a single
+// row legible from every asset it names: the same move is "moved out" read from
+// one room and "moved in" read from the other, and a create-in-a-room-assigned-
+// to-someone entry is "created here" from the room and "assigned to Jane" from
+// the person. A bare list of ids can say an entry is relevant but not how, which
+// is not enough to word it.
+//
+// The role vocabulary is deliberately open-ended -- `assigned`/`unassigned` are
+// unused until users become assets, and cost nothing to reserve now. Adding them
+// later would mean rewriting AuditLog, the one table with no rewrite path.
+// The wording for each role lives in describeAuditFor(), not in a map here:
+// several roles need the OTHER end of the move to read correctly, which a
+// role->string table cannot supply.
+
+// Build an entry's `related` string. Takes { role: id } or { role: [ids] } so a
+// call site names the relationship rather than assembling pair strings itself --
+// the pairing rule then exists once instead of at each of the ten sites that
+// need it, which is the mistake CLAUDE.md records nameOf() being introduced to
+// undo. Falsy ids drop out, so an unset parent needs no guard at the call site.
+function relate(pairs) {
+  return Object.entries(pairs || {})
+    .flatMap(([role, ids]) => (Array.isArray(ids) ? ids : [ids])
+      .filter(Boolean)
+      .map(id => `${id}:${role}`))
+    .join(",");
+}
+
+// The inverse. Tolerates a missing value (every row written before v27), a bare
+// label with no role (nothing writes one, but a hand-edited sheet could), and
+// stray whitespace.
+function parseRelated(related) {
+  return String(related || "")
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(pair => {
+      const i = pair.lastIndexOf(":");
+      return i === -1 ? { id: pair, role: "at" } : { id: pair.slice(0, i), role: pair.slice(i + 1) };
+    })
+    .filter(r => r.id);
+}
+
+// Does this entry concern `label` as an associated resource? (Its own
+// `assetLabel` is asked separately -- that is the entry's subject, not an
+// association.)
+function relatedRoleFor(entry, label) {
+  const hit = parseRelated(entry.related).find(r => r.id === label);
+  return hit ? hit.role : null;
+}
+
 function describeAudit(entry) {
   if (entry.action === "created") return "Asset created";
   if (entry.action === "deleted") return "Asset permanently deleted";
@@ -777,6 +903,165 @@ function describeAudit(entry) {
   // breaker_edited / circuit_edited fall through to the generic case below —
   // their field/from/to are already in the "X changed from A to B" shape.
   return `${entry.field} changed from "${entry.from || "—"}" to "${entry.to || "—"}"`;
+}
+
+// describeAudit() writes an entry from its SUBJECT's point of view, which is the
+// right reading on that asset's own Audit tab and backwards everywhere else: on
+// Room 101, "Parent changed from Room 101 to Room 205" describes something that
+// left. This renders the same entry as the VIEWER sees it, keyed on the role the
+// viewer plays in it, and falls through to describeAudit() whenever the viewer
+// IS the subject -- so every existing call site is untouched.
+//
+// The subject is named by nameOf() on the asset the label points at, falling
+// back to the BARE LABEL when there is no such asset. That fallback is load
+// bearing, not defensive: audit entries deliberately outlive the assets they
+// describe (a permanently deleted asset keeps its history), so the common case
+// for a `deleted` entry is that the lookup finds nothing.
+function describeAuditFor(entry, viewerLabel, assets, typesList) {
+  if (!viewerLabel || entry.assetLabel === viewerLabel) return describeAudit(entry);
+  // No role means the viewer is not named by the entry at all -- it reached this
+  // view through the contents section, i.e. it happened to something sitting
+  // inside the viewer. Still needs the subject named: "Serial changed from A to
+  // B" is useless in a room holding nine devices.
+  const role = relatedRoleFor(entry, viewerLabel);
+
+  // Since v23 every asset carries a `name`, and adoptLegacyNames gives a nameless
+  // one the name it was already displayed under -- "Monitor BCA0002". So nameOf()
+  // alone reads correctly here and appending the type would say Monitor twice.
+  // Only when the asset is GONE is there nothing but a label, and there the
+  // entry's own stored type is the one thing left worth adding; it is built in
+  // the same shape suggestedNameFor() would have used, so a deleted asset reads
+  // like a live one rather than as a bare id.
+  const subjectAsset = (assets || []).find(a => a.label === entry.assetLabel);
+  const deadType = subjectAsset ? "" : typeNameOf(entry.assetType, typesList);
+  const subject = subjectAsset
+    ? nameOf(subjectAsset)
+    : `${deadType} ${entry.assetLabel}`.trim();
+
+  // The other end of a move, so "moved out" can say where to. Absent on an
+  // entry that only names one side (an allocation, a create).
+  const otherId = parseRelated(entry.related).find(r => r.id !== viewerLabel && (r.role === "from" || r.role === "to"));
+  const otherName = otherId ? (parentNameFor(otherId.id, assets) || otherId.id) : "";
+
+  if (role === "from") return otherName ? `${subject} moved out → ${otherName}` : `${subject} moved out`;
+  if (role === "to") return otherName ? `${subject} moved in ← ${otherName}` : `${subject} moved in`;
+  if (role === "serves") return `${subject} — circuit serves here`;
+  if (role === "feeds") return `${subject} — circuit feeds this panel`;
+  if (role === "assigned") return `${subject} assigned`;
+  if (role === "unassigned") return `${subject} unassigned`;
+  // Everything else -- role "at", and the no-role contents case. The entry's own
+  // wording already reads correctly ("Asset created", "Serial changed from A to
+  // B"); all it lacks is which asset, since the viewer is not it. Lowercasing the
+  // first letter keeps "BCA0001 — asset created" reading as one sentence.
+  const own = describeAudit(entry);
+  return `${subject} — ${own.charAt(0).toLowerCase()}${own.slice(1)}`;
+}
+
+// How an inline "open that asset" link looks. Matches the "Fed by Panel X" link
+// in the breaker modal, which was the first one of these.
+const AUDIT_LINK_STYLE = {
+  background: "none", border: "none", padding: 0, font: "inherit",
+  color: C.brandDark, fontWeight: 700, cursor: "pointer", textDecoration: "underline",
+};
+
+// describeAuditFor() produces the sentence; this says which spans of it name an
+// asset worth opening. Returns an array of segments -- plain strings, plus
+// { text, label } for the parts that should be links.
+//
+// The pairing is STRUCTURAL rather than a search for room-shaped words: `related`
+// says which ids the entry names and in what role, and each role has a fixed home
+// in the entry's own text -- a parent move's `from` text IS its `from` id, an
+// allocation's `room` IS its single id. So this decorates spans it already knows
+// are there. Candidates that don't appear in the sentence simply never match,
+// which is what lets both the subject's own wording and the viewer-relative
+// wording be fed the same list without either needing to know which it got.
+//
+// Two things are deliberately never linked: a value like "Unassigned" or an em
+// dash, which name no asset, and an id whose asset is gone -- audit entries
+// outlive the assets they describe, so a link there would open nothing.
+function auditSegments(entry, viewerLabel, assets, typesList) {
+  const text = describeAuditFor(entry, viewerLabel, assets, typesList);
+  const byLabel = l => (assets || []).find(a => a.label === l);
+  const links = [];
+  const add = (t, label) => {
+    const str = String(t || "");
+    if (!str || !label || str === UNASSIGNED_LABEL || str === "—") return;
+    if (!byLabel(label)) return;
+    links.push({ text: str, label });
+  };
+
+  const isSubjectView = !viewerLabel || entry.assetLabel === viewerLabel;
+  const related = parseRelated(entry.related);
+  const roleId = role => (related.find(r => r.role === role) || {}).id;
+
+  // The sentence leads with the subject whenever the viewer is not it, named
+  // exactly the way describeAuditFor named it.
+  if (!isSubjectView) {
+    const subj = byLabel(entry.assetLabel);
+    if (subj) add(nameOf(subj), entry.assetLabel);
+    // A viewer-relative move prints the other end by a name resolved NOW, not
+    // from the stored text.
+    const other = related.find(r => r.id !== viewerLabel && (r.role === "from" || r.role === "to"));
+    if (other) add(parentNameFor(other.id, assets), other.id);
+  }
+
+  // The names the entry stored for its own wording, each tied to the id playing
+  // the matching role.
+  if (entry.action === "edited" && entry.field === "Parent") {
+    add(entry.from, roleId("from"));
+    add(entry.to, roleId("to"));
+  } else if (entry.action === "edited" && entry.field === "User") {
+    // The people who actually MOVED come from `related`, by id, like everywhere
+    // else here.
+    related.filter(r => r.role === "assigned" || r.role === "unassigned")
+      .forEach(r => add(nameOf(byLabel(r.id) || {}), r.id));
+    // Everyone ELSE named in the sentence is someone who was already on the
+    // asset and still is, so this entry gives no id for them -- but leaving only
+    // the changed name linked reads as arbitrary rather than as emphasis. So the
+    // remaining names are resolved by NAME, which is safe here and nowhere else:
+    // this decorates text that is already on screen, it does not resolve a
+    // reference. An unmatched name simply stays plain, and an AMBIGUOUS one --
+    // two people sharing a name -- is deliberately left plain too, since there is
+    // no honest way to choose which page it should open.
+    const people = (assets || []).filter(a => a.type === "User");
+    [entry.from, entry.to].forEach(side => {
+      String(side || "").split(",").map(n => n.trim()).filter(Boolean).forEach(n => {
+        if (links.some(l => l.text === n)) return;
+        const hits = people.filter(u => nameOf(u) === n);
+        if (hits.length === 1) add(n, hits[0].label);
+      });
+    });
+  } else if (entry.action === "allocated") {
+    add(entry.room, roleId("to"));
+  } else if (entry.action === "unallocated") {
+    add(entry.room, roleId("from"));
+  } else if (entry.action === "circuit_edited" || entry.action === "circuit_added" || entry.action === "circuit_removed") {
+    // Rooms served are printed as a comma-joined list of names; each resolves
+    // through its own id, so a deleted one drops out of the links by itself.
+    related.filter(r => r.role === "serves" || r.role === "feeds")
+      .forEach(r => add(nameOf(byLabel(r.id) || {}), r.id));
+  }
+
+  if (!links.length) return [text];
+  // Longest first so "Room 10" can never win a position that "Room 101" starts
+  // at. Scanning position by position (rather than replacing) keeps a name that
+  // appears twice linked in both places.
+  const sorted = [...links].sort((a, b) => b.text.length - a.text.length);
+  const out = [];
+  let buf = "";
+  for (let i = 0; i < text.length; ) {
+    const hit = sorted.find(l => text.startsWith(l.text, i));
+    if (hit) {
+      if (buf) { out.push(buf); buf = ""; }
+      out.push({ text: hit.text, label: hit.label });
+      i += hit.text.length;
+    } else {
+      buf += text[i];
+      i++;
+    }
+  }
+  if (buf) out.push(buf);
+  return out;
 }
 // Every asset already has a stable, unique `label` — Room/Building references
 // elsewhere in the app store that label (an id), not the mutable display
@@ -1127,7 +1412,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v26";
+const FRONTEND_SCRIPT_VERSION = "v28";
 // The version of THIS file — shown in About (the account menu), so "is my browser
 // actually running the build I just deployed, or a cached one?" is answerable in
 // two clicks instead of by reading view-source.
@@ -1145,7 +1430,7 @@ const FRONTEND_SCRIPT_VERSION = "v26";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-08-26.1";
+const APP_VERSION = "2026-08-26.2";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -1350,6 +1635,11 @@ const MOCK_SNAPSHOT = {
     { label: "BCR0002", type: "Room", name: "Kitchen", parentId: "BCB0001", person: "Multiple teachers", notes: "", status: "Active" },
     { label: "BCR0018", type: "Room", name: "Storage Room", parentId: "BCB0001", person: "", notes: "", status: "Active" },
     { label: "BCR0020", type: "Room", name: "Room 101", parentId: "BCB0001", person: "Dillon Jacobsma", notes: "", status: "Active" },
+    // Deliberately PRE-conversion: every assignment is still a legacy `person`
+    // name and there are no User records. That is the state a real sheet is in
+    // the moment v28 ships, so the sandbox exercises the conversion button
+    // rather than starting past it -- the same reasoning as the stored column
+    // config carrying retired keys.
     { label: "BCA0001", type: "Computer", parentId: "BCR0006", brand: "Dell", model: "OptiPlex 7010", serial: "MOCK-CMP-001", person: "Jen Kramer", peripherals: "Keyboard, Mouse", notes: "", status: "Active" },
     { label: "BCA0002", type: "Monitor", parentId: "BCR0006", brand: "Dell", model: "P2419H", serial: "MOCK-MON-001", person: "Jen Kramer", notes: "", status: "Active" },
     { label: "BCA0003", type: "Phone", parentId: "BCR0006", brand: "Cisco", model: "8841", serial: "MOCK-PHN-001", person: "Jen Kramer", notes: "", status: "Active" },
@@ -1809,7 +2099,34 @@ const MOCK_SNAPSHOT = {
     },
   ],
   breakerTypes: SEEDED_BREAKER_TYPES,
-  auditLog: [],
+  // Enough history to exercise BOTH audit sections without a backend, since the
+  // whole point of Sandbox is building this before a redeploy. Deliberately
+  // covers the three shapes that behave differently:
+  //   - a move, which names two rooms and must read "out" from one and "in" from
+  //     the other off this ONE row;
+  //   - a create, which names one room with role `at`;
+  //   - an edit naming nobody, which must appear only under its own asset and
+  //     under its room's "activity on contents".
+  auditLog: [
+    {
+      at: "2026-08-10T16:20:00.000Z", by: "Eric", assetLabel: "BCA0001", assetType: "Computer",
+      action: "created", related: relate({ at: "BCR0008" }),
+    },
+    {
+      at: "2026-08-18T15:05:00.000Z", by: "Eric", assetLabel: "BCA0001", assetType: "Computer",
+      action: "edited", field: "Serial", from: "MOCK-CMP-000", to: "MOCK-CMP-001", related: "",
+    },
+    {
+      at: "2026-08-22T17:40:00.000Z", by: "Eric", assetLabel: "BCA0001", assetType: "Computer",
+      action: "edited", field: "Parent", from: "Room 200", to: "Room 102",
+      related: relate({ from: "BCR0008", to: "BCR0006" }),
+    },
+    {
+      at: "2026-08-24T18:12:00.000Z", by: "Eric", assetLabel: "BCA0002", assetType: "Monitor",
+      action: "edited", field: "Parent", from: "Unassigned", to: "Room 102",
+      related: relate({ to: "BCR0006" }),
+    },
+  ],
 };
 
 function AssetTracker() {
@@ -2001,6 +2318,9 @@ function AssetTracker() {
   const [moveTarget, setMoveTarget] = useState("");
   const [activeFilterCol, setActiveFilterCol] = useState(null);
   const [showToolbarMenu, setShowToolbarMenu] = useState(false);
+  // Collapsed by default: contents activity is context, not the asset's own
+  // history, and on a building it can be far longer than the history above it.
+  const [showContentsAudit, setShowContentsAudit] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [draft, setDraft] = useState({});
   const [showAdd, setShowAdd] = useState(false);
@@ -2289,7 +2609,12 @@ function AssetTracker() {
       applyTypeSettings(loadedTypeSettings, storedCols);
 
       const parented = data.assets
-        .map(a => ({ comments: [], changes: [], allocations: [], status: "Active", subType: "", purchaseDate: "", warrantyUntil: "", ...a }));
+        .map(a => ({ comments: [], changes: [], allocations: [], status: "Active", subType: "", purchaseDate: "", warrantyUntil: "", ...a }))
+        // The sandbox fixture is hand-written and the backend is not, so normalize
+        // here rather than trusting either: personIds must be an ARRAY on every
+        // asset from this point on. It arrives as one from doGet and is absent
+        // from older fixture rows, and code downstream branches on isArray.
+        .map(a => (Array.isArray(a.personIds) ? a : { ...a, personIds: [] }));
       // Names are filled in over the already-parented list, because the
       // suggestion for fixed equipment reads the chain above the asset ("Room 102
       // Mini Split") — running it inside the first map would walk a list whose
@@ -2656,7 +2981,41 @@ function AssetTracker() {
       typeNameOf(x, typesList).localeCompare(typeNameOf(y, typesList)))];
   }, [assets, typesList]);
 
-  const users = useMemo(() => ["All users", ...usersList], [usersList]);
+  // The User assets, and whether the app is in "users are records" mode at all.
+  // One boolean rather than a migration flag in Config: the presence of a User
+  // asset IS the fact, so it cannot disagree with reality, and a sheet that has
+  // never been converted needs no marker saying so.
+  const userAssets = useMemo(
+    () => (assets || []).filter(a => a.type === "User" && a.status !== "Archived"),
+    [assets]
+  );
+  // Every name the app knows that has no User record yet -- what the conversion
+  // would create, and zero once it has finished.
+  const unconvertedUserNames = useMemo(() => {
+    const known = new Set((assets || []).filter(a => a.type === "User").map(nameOf));
+    return [...new Set([
+      ...usersList,
+      ...(assets || []).flatMap(a => String(a.person || "").split("/").map(x => x.trim())),
+    ].filter(Boolean))].filter(n => !known.has(n));
+  }, [assets, usersList]);
+
+  // "Users are records" means the conversion is COMPLETE, not that some User
+  // asset happens to exist. Getting this wrong is not cosmetic: the edit form
+  // reads ids in this mode, so an asset still carrying only a legacy name would
+  // render as unassigned and the next save would wipe the assignment. Flipping
+  // only when nothing is left unconverted means there is never a half state --
+  // the app is wholly on names or wholly on ids.
+  const usersAreAssets = useMemo(
+    () => (assets || []).some(a => a.type === "User") && unconvertedUserNames.length === 0,
+    [assets, unconvertedUserNames]
+  );
+
+  // Names for the pick lists and the User filter, from whichever shape is live.
+  const userNames = useMemo(() => (
+    usersAreAssets ? userAssets.map(nameOf).sort((a, b) => a.localeCompare(b)) : usersList
+  ), [usersAreAssets, userAssets, usersList]);
+
+  const users = useMemo(() => ["All users", ...userNames], [userNames]);
 
   const filtered = useMemo(() => {
     if (!assets) return [];
@@ -2669,7 +3028,7 @@ function AssetTracker() {
       // (it's also what made the bulk move-to-room drag the room along).
       if (scopeId && !ancestorsOf(a, assets).some(p => p.label === scopeId)) return false;
       if (typeFilter !== "All types" && (a.type || "Other") !== typeFilter) return false;
-      if (userFilter !== "All users" && !(a.person || "").split("/").map(s => s.trim()).includes(userFilter)) return false;
+      if (userFilter !== "All users" && !personNamesOf(a, assets).includes(userFilter)) return false;
       if (statusFilter !== "All statuses" && (a.status || "Active") !== statusFilter) return false;
       if (!q) return true;
       // Searching matches the whole chain above an asset, so typing a building
@@ -2818,6 +3177,42 @@ function AssetTracker() {
 
   const selectedAsset = assets ? assets.find(a => a.label === selectedLabel) : null;
 
+  // label -> positions in auditLog, built once per change to the log rather than
+  // by scanning it per asset per render.
+  //
+  // This is not premature. The two lists the Audit tab needs are computed in the
+  // detail view's RENDER BODY, so they were re-derived on every render of that
+  // view -- every keystroke in the edit form, whether or not the Audit tab was
+  // even open -- and each pass walked the whole log calling parseRelated() on
+  // every row. The log is append-only and never pruned, so that cost only ever
+  // grows. Measured at 100k entries it was ~26ms per pass on a desktop, which is
+  // roughly 100ms on a phone: fine once, janky per keystroke.
+  //
+  // Positions rather than entries, for two reasons: it stays small, and the
+  // append order IS the chronological order, so merging the two maps and sorting
+  // the numbers descending reproduces the old `.filter().reverse()` ordering
+  // exactly, without comparing timestamps.
+  const auditIndex = useMemo(() => {
+    const bySubject = new Map();
+    const byRelated = new Map();
+    const add = (map, key, i) => {
+      if (!key) return;
+      const arr = map.get(key);
+      if (arr) arr.push(i); else map.set(key, [i]);
+    };
+    auditLog.forEach((e, i) => {
+      add(bySubject, e.assetLabel, i);
+      parseRelated(e.related).forEach(r => add(byRelated, r.id, i));
+    });
+    return { bySubject, byRelated };
+  }, [auditLog]);
+
+  // Also memoized because it walks every asset's parent chain, and it likewise
+  // sat in the render body.
+  const selectedDescendantLabels = useMemo(() => (
+    selectedAsset ? new Set(descendantsOf(selectedAsset, assets).map(a => a.label)) : new Set()
+  ), [selectedAsset, assets]);
+
   function openDetail(asset, initialTab) {
     setSelectedLabel(asset.label);
     setView("detail");
@@ -2825,6 +3220,10 @@ function AssetTracker() {
     setEditNote("");
     setCommentDraft("");
     setChangeDraft({ changeType: "", vendor: "", cost: "", note: "" });
+    // Collapse the contents-activity section again. Navigating to a different
+    // asset should not carry over a section the user expanded on the last one --
+    // same reasoning as the breaker-modal reset below it.
+    setShowContentsAudit(false);
     // Electrical Panels open straight to Breakers — that's the tab worth
     // seeing first for a panel, not the mostly-empty generic Details fields.
     // A requested tab this type doesn't have falls back to its default rather
@@ -2944,6 +3343,8 @@ function AssetTracker() {
       const createdEntry = {
         at: new Date().toISOString(), by: currentUser || "", assetLabel: label,
         assetType: draft.type, action: "created",
+        // Where it was created, so the room shows the arrival.
+        related: relate({ at: draft.parentId }),
       };
       // Left blank, the Name takes the same suggestion the field shows as its
       // placeholder — so a new asset is named at creation rather than relying on
@@ -2983,6 +3384,28 @@ function AssetTracker() {
       // is legible in the history.
       Object.keys(draftToSave).forEach(key => {
         if (key === "comments" || key === "changes" || key === "allocations" || key === "parentError") return;
+        // personIds is the one ARRAY among the flat fields, so it can't go
+        // through the `||""` string compare below -- two equal arrays are never
+        // ===, which would log an edit on every save. It also writes the legacy
+        // `person` names alongside, and names the people on both sides so the
+        // change lands in THEIR history as well as this asset's.
+        if (key === "personIds") {
+          const before = personLabelsOf(original);
+          const after = (draftToSave.personIds || []).filter(Boolean);
+          if (before.join(",") === after.join(",")) return;
+          const nameFor = id => { const u = assets.find(x => x.label === id); return u ? nameOf(u) : "(deleted user)"; };
+          editEntries.push({
+            at: new Date().toISOString(), by: currentUser || "", assetLabel: original.label,
+            assetType: draftToSave.type || original.type, action: "edited", field: "User",
+            from: before.map(nameFor).join(", ") || "—",
+            to: after.map(nameFor).join(", ") || "—",
+            related: relate({
+              unassigned: before.filter(id => !after.includes(id)),
+              assigned: after.filter(id => !before.includes(id)),
+            }),
+          });
+          return;
+        }
         const oldVal = original[key] || "";
         const newVal = draftToSave[key] || "";
         if (oldVal === newVal) return;
@@ -2993,10 +3416,33 @@ function AssetTracker() {
         editEntries.push({
           at: new Date().toISOString(), by: currentUser || "", assetLabel: original.label,
           assetType: draftToSave.type || original.type, action: "edited", field: fieldLabel, from, to,
+          // Only a parent change names other assets. from/to hold display names
+          // for this entry's own wording; the ids are how the two rooms find it.
+          related: isParentField ? relate({ from: oldVal, to: newVal }) : "",
         });
       });
 
-      const next = assets.map(a => (a.label === selectedLabel ? { ...a, ...stripDraftUiState(draftToSave) } : a));
+      // `person` trails `personIds` rather than being edited directly, so the
+      // legacy column stays truthful for as long as it is still written (and so
+      // a rollback to v27 shows the right names, which is the point of keeping
+      // it). personNamesOf reads ids first, so this is a copy, never a source.
+      //
+      // GATED ON usersAreAssets, and that gate is the whole point. Without it
+      // this WIPED the assignment on every save: doGet returns `personIds: []`
+      // for every asset, so in name mode -- where `person` is the source of
+      // truth and nothing writes ids -- the draft carried an empty ARRAY, this
+      // ran, and `person` was overwritten with "". Sandbox could not reproduce
+      // it because MOCK_SNAPSHOT assets carry no personIds key at all, so the
+      // isArray test was false there and the line never ran. A fixture that
+      // doesn't match the backend's actual response shape hides exactly this
+      // class of bug; MOCK_SNAPSHOT now carries `personIds: []` for that reason.
+      const savedDraft = stripDraftUiState(draftToSave);
+      if (usersAreAssets && Array.isArray(savedDraft.personIds)) {
+        savedDraft.person = savedDraft.personIds
+          .map(id => { const u = assets.find(x => x.label === id); return u ? nameOf(u) : ""; })
+          .filter(Boolean).join("/");
+      }
+      const next = assets.map(a => (a.label === selectedLabel ? { ...a, ...savedDraft } : a));
       if (editNote.trim()) {
         editEntries.push({
           at: new Date().toISOString(), by: currentUser || "", assetLabel: original.label,
@@ -3024,6 +3470,11 @@ function AssetTracker() {
     assets.forEach(a => {
       if (a.label === asset.label) return;
       if (a.parentId === asset.label) refs.push(a.label);
+      // An assignment dangles exactly like a parent does. Archiving a User is the
+      // normal way to retire someone -- it keeps their history and every
+      // assignment intact -- so this only blocks the permanent delete, which is
+      // already the heavily-confirmed path.
+      if (personLabelsOf(a).includes(asset.label)) refs.push(`${a.label} (assigned)`);
       (a.allocations || []).forEach(al => { if (al.roomId === asset.label) refs.push(`${a.label} (allocation)`); });
       (a.breakers || []).forEach(b => (b.circuits || []).forEach(c => {
         if ((c.roomsServedIds || []).includes(asset.label)) refs.push(`${a.label} Slot ${slotsLabel_(b)} (circuit "${c.label}")`);
@@ -3044,6 +3495,7 @@ function AssetTracker() {
     const deletedEntry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: label,
       assetType: asset ? asset.type : "", action: "deleted",
+      related: relate({ at: asset ? asset.parentId : "" }),
     };
     await persist(assets.filter(a => a.label !== label), { auditLog: logAudit([deletedEntry]) });
     setConfirmDelete(null);
@@ -3056,6 +3508,7 @@ function AssetTracker() {
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: label,
       assetType: asset ? asset.type : "", action: "archived",
+      related: relate({ at: asset ? asset.parentId : "" }),
     };
     const next = assets.map(a => (a.label === label ? { ...a, status: "Archived" } : a));
     await persist(next, { auditLog: logAudit([entry]) });
@@ -3068,6 +3521,7 @@ function AssetTracker() {
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: label,
       assetType: asset ? asset.type : "", action: "restored",
+      related: relate({ at: asset ? asset.parentId : "" }),
     };
     const next = assets.map(a => (a.label === label ? { ...a, status: "Active" } : a));
     await persist(next, { auditLog: logAudit([entry]) });
@@ -3100,6 +3554,7 @@ function AssetTracker() {
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: nextLabel,
       assetType: copy.type, action: "created",
+      related: relate({ at: copy.parentId }),
     };
     await persist([...assets, copy], { auditLog: logAudit([entry]), nextAssetNumber: advanceAssetNumber(nextLabel) });
     openDetail(copy);
@@ -3109,14 +3564,26 @@ function AssetTracker() {
   async function reassignFilteredTo(newUser) {
     if (!newUser.trim()) return;
     const targets = new Set(filtered.filter(a => fieldAppliesTo("person", a.type)).map(a => a.label));
+    // Once users are records the target is a label; before that it is still the
+    // raw name, and both paths write `person` so the sheet stays readable either
+    // way. `related` names the people involved, which is what puts the change in
+    // THEIR audit history as well as the asset's.
+    const toUser = usersAreAssets ? userAssets.find(u => nameOf(u) === newUser) : null;
     const entries = [];
     const next = assets.map(a => {
-      if (!targets.has(a.label) || a.person === newUser) return a;
+      if (!targets.has(a.label)) return a;
+      const fromNames = personNamesOf(a, assets);
+      if (fromNames.length === 1 && fromNames[0] === newUser) return a;
+      const fromIds = personLabelsOf(a);
       entries.push({
         at: new Date().toISOString(), by: currentUser || "", assetLabel: a.label,
-        assetType: a.type, action: "edited", field: "User", from: a.person || "", to: newUser,
+        assetType: a.type, action: "edited", field: "User",
+        from: fromNames.join(", ") || "—", to: newUser,
+        related: relate({ unassigned: fromIds, assigned: toUser ? toUser.label : "" }),
       });
-      return { ...a, person: newUser };
+      return toUser
+        ? { ...a, personIds: [toUser.label], person: newUser }
+        : { ...a, person: newUser };
     });
     await persist(next, { auditLog: entries.length ? logAudit(entries) : auditLog });
     setUserFilter(newUser);
@@ -3139,6 +3606,7 @@ function AssetTracker() {
       entries.push({
         at: new Date().toISOString(), by: currentUser || "", assetLabel: a.label,
         assetType: a.type, action: "edited", field: "Parent",
+        related: relate({ from: a.parentId, to: newRoomId }),
         from: parentNameFor(a.parentId, assets) || UNASSIGNED_LABEL, to: newRoomName,
       });
       return { ...a, parentId: newRoomId };
@@ -3229,6 +3697,7 @@ function AssetTracker() {
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel,
       assetType: selectedAsset.type, action: "allocated", room: roomNameFor(roomId, assets), quantity: qty,
+      related: relate({ to: roomId }),
       previousQuantity: existingForRoom ? existingForRoom.quantity : null,
     };
     const next = assets.map(a => (a.label === selectedLabel ? { ...a, allocations: nextAllocations } : a));
@@ -3245,6 +3714,7 @@ function AssetTracker() {
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel,
       assetType: selectedAsset.type, action: "unallocated", room: roomNameFor(roomId, assets), quantity: existingForRoom ? existingForRoom.quantity : 0,
+      related: relate({ from: roomId }),
     };
     const next = assets.map(a => (a.label === selectedLabel ? { ...a, allocations: nextAllocations } : a));
     await persist(next, { auditLog: logAudit([entry]) });
@@ -3653,6 +4123,7 @@ function AssetTracker() {
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
       action: "circuit_added", field: circuit.label, from: circuitLocationLabel(breakerId),
+      related: relate({ serves: roomsServedIds, feeds: feedsPanelLabel }),
       to: feedsPanelLabel ? `Feeds ${feedsPanelLabel}` : `Serves ${roomsServedIds.map(id => roomNameFor(id, assets)).join(", ")}`,
     };
     persist(updatePanelCircuits(nextBreakers, nextUnassigned), { auditLog: logAudit([entry]) });
@@ -3670,9 +4141,11 @@ function AssetTracker() {
     const original = circuitsIn(breakerId).find(c => c.id === id);
     if (!original) return "Circuit not found.";
     const updated = { ...original, label: draft.label.trim(), notes: (draft.notes || "").trim(), roomsServedIds, feedsPanelLabel };
-    const mk = (field, from, to) => ({
+    // `related` defaults to none: of the four things editable here, only the two
+    // that name other assets pass one.
+    const mk = (field, from, to, related = "") => ({
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
-      action: "circuit_edited", field: `${original.label} — ${field}`, from, to,
+      action: "circuit_edited", field: `${original.label} — ${field}`, from, to, related,
     });
     const entries = [];
     if (original.label !== updated.label) entries.push(mk("Label", original.label, updated.label));
@@ -3680,9 +4153,15 @@ function AssetTracker() {
     if ((original.roomsServedIds || []).join(",") !== roomsServedIds.join(",")) {
       const fromNames = (original.roomsServedIds || []).map(rid => roomNameFor(rid, assets)).join(", ");
       const toNames = roomsServedIds.map(rid => roomNameFor(rid, assets)).join(", ");
-      entries.push(mk("Rooms served", fromNames || "—", toNames || "—"));
+      // The UNION of both sides, so a room that just LOST this circuit sees the
+      // change too -- it is as much that room's news as the one that gained it.
+      const bothEnds = [...new Set([...(original.roomsServedIds || []), ...roomsServedIds])];
+      entries.push(mk("Rooms served", fromNames || "—", toNames || "—", relate({ serves: bothEnds })));
     }
-    if ((original.feedsPanelLabel || "") !== feedsPanelLabel) entries.push(mk("Feeds sub-panel", original.feedsPanelLabel || "—", feedsPanelLabel || "—"));
+    if ((original.feedsPanelLabel || "") !== feedsPanelLabel) {
+      entries.push(mk("Feeds sub-panel", original.feedsPanelLabel || "—", feedsPanelLabel || "—",
+        relate({ feeds: [original.feedsPanelLabel || "", feedsPanelLabel] })));
+    }
     const nextBreakers = breakerId
       ? existing.map(b => (b.id === breakerId ? { ...b, circuits: (b.circuits || []).map(c => (c.id === id ? updated : c)) } : b))
       : null;
@@ -3703,6 +4182,7 @@ function AssetTracker() {
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
       action: "circuit_removed", field: circuit.label, from: circuitLocationLabel(breakerId),
+      related: relate({ serves: circuit.roomsServedIds || [], feeds: circuit.feedsPanelLabel || "" }),
     };
     persist(updatePanelCircuits(nextBreakers, nextUnassigned), { auditLog: logAudit([entry]) });
   }
@@ -3822,6 +4302,77 @@ function AssetTracker() {
 
   function removePeripheral(name) {
     persist(assets, { peripheralsList: peripheralsList.filter(p => p !== name) });
+  }
+
+  // ONE-TIME: turn every name the app knows about into a real User asset, and
+  // re-point every assignment at it by id.
+  //
+  // Deliberately a button rather than something loadData() does on its own.
+  // Creating assets means issuing labels from `nextAssetNumber`, and that
+  // counter lives in the Config domain behind the revision check -- so a
+  // load-time conversion running in several browsers at once would race to
+  // claim the same numbers, and the loser's User assets would collide with the
+  // winner's. One deliberate click, through persist() like every other write,
+  // has none of that: it is audited, it is conflict-checked, and it either
+  // lands whole or not at all.
+  //
+  // Idempotent: a name that already has a record is reused rather than
+  // duplicated, so a partial run (or a name added later) can just be re-run.
+  // `person` is left in place on purpose -- see personNamesOf.
+  function convertUsersToAssets() {
+    if (savingRef.current) return;
+    if (!assets) return;
+    const wanted = [...new Set([
+      ...usersList,
+      ...assets.flatMap(a => String(a.person || "").split("/").map(x => x.trim())),
+    ].filter(Boolean))].sort((a, b) => a.localeCompare(b));
+
+    const byName = new Map((assets || []).filter(a => a.type === "User").map(u => [nameOf(u), u.label]));
+    let counter = peekAssetNumber();
+    const created = [];
+    wanted.forEach(name => {
+      if (byName.has(name)) return;
+      const label = assetLabelForNumber(counter++);
+      byName.set(name, label);
+      created.push({
+        label, type: "User", name, status: "Active",
+        comments: [], changes: [], allocations: [],
+      });
+    });
+
+    const stamp = { at: new Date().toISOString(), by: currentUser || "" };
+    const entries = created.map(u => ({
+      ...stamp, assetLabel: u.label, assetType: "User", action: "created", related: "",
+    }));
+
+    const next = [...assets, ...created].map(a => {
+      if (personLabelsOf(a).length) return a;              // already by id
+      const names = String(a.person || "").split("/").map(x => x.trim()).filter(Boolean);
+      if (!names.length) return a;
+      const ids = names.map(n => byName.get(n)).filter(Boolean);
+      if (!ids.length) return a;
+      // Deliberately NOT audited per asset. Nobody's assignment changed here --
+      // the same people are on the same things; only the way it is stored moved
+      // from a name to a reference. An entry per asset would read "User changed
+      // from Jen Kramer to Jen Kramer" across the whole inventory, which is
+      // noise that buries the entries that do mean something. The User records
+      // being created IS logged, which is the part that actually happened.
+      return { ...a, personIds: ids };
+    });
+
+    // Close any open edit form and the manager. The conversion changes what the
+    // User field MEANS -- names before, ids after -- and a draft seeded under the
+    // old meaning still holds an empty personIds. Saving that afterwards writes
+    // the empty array back and blanks the assignment on that one asset. Dropping
+    // the stale draft is the only safe answer; re-opening Edit reseeds it from
+    // the converted asset.
+    setDetailEditing(false);
+    setShowUsersManager(false);
+    setNewUserName("");
+    persist(next, {
+      auditLog: entries.length ? logAudit(entries) : auditLog,
+      nextAssetNumber: Math.max(counter, peekAssetNumber()),
+    });
   }
 
   function addUser() {
@@ -4073,7 +4624,7 @@ function AssetTracker() {
           return;
         }
         if (!fieldAppliesTo(c.key, a.type)) { row[c.label] = ""; return; }
-        row[c.label] = a[c.key] || "";
+        row[c.label] = c.key === "person" ? personTextOf(a, assets) : (a[c.key] || "");
       });
       // A column config with no `parent` shouldn't cost the export its location
       // columns — the whole point of writing them here is that they don't depend
@@ -4795,7 +5346,16 @@ function AssetTracker() {
   const usersManagerModal = showUsersManager && (
     <ListManagerModal
       title="Manage users"
-      items={usersList}
+      items={usersAreAssets ? userNames : usersList}
+      readOnly={usersAreAssets}
+      note={usersAreAssets
+        ? "Users are records now — add, rename or archive them like any other asset."
+        : null}
+      action={unconvertedUserNames.length && canEdit ? {
+        label: `Convert ${unconvertedUserNames.length} name${unconvertedUserNames.length === 1 ? "" : "s"} to records`,
+        hint: "Gives each person their own page and history. Assignments keep working either way.",
+        onClick: convertUsersToAssets,
+      } : null}
       newValue={newUserName}
       onNewValueChange={setNewUserName}
       onAdd={addUser}
@@ -5035,7 +5595,34 @@ function AssetTracker() {
     const comments = [...(selectedAsset.comments || [])].reverse();
     const changeEntries = [...(selectedAsset.changes || [])].reverse();
     const totalLoggedCost = (selectedAsset.changes || []).reduce((sum, c) => sum + (parseFloat(c.cost) || 0), 0);
-    const assetAuditEntries = auditLog.filter(e => e.assetLabel === selectedAsset.label).slice().reverse();
+    // THIS asset's own history: entries stamped with it, plus every entry that
+    // names it as an associated resource -- things that moved in or out, a
+    // quantity allocated here, a circuit that serves it. Merged into one list,
+    // newest first, because they are all equally this asset's news.
+    const relatedIdx = auditIndex.byRelated.get(selectedAsset.label) || [];
+    const assetAuditEntries = [...new Set([
+      ...(auditIndex.bySubject.get(selectedAsset.label) || []),
+      ...relatedIdx,
+    ])].sort((a, b) => b - a).map(i => auditLog[i]);
+    // Activity on what is INSIDE it, collapsed by default. Deliberately not
+    // gated on type: it keys off descendantsOf(), so a Building shows its rooms'
+    // activity and a Campus its buildings', with no type test to keep in step.
+    //
+    // Note this is a LIVE view of current containment -- something that has since
+    // moved away takes its edit history with it. Its move stays above regardless,
+    // since that entry names this asset by id. So the asset's own history is
+    // durable and this section is a snapshot, which is the honest split.
+    // Subtracting the entries already shown above is what stops a row that both
+    // names this asset and happened to something inside it appearing twice.
+    const alreadyShown = new Set(relatedIdx);
+    const contentsAuditEntries = [];
+    selectedDescendantLabels.forEach(label => {
+      (auditIndex.bySubject.get(label) || []).forEach(i => {
+        if (!alreadyShown.has(i)) contentsAuditEntries.push(i);
+      });
+    });
+    contentsAuditEntries.sort((a, b) => b - a);
+    const contentsAuditRows = contentsAuditEntries.map(i => auditLog[i]);
     // Never-performed items sort first (need scheduling attention); the rest by
     // ascending next-due date, which naturally puts the most-overdue on top.
     const maintenanceItems = (selectedAsset.maintenanceItems || [])
@@ -5195,6 +5782,7 @@ function AssetTracker() {
                           // own name (the computed ones were filtered out above),
                           // so it falls through to the plain stored value.
                           c.key === "parent" ? (pathOf(selectedAsset, assets) || UNASSIGNED_LABEL)
+                          : c.key === "person" ? personTextOf(selectedAsset, assets)
                           : selectedAsset[c.key]
                         }
                         wide={c.key === "notes" || c.key === "parent"}
@@ -5279,9 +5867,10 @@ function AssetTracker() {
                   ) : c.key === "person" ? (
                     <UserField
                       key={c.key}
-                      value={draft.person || ""}
-                      onChange={v => setDraft({ ...draft, person: v })}
-                      userOptions={usersList}
+                      value={usersAreAssets ? (draft.personIds || []) : (draft.person || "")}
+                      onChange={v => setDraft(usersAreAssets ? { ...draft, personIds: v } : { ...draft, person: v })}
+                      userOptions={userNames}
+                      userAssets={usersAreAssets ? userAssets : undefined}
                       onManage={() => setShowUsersManager(true)}
                     />
                   ) : c.key === "peripherals" ? (
@@ -5822,22 +6411,63 @@ function AssetTracker() {
             </>
           )}
 
-          {detailTab === "audit" && (
-            assetAuditEntries.length === 0 ? (
-              <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>No edits recorded yet.</div>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {assetAuditEntries.map((entry, i) => (
-                  <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "9px 14px" }}>
-                    <div style={{ fontSize: 13, color: C.ink, marginBottom: 3 }}>{describeAudit(entry)}</div>
-                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.placeholder }}>
-                      {formatWhen(entry.at)}{entry.by ? ` · ${entry.by}` : ""}
-                    </div>
-                  </div>
-                ))}
+          {detailTab === "audit" && (() => {
+            // One row renderer for both sections. describeAuditFor() falls
+            // through to describeAudit() when the viewer IS the entry's subject,
+            // so the asset's own entries read exactly as they always have.
+            const row = (entry, i) => (
+              <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "9px 14px" }}>
+                <div style={{ fontSize: 13, color: C.ink, marginBottom: 3 }}>
+                  {auditSegments(entry, selectedAsset.label, assets, typesList).map((seg, k) => (
+                    typeof seg === "string" ? <React.Fragment key={k}>{seg}</React.Fragment> : (
+                      <button
+                        key={k}
+                        onClick={() => {
+                          const target = assets.find(a => a.label === seg.label);
+                          if (target) openDetail(target);
+                        }}
+                        style={AUDIT_LINK_STYLE}
+                        title={`Open ${seg.label}`}
+                      >
+                        {seg.text}
+                      </button>
+                    )
+                  ))}
+                </div>
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.placeholder }}>
+                  {formatWhen(entry.at)}{entry.by ? ` · ${entry.by}` : ""}
+                </div>
               </div>
-            )
-          )}
+            );
+            return (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {assetAuditEntries.length === 0 ? (
+                  <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>No edits recorded yet.</div>
+                ) : assetAuditEntries.map(row)}
+
+                {contentsAuditRows.length > 0 && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => setShowContentsAudit(v => !v)}
+                      style={{
+                        display: "flex", alignItems: "center", gap: 6, width: "100%",
+                        background: "none", border: "none", borderTop: `1px solid ${C.border}`,
+                        padding: "12px 2px 6px", marginTop: 4, cursor: "pointer",
+                        fontFamily: "'IBM Plex Mono', monospace", fontSize: 11,
+                        letterSpacing: 0.5, textTransform: "uppercase", color: C.muted,
+                      }}
+                      aria-expanded={showContentsAudit}
+                    >
+                      {showContentsAudit ? <ChevronDown size={14} color={C.muted} /> : <ChevronRight size={14} color={C.muted} />}
+                      Activity on contents ({contentsAuditRows.length})
+                    </button>
+                    {showContentsAudit && contentsAuditRows.map(row)}
+                  </>
+                )}
+              </div>
+            );
+          })()}
         </div>
 
         {confirmDelete && (() => {
@@ -6600,6 +7230,22 @@ function AssetTracker() {
                       <Plus size={15} /> Add asset
                     </button>
                     )}
+                    {/* The one-time users conversion. It lived only behind the
+                        gear on the User field, which is inside the EDIT form —
+                        so a setup action nobody had a reason to open an asset to
+                        find. Shown here only while there is something to convert,
+                        so it surfaces itself once and then disappears rather than
+                        becoming permanent clutter. */}
+                    {canEdit && unconvertedUserNames.length > 0 && (
+                    <button
+                      onClick={() => { setShowToolbarMenu(false); convertUsersToAssets(); }}
+                      className="icon-btn"
+                      style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6, borderTop: `1px solid ${C.border}`, marginTop: 4 }}
+                      title="Gives each person their own page and history. Assignments keep working either way."
+                    >
+                      <UserCircle size={15} /> Convert {unconvertedUserNames.length} user{unconvertedUserNames.length === 1 ? "" : "s"} to records
+                    </button>
+                    )}
                   </div>
                 </>
               )}
@@ -6699,9 +7345,10 @@ function AssetTracker() {
                 ) : c.key === "person" ? (
                   <UserField
                     key={c.key}
-                    value={draft.person || ""}
-                    onChange={v => setDraft({ ...draft, person: v })}
-                    userOptions={usersList}
+                    value={usersAreAssets ? (draft.personIds || []) : (draft.person || "")}
+                    onChange={v => setDraft(usersAreAssets ? { ...draft, personIds: v } : { ...draft, person: v })}
+                    userOptions={userNames}
+                    userAssets={usersAreAssets ? userAssets : undefined}
                     onManage={() => setShowUsersManager(true)}
                   />
                 ) : c.key === "peripherals" ? (
@@ -6868,6 +7515,10 @@ function AssetTracker() {
                         // current name, which is what makes a rename take effect
                         // everywhere at once.
                         typeNameOf(a.type, typesList) || "—"
+                      ) : c.key === "person" ? (
+                        // Stored as ids since v28; the names are resolved now, so
+                        // renaming a person updates every row at once.
+                        applies ? (personTextOf(a, assets) || "—") : ""
                       ) : (
                         applies ? (a[c.key] || "—") : ""
                       )}
@@ -7597,15 +8248,34 @@ function BulkTypeField({ value, onChange, options, onManage }) {
   );
 }
 
-function UserField({ value, onChange, userOptions, onManage }) {
-  const selected = (value || "").split("/").map(s => s.trim()).filter(Boolean);
-  // Include any legacy/custom names already on this asset that aren't in the
-  // managed list, so editing never silently drops someone.
-  const allOptions = [...userOptions, ...selected.filter(s => !userOptions.includes(s))];
+// Chip multi-select for who an asset is assigned to. Deliberately NOT a
+// PickerField: several people can share one device, so this is a toggle group,
+// not a dropdown.
+//
+// Two modes, because users only became records in v28 and a sheet converts on a
+// deliberate click rather than on load (see convertUsersToAssets):
+//   userAssets given -> options are User ASSETS, the value is an array of labels
+//   otherwise        -> options are plain names, the value is the old
+//                       slash-joined string, byte for byte as before v28
+// The caller picks by passing userAssets or not, so neither path has to know the
+// other exists.
+function UserField({ value, onChange, userOptions, userAssets, onManage }) {
+  const byAsset = Array.isArray(userAssets);
+  const selected = byAsset
+    ? (Array.isArray(value) ? value.filter(Boolean) : [])
+    : (value || "").split("/").map(s => s.trim()).filter(Boolean);
+  // Include anyone already on this asset who isn't in the list any more -- a
+  // removed managed name, or a User record since archived -- so editing another
+  // field never silently drops them.
+  const allOptions = byAsset
+    ? [...userAssets.map(u => ({ key: u.label, label: nameOf(u) })),
+       ...selected.filter(l => !userAssets.some(u => u.label === l))
+                  .map(l => ({ key: l, label: "(archived or deleted user)" }))]
+    : [...userOptions, ...selected.filter(s => !userOptions.includes(s))].map(n => ({ key: n, label: n }));
 
-  function toggle(opt) {
-    const next = selected.includes(opt) ? selected.filter(s => s !== opt) : [...selected, opt];
-    onChange(next.join("/"));
+  function toggle(key) {
+    const next = selected.includes(key) ? selected.filter(s => s !== key) : [...selected, key];
+    onChange(byAsset ? next : next.join("/"));
   }
 
   return (
@@ -7621,12 +8291,12 @@ function UserField({ value, onChange, userOptions, onManage }) {
       ) : (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
           {allOptions.map(opt => {
-            const active = selected.includes(opt);
+            const active = selected.includes(opt.key);
             return (
               <button
-                key={opt}
+                key={opt.key}
                 type="button"
-                onClick={() => toggle(opt)}
+                onClick={() => toggle(opt.key)}
                 style={{
                   padding: "6px 12px", borderRadius: 14, fontSize: 13, fontWeight: active ? 600 : 500,
                   border: `1.5px solid ${active ? C.brand : C.border}`,
@@ -7634,7 +8304,7 @@ function UserField({ value, onChange, userOptions, onManage }) {
                   color: active ? "#fff" : C.ink,
                 }}
               >
-                {opt}
+                {opt.label}
               </button>
             );
           })}
@@ -7988,7 +8658,12 @@ function TypeManagerModal({
   );
 }
 
-function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onRemove, onClose, placeholder, isLocked, hint, isSaving }) {
+// `readOnly` hides the add row and the per-item delete: used once users became
+// records, where the list is a VIEW of User assets and the real add/rename/
+// archive live on the asset itself. `action` is an optional one-shot button --
+// the users conversion, which belongs here because this is where someone goes
+// looking for the user list.
+function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onRemove, onClose, placeholder, isLocked, hint, isSaving, readOnly, note, action }) {
   const [confirmItem, setConfirmItem] = useState(null);
   return (
     // zIndex 50, above SelectionModal's 40 — this modal is frequently opened via the
@@ -8001,6 +8676,24 @@ function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onR
           <button onClick={onClose} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
         </div>
         {hint && <div style={{ fontSize: 12, color: C.empty, marginBottom: 10 }}>{hint}</div>}
+        {note && <div style={{ fontSize: 12, color: C.empty, marginBottom: 10 }}>{note}</div>}
+        {action && (
+          <div style={{ marginBottom: 14 }}>
+            <button
+              onClick={() => { if (isSaving) return; action.onClick(); }}
+              disabled={isSaving}
+              style={{
+                width: "100%", padding: "8px 12px", borderRadius: 10, fontSize: 13, fontWeight: 600,
+                border: "none", background: isSaving ? C.border : C.brand, color: "#fff",
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+              }}
+            >
+              {isSaving ? <Loader2 size={14} className="spin" /> : null}
+              {isSaving ? "Saving…" : action.label}
+            </button>
+            {action.hint && <div style={{ fontSize: 11, color: C.empty, marginTop: 6 }}>{action.hint}</div>}
+          </div>
+        )}
         {items.length === 0 && (
           <div style={{ fontSize: 13, color: C.empty, marginBottom: 12 }}>Nothing added yet.</div>
         )}
@@ -8026,7 +8719,7 @@ function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onR
               ) : (
                 <>
                   <span style={{ display: "flex", alignItems: "center", gap: 6, opacity: locked ? 0.6 : 1 }}>{item} {locked && <Lock size={11} />}</span>
-                  {locked ? (
+                  {locked || readOnly ? (
                     <span />
                   ) : (
                     <button onClick={() => setConfirmItem(item)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}>
@@ -8039,6 +8732,7 @@ function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onR
             );
           })}
         </div>
+        {!readOnly && (
         <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 14, display: "flex", gap: 6 }}>
           <input
             value={newValue}
@@ -8049,6 +8743,7 @@ function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onR
           />
           <button onClick={onAdd} disabled={isSaving} style={{ padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600 }}>{isSaving ? "Saving…" : "Add"}</button>
         </div>
+        )}
       </div>
     </div>
   );
@@ -8167,14 +8862,19 @@ function ColumnFilterModal({ activeCol, filterConfigs, sortConfig, setSortConfig
   const getLabel = cfg.labelForOption || (o => o);
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
-      <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth:300, maxHeight: "70vh", overflowY: "auto" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+      {/* The CARD is a flex column that never scrolls; only the option list
+          inside it does. Scrolling the whole card instead (which this did) meant
+          a long list pushed the Sort buttons — and the close button — off the
+          bottom of the viewport, where they were reachable only by scrolling
+          past every option. Reported on a short window with 14 types. */}
+      <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth:300, maxHeight: "80vh", display: "flex", flexDirection: "column", minHeight: 0 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexShrink: 0 }}>
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>
             Filter by {cfg.label}
           </div>
           <button onClick={onClose} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
         </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 2, overflowY: "auto", minHeight: 0, flex: 1 }}>
           {cfg.options.map(opt => {
             const isSelected = opt === cfg.value;
             return (
@@ -8193,7 +8893,7 @@ function ColumnFilterModal({ activeCol, filterConfigs, sortConfig, setSortConfig
             );
           })}
         </div>
-        <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 12, paddingTop: 12, display: "flex", gap: 6 }}>
+        <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 12, paddingTop: 12, display: "flex", gap: 6, flexShrink: 0 }}>
           {[["asc", "Sort A → Z"], ["desc", "Sort Z → A"]].map(([dir, lbl]) => {
             const active = sortConfig && sortConfig.key === activeCol && sortConfig.dir === dir;
             return (
