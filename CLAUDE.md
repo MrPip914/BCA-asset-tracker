@@ -893,6 +893,11 @@ collapse and got its own phase.
 - **Retiring someone is ARCHIVING them** (Eric's call), which keeps their history and every
   assignment intact. `canDeleteAsset` therefore blocks the permanent delete of a User who
   is still assigned to anything, exactly like a Room that still holds something.
+- **`ensureLockedTypes` puts a missing locked type back in REGISTRY order, not at the end.**
+  Appending is what User did on arrival: it landed below `Other` at the very bottom of the
+  picker — the one entry beneath the catch-all, which is where the eye stops looking — and
+  read as an afterthought rather than a peer of Room and Building. Existing entries keep
+  their order; only the new arrival moves.
 - **`person` is synced from `personIds` ONLY in id mode, and that gate is a data-loss fix.**
   `doGet` returns `personIds: []` for *every* asset, so in name mode — where `person` is the
   source of truth and nothing writes ids — an ungated sync overwrote `person` with `""` on
@@ -917,6 +922,11 @@ collapse and got its own phase.
   is reversible and an un-migrated row still resolves. `personNamesOf()` reads ids first and
   falls back to it; **nothing outside `personLabelsOf`/`personNamesOf` should read either
   field.**
+- **The conversion is offered in the LIST TOOLBAR menu** (next to Columns/Export/Add
+  asset), shown only while `unconvertedUserNames` is non-empty so it surfaces itself once
+  and then retires. It first lived only behind the gear on the User field — which is inside
+  the *edit form* — i.e. a one-time setup action reachable only by opening an asset and
+  clicking Edit, which nobody had a reason to do. It is still in the users manager too.
 - **Conversion is a BUTTON, not a load-time rewrite** (`convertUsersToAssets`, in the users
   manager). Creating assets means issuing labels from `nextAssetNumber`, which lives in the
   Config domain behind the revision check — so a load-time conversion running in several

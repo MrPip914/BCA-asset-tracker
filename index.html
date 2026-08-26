@@ -332,7 +332,21 @@ function ensureLockedTypes(list) {
   const have = new Set(list.map(t => t.id));
   const missing = TYPE_OPTIONS.filter(id => isLockedType(id) && !have.has(id));
   if (missing.length === 0) return list; // reference-stable: persist()'s _dirty check compares by identity
-  return [...list, ...missing.map(id => ({ id, name: id }))];
+  // Put each one back where the registry says it belongs, rather than appending.
+  // Appending is what User did on arrival: it landed below "Other" at the very
+  // bottom of the picker, reading as an afterthought instead of a peer of Room
+  // and Building — and on a stored list it was the ONE entry below the catch-all,
+  // which is where the eye stops looking. Existing entries keep their order; a
+  // missing type slots in before the next registry sibling already present, so
+  // only the new arrival moves.
+  const out = [...list];
+  missing.forEach(id => {
+    const after = TYPE_OPTIONS.slice(TYPE_OPTIONS.indexOf(id) + 1);
+    const at = out.findIndex(t => after.includes(t.id));
+    const entry = { id, name: id };
+    if (at === -1) out.push(entry); else out.splice(at, 0, entry);
+  });
+  return out;
 }
 // Which types an asset of `type` may sit inside — the only thing render sites
 // should branch on, instead of comparing type names. A REGISTERED type always
@@ -7034,6 +7048,22 @@ function AssetTracker() {
                       <Plus size={15} /> Add asset
                     </button>
                     )}
+                    {/* The one-time users conversion. It lived only behind the
+                        gear on the User field, which is inside the EDIT form —
+                        so a setup action nobody had a reason to open an asset to
+                        find. Shown here only while there is something to convert,
+                        so it surfaces itself once and then disappears rather than
+                        becoming permanent clutter. */}
+                    {canEdit && unconvertedUserNames.length > 0 && (
+                    <button
+                      onClick={() => { setShowToolbarMenu(false); convertUsersToAssets(); }}
+                      className="icon-btn"
+                      style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6, borderTop: `1px solid ${C.border}`, marginTop: 4 }}
+                      title="Gives each person their own page and history. Assignments keep working either way."
+                    >
+                      <UserCircle size={15} /> Convert {unconvertedUserNames.length} user{unconvertedUserNames.length === 1 ? "" : "s"} to records
+                    </button>
+                    )}
                   </div>
                 </>
               )}
@@ -8650,14 +8680,19 @@ function ColumnFilterModal({ activeCol, filterConfigs, sortConfig, setSortConfig
   const getLabel = cfg.labelForOption || (o => o);
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
-      <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth:300, maxHeight: "70vh", overflowY: "auto" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+      {/* The CARD is a flex column that never scrolls; only the option list
+          inside it does. Scrolling the whole card instead (which this did) meant
+          a long list pushed the Sort buttons — and the close button — off the
+          bottom of the viewport, where they were reachable only by scrolling
+          past every option. Reported on a short window with 14 types. */}
+      <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth:300, maxHeight: "80vh", display: "flex", flexDirection: "column", minHeight: 0 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexShrink: 0 }}>
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>
             Filter by {cfg.label}
           </div>
           <button onClick={onClose} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
         </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 2, overflowY: "auto", minHeight: 0, flex: 1 }}>
           {cfg.options.map(opt => {
             const isSelected = opt === cfg.value;
             return (
@@ -8676,7 +8711,7 @@ function ColumnFilterModal({ activeCol, filterConfigs, sortConfig, setSortConfig
             );
           })}
         </div>
-        <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 12, paddingTop: 12, display: "flex", gap: 6 }}>
+        <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 12, paddingTop: 12, display: "flex", gap: 6, flexShrink: 0 }}>
           {[["asc", "Sort A → Z"], ["desc", "Sort Z → A"]].map(([dir, lbl]) => {
             const active = sortConfig && sortConfig.key === activeCol && sortConfig.dir === dir;
             return (
