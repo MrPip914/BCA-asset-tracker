@@ -911,6 +911,19 @@ and read by `parseRelated()`/`relatedRoleFor()`.
   "Monitor BCA0002 (Monitor)" since `adoptLegacyNames` already builds names in that shape;
   only a **deleted** asset gets `"<type> <label>"`, since there the stored type is the one
   thing left. That fallback is load-bearing: audit entries deliberately outlive their assets.
+- **The named assets are LINKS** (`auditSegments()`): "Computer BCA0001 moved out →
+  Room 101" opens either one. Frontend-only — the ids were already in `related`, so this
+  needed no backend change and no new version. The pairing is **structural, not a search
+  for room-shaped words**: `related` says which id plays which role, and each role has a
+  fixed home in the entry's own text (a parent move's `from` text IS its `from` id, an
+  allocation's `room` IS its one id). Candidates that don't appear in the sentence simply
+  never match, which is what lets the subject's own wording and the viewer-relative
+  wording be fed one candidate list without either knowing which it got. Matching is
+  longest-first and position-by-position, so "Room 10" can't win a spot "Room 101" starts
+  at and a name appearing twice links twice. **Two things are never linked**: a value like
+  "Unassigned" or an em dash, which name no asset, and an id whose asset is gone — audit
+  entries outlive their assets, so that link would open nothing. `describeAudit()` still
+  returns a plain string, which is what the Excel export needs.
 - **The Audit tab is two sections**: the asset's own history (its entries plus every entry
   naming it), then **"Activity on contents"**, collapsed, keyed off `descendantsOf()`. No type
   test anywhere — a Building gets its rooms' activity and a Campus its buildings' for free.

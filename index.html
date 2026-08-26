@@ -888,6 +888,92 @@ function describeAuditFor(entry, viewerLabel, assets, typesList) {
   const own = describeAudit(entry);
   return `${subject} — ${own.charAt(0).toLowerCase()}${own.slice(1)}`;
 }
+
+// How an inline "open that asset" link looks. Matches the "Fed by Panel X" link
+// in the breaker modal, which was the first one of these.
+const AUDIT_LINK_STYLE = {
+  background: "none", border: "none", padding: 0, font: "inherit",
+  color: C.brandDark, fontWeight: 700, cursor: "pointer", textDecoration: "underline",
+};
+
+// describeAuditFor() produces the sentence; this says which spans of it name an
+// asset worth opening. Returns an array of segments -- plain strings, plus
+// { text, label } for the parts that should be links.
+//
+// The pairing is STRUCTURAL rather than a search for room-shaped words: `related`
+// says which ids the entry names and in what role, and each role has a fixed home
+// in the entry's own text -- a parent move's `from` text IS its `from` id, an
+// allocation's `room` IS its single id. So this decorates spans it already knows
+// are there. Candidates that don't appear in the sentence simply never match,
+// which is what lets both the subject's own wording and the viewer-relative
+// wording be fed the same list without either needing to know which it got.
+//
+// Two things are deliberately never linked: a value like "Unassigned" or an em
+// dash, which name no asset, and an id whose asset is gone -- audit entries
+// outlive the assets they describe, so a link there would open nothing.
+function auditSegments(entry, viewerLabel, assets, typesList) {
+  const text = describeAuditFor(entry, viewerLabel, assets, typesList);
+  const byLabel = l => (assets || []).find(a => a.label === l);
+  const links = [];
+  const add = (t, label) => {
+    const str = String(t || "");
+    if (!str || !label || str === UNASSIGNED_LABEL || str === "—") return;
+    if (!byLabel(label)) return;
+    links.push({ text: str, label });
+  };
+
+  const isSubjectView = !viewerLabel || entry.assetLabel === viewerLabel;
+  const related = parseRelated(entry.related);
+  const roleId = role => (related.find(r => r.role === role) || {}).id;
+
+  // The sentence leads with the subject whenever the viewer is not it, named
+  // exactly the way describeAuditFor named it.
+  if (!isSubjectView) {
+    const subj = byLabel(entry.assetLabel);
+    if (subj) add(nameOf(subj), entry.assetLabel);
+    // A viewer-relative move prints the other end by a name resolved NOW, not
+    // from the stored text.
+    const other = related.find(r => r.id !== viewerLabel && (r.role === "from" || r.role === "to"));
+    if (other) add(parentNameFor(other.id, assets), other.id);
+  }
+
+  // The names the entry stored for its own wording, each tied to the id playing
+  // the matching role.
+  if (entry.action === "edited" && entry.field === "Parent") {
+    add(entry.from, roleId("from"));
+    add(entry.to, roleId("to"));
+  } else if (entry.action === "allocated") {
+    add(entry.room, roleId("to"));
+  } else if (entry.action === "unallocated") {
+    add(entry.room, roleId("from"));
+  } else if (entry.action === "circuit_edited" || entry.action === "circuit_added" || entry.action === "circuit_removed") {
+    // Rooms served are printed as a comma-joined list of names; each resolves
+    // through its own id, so a deleted one drops out of the links by itself.
+    related.filter(r => r.role === "serves" || r.role === "feeds")
+      .forEach(r => add(nameOf(byLabel(r.id) || {}), r.id));
+  }
+
+  if (!links.length) return [text];
+  // Longest first so "Room 10" can never win a position that "Room 101" starts
+  // at. Scanning position by position (rather than replacing) keeps a name that
+  // appears twice linked in both places.
+  const sorted = [...links].sort((a, b) => b.text.length - a.text.length);
+  const out = [];
+  let buf = "";
+  for (let i = 0; i < text.length; ) {
+    const hit = sorted.find(l => text.startsWith(l.text, i));
+    if (hit) {
+      if (buf) { out.push(buf); buf = ""; }
+      out.push({ text: hit.text, label: hit.label });
+      i += hit.text.length;
+    } else {
+      buf += text[i];
+      i++;
+    }
+  }
+  if (buf) out.push(buf);
+  return out;
+}
 // Every asset already has a stable, unique `label` — Room/Building references
 // elsewhere in the app store that label (an id), not the mutable display
 // name, so renaming a Room/Building is a normal single-asset edit with
@@ -5822,7 +5908,21 @@ function AssetTracker() {
             const row = (entry, i) => (
               <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "9px 14px" }}>
                 <div style={{ fontSize: 13, color: C.ink, marginBottom: 3 }}>
-                  {describeAuditFor(entry, selectedAsset.label, assets, typesList)}
+                  {auditSegments(entry, selectedAsset.label, assets, typesList).map((seg, k) => (
+                    typeof seg === "string" ? <React.Fragment key={k}>{seg}</React.Fragment> : (
+                      <button
+                        key={k}
+                        onClick={() => {
+                          const target = assets.find(a => a.label === seg.label);
+                          if (target) openDetail(target);
+                        }}
+                        style={AUDIT_LINK_STYLE}
+                        title={`Open ${seg.label}`}
+                      >
+                        {seg.text}
+                      </button>
+                    )
+                  ))}
                 </div>
                 <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.placeholder }}>
                   {formatWhen(entry.at)}{entry.by ? ` · ${entry.by}` : ""}
