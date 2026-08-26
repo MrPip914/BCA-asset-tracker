@@ -65,6 +65,18 @@ Step 5 is the reason this exists. Saving the script without creating a new versi
 identical to a successful deploy, and has silently cost several redeploy cycles on this
 project before. Now it fails immediately, and says so.
 
+## It refuses to go backwards
+
+If the version in this branch is *older* than what is already deployed, the deploy stops
+before uploading anything and tells you both versions.
+
+This is not tidiness. Every save rewrites whole sheet tabs from the backend's own field
+list, so an older backend **drops columns a newer one added** — the next save after a
+downgrade destroys that data, rather than merely reverting behavior. It has happened once:
+v24 was live and v22 was pushed over it from a branch that was simply behind.
+
+If a rollback is genuinely what you want: `ALLOW_DOWNGRADE=1 node deploy.mjs`.
+
 ## Things worth knowing
 
 - **The editor stops being a place to edit.** Every deploy overwrites the live code with

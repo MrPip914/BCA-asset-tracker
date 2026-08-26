@@ -138,6 +138,34 @@ try {
     .match(/const SCRIPT_VERSION = "([^"]+)"/) || [])[1];
   console.log(`  live script is "${remoteName}" (currently ${liveVersion || "unknown"})`);
 
+  // Refuse to go backwards. A branch can easily be behind what is already deployed, and
+  // because every save rewrites whole sheet tabs from the backend's own field lists, an
+  // older backend silently DROPS columns a newer one added - the next save after a
+  // downgrade destroys that data. This happened once (v24 live, v22 pushed over it) and
+  // is the reason the check exists. Same-version re-deploys are fine.
+  const seq = (v) => {
+    const m = /^v(\d+)/.exec(String(v || "").trim());
+    return m ? Number(m[1]) : null;
+  };
+  const liveSeq = seq(liveVersion);
+  const nextSeq = seq(backendVersion);
+
+  if (liveSeq !== null && nextSeq !== null && nextSeq < liveSeq && !process.env.ALLOW_DOWNGRADE) {
+    die(
+      `Refusing to downgrade the live backend.\n\n` +
+        `    live:            ${liveVersion}\n` +
+        `    this repo/branch: ${backendVersion}\n\n` +
+        `Nothing was uploaded. This branch is behind what is already deployed - you are\n` +
+        `probably on the wrong branch, or the newer work needs merging in first.\n\n` +
+        `Because a save rewrites whole sheet tabs from the backend's field list, an older\n` +
+        `backend drops columns a newer one added. That is data loss, not just a rollback.\n\n` +
+        `If a rollback really is what you want: ALLOW_DOWNGRADE=1 node deploy.mjs`
+    );
+  }
+  if (liveSeq === null || nextSeq === null) {
+    console.log("  (could not compare versions numerically - downgrade check skipped)");
+  }
+
   fs.copyFileSync(path.join(REPO, "AssetTrackerSync.gs"), path.join(staging, remoteName));
 
   step("Uploading");
