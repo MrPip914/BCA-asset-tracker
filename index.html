@@ -694,7 +694,13 @@ const DEFAULT_COLUMNS = [
   { key: "notes", label: "Notes", width: 240 },
   { key: "label", label: "Asset ID", width: 110 },
   { key: "status", label: "Status", width: 100 },
-].map(c => ({ ...c, visible: ["name", "type", "subType", "parent", "person", "status"].includes(c.key), custom: false }));
+// Sub-Type is deliberately NOT in the visible set: it's a restricted field (Bulk
+// Item's `onlyFields`), so it's blank on every row that isn't a bulk item — the
+// same "a field belonging to one type would otherwise add a mostly-empty column
+// to everyone's table" rule that makes a per-type custom field hidden on
+// creation. It stays a column, since the Bulk Item form renders its picker from
+// this list; it just isn't shown until someone turns it on.
+].map(c => ({ ...c, visible: ["name", "type", "parent", "person", "status"].includes(c.key), custom: false }));
 
 // Default columns that were RENAMED. A stored config still calls the sub-type
 // column `itemName`; without this it would keep that column (reading a field
@@ -710,6 +716,16 @@ const RENAMED_COLUMN_KEYS = { itemName: "subType" };
 // form can edit. Custom columns are never touched: a custom key is a real field
 // on every asset, so dropping one would hide stored data.
 const RETIRED_COLUMN_KEYS = new Set(["campus", "building", "room"]);
+
+// Default columns whose shipped DEFAULT changed from visible to hidden. The
+// migration below only ever adds columns, and a stored config carries its own
+// `visible` flag, so without this an existing sheet would keep showing Sub-Type
+// forever and the change above would be invisible to everyone who already has a
+// saved config — i.e. everyone. This only moves the FALLBACK: visibility is a
+// per-device localStorage override (see isColumnVisible), so a device that has
+// explicitly toggled the column keeps its own answer either way, and turning it
+// back on in the Columns menu still sticks.
+const DEMOTED_COLUMN_KEYS = new Set(["subType"]);
 
 // The fields the type editor lets you switch on and off for a type. Everything
 // else in DEFAULT_COLUMNS is structural and not a per-type choice: name, type,
@@ -1430,7 +1446,7 @@ const FRONTEND_SCRIPT_VERSION = "v28";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-08-26.2";
+const APP_VERSION = "2026-08-26.3";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -2591,6 +2607,12 @@ function AssetTracker() {
       // sheet last saved by an older client doesn't keep offering a column that
       // nothing renders or edits any more (see RETIRED_COLUMN_KEYS).
       storedCols = storedCols.filter(c => c.custom || !RETIRED_COLUMN_KEYS.has(c.key));
+      // Demote columns that are no longer visible by default (see
+      // DEMOTED_COLUMN_KEYS) — after the rename pass, so the sub-type column is
+      // matched under its new key whichever name the stored config used.
+      storedCols = storedCols.map(c => (
+        !c.custom && DEMOTED_COLUMN_KEYS.has(c.key) ? { ...c, visible: false } : c
+      ));
       DEFAULT_COLUMNS.forEach((dc, defaultIdx) => {
         if (storedCols.some(c => c.key === dc.key)) return;
         let insertAt = 0;
