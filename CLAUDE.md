@@ -350,12 +350,22 @@ default" is just deleting it.
   reads the new values. **Anything that changes these settings without a setState will silently
   show stale rules.** The two app-wide derived sets (restricted fields, place types) are
   recomputed on change rather than per call, since `fieldAppliesTo` runs per cell.
+- **Per-type custom fields (v26).** The editor can invent a new field for a type. It becomes
+  an ordinary custom column (Config's `columns`) carrying `restricted: true`, plus its key in
+  that type's `onlyFields` — so it reuses the restricted-field engine rather than adding a
+  second mechanism. **Restriction is a flag on the COLUMN, not a consequence of who claims
+  it**: derived the other way, unticking a field from its last owner would turn it into a
+  common field and splash it across every type. New fields are pending until Save, so the whole
+  editor stays one commit and a cancelled edit leaves no stray column. They're created hidden —
+  a field belonging to one type would otherwise add a mostly-empty column to everyone's table.
+  Deleting one stays in the Columns menu, which already owns that destructive action.
 - **What the editor can't do, and why.** An icon is stored as a NAME from a curated map
   (`TYPE_ICON_CHOICES`), since a React component can't survive JSON; an unknown name falls back
   to the shipped icon. A ticked field enters `onlyFields` only when it is *already* restricted
   app-wide (`SHIPPED_RESTRICTED_FIELDS`) — the editor must not mint a new restricted field,
   because that would restrict it app-wide and quietly strip it from every type that hadn't
-  opted in; genuinely new per-type fields are the deferred custom-fields work in `BUGS.md`.
+  opted in — that hazard is about EXISTING columns, which is why a field the editor creates
+  itself (above) may be restricted: it is new, so there is no data anywhere to strip.
   Modules stay uneditable: a tab body needs a render branch, so it can't be switched on by data.
 - **Editing is allowed on locked types.** `locked` means the app depends on the type *existing*
   — its tabs, its field rules — which is about the id, not what it's called or what it holds.
@@ -1094,6 +1104,16 @@ When you do:
 
 ## Known constraints / things to watch
 
+- **The repo is at v26 and v26 is UNDEPLOYED as of 2026-08-25.** It makes the Assets tab's
+  column set dynamic — the fixed `ASSET_FIELDS` plus the custom columns named in Config — which
+  is what makes a custom column's value persist at all (see the Fixed entry in `BUGS.md`), and
+  therefore what unblocks per-type custom fields. Until it's pasted in and a **New version**
+  deploy is created, a value typed into any custom column, including a per-type field, is still
+  dropped on save. The column and the type settings persist normally; only the VALUES don't.
+  Sandbox is unaffected, as ever.
+  - `test-backend-fields.js` in the repo root unit-tests `customColumnKeys_` directly. Worth
+    keeping the habit: Sandbox never contacts Apps Script and the live backend needs a sign-in,
+    so browser testing structurally cannot cover a backend write path.
 - **v25 is DEPLOYED, confirmed 2026-08-25** by fetching the `/exec` URL and reading
   `scriptVersion` back, and the six columns are gone from the live sheet. It was the first
   DESTRUCTIVE version: it deleted six columns from the Assets tab that were kept only to keep an earlier

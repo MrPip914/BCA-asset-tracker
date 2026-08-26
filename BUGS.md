@@ -16,32 +16,30 @@ version that fixed them.
 
 ## Open
 
-### Custom column values are never saved
-**Found:** 2026-08-23, during the asset type editor design discussion.
-**Needs a deploy:** yes — the fix is in `AssetTrackerSync.gs`.
-**Confirmed:** read both ends of the path, not inferred.
-
-Anything typed into a user-created custom column is silently discarded. The column
-itself keeps working — its definition is stored in Config and it goes on appearing in
-the table — so the failure looks like the value "didn't stick" rather than like a bug.
-
-Why: `addColumn()` in `index.html` puts the value on each asset under the new column's
-key, but the backend writes the Assets tab with `writeTable_(SHEET_NAMES.assets,
-ASSET_FIELDS, assets)`, and `ASSET_FIELDS` is a fixed list that never learns about
-custom columns. `writeTable_` only writes the columns it was handed, so the value is
-dropped on save; `readTable_` reads the same fixed list, so nothing comes back.
-
-Fixing it means the Assets tab's column set has to become dynamic — the fixed fields
-plus whatever custom columns exist in Config. Note the tab is `clear()`ed and rewritten
-on every save, so a column set that changes between saves needs care.
-
-**Blocks:** per-type custom fields (phase two of the asset type editor). New fields
-need somewhere to store their values, and this is that same broken path. Does **not**
-block phase one of the type editor (icon, allowed parents, default tab, and toggling
-which existing fields apply), since those change no asset data.
+_(nothing open)_
 
 ---
 
 ## Fixed
 
-_(nothing yet)_
+### Custom column values are never saved — fixed in v26
+**Found:** 2026-08-23. **Fixed:** 2026-08-25, alongside per-type custom fields, which
+were blocked by it.
+
+`writeTable_` writes only the columns it is handed, and `doPost` handed it the fixed
+`ASSET_FIELDS`, so anything typed into a user-created column was dropped on save while
+the column itself kept appearing — the failure looked like the value "didn't stick".
+
+`customColumnKeys_()` now appends the custom columns to that list, taken from the
+columns carried by the request and falling back to what Config already holds (an old
+client or a direct API call posts assets with no column list, and dropping the custom
+columns there would delete real data). Keys that shadow a schema field or repeat
+another are refused, since `writeTable_` would write that column twice and
+`readTable_` would keep only the last.
+
+The read side needed nothing: `readTable_` ignores the header list it is given and
+returns whatever the sheet holds, so a column that gets written comes back on its own.
+
+**Verified** by `test-backend-fields.js` in the repo root, not in a browser — Sandbox
+never contacts Apps Script and the live backend needs a sign-in, so the write path this
+bug lived on is exactly what the usual check can't reach.

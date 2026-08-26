@@ -49,7 +49,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v25";
+const SCRIPT_VERSION = "v26";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -103,6 +103,42 @@ const ASSET_FIELDS = [
   "totalQuantity", "purchaseDate", "warrantyUntil", "status",
   "panelSlotCount", "panelLayout",
 ];
+
+// The Assets tab's real column set: the fixed schema above PLUS whatever custom
+// columns the user has added. Custom columns live in Config's `columns` blob, so
+// ASSET_FIELDS alone can never know about them — and writeTable_ writes only the
+// columns it is handed, which is why anything typed into a custom column used to
+// be silently dropped on save while the column itself went on appearing.
+//
+// Read needs no equivalent: readTable_ ignores the header list it is given and
+// returns whatever the sheet actually holds, so a column that gets WRITTEN comes
+// back on its own.
+//
+// Prefers the columns carried by this request, falling back to what Config
+// already holds — an old client, or any direct API call, posts assets without a
+// column list, and dropping the custom columns in that case would delete real
+// data from the sheet.
+function customColumnKeys_(bodyColumns, configMap) {
+  let columns = Array.isArray(bodyColumns) ? bodyColumns : null;
+  if (!columns) {
+    try {
+      const stored = configMap && configMap.columns;
+      columns = Array.isArray(stored) ? stored : JSON.parse(stored || "[]");
+    } catch (err) {
+      columns = [];
+    }
+  }
+  const keys = [];
+  (columns || []).forEach(c => {
+    const key = c && c.custom && c.key ? String(c.key) : "";
+    // Never let a custom key shadow a schema field or duplicate another —
+    // writeTable_ would write that column twice and readTable_ would keep only
+    // the last one.
+    if (key && ASSET_FIELDS.indexOf(key) === -1 && keys.indexOf(key) === -1) keys.push(key);
+  });
+  return keys;
+}
+
 
 // Breakers are scoped to a Panel asset (panelLabel); Circuits are scoped to a
 // Breaker (breakerId), not directly to the Panel — chain is Circuit -> Breaker
@@ -1185,8 +1221,9 @@ function doPost(e) {
     }
 
     if (dirty.assets) {
-      // Assets tab: flat fields only.
-      writeTable_(SHEET_NAMES.assets, ASSET_FIELDS, assets);
+      // Assets tab: flat fields only, plus any custom columns (see
+      // customColumnKeys_ — without them, custom column values are dropped).
+      writeTable_(SHEET_NAMES.assets, ASSET_FIELDS.concat(customColumnKeys_(body.columns, configMap)), assets);
 
       // Child tables, flattened out with the parent asset's label as the key.
       const commentRows = [];

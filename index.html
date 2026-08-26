@@ -245,6 +245,11 @@ let TYPE_SETTINGS = {};
 // The two app-wide sets derived from every entry at once. Recomputed when the
 // settings change rather than on every call, since fieldAppliesTo runs per cell.
 let DERIVED_TYPE_SETS = { restrictedFields: new Set(), placeTypes: new Set() };
+// The column list, mirrored here for the same reason TYPE_SETTINGS is: a custom
+// column created AS a per-type field carries `restricted: true`, and
+// fieldAppliesTo has to know that without being handed the columns at every one
+// of its call sites.
+let TYPE_FIELD_COLUMNS = [];
 function recomputeDerivedTypeSets() {
   const ids = new Set([...Object.keys(TYPE_REGISTRY), ...Object.keys(TYPE_SETTINGS)]);
   const restricted = new Set();
@@ -254,15 +259,23 @@ function recomputeDerivedTypeSets() {
     (entry.onlyFields || []).forEach(k => restricted.add(k));
     (entry.parentTypes || []).forEach(t => places.add(t));
   });
+  // A per-type field is restricted by a flag on the COLUMN, not by whoever
+  // currently claims it in onlyFields. Otherwise unticking it from its last
+  // owner would make it an ordinary common field and it would appear on every
+  // type at once — the opposite of what "field for this type" means.
+  TYPE_FIELD_COLUMNS.forEach(c => { if (c && c.restricted && c.key) restricted.add(c.key); });
   DERIVED_TYPE_SETS = { restrictedFields: restricted, placeTypes: places };
 }
-function applyTypeSettings(next) {
+function applyTypeSettings(next, columns) {
   TYPE_SETTINGS = next && typeof next === "object" ? next : {};
+  if (Array.isArray(columns)) TYPE_FIELD_COLUMNS = columns;
   recomputeDerivedTypeSets();
 }
 // Populate the derived sets from the shipped registry alone, so they're correct
-// before any Config has loaded (and in sandbox, which may never load settings).
-applyTypeSettings({});
+// before any Config has loaded. An empty column list, not DEFAULT_COLUMNS: that
+// const is declared further down this file and reading it here would be a
+// temporal-dead-zone error — and no custom column exists at module load anyway.
+applyTypeSettings({}, []);
 
 // The effective settings for a type: shipped defaults with the user's overrides
 // on top. Null for a type that is neither registered nor customised — i.e. a
@@ -1114,7 +1127,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v25";
+const FRONTEND_SCRIPT_VERSION = "v26";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -2214,29 +2227,6 @@ function AssetTracker() {
       }
       setAuthPending(false);
 
-      // BEFORE the assets are mapped, not just before the setState: the load-time
-      // backfills below ask typeTakesParent and isPlaceType, and those read the
-      // module-level settings. Applied later, the first load after a settings
-      // change would adopt parents and names using the PREVIOUS rules.
-      const loadedTypeSettings = data.typeSettings && typeof data.typeSettings === "object" ? data.typeSettings : {};
-      applyTypeSettings(loadedTypeSettings);
-
-      const parented = data.assets
-        .map(a => ({ comments: [], changes: [], allocations: [], status: "Active", subType: "", purchaseDate: "", warrantyUntil: "", ...a }));
-      // Names are filled in over the already-parented list, because the
-      // suggestion for fixed equipment reads the chain above the asset ("Room 102
-      // Mini Split") — running it inside the first map would walk a list whose
-      // parentIds were still half-adopted.
-      const loadedAssets = adoptLegacyNames(parented);
-      setAssets(loadedAssets);
-      // No scriptVersion at all means an old backend that predates this check entirely —
-      // still a real mismatch, not a "nothing to compare" case. In sandbox mode the
-      // fixture always reports the current frontend version, so this never fires there.
-      setBackendScriptVersion(data.scriptVersion || "(none reported — backend predates version tracking)");
-      // Absent (sandbox fixture, or a backend predating v12) normalizes to all
-      // zeros, which is exactly what such a backend compares against — so this
-      // stays a no-op rather than a permanent conflict.
-      rememberRevisions(data.revisions);
       // Migrate column config: add any default columns introduced in newer app
       // versions, at the position DEFAULT_COLUMNS puts them in rather than always
       // just before `status`. That blanket rule sent `name` to the far right of an
@@ -2268,6 +2258,29 @@ function AssetTracker() {
         storedCols = [...storedCols.slice(0, insertAt), dc, ...storedCols.slice(insertAt)];
       });
       setColumns(storedCols);
+      // BEFORE the assets are mapped, not just before the setState: the load-time
+      // backfills below ask typeTakesParent and isPlaceType, and those read the
+      // module-level settings. Applied later, the first load after a settings
+      // change would adopt parents and names using the PREVIOUS rules.
+      const loadedTypeSettings = data.typeSettings && typeof data.typeSettings === "object" ? data.typeSettings : {};
+      applyTypeSettings(loadedTypeSettings, storedCols);
+
+      const parented = data.assets
+        .map(a => ({ comments: [], changes: [], allocations: [], status: "Active", subType: "", purchaseDate: "", warrantyUntil: "", ...a }));
+      // Names are filled in over the already-parented list, because the
+      // suggestion for fixed equipment reads the chain above the asset ("Room 102
+      // Mini Split") — running it inside the first map would walk a list whose
+      // parentIds were still half-adopted.
+      const loadedAssets = adoptLegacyNames(parented);
+      setAssets(loadedAssets);
+      // No scriptVersion at all means an old backend that predates this check entirely —
+      // still a real mismatch, not a "nothing to compare" case. In sandbox mode the
+      // fixture always reports the current frontend version, so this never fires there.
+      setBackendScriptVersion(data.scriptVersion || "(none reported — backend predates version tracking)");
+      // Absent (sandbox fixture, or a backend predating v12) normalizes to all
+      // zeros, which is exactly what such a backend compares against — so this
+      // stays a no-op rather than a permanent conflict.
+      rememberRevisions(data.revisions);
       setChangeTypes(data.changeTypes && data.changeTypes.length ? data.changeTypes : DEFAULT_CHANGE_TYPES);
       setVendors(Array.isArray(data.vendors) ? data.vendors : []);
       setAuditLog(Array.isArray(data.auditLog) ? data.auditLog : []);
@@ -2503,7 +2516,7 @@ function AssetTracker() {
       // Before the setState, per the ordering rule in the TYPE_SETTINGS comment:
       // the re-render this setState causes is what makes the new rules visible,
       // so the module-level copy has to be current by the time it runs.
-      applyTypeSettings(nextTypeSettings);
+      applyTypeSettings(nextTypeSettings, nextColumns);
       setTypeSettings(nextTypeSettings);
       setBreakerTypes(nextBreakerTypes);
       setNextAssetNumber(nextNumberToIssue);
@@ -3847,21 +3860,47 @@ function AssetTracker() {
   function saveTypeSettings(id, draft) {
     const name = (draft.name || "").trim();
     if (!name || typeNameTaken(name, id)) return;
-    const fields = typeEditableFields(columns).map(c => c.key);
+
+    // Fields invented in this editing session become real custom columns, each
+    // flagged `restricted` so it belongs to the types that claim it rather than
+    // appearing on everything. This is the one way a NEW restricted field can be
+    // created — ticking an existing common field still can't mint one, for the
+    // reason in SHIPPED_RESTRICTED_FIELDS.
+    let nextColumns = columns;
+    const createdKeys = [];
+    (draft.newFields || []).forEach(f => {
+      const label = (f.label || "").trim();
+      if (!label) return;
+      let key = slugify(label);
+      let i = 1;
+      while (nextColumns.some(c => c.key === key)) key = slugify(label) + "_" + i++;
+      // Hidden by default: a field belonging to one type would otherwise add a
+      // mostly-empty column to everyone's table. It's in the Columns menu.
+      nextColumns = [...nextColumns, { key, label, width: 160, visible: false, custom: true, restricted: true }];
+      createdKeys.push(key);
+    });
+
+    const fields = typeEditableFields(nextColumns).map(c => c.key);
+    const wanted = new Set([...draft.fields, ...createdKeys]);
+    // Restriction is read off the columns being SAVED, not the current ones, so
+    // a field created in this same save counts as restricted immediately.
+    const isRestricted = k => SHIPPED_RESTRICTED_FIELDS.has(k)
+      || nextColumns.some(c => c.key === k && c.restricted);
+
     const nextTypesList = typesList.map(t => (t.id === id ? { ...t, name } : t));
     const nextTypeSettings = {
       ...typeSettings,
       [id]: {
         iconName: draft.iconName || undefined,
         parentTypes: draft.parentTypes,
-        // Unchecked fields become exclusions; checked ones only appear in
-        // onlyFields when they're restricted app-wide to begin with. See
-        // SHIPPED_RESTRICTED_FIELDS for why the editor can't mint a new one.
-        excludedFields: fields.filter(k => !draft.fields.includes(k)),
-        onlyFields: fields.filter(k => draft.fields.includes(k) && SHIPPED_RESTRICTED_FIELDS.has(k)),
+        // Unchecked fields become exclusions; checked ones enter onlyFields only
+        // when they're restricted — shipped that way, or created as a per-type
+        // field just above.
+        excludedFields: fields.filter(k => !wanted.has(k)),
+        onlyFields: fields.filter(k => wanted.has(k) && isRestricted(k)),
       },
     };
-    persist(assets, { typesList: nextTypesList, typeSettings: nextTypeSettings });
+    persist(assets, { columns: nextColumns, typesList: nextTypesList, typeSettings: nextTypeSettings });
   }
 
   // Drops the override so the type falls back to what the app ships. For a
@@ -7521,7 +7560,8 @@ function TypeManagerModal({
   isSaving, canEdit, isLocked, nameTaken, countFor, fieldOptions, hasOverrides,
 }) {
   const [confirmId, setConfirmId] = useState(null);
-  const [draft, setDraft] = useState(null); // { id, name, iconName, parentTypes, fields }
+  const [draft, setDraft] = useState(null); // { id, name, iconName, parentTypes, fields, newFields }
+  const [newFieldName, setNewFieldName] = useState("");
 
   // Seeds the form from the type's EFFECTIVE settings (shipped defaults with any
   // override already applied), so the boxes show what's actually in force rather
@@ -7535,7 +7575,9 @@ function TypeManagerModal({
       iconName: entry.iconName || "",
       parentTypes: entry.parentTypes || (TYPE_REGISTRY[t.id] ? [] : DEFAULT_PARENT_TYPES),
       fields: fieldOptions.filter(f => fieldAppliesTo(f.key, t.id)).map(f => f.key),
+      newFields: [],
     });
+    setNewFieldName("");
     setConfirmId(null);
   };
   const cancelEdit = () => setDraft(null);
@@ -7544,6 +7586,23 @@ function TypeManagerModal({
   const duplicate = !!draft && !!clean && nameTaken(clean, draft.id);
   const canSave = !!clean && !duplicate && !isSaving;
   const toggle = (list, v) => (list.includes(v) ? list.filter(x => x !== v) : [...list, v]);
+
+  // Pending until Save, so the whole editor is still one commit — creating the
+  // column immediately would persist half an edit and leave a stray column
+  // behind if the rest were cancelled. Refuses a label that already names a
+  // field, for the same reason duplicate type names are refused: the chips
+  // become unreadable.
+  const fieldLabelTaken = label => {
+    const wanted = label.trim().toLowerCase();
+    return fieldOptions.some(f => f.label.trim().toLowerCase() === wanted)
+      || (draft?.newFields || []).some(f => f.label.trim().toLowerCase() === wanted);
+  };
+  const addPendingField = () => {
+    const label = newFieldName.trim();
+    if (!label || !draft || fieldLabelTaken(label)) return;
+    setDraft({ ...draft, newFields: [...(draft.newFields || []), { tempId: crypto.randomUUID(), label }] });
+    setNewFieldName("");
+  };
 
   const chip = (on, label, key, onClick) => (
     <button
@@ -7625,6 +7684,42 @@ function TypeManagerModal({
                   draft.fields.includes(f.key), f.label, f.key,
                   () => setDraft({ ...draft, fields: toggle(draft.fields, f.key) })
                 ))}
+                {/* Fields invented here but not yet saved. Removable while they
+                    are still pending; once saved they're ordinary columns and
+                    are deleted from the Columns menu, which already owns that
+                    (destructive) action rather than having a second copy here. */}
+                {(draft.newFields || []).map(f => (
+                  <span key={f.tempId} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "4px 6px 4px 10px", borderRadius: 999, fontSize: 12, border: `1px dashed ${C.brand}`, background: "transparent", color: C.brandDark, fontWeight: 600 }}>
+                    {f.label}
+                    <button
+                      type="button"
+                      aria-label={`Remove ${f.label}`}
+                      onClick={() => setDraft({ ...draft, newFields: draft.newFields.filter(x => x.tempId !== f.tempId) })}
+                      style={{ background: "none", border: "none", padding: 0, display: "flex", color: C.muted }}
+                    >
+                      <X size={12} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
+                <input
+                  value={newFieldName}
+                  onChange={e => setNewFieldName(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addPendingField(); } }}
+                  placeholder="New field for this type, e.g. Warranty Contact"
+                  style={{ flex: 1, padding: "5px 8px", border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 12, fontFamily: "inherit", background: C.surface, color: C.ink }}
+                />
+                <button
+                  type="button"
+                  onClick={addPendingField}
+                  style={{ padding: "5px 10px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12, color: C.ink, fontWeight: 600 }}
+                >
+                  Add field
+                </button>
+              </div>
+              <div style={{ fontSize: 12, color: C.empty }}>
+                A new field belongs to the types you tick it for, and is hidden from the main table until you show it from the Columns menu.
               </div>
             </div>
 
