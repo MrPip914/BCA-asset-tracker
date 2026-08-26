@@ -2551,7 +2551,12 @@ function AssetTracker() {
       applyTypeSettings(loadedTypeSettings, storedCols);
 
       const parented = data.assets
-        .map(a => ({ comments: [], changes: [], allocations: [], status: "Active", subType: "", purchaseDate: "", warrantyUntil: "", ...a }));
+        .map(a => ({ comments: [], changes: [], allocations: [], status: "Active", subType: "", purchaseDate: "", warrantyUntil: "", ...a }))
+        // The sandbox fixture is hand-written and the backend is not, so normalize
+        // here rather than trusting either: personIds must be an ARRAY on every
+        // asset from this point on. It arrives as one from doGet and is absent
+        // from older fixture rows, and code downstream branches on isArray.
+        .map(a => (Array.isArray(a.personIds) ? a : { ...a, personIds: [] }));
       // Names are filled in over the already-parented list, because the
       // suggestion for fixed equipment reads the chain above the asset ("Room 102
       // Mini Split") — running it inside the first map would walk a list whose
@@ -3363,8 +3368,18 @@ function AssetTracker() {
       // legacy column stays truthful for as long as it is still written (and so
       // a rollback to v27 shows the right names, which is the point of keeping
       // it). personNamesOf reads ids first, so this is a copy, never a source.
+      //
+      // GATED ON usersAreAssets, and that gate is the whole point. Without it
+      // this WIPED the assignment on every save: doGet returns `personIds: []`
+      // for every asset, so in name mode -- where `person` is the source of
+      // truth and nothing writes ids -- the draft carried an empty ARRAY, this
+      // ran, and `person` was overwritten with "". Sandbox could not reproduce
+      // it because MOCK_SNAPSHOT assets carry no personIds key at all, so the
+      // isArray test was false there and the line never ran. A fixture that
+      // doesn't match the backend's actual response shape hides exactly this
+      // class of bug; MOCK_SNAPSHOT now carries `personIds: []` for that reason.
       const savedDraft = stripDraftUiState(draftToSave);
-      if (Array.isArray(savedDraft.personIds)) {
+      if (usersAreAssets && Array.isArray(savedDraft.personIds)) {
         savedDraft.person = savedDraft.personIds
           .map(id => { const u = assets.find(x => x.label === id); return u ? nameOf(u) : ""; })
           .filter(Boolean).join("/");
@@ -4287,6 +4302,15 @@ function AssetTracker() {
       return { ...a, personIds: ids };
     });
 
+    // Close any open edit form and the manager. The conversion changes what the
+    // User field MEANS -- names before, ids after -- and a draft seeded under the
+    // old meaning still holds an empty personIds. Saving that afterwards writes
+    // the empty array back and blanks the assignment on that one asset. Dropping
+    // the stale draft is the only safe answer; re-opening Edit reseeds it from
+    // the converted asset.
+    setDetailEditing(false);
+    setShowUsersManager(false);
+    setNewUserName("");
     persist(next, {
       auditLog: entries.length ? logAudit(entries) : auditLog,
       nextAssetNumber: Math.max(counter, peekAssetNumber()),

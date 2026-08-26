@@ -893,6 +893,19 @@ collapse and got its own phase.
 - **Retiring someone is ARCHIVING them** (Eric's call), which keeps their history and every
   assignment intact. `canDeleteAsset` therefore blocks the permanent delete of a User who
   is still assigned to anything, exactly like a Room that still holds something.
+- **`person` is synced from `personIds` ONLY in id mode, and that gate is a data-loss fix.**
+  `doGet` returns `personIds: []` for *every* asset, so in name mode — where `person` is the
+  source of truth and nothing writes ids — an ungated sync overwrote `person` with `""` on
+  every single save. It shipped, and it wiped assignments on the live sheet before Eric hit
+  it. **Sandbox could not reproduce it**, because `MOCK_SNAPSHOT` rows carried no
+  `personIds` key at all and the `isArray` test was false there. That is the lesson, not the
+  line: a fixture whose SHAPE differs from the backend's actual response hides exactly the
+  bugs the fixture exists to catch. `loadData` now normalizes `personIds` to an array for
+  every asset from both sources, so fixture and backend agree.
+- **Converting closes any open edit form.** The conversion changes what the User field
+  means, and a draft seeded under the old meaning holds an empty `personIds`; saving it
+  afterwards wrote that empty array back and blanked that one asset. Same class of bug as
+  the one above, found in the same session by testing the two orders separately.
 - **The mode switch is ALL-OR-NOTHING, and that is load-bearing.** `usersAreAssets` means
   the conversion is *complete* (`unconvertedUserNames.length === 0`), not that some User
   record happens to exist. An earlier version meant the latter and had a real bug: in id
