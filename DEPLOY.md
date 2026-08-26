@@ -35,9 +35,10 @@ where the sign-in is stored.
    address you land on, which is what works where no browser can reach the terminal.
    The credential is written to `~/.clasprc.json` — never into this repo, which is public.
 
-3. **Record the Script ID** (Apps Script editor: Project Settings > IDs > Script ID):
+3. **Record the Script ID** (Sheet > Extensions > Apps Script > Project Settings > Script ID).
+   This prompts for it rather than making you edit the command, which matters on a phone:
 
-       echo '{"scriptId":"YOUR_ID_HERE"}' > ~/.bca-asset-tracker-deploy.json
+       read -p "Paste your Script ID: " id && printf '{"scriptId":"%s"}\n' "$id" > ~/.bca-asset-tracker-deploy.json
 
    `deploy.mjs` reads `./deploy.config.json` first and falls back to that home-directory
    copy. The home copy is what survives Cloud Shell re-cloning the repo each visit;

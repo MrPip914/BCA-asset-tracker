@@ -30,15 +30,18 @@ That should print your email address.
 
 ## Step 2: Save the Script ID (first visit only)
 
-Open the Apps Script editor, go to **Project Settings → IDs**, and copy the **Script ID**.
+First get the ID: open your Google Sheet, then **Extensions → Apps Script**, then
+**Project Settings** (the gear icon on the left), and copy the **Script ID**.
 
-Then run this with your ID pasted in place of `YOUR_ID_HERE`:
+Now run this. It will stop and ask for the ID — paste it at the prompt and press Enter.
+You do not need to edit the command.
 
 ```sh
-echo '{"scriptId":"YOUR_ID_HERE"}' > ~/.bca-asset-tracker-deploy.json
+read -p "Paste your Script ID: " id && printf '{"scriptId":"%s"}\n' "$id" > ~/.bca-asset-tracker-deploy.json && echo "Saved."
 ```
 
-This is saved in your home directory, which persists — you won't need to do it again.
+It prints `Saved.` when done. This lives in your home directory, which persists — you
+won't be asked again.
 
 ## Step 3: Deploy
 
