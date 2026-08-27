@@ -49,7 +49,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v29";
+const SCRIPT_VERSION = "v30";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -1553,29 +1553,36 @@ function backfillAuditIds_() {
    that save is rejected as a conflict and the app reloads (see "Optimistic
    concurrency" in CLAUDE.md).
 
-   NOTE ON SCOPES: reading the CSV from Drive adds the Drive scope to the whole
-   project, so the first deploy after this asks for a permission the script never
-   needed before, and the first use of the menu prompts for it too. Both are the
-   normal interactive flow — unlike UrlFetchApp in the WEB APP path, which fails
-   silently and needs forceAuthorizeExternalRequests above. DriveApp is only ever
-   called from a menu handler, never from doGet/doPost, so there is nothing here
-   that can fail invisibly.
+   NOTE ON SCOPES: nothing here asks for a permission the script does not already
+   hold. That is a constraint, not an accident — see IMPORT_TAB_NAME below for the
+   two designs that broke on it. The live manifest declares its oauthScopes
+   explicitly and deploy.mjs deliberately keeps the LIVE manifest, so a new API
+   here does not quietly acquire a scope; it fails at runtime instead.
 */
 
-// What "Import inventory" looks for in Drive when the prompt is left blank.
+// The tab "Import inventory" reads when the prompt is left blank.
 //
-// DRIVE, DELIBERATELY NOT A URL. The first version of this fetched the CSV from
-// the repo's raw URL, which was simpler but wrong: the repo is PUBLIC, so using
-// it would have published the school's whole inventory — 21 staff names, which
-// room each person sits in, and every device's serial number and hostname — to
-// the open internet, permanently, since git history outlives a deletion.
+// A TAB IN THIS SHEET, and the reason is worth knowing before anyone "improves"
+// it back to something more convenient. This has now been wrong twice:
 //
-// This script is bound to the Sheet and runs as its owner, so it already has
-// that person's Drive access. Reading the file straight from Drive needs no
-// sharing, no link, and nothing public. A URL is still accepted (see
-// adminReadSource_) for a genuinely public file, but it is no longer the path of
-// least resistance.
-const IMPORT_DRIVE_FILENAME = "BCA-inventory-import.csv";
+//   1. A raw URL from the repo. Simple, and it would have published the school's
+//      whole inventory — 21 staff by name, which room each sits in, every serial
+//      number and hostname — to a PUBLIC repo, permanently, since git history
+//      outlives a deletion.
+//   2. DriveApp.getFilesByName. Private, and it fails at runtime: the live
+//      manifest declares its oauthScopes explicitly, so Apps Script does not
+//      auto-detect the new Drive scope, and deploy.mjs deliberately keeps the
+//      LIVE manifest so a deploy can never alter the web app's access settings.
+//      Adding the scope is possible but not free — the web app executes as its
+//      owner, so between the deploy and the owner re-granting, EVERY user's
+//      requests fail. See forceAuthorizeExternalRequests for the same trap.
+//
+// A tab needs no scope at all: this script reads and writes tabs on every single
+// request already. The data never leaves the document, it is visible before it is
+// imported, and the tab is removed once the import succeeds so no second copy is
+// left lying around. An explicit http(s) URL still works for a genuinely public
+// file — UrlFetchApp is long since authorized.
+const IMPORT_TAB_NAME = "Import";
 
 // Every tab holding DATA, with the header row it should be left with when empty.
 // Config is deliberately absent — it holds the access allowlist and the app's
@@ -1674,15 +1681,16 @@ function menuImportInventory() {
   const ui = SpreadsheetApp.getUi();
   const asked = ui.prompt(
     "Import inventory",
-    "Leave blank to import the file named\n" + IMPORT_DRIVE_FILENAME + "\nfrom your Drive.\n\n" +
-      "Or type a different Drive filename, or paste a public CSV URL.",
+    'Leave blank to import the "' + IMPORT_TAB_NAME + '" tab of this Sheet.\n\n' +
+      "To create it: File > Import > Upload the CSV > Insert new sheet(s),\n" +
+      'then rename that tab to "' + IMPORT_TAB_NAME + '".\n\n' +
+      "Or type a different tab name, or paste a public CSV URL.",
     ui.ButtonSet.OK_CANCEL
   );
   if (asked.getSelectedButton() !== ui.Button.OK) return;
   const source = String(asked.getResponseText()).trim();
-  const describedSource = /^https?:\/\//i.test(source)
-    ? source
-    : "Drive: " + (source || IMPORT_DRIVE_FILENAME);
+  const fromUrl = /^https?:\/\//i.test(source);
+  const describedSource = fromUrl ? source : 'the "' + (source || IMPORT_TAB_NAME) + '" tab';
 
   let parsed;
   try {
@@ -1718,46 +1726,66 @@ function menuImportInventory() {
     usersList: "[]",
     nextAssetNumber: String(parsed.nextAssetNumber),
   });
-  ui.alert("Imported " + parsed.rows.length + " assets. Reload the app.");
+
+  // Drop the scratch tab once the data is safely in Assets. Leaving it would mean
+  // a second full copy of the inventory sitting in the document that no later
+  // wipe clears (it isn't in adminDataTabs_), and a stale one the next import
+  // would happily read again. Only after a successful write, and never for a URL
+  // import, which created no tab.
+  let removed = "";
+  if (!fromUrl) {
+    const name = source || IMPORT_TAB_NAME;
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const scratch = ss.getSheetByName(name);
+    // A spreadsheet must keep at least one sheet, so this can throw on a document
+    // holding nothing else. The import already succeeded by this point, so a
+    // failure to tidy up must not read as a failed import.
+    if (scratch) {
+      try {
+        ss.deleteSheet(scratch);
+        removed = '\n\nThe "' + name + '" tab has been removed.';
+      } catch (err) {
+        removed = '\n\nThe "' + name + '" tab could not be removed — delete it by hand.';
+      }
+    }
+  }
+  ui.alert("Imported " + parsed.rows.length + " assets. Reload the app." + removed);
 }
 
-// Resolves whatever the prompt returned to CSV text. Three shapes, in the order
-// they're least likely to leak anything: blank means the default Drive file, a
-// bare name means that Drive file, and only an explicit http(s) URL fetches.
-function adminReadSource_(source) {
+// Resolves whatever the prompt returned to a 2D grid of strings. A blank or a
+// bare name means a tab in this Sheet; only an explicit http(s) URL fetches.
+function adminReadGrid_(source) {
   const s = String(source || "").trim();
   if (/^https?:\/\//i.test(s)) {
     const res = UrlFetchApp.fetch(s, { muteHttpExceptions: true, followRedirects: true });
     if (res.getResponseCode() !== 200) {
       throw new Error("Fetch returned HTTP " + res.getResponseCode() + ".\nCheck the URL is reachable and public.");
     }
-    return res.getContentText("UTF-8");
+    // Strip a UTF-8 BOM — Sheets writes one on export, and parseCsv would fold it
+    // into the first header name, so "label" would never match.
+    return Utilities.parseCsv(res.getContentText("UTF-8").replace(/^﻿/, ""));
   }
-  const name = s || IMPORT_DRIVE_FILENAME;
-  const found = DriveApp.getFilesByName(name);
-  if (!found.hasNext()) {
-    throw new Error('No file named "' + name + '" in your Drive.\n\n' +
-      "Put the CSV anywhere in Drive under that name (My Drive, a folder, either " +
-      "works) and try again. It does not need to be shared.");
+  const name = s || IMPORT_TAB_NAME;
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
+  // Deliberately NOT getSheet_, which creates a missing tab. Silently making an
+  // empty "Import" tab and then reporting "no data rows" hides the real answer,
+  // which is that the file was never brought in.
+  if (!sheet) {
+    throw new Error('This Sheet has no tab named "' + name + '".\n\n' +
+      "In this spreadsheet: File > Import > Upload the CSV, and choose\n" +
+      '"Insert new sheet(s)". Rename the new tab to "' + name + '" if it\n' +
+      "came in under the file's name, then run this again.");
   }
-  const file = found.next();
-  // Drive happily holds several files with one name, and importing the wrong copy
-  // is exactly the mistake worth refusing rather than guessing at — this replaces
-  // the entire inventory.
-  if (found.hasNext()) {
-    throw new Error('More than one file in your Drive is named "' + name + '".\n\n' +
-      "Rename or remove the ones you don't want imported, so there is exactly one.");
-  }
-  return file.getBlob().getDataAsString("UTF-8");
+  // getDisplayValues, not getValues: Sheets turns a date-looking cell into a real
+  // Date on import, and getValues would hand back Date objects where the app
+  // expects plain "yyyy-MM-dd" strings. Display values are what is on screen.
+  return sheet.getDataRange().getDisplayValues();
 }
 
-// Reads and validates the CSV. Throws with a readable message rather than
+// Reads and validates the import. Throws with a readable message rather than
 // returning a half-result — the caller shows it and changes nothing.
 function adminParseAssetCsv_(source) {
-  // Strip a UTF-8 BOM — Sheets writes one on export, and parseCsv would otherwise
-  // fold it into the first header name, so "label" would never match.
-  const text = adminReadSource_(source).replace(/^﻿/, "");
-  const grid = Utilities.parseCsv(text);
+  const grid = adminReadGrid_(source);
   if (!grid || grid.length < 2) throw new Error("That file has no data rows.");
 
   const csvHeaders = grid[0].map(h => String(h).trim());

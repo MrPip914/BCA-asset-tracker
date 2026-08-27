@@ -253,22 +253,35 @@ per-device via `localStorage` (`SANDBOX_MODE_KEY`).
   - **It parses and summarises BEFORE it destroys anything** — the confirmation quotes real
     row counts from the fetched file, and every validation failure throws before
     `adminReplaceAll_`, whose first act is to empty the sheet.
-  - **The CSV is read from the owner's DRIVE, and that is a privacy decision, not a
-    convenience one.** The first version fetched it from the repo's raw URL — simpler, and
-    wrong: **this repo is public**, so that would have published the school's entire
-    inventory (21 staff by name, which room each sits in, every serial number and hostname)
-    permanently, since git history outlives a deletion. The script is bound to the Sheet
-    and runs as its owner, so it already has Drive access and needs no sharing, no link and
-    nothing public. `adminReadSource_` still accepts an explicit `http(s)` URL, but a blank
-    or bare-name answer means Drive — the low-friction path is the private one.
-    - Two files in Drive with the same name is a **refusal, not a first-match**: importing
-      the wrong copy replaces the whole inventory.
-    - **`import/` is gitignored** for the same reason, so the generated CSV, the source
-      xlsx and the transform scripts stay local. Nothing needs them in the repo.
-    - Reading Drive adds an OAuth scope the script never had, so the first deploy and the
-      first menu use each prompt once. Both are interactive, unlike `UrlFetchApp` in the
-      web-app path (see `forceAuthorizeExternalRequests`) — `DriveApp` is called only from
-      menu handlers, so nothing here can fail invisibly.
+  - **The data is read from a TAB in the Sheet, and getting here took two wrong turns
+    worth knowing about.** `adminReadGrid_` resolves a blank or bare-name answer to a tab
+    (`IMPORT_TAB_NAME`, "Import"); an explicit `http(s)` URL still fetches.
+    - **First wrong turn — a raw URL from this repo.** Simplest possible fetch, and it
+      would have published the school's entire inventory (21 staff by name, which room
+      each sits in, every serial number and hostname) to a **public repo**, permanently,
+      since git history outlives a deletion. **`import/` is gitignored** for that reason:
+      the generated CSV, the source xlsx and the transform scripts stay local.
+    - **Second wrong turn — `DriveApp.getFilesByName`.** Private, and it failed at runtime
+      with "You do not have permission to call DriveApp.getFilesByName". **The live
+      manifest declares its `oauthScopes` explicitly**, so Apps Script does not auto-detect
+      a newly used API's scope, and `deploy.mjs` deliberately keeps the LIVE manifest so a
+      deploy can never alter the web app's access settings. Adding the scope is possible
+      but not free: the web app executes as its owner, so between that deploy and the owner
+      re-granting, **every user's requests fail** — the same trap
+      `forceAuthorizeExternalRequests` documents for `UrlFetchApp`.
+    - **So the rule for anything added here: use an API the script already holds a scope
+      for.** `SpreadsheetApp` reads and writes tabs on every request already, so a tab
+      costs nothing. The data also never leaves the document, and is visible before it is
+      imported.
+    - `getDisplayValues()`, not `getValues()` — Sheets turns a date-looking cell into a
+      real `Date` on CSV import, and the app expects plain `yyyy-MM-dd` strings. Same
+      hazard `writeTable_`'s `setNumberFormat("@")` exists for, met from the other side.
+    - A missing tab **refuses and says how to create one**, deliberately not going through
+      `getSheet_`, which would create an empty tab and then report "no data rows" — hiding
+      the real answer, that the file never arrived.
+    - The scratch tab is **deleted once the write succeeds**, so no second copy of the
+      inventory is left in the document for a later import to read by mistake. A failure to
+      delete it is reported without claiming the import failed.
 - **Saving feedback is one flag, because `persist()` is the one choke point**: `isSaving`
   (plus a `savingRef` mirror) is set at the top of `persist()` and cleared in a `finally`,
   so it clears on success, on a network/backend failure, *and* on the conflict path that
@@ -1382,11 +1395,18 @@ When you do:
 
 ## Known constraints / things to watch
 
-- **The repo is at v29 and v29 is UNDEPLOYED as of 2026-08-26.** It adds the **BCA Admin
-  menu** — see "Wipe and import" under Architecture. Nothing in the app depends on it, so
-  an undeployed v29 costs only the menu (the Sheet shows no "BCA Admin"); every read and
-  write path is byte-identical to v28. Covered by `test-backend-admin.js`, which is the
-  only place it *can* be covered — Sandbox never contacts Apps Script.
+- **The repo is at v30 and v30 is UNDEPLOYED as of 2026-08-26.** It makes the admin import
+  read a **tab in the Sheet** instead of Drive. v29 (which IS deployed) shipped the
+  `DriveApp` version, and it fails at runtime — "You do not have permission to call
+  DriveApp.getFilesByName" — because the live manifest declares its scopes explicitly. See
+  "Wipe and import" under Architecture for why that isn't just a matter of adding the scope.
+  - Until v30 deploys, **"BCA Admin > Import inventory" does not work**; "Wipe all data"
+    does, since it touches nothing outside the Sheet. Nothing else is affected — no read or
+    write path in the app differs between v28, v29 and v30.
+  - Covered by `test-backend-admin.js`, which is the only place it *can* be covered —
+    Sandbox never contacts Apps Script, and this is a menu path a browser cannot reach.
+- **v29 is DEPLOYED, confirmed 2026-08-26** by fetching the `/exec` URL and reading
+  `scriptVersion` back. Superseded by v30 above; kept because it is what is live right now.
 - **v28 is DEPLOYED, confirmed 2026-08-26** by fetching the `/exec` URL and reading
   `scriptVersion` back. It adds the `personIds` column to Assets (see "Users are assets"
   under Data model), so assignments persist and the users conversion is safe to run

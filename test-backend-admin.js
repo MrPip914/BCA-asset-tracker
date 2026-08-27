@@ -48,21 +48,19 @@ const UrlFetchApp = {
     getContentText: () => fetchResponse.body,
   }),
 };
-// driveFiles maps a filename to the list of files Drive holds under it, so a test
-// can produce none (missing) or several (ambiguous) as well as the happy path.
-let driveFiles = {};
-const DriveApp = {
-  getFilesByName: (name) => {
-    const list = (driveFiles[name] || []).slice();
-    return {
-      hasNext: () => list.length > 0,
-      next: () => {
-        const body = list.shift();
-        return { getBlob: () => ({ getDataAsString: () => body }) };
-      },
-    };
-  },
+// tabs maps a tab name to its grid, so a test can produce a missing tab as well
+// as the happy path. getDisplayValues is what the real reader calls.
+let tabs = {};
+const SpreadsheetApp = {
+  getActiveSpreadsheet: () => ({
+    getSheetByName: (name) => tabs[name]
+      ? { getDataRange: () => ({ getDisplayValues: () => tabs[name] }) }
+      : null,
+  }),
 };
+// Turns CSV text into the grid a tab would hand back, so the same fixtures drive
+// both the tab path and the URL path.
+const asGrid = (text) => Utilities.parseCsv(text);
 const Utilities = {
   parseCsv: (s) => {
     const rows = []; let row = [], cell = '', q = false;
@@ -86,25 +84,25 @@ let writtenConfig = null;
 const SHEET_NAMES = { config: 'Config' };
 const writeTable_ = (name, headers, rows) => { writtenConfig = rows; };
 
-const driveNameSrc = src.slice(
-  src.indexOf('const IMPORT_DRIVE_FILENAME'),
-  src.indexOf(';', src.indexOf('const IMPORT_DRIVE_FILENAME')) + 1
+const tabNameSrc = src.slice(
+  src.indexOf('const IMPORT_TAB_NAME'),
+  src.indexOf(';', src.indexOf('const IMPORT_TAB_NAME')) + 1
 );
 
 const mod = {};
 new Function(
-  'module', 'UrlFetchApp', 'DriveApp', 'Utilities', 'SHEET_NAMES', 'writeTable_',
+  'module', 'UrlFetchApp', 'SpreadsheetApp', 'Utilities', 'SHEET_NAMES', 'writeTable_',
   constSrc('const ASSET_FIELDS = [') + '\n' +
   constSrc('const REVISION_DOMAINS = [') + '\n' +
   'const REVISION_KEY_PREFIX = "rev_";\n' +
-  driveNameSrc + '\n' +
+  tabNameSrc + '\n' +
   grab('readRevisions_') + '\n' +
-  grab('adminReadSource_') + '\n' +
+  grab('adminReadGrid_') + '\n' +
   grab('adminParseAssetCsv_') + '\n' +
   grab('adminWriteConfig_') + '\n' +
   'module.parse = adminParseAssetCsv_; module.writeConfig = adminWriteConfig_;' +
-  'module.ASSET_FIELDS = ASSET_FIELDS; module.DEFAULT_NAME = IMPORT_DRIVE_FILENAME;'
-)(mod, UrlFetchApp, DriveApp, Utilities, SHEET_NAMES, writeTable_);
+  'module.ASSET_FIELDS = ASSET_FIELDS; module.DEFAULT_NAME = IMPORT_TAB_NAME;'
+)(mod, UrlFetchApp, SpreadsheetApp, Utilities, SHEET_NAMES, writeTable_);
 const { parse, writeConfig, ASSET_FIELDS, DEFAULT_NAME } = mod;
 
 let pass = 0, fail = 0;
@@ -122,34 +120,32 @@ const throws = (name, fn, re) => {
     (ok ? '' : `\n        got  ${msg === null ? 'no throw' : JSON.stringify(msg)}\n        want match ${re}`));
   ok ? pass++ : fail++;
 };
-// Default path: the file sits in Drive under the default name and the prompt is
-// left blank. Every parse test below therefore also exercises the Drive branch.
+// Default path: the data sits in the default tab and the prompt is left blank.
+// Every parse test below therefore also exercises the tab branch.
 const csv = (body, code = 200) => {
   fetchResponse = { code, body };
-  driveFiles = {}; driveFiles[DEFAULT_NAME] = [body];
+  tabs = {}; tabs[DEFAULT_NAME] = asGrid(body);
   return () => parse('');
 };
 
-/* ---- adminReadSource_: where the CSV comes from ------------------------- */
+/* ---- adminReadGrid_: where the data comes from -------------------------- */
 
-// The whole point of the Drive default: nothing has to be published to import it.
-driveFiles = {}; driveFiles[DEFAULT_NAME] = ['label,type\nBCA0009,Computer\n'];
-eq('a blank prompt reads the default Drive file', parse('').rows[0].label, 'BCA0009');
+// The whole point of the tab default: no new OAuth scope, and nothing published.
+tabs = {}; tabs[DEFAULT_NAME] = asGrid('label,type\nBCA0009,Computer\n');
+eq('a blank prompt reads the default tab', parse('').rows[0].label, 'BCA0009');
 
-driveFiles = { 'other.csv': ['label,type\nBCA0011,Phone\n'] };
-eq('a bare name reads that Drive file', parse('other.csv').rows[0].label, 'BCA0011');
+tabs = { Other: asGrid('label,type\nBCA0011,Phone\n') };
+eq('a bare name reads that tab', parse('Other').rows[0].label, 'BCA0011');
 
-driveFiles = {};
-throws('a missing Drive file refuses',
-  () => parse(''), new RegExp('No file named "' + DEFAULT_NAME + '"'));
-
-// Drive allows duplicate names, and importing the wrong copy replaces the whole
-// inventory — so this refuses rather than taking the first hit.
-driveFiles = {}; driveFiles[DEFAULT_NAME] = ['label,type\nBCA0001,Computer\n', 'label,type\nBCA0002,Phone\n'];
-throws('two Drive files with one name refuse', () => parse(''), /More than one file/);
+// Must not fall through to getSheet_, which would CREATE an empty tab and then
+// report "no data rows" — hiding the real answer, that the file never arrived.
+tabs = {};
+throws('a missing tab refuses, naming it',
+  () => parse(''), new RegExp('no tab named "' + DEFAULT_NAME + '"'));
+throws('a missing tab explains how to make one', () => parse(''), /File > Import/);
 
 // A URL still works, but only when explicitly given.
-driveFiles = {};
+tabs = {};
 fetchResponse = { code: 200, body: 'label,type\nBCA0022,TV\n' };
 eq('an explicit http URL is fetched', parse('https://example.test/a.csv').rows[0].label, 'BCA0022');
 
