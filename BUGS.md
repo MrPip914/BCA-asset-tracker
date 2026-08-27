@@ -16,6 +16,31 @@ version that fixed them.
 
 ## Open
 
+### `MOCK_SNAPSHOT` uses real staff names, and the repo is public
+**Found:** 2026-08-26, while scanning the v29 commit for anything that shouldn't be
+published — pre-existing, not introduced by that change.
+**Needs a deploy:** no — `index.html` only.
+**Confirmed:** by `grep` over the tracked files, and by fetching the GitHub API
+anonymously to verify `"visibility": "public"`.
+
+The sandbox fixture names six real people — Jen Kramer, Aaron Cantrell, Denise Sloan,
+Kelly Mackinga, Dillon Jacobsma — against real room numbers, and `Kramer Residence` /
+`Kramer Campus` name a staff member's home. `index.html` is committed and served from
+GitHub Pages, so all of that is already public and already in git history.
+
+Not as bad as it could be: every serial in the fixture is `MOCK-*`, there are no real
+hostnames, and a school's staff list is semi-public anyway. What is actually exposed is
+the mapping of person → room, plus one person's residence.
+
+Worth fixing because the fixture has no reason to use real names — invented ones would
+exercise exactly the same code paths. Renaming them in `MOCK_SNAPSHOT` fixes it going
+forward; scrubbing history would mean a force-push and is probably not worth it for
+this. Decide which.
+
+**Blocks:** nothing.
+
+---
+
 ### A failed sign-in hangs on "Checking your access…" forever
 **Found:** 2026-08-24, while testing v22 sign-in against a backend still running v21.
 **Needs a deploy:** no — `index.html` only.

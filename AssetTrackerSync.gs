@@ -49,7 +49,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v28";
+const SCRIPT_VERSION = "v29";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -1525,4 +1525,290 @@ function backfillAuditIds_() {
   } finally {
     lock.releaseLock();
   }
+}
+
+/* ============================================================================
+   ADMIN TOOLS — wipe and import, as a menu on the Sheet itself
+   ============================================================================
+
+   Replacing the inventory used to be a documented nine-step ritual: import a CSV
+   into the Assets tab by hand, clear eight child tabs one at a time, then edit
+   individual Config rows. Every step was a chance to clear the wrong tab, and one
+   of them (leaving a stale `usersList`) silently flips the app back to legacy
+   name mode and wipes every assignment on the next save.
+
+   These two menu items do the whole thing. They live here rather than in a Node
+   script because the /exec endpoint requires a signed-in session (v18+), and the
+   only way to get one into a script would be to copy a live credential out of a
+   browser. Running inside the bound script needs no credential at all — the
+   Sheet's own authorization IS the auth — and it works from a phone.
+
+   `onOpen` is a simple trigger, so the menu appears on every open with no
+   installation step. The handlers must NOT end in `_`: Apps Script treats a
+   trailing underscore as private and refuses to wire it to a menu item.
+
+   Both operations bump every revision counter, which is load-bearing rather than
+   tidy: a browser left open still holds the pre-wipe snapshot, and without the
+   bump its next save would happily overwrite everything this just did. With it,
+   that save is rejected as a conflict and the app reloads (see "Optimistic
+   concurrency" in CLAUDE.md).
+
+   NOTE ON SCOPES: reading the CSV from Drive adds the Drive scope to the whole
+   project, so the first deploy after this asks for a permission the script never
+   needed before, and the first use of the menu prompts for it too. Both are the
+   normal interactive flow — unlike UrlFetchApp in the WEB APP path, which fails
+   silently and needs forceAuthorizeExternalRequests above. DriveApp is only ever
+   called from a menu handler, never from doGet/doPost, so there is nothing here
+   that can fail invisibly.
+*/
+
+// What "Import inventory" looks for in Drive when the prompt is left blank.
+//
+// DRIVE, DELIBERATELY NOT A URL. The first version of this fetched the CSV from
+// the repo's raw URL, which was simpler but wrong: the repo is PUBLIC, so using
+// it would have published the school's whole inventory — 21 staff names, which
+// room each person sits in, and every device's serial number and hostname — to
+// the open internet, permanently, since git history outlives a deletion.
+//
+// This script is bound to the Sheet and runs as its owner, so it already has
+// that person's Drive access. Reading the file straight from Drive needs no
+// sharing, no link, and nothing public. A URL is still accepted (see
+// adminReadSource_) for a genuinely public file, but it is no longer the path of
+// least resistance.
+const IMPORT_DRIVE_FILENAME = "BCA-inventory-import.csv";
+
+// Every tab holding DATA, with the header row it should be left with when empty.
+// Config is deliberately absent — it holds the access allowlist and the app's
+// configuration, neither of which is inventory data. See adminWriteConfig_.
+function adminDataTabs_() {
+  return [
+    { name: SHEET_NAMES.assets, headers: ASSET_FIELDS },
+    { name: SHEET_NAMES.comments, headers: ["assetLabel", "text", "at", "by"] },
+    { name: SHEET_NAMES.changes, headers: ["assetLabel", "changeType", "vendor", "cost", "note", "at", "by"] },
+    { name: SHEET_NAMES.allocations, headers: ["assetLabel", "room", "quantity"] },
+    { name: SHEET_NAMES.maintenance, headers: ["assetLabel", "task", "frequencyLabel", "frequencyDays", "lastPerformed", "owner", "at", "by"] },
+    { name: SHEET_NAMES.breakers, headers: BREAKER_FIELDS },
+    { name: SHEET_NAMES.circuits, headers: CIRCUIT_FIELDS },
+    { name: SHEET_NAMES.breakerTypes, headers: BREAKER_TYPE_FIELDS },
+    { name: SHEET_NAMES.audit, headers: AUDIT_FIELDS },
+  ];
+}
+
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu("BCA Admin")
+    .addItem("Import inventory (replaces everything)...", "menuImportInventory")
+    .addSeparator()
+    .addItem("Wipe all data...", "menuWipeAllData")
+    .addToUi();
+}
+
+// Rewrites Config, overriding only the named keys and copying every other row
+// through untouched — which is what preserves `authUsers`. Writing a fixed key
+// list here instead would blank the allowlist and lock out everyone but
+// OWNER_EMAIL, the same hazard doPost's authUsers handling exists to avoid.
+// Revision counters are re-stated at their bumped values.
+function adminWriteConfig_(configMap, overrides) {
+  const rows = [];
+  Object.keys(overrides).forEach(k => rows.push({ key: k, value: overrides[k] }));
+  Object.keys(configMap).forEach(k => {
+    if (k in overrides) return;
+    if (k.indexOf(REVISION_KEY_PREFIX) === 0) return;
+    rows.push({ key: k, value: String(configMap[k]) });
+  });
+  const revisions = readRevisions_(configMap);
+  REVISION_DOMAINS.forEach(d =>
+    rows.push({ key: REVISION_KEY_PREFIX + d, value: String(revisions[d] + 1) })
+  );
+  writeTable_(SHEET_NAMES.config, ["key", "value"], rows);
+}
+
+// Empties every data tab, leaving each one's header row. Assets can optionally be
+// refilled in the same locked section, so an import never leaves the sheet in a
+// half-wiped state if something fails partway.
+function adminReplaceAll_(assetHeaders, assetRows, configOverrides) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const configMap = readConfigMap_();
+    adminDataTabs_().forEach(t => {
+      const isAssets = t.name === SHEET_NAMES.assets;
+      writeTable_(
+        t.name,
+        isAssets && assetHeaders ? assetHeaders : t.headers,
+        isAssets && assetRows ? assetRows : []
+      );
+    });
+    adminWriteConfig_(configMap, configOverrides);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function menuWipeAllData() {
+  const ui = SpreadsheetApp.getUi();
+  const typed = ui.prompt(
+    "Wipe all data",
+    "This permanently empties Assets, Comments, Changes, Allocations, Maintenance, " +
+      "Breakers, Circuits, BreakerTypes and AuditLog.\n\n" +
+      "Sign-in access and column/type settings are kept.\n\n" +
+      "File > Version history is the only undo. Type WIPE to confirm:",
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (typed.getSelectedButton() !== ui.Button.OK) return;
+  if (String(typed.getResponseText()).trim().toUpperCase() !== "WIPE") {
+    ui.alert("Cancelled — nothing was changed.");
+    return;
+  }
+  adminReplaceAll_(null, null, {
+    usersList: "[]",
+    peripheralsList: "[]",
+    // 0 reads as "never stored", so the app re-derives the next label from the
+    // assets themselves — which, with none left, starts over at BCA0001.
+    nextAssetNumber: "0",
+  });
+  ui.alert("Done — every data tab is empty. Reload the app.");
+}
+
+function menuImportInventory() {
+  const ui = SpreadsheetApp.getUi();
+  const asked = ui.prompt(
+    "Import inventory",
+    "Leave blank to import the file named\n" + IMPORT_DRIVE_FILENAME + "\nfrom your Drive.\n\n" +
+      "Or type a different Drive filename, or paste a public CSV URL.",
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (asked.getSelectedButton() !== ui.Button.OK) return;
+  const source = String(asked.getResponseText()).trim();
+  const describedSource = /^https?:\/\//i.test(source)
+    ? source
+    : "Drive: " + (source || IMPORT_DRIVE_FILENAME);
+
+  let parsed;
+  try {
+    parsed = adminParseAssetCsv_(source);
+  } catch (err) {
+    ui.alert("Import failed — nothing was changed.\n\n" + err.message);
+    return;
+  }
+
+  // Everything above this point is read-only, so the summary describes real
+  // parsed data rather than a promise. Nothing is destroyed until OK is clicked.
+  const ok = ui.alert(
+    "Replace everything with this?",
+    parsed.rows.length + " assets parsed from:\n" + describedSource + "\n\n" +
+      parsed.summary + "\n\n" +
+      "This REPLACES the whole inventory and empties every child tab (comments, " +
+      "maintenance, breakers, audit log...). Sign-in access is kept.\n\n" +
+      "File > Version history is the only undo.",
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (ok !== ui.Button.OK) return;
+
+  adminReplaceAll_(parsed.headers, parsed.rows, {
+    // Derived from the file rather than hand-maintained, so the managed list can
+    // never drift from what the assets actually reference.
+    peripheralsList: JSON.stringify(parsed.peripherals),
+    // Emptied on purpose. The app rebuilds it from the assets on load, and a
+    // stale name left here with no matching User asset would make
+    // `usersAreAssets` false -- dropping the app back to legacy name mode, where
+    // every personIds assignment renders as unassigned and the next save writes
+    // that emptiness back. That is the most destructive thing this import could
+    // get wrong, and it is the step the manual process kept getting wrong.
+    usersList: "[]",
+    nextAssetNumber: String(parsed.nextAssetNumber),
+  });
+  ui.alert("Imported " + parsed.rows.length + " assets. Reload the app.");
+}
+
+// Resolves whatever the prompt returned to CSV text. Three shapes, in the order
+// they're least likely to leak anything: blank means the default Drive file, a
+// bare name means that Drive file, and only an explicit http(s) URL fetches.
+function adminReadSource_(source) {
+  const s = String(source || "").trim();
+  if (/^https?:\/\//i.test(s)) {
+    const res = UrlFetchApp.fetch(s, { muteHttpExceptions: true, followRedirects: true });
+    if (res.getResponseCode() !== 200) {
+      throw new Error("Fetch returned HTTP " + res.getResponseCode() + ".\nCheck the URL is reachable and public.");
+    }
+    return res.getContentText("UTF-8");
+  }
+  const name = s || IMPORT_DRIVE_FILENAME;
+  const found = DriveApp.getFilesByName(name);
+  if (!found.hasNext()) {
+    throw new Error('No file named "' + name + '" in your Drive.\n\n' +
+      "Put the CSV anywhere in Drive under that name (My Drive, a folder, either " +
+      "works) and try again. It does not need to be shared.");
+  }
+  const file = found.next();
+  // Drive happily holds several files with one name, and importing the wrong copy
+  // is exactly the mistake worth refusing rather than guessing at — this replaces
+  // the entire inventory.
+  if (found.hasNext()) {
+    throw new Error('More than one file in your Drive is named "' + name + '".\n\n' +
+      "Rename or remove the ones you don't want imported, so there is exactly one.");
+  }
+  return file.getBlob().getDataAsString("UTF-8");
+}
+
+// Reads and validates the CSV. Throws with a readable message rather than
+// returning a half-result — the caller shows it and changes nothing.
+function adminParseAssetCsv_(source) {
+  // Strip a UTF-8 BOM — Sheets writes one on export, and parseCsv would otherwise
+  // fold it into the first header name, so "label" would never match.
+  const text = adminReadSource_(source).replace(/^﻿/, "");
+  const grid = Utilities.parseCsv(text);
+  if (!grid || grid.length < 2) throw new Error("That file has no data rows.");
+
+  const csvHeaders = grid[0].map(h => String(h).trim());
+  if (csvHeaders.indexOf("label") === -1 || csvHeaders.indexOf("type") === -1) {
+    throw new Error("Expected 'label' and 'type' columns.\nFound: " + csvHeaders.join(", "));
+  }
+
+  const rows = grid.slice(1)
+    .filter(r => r.some(c => String(c).trim() !== ""))
+    .map(r => {
+      const obj = {};
+      csvHeaders.forEach((h, i) => { obj[h] = r[i] === undefined ? "" : r[i]; });
+      return obj;
+    });
+
+  const seen = {}, dupes = [];
+  rows.forEach(r => {
+    const l = String(r.label || "").trim();
+    if (!l) return;
+    if (seen[l]) dupes.push(l); else seen[l] = true;
+  });
+  if (dupes.length) {
+    // Two assets sharing a label are not two assets — every lookup in the app
+    // matches ALL rows carrying that label, so they merge with no way back apart.
+    throw new Error("Duplicate labels: " + dupes.slice(0, 5).join(", ") + (dupes.length > 5 ? "..." : ""));
+  }
+
+  // ASSET_FIELDS first so the tab keeps its canonical column order, then any
+  // extra column the file carries (a custom column) appended after.
+  const headers = ASSET_FIELDS.slice();
+  csvHeaders.forEach(h => { if (headers.indexOf(h) === -1) headers.push(h); });
+
+  const peripherals = [];
+  rows.forEach(r => String(r.peripherals || "").split(",").forEach(p => {
+    const v = p.trim();
+    if (v && peripherals.indexOf(v) === -1) peripherals.push(v);
+  }));
+  peripherals.sort();
+
+  let highest = 0;
+  rows.forEach(r => {
+    const m = /^BCA(\d+)$/i.exec(String(r.label || "").trim());
+    if (m) highest = Math.max(highest, Number(m[1]));
+  });
+
+  const byType = {};
+  rows.forEach(r => {
+    const t = String(r.type || "(none)").trim() || "(none)";
+    byType[t] = (byType[t] || 0) + 1;
+  });
+  const summary = Object.keys(byType).sort().map(t => byType[t] + " " + t).join(", ");
+
+  return { headers, rows, peripherals, nextAssetNumber: highest + 1, summary };
 }

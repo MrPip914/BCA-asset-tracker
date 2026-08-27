@@ -227,6 +227,48 @@ per-device via `localStorage` (`SANDBOX_MODE_KEY`).
   tab wholesale, Config is now rewritten whenever *any* domain is written. When config
   itself isn't dirty its stored rows are copied straight back unparsed (including keys the
   script doesn't know about), so the content is unchanged — only the counters move.
+- **Wipe and import are a menu on the Sheet, not a script (backend v29).** `onOpen` adds a
+  **BCA Admin** menu with "Import inventory" and "Wipe all data"; both empty every data tab
+  and rewrite Config in one `LockService` section.
+  - **Why not a Node script, which is what was asked for.** `/exec` needs a signed-in
+    session (v18+), so a script could only get one by copying a live credential out of a
+    browser. Inside the bound script there is no credential at all — the Sheet's own
+    authorization is the auth — and it works from a phone, which is where Eric operates.
+  - **Menu handlers must NOT end in `_`.** Apps Script treats a trailing underscore as
+    private and silently refuses to wire it to a menu item. Every helper here keeps the
+    underscore; only the four `menu*`/`onOpen` entry points drop it.
+  - **Both bump every revision counter**, which is load-bearing rather than tidy: a browser
+    left open still holds the pre-wipe snapshot, and without the bump its next save would
+    overwrite everything the import just did. With it, that save is refused as a conflict
+    and the app reloads.
+  - **`adminWriteConfig_` copies through every key it wasn't asked to change**, which is
+    what preserves `authUsers`. A fixed key list there would blank the allowlist and lock
+    out everyone but `OWNER_EMAIL` — the same hazard `doPost`'s own `authUsers` handling
+    exists to avoid, met again in a second place.
+  - **The import sets `usersList` to `[]` deliberately.** A stale name with no matching
+    User asset makes `usersAreAssets` false, dropping the app to legacy name mode where
+    every `personIds` assignment renders as unassigned and the next save writes that back.
+    That is the single most destructive thing this can get wrong, and it is exactly what
+    the by-hand process kept getting wrong.
+  - **It parses and summarises BEFORE it destroys anything** — the confirmation quotes real
+    row counts from the fetched file, and every validation failure throws before
+    `adminReplaceAll_`, whose first act is to empty the sheet.
+  - **The CSV is read from the owner's DRIVE, and that is a privacy decision, not a
+    convenience one.** The first version fetched it from the repo's raw URL — simpler, and
+    wrong: **this repo is public**, so that would have published the school's entire
+    inventory (21 staff by name, which room each sits in, every serial number and hostname)
+    permanently, since git history outlives a deletion. The script is bound to the Sheet
+    and runs as its owner, so it already has Drive access and needs no sharing, no link and
+    nothing public. `adminReadSource_` still accepts an explicit `http(s)` URL, but a blank
+    or bare-name answer means Drive — the low-friction path is the private one.
+    - Two files in Drive with the same name is a **refusal, not a first-match**: importing
+      the wrong copy replaces the whole inventory.
+    - **`import/` is gitignored** for the same reason, so the generated CSV, the source
+      xlsx and the transform scripts stay local. Nothing needs them in the repo.
+    - Reading Drive adds an OAuth scope the script never had, so the first deploy and the
+      first menu use each prompt once. Both are interactive, unlike `UrlFetchApp` in the
+      web-app path (see `forceAuthorizeExternalRequests`) — `DriveApp` is called only from
+      menu handlers, so nothing here can fail invisibly.
 - **Saving feedback is one flag, because `persist()` is the one choke point**: `isSaving`
   (plus a `savingRef` mirror) is set at the top of `persist()` and cleared in a `finally`,
   so it clears on success, on a network/backend failure, *and* on the conflict path that
@@ -1340,13 +1382,20 @@ When you do:
 
 ## Known constraints / things to watch
 
-- **The repo is at v28 and v28 is UNDEPLOYED as of 2026-08-26.** It adds the `personIds`
-  column to Assets (see "Users are assets" under Data model). Until it's deployed, a
-  `personIds` value the app sends is dropped on write and assignments read back from the
-  legacy `person` column, so the conversion appears to work in-session and forgets on
-  reload. **Do not run the conversion against the live sheet until v28 is deployed** — it
-  would create the User assets (those persist) while the assignments pointing at them would
-  not, leaving records nothing refers to. Sandbox is unaffected, as ever.
+- **The repo is at v29 and v29 is UNDEPLOYED as of 2026-08-26.** It adds the **BCA Admin
+  menu** — see "Wipe and import" under Architecture. Nothing in the app depends on it, so
+  an undeployed v29 costs only the menu (the Sheet shows no "BCA Admin"); every read and
+  write path is byte-identical to v28. Covered by `test-backend-admin.js`, which is the
+  only place it *can* be covered — Sandbox never contacts Apps Script.
+- **v28 is DEPLOYED, confirmed 2026-08-26** by fetching the `/exec` URL and reading
+  `scriptVersion` back. It adds the `personIds` column to Assets (see "Users are assets"
+  under Data model), so assignments persist and the users conversion is safe to run
+  against the live sheet.
+  - **This entry said UNDEPLOYED on the same day the deploy landed** — the same failure as
+    the v26 entry two below, which the entry itself calls a standing warning. It is worth
+    stating once more because it keeps happening: a line here recording a deploy state is
+    stale the moment someone deploys, and nothing prompts anyone to update it. One `curl`
+    of the `/exec` URL settles it in a second, unauthenticated. **Check, don't read.**
 - **v27 is DEPLOYED, confirmed 2026-08-26** by fetching the `/exec` URL and reading
   `scriptVersion` back. It adds the `related` column
   to AuditLog (see "Audit entries name the OTHER assets they concern" under Data model) and
