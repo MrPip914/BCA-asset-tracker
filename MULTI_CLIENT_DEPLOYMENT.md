@@ -1,12 +1,14 @@
 # Multi-client deployment
 
-**Status: proposal, nothing implemented in the app.** This is the plan for running the app
+**Status: Phase 0 shipped; the rest is still a proposal.** This is the plan for running the app
 for several schools at once, with a development instance to work against instead of testing
 on a live client. Ownership and hosting are now decided (see Decisions made); the remaining
 open questions are at the bottom.
 
-The hosting half is already done and live: Brookside runs at `https://assets.stama.tech`
-as of 2026-09-04. Nothing in the app changed for it — no `?client=` yet, one backend.
+The hosting half is done and live: Brookside runs at `https://assets.stama.tech` as of
+2026-09-04. Phase 0 landed the same day, so the app now resolves a tenant from `?client=`
+and reads every per-school value from `clients.js` — but only one tenant exists, so nothing
+about Brookside's behaviour changed. Phase 1 (a dev tenant) is the next thing that would.
 
 ## The finding that makes this small
 
@@ -253,8 +255,8 @@ worth moving until someone actually asks for it.
 
 | Phase | Work | Result |
 |---|---|---|
-| 0 | Extract config to `clients.js` + `resolveClient()`; namespace `localStorage`; thread the config through the 3 HTML files | No behaviour change. BCA byte-identical in use. Verifiable before anything else moves. |
-| 1 | Dev tenant: Sheet, script, a `dev` entry in `clients.js`, seed from `MOCK_SNAPSHOT` | Stop testing backend changes on the school. |
+| 0 | **DONE** (2026-09-04) — `clients.js`, namespaced `localStorage` with a one-time adoption of the old keys, config threaded through all 3 HTML files, tenant carried on every built URL | No behaviour change for Brookside. Verified in a headless browser: renders, sandbox loads, About names the tenant, a second tenant gets its own branding/keys/prefix, an unknown id falls back, and the old storage keys migrate for the default tenant only. |
+| 1 | **NEXT** — Dev tenant: Sheet, script, a `dev` entry in `clients.js`, seed from `MOCK_SNAPSHOT` | Stop testing backend changes on the school. |
 | 2 | `deploy.mjs --client/--all/--status`; config moves to a per-tenant home file | One command to deploy or audit every backend. |
 | 3 | First real client onboarded; write `ONBOARDING.md` from what actually happened | Two live clients. |
 | 4 | Optional, only if wanted: per-client theming, pinned frontend releases, Cloudflare Pages | Staged rollout, custom domains. |

@@ -70,6 +70,10 @@ Three things that make this non-optional rather than a convenience:
 
 - `BUGS.md` — known bugs, why they happen, whether fixing one needs an Apps Script
   deploy, and what each blocks. Read it before starting anything substantial.
+- `clients.js` — the tenant registry: one entry per school, holding everything that
+  differs between them (backend URL, app/org name, asset-ID prefix). Loaded by
+  `index.html`, `panel.html` and `panel-qr-sheet.html` in `<head>` before anything else
+  runs. See "Multiple clients" below.
 - `index.html` — the entire app. No build step, no npm install. React, ReactDOM,
   lucide-react (icons), and xlsx (SheetJS, for the Excel export button) are all loaded
   from esm.sh/unpkg via an import map. Babel Standalone transpiles the JSX in-browser
@@ -134,6 +138,63 @@ per-device via `localStorage` (`SANDBOX_MODE_KEY`).
   by Claude Code, which can flip the toggle via the same UI — without needing a redeploy
   first. Only flip Sandbox OFF and redeploy once the feature is actually done, so a
   schema change only needs *one* "paste + redeploy" instead of one per iteration.
+
+## Multiple clients (tenants)
+
+The app runs for more than one school from **one deployed frontend**. A tenant is a Google
+Sheet + its own bound Apps Script deployment + an entry in `clients.js`; picked per request
+with `?client=<id>` (or `?c=<id>`, the short form for QR stickers), defaulting to `bca`.
+`MULTI_CLIENT_DEPLOYMENT.md` is the full plan, including the release order and how to
+onboard one.
+
+- **The backend needed no change at all, and that is the load-bearing fact.**
+  `AssetTrackerSync.gs` reads its Sheet through `SpreadsheetApp.getActiveSpreadsheet()` and
+  never `openById`, so the identical file deploys unchanged to any number of script
+  projects, each bound to its own Sheet. There is no tenant id in the backend, nothing to
+  partition, and no cross-client query that could be got wrong — isolation is structural.
+  The corollary is operational, not architectural: **a backend change now has to be
+  deployed to every tenant**, one `node deploy.mjs` each.
+- **`window.ASSET_TRACKER_CLIENT` is the only source of per-school values.** Nothing else
+  should name a school, a deployment URL or an ID prefix. `index.html` reads it once into
+  `CLIENT` at module scope and derives `SHEET_API_URL`, `ASSET_LABEL_PREFIX`, `APP_NAME`
+  and `ORG_NAME` from it. `ASSET_LABEL_RE` is *built* from the prefix rather than written
+  out, or a tenant whose assets read `SMA0001` would count none of its own labels.
+- **One file for every tenant, not one file per tenant.** Per-tenant JSON would have to be
+  fetched before the app knew which backend to talk to — a round trip and a loading state
+  in front of every page load, and an async step in a codebase with no build to absorb it.
+  A `<script src>` is already resolved when the app starts. Splitting hides nothing either:
+  the `/exec` URLs are public and are protected by sign-in, not obscurity.
+- **`GOOGLE_CLIENT_ID` / `OAUTH_CLIENT_ID` stay SHARED and are deliberately not in
+  `clients.js`.** Google only answers "is this really them?"; the per-Sheet `authUsers`
+  allowlist answers "may they in". Holding a client id authorizes nothing, so one client
+  leaks nothing between tenants, and it keeps the authorized-JavaScript-origins list to one
+  entry rather than one per school.
+- **Every `localStorage` key is namespaced by tenant** (`CLIENT.storageKey()` →
+  `asset-tracker-session:bca`). All tenants share one origin, so without it opening client B
+  after client A hands B's backend A's session id — rejected correctly, so not a hole, but
+  it presents as a mysteriously broken sign-in, which is worse to diagnose than to prevent.
+  **Namespaced for the default tenant too**, and `adoptLegacyStorageKeys()` migrates the
+  pre-namespace values once instead. Letting the default keep the bare keys would have
+  skipped that migration at the price of stored sessions silently transferring if
+  `DEFAULT_CLIENT_ID` ever changed. **The adoption is default-tenant-only** — the bare keys
+  were written when there was one tenant, so they belong to whoever the default is; adopting
+  them for an arbitrary `?client=` would hand a second school the first one's session.
+- **Every URL the app builds carries the tenant**, via `CLIENT.urlParam()` — the panel deep
+  link, the QR-sheet link, and every printed sticker. It returns `""` for the default, so
+  Brookside's links and stickers keep exactly the shape they already have. **A sticker is
+  the one artifact here that cannot be redeployed**: it ends up taped inside a panel door,
+  so one printed without the tenant resolves to the default forever.
+- **An unknown `?client=` falls back to the default rather than refusing**, and the About
+  panel's `Client` row says which tenant resolved and flags the fallback. Refusing would be
+  no safer — access is decided by that tenant's allowlist, not by which config loaded — and
+  a silent fallback with nothing on screen makes "why am I looking at the wrong school"
+  unanswerable from inside the app.
+- **`MOCK_SNAPSHOT` is still Brookside's fixture for every tenant.** Sandbox on a second
+  school shows Brookside campus names. Harmless (Sandbox touches no backend) and left alone
+  deliberately: the fixture is hand-maintained and generalising it is not what Phase 0 was
+  for. Worth doing when a second tenant actually exists.
+- **Per-client theming is deferred.** The palette is Brookside's, shared. Adding it later is
+  a `theme` key in `clients.js` and nothing else.
 
 ## Architecture
 
@@ -1395,14 +1456,19 @@ When you do:
 
 ## Known constraints / things to watch
 
-- **The repo is at v30 and v30 is UNDEPLOYED as of 2026-08-26.** It makes the admin import
-  read a **tab in the Sheet** instead of Drive. v29 (which IS deployed) shipped the
-  `DriveApp` version, and it fails at runtime — "You do not have permission to call
-  DriveApp.getFilesByName" — because the live manifest declares its scopes explicitly. See
-  "Wipe and import" under Architecture for why that isn't just a matter of adding the scope.
-  - Until v30 deploys, **"BCA Admin > Import inventory" does not work**; "Wipe all data"
-    does, since it touches nothing outside the Sheet. Nothing else is affected — no read or
-    write path in the app differs between v28, v29 and v30.
+- **v30 is DEPLOYED, confirmed 2026-09-04** by fetching the `/exec` URL and reading
+  `scriptVersion` back. It makes the admin import read a **tab in the Sheet** instead of
+  Drive. v29 shipped the `DriveApp` version, which failed at runtime — "You do not have
+  permission to call DriveApp.getFilesByName" — because the live manifest declares its
+  scopes explicitly. See "Wipe and import" under Architecture for why that was not just a
+  matter of adding the scope.
+  - So **"BCA Admin > Import inventory" works**. This entry said the opposite, and said it
+    for over a week: it read "v30 is UNDEPLOYED as of 2026-08-26", written the day v30 was
+    still pending and never updated when it landed. **That is the third time a deploy-state
+    line here has gone stale** — the v26 and v28 entries below both record the same failure
+    about themselves, and one of them cost a session real work. The standing instruction is
+    two lines down and is worth obeying: a line in this file is not evidence. One `curl` of
+    the `/exec` answers it in a second, unauthenticated. **Check, don't read.**
   - Covered by `test-backend-admin.js`, which is the only place it *can* be covered —
     Sandbox never contacts Apps Script, and this is a menu path a browser cannot reach.
 - **v29 is DEPLOYED, confirmed 2026-08-26** by fetching the `/exec` URL and reading

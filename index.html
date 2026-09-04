@@ -3,7 +3,12 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>BCA Asset Tracker</title>
+<title>Asset Tracker</title>
+<!-- Tenant config. Must load BEFORE the app: it decides which backend this page
+     talks to and what it calls itself. A plain script tag rather than a fetch so
+     the answer is already there when the app starts — see clients.js. -->
+<script src="clients.js"></script>
+<script>document.title = window.ASSET_TRACKER_CLIENT.appName;</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
@@ -739,7 +744,10 @@ const MAINTENANCE_STATUS_FILTER_OPTIONS = [
   { value: "never", label: "Never done" },
 ];
 
-// Brookside Christian Academy palette (from brooksideacademy.com)
+// The default palette (Brookside Christian Academy's, from brooksideacademy.com).
+// Shared by every tenant for now — per-client theming is deliberately deferred,
+// since a colour scheme is worth far less than the app pointing at the right
+// Sheet, and adding it later is a `theme` key in clients.js and nothing else.
 const C = {
   bg: "#F4F0E6",
   surface: "#FFFFFF",
@@ -1293,16 +1301,48 @@ function groupDetailColumns(cols) {
   return groups.filter(g => g.columns.length > 0);
 }
 
-const USER_STORAGE_KEY = "asset-tracker-user"; // localStorage — who's using this browser
+// The tenant this page is serving, resolved in clients.js from ?client= before
+// this script ran. Everything that differs between schools hangs off it; nothing
+// below should name a school, a deployment URL or an ID prefix directly.
+const CLIENT = window.ASSET_TRACKER_CLIENT;
+const APP_NAME = CLIENT.appName;
+const ORG_NAME = CLIENT.orgName;
+
+// Pre-namespace localStorage values, adopted once so the change to namespaced
+// keys doesn't sign everyone out and lose their column layout.
+//
+// DEFAULT TENANT ONLY, and that restriction is the whole correctness argument:
+// the bare keys were written back when there was exactly one tenant, so they
+// belong to whoever the default is. Adopting them for an arbitrary ?client=
+// would hand a second school the first one's session id.
+function adoptLegacyStorageKeys() {
+  if (!CLIENT.isDefault) return;
+  try {
+    ["asset-tracker-user", "asset-tracker-column-visibility", "asset-tracker-session",
+     "asset-tracker-sandbox-mode", "asset-tracker-sandbox-data"].forEach(base => {
+      const legacy = localStorage.getItem(base);
+      if (legacy === null) return;
+      const key = CLIENT.storageKey(base);
+      if (localStorage.getItem(key) === null) localStorage.setItem(key, legacy);
+      localStorage.removeItem(base);
+    });
+  } catch (e) {
+    /* private mode or blocked storage — the app tolerates missing storage everywhere else too */
+  }
+}
+adoptLegacyStorageKeys();
+
+const USER_STORAGE_KEY = CLIENT.storageKey("asset-tracker-user"); // localStorage — who's using this browser
 // localStorage — per-device column show/hide overrides. Column *definitions*
 // (key/label/width/custom flag) stay server-synced since custom columns add a
 // real field to every asset; only which ones are shown on THIS device is local,
 // so one person's view preference stops overriding everyone else's, and toggling
 // needs no server round-trip.
-const COLUMN_VISIBILITY_STORAGE_KEY = "asset-tracker-column-visibility";
-// Your deployed Apps Script Web App URL. Redeploy in Apps Script (Deploy > Manage
-// deployments > New version) any time you change AssetTrackerSync.gs.
-const SHEET_API_URL = "https://script.google.com/macros/s/AKfycbzXaKRuCrTesxobxP-b2me1TSn0YoGogoYhNPTWU4qWWjXANXGlPuDzJSKGClOTsfOXRQ/exec";
+const COLUMN_VISIBILITY_STORAGE_KEY = CLIENT.storageKey("asset-tracker-column-visibility");
+// This tenant's deployed Apps Script Web App URL, from clients.js. Redeploy with
+// `node deploy.mjs` any time you change AssetTrackerSync.gs — and note that each
+// tenant has its OWN deployment, so a backend change has to reach all of them.
+const SHEET_API_URL = CLIENT.apiUrl;
 
 // Google Sign-In client, matching OAUTH_CLIENT_ID in AssetTrackerSync.gs — the
 // backend rejects any token not minted for exactly this id, so the two must stay
@@ -1310,7 +1350,8 @@ const SHEET_API_URL = "https://script.google.com/macros/s/AKfycbzXaKRuCrTesxobxP
 // anything. Access is decided by the allowlist in the Sheet, not by holding this.
 //
 // Sign-in only works from an origin registered on this client in the Google Cloud
-// console. Currently https://mrpip914.github.io. A file:// page has no origin
+// console. Currently https://assets.stama.tech (and https://mrpip914.github.io,
+// kept registered as a fallback while old links redirect). A file:// page has no origin
 // Google will accept, so local testing needs a real http://localhost server AND
 // that localhost origin added there — opening index.html by double-clicking it
 // will show the sign-in button and then fail.
@@ -1333,7 +1374,7 @@ let authIdToken = null;
 // nothing outside this script, and because the backend holds the matching
 // record it can be destroyed — signing out or being removed from the access
 // list ends it immediately, which no self-expiring token allows.
-const SESSION_ID_KEY = "asset-tracker-session";
+const SESSION_ID_KEY = CLIENT.storageKey("asset-tracker-session");
 
 let sessionId = null;
 
@@ -1430,7 +1471,7 @@ const FRONTEND_SCRIPT_VERSION = "v30";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-08-26.4";
+const APP_VERSION = "2026-09-04.1";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -1479,12 +1520,17 @@ function normalizeRevisions(raw) {
 // Generated Asset IDs are BCA-prefixed and zero-padded to 4 digits (BCA0082).
 // The BCR/BCB labels on Rooms/Buildings predate this and are never generated —
 // only BCA numbers are ever issued, for every type.
-const ASSET_LABEL_PREFIX = "BCA";
+const ASSET_LABEL_PREFIX = CLIENT.labelPrefix;
 const assetLabelForNumber = n => ASSET_LABEL_PREFIX + String(n).padStart(4, "0");
-// The numeric part of a BCA label, or 0 for anything else (a BCR/BCB label, or
-// a hand-typed non-conforming one) — those consume no number from the counter.
+// Built from the prefix rather than written out, so a tenant whose assets read
+// SMA0001 counts its own labels instead of silently counting none. The prefix is
+// our own config and is letters only, so it needs no regex escaping.
+const ASSET_LABEL_RE = new RegExp("^" + ASSET_LABEL_PREFIX + "(\\d+)$", "i");
+// The numeric part of a generated label, or 0 for anything else (a BCR/BCB
+// label, or a hand-typed non-conforming one) — those consume no number from the
+// counter.
 function assetNumberFromLabel(label) {
-  const m = /^BCA(\d+)$/i.exec(String(label || "").trim());
+  const m = ASSET_LABEL_RE.exec(String(label || "").trim());
   return m ? parseInt(m[1], 10) : 0;
 }
 
@@ -1581,8 +1627,8 @@ const SEEDED_BREAKER_TYPES = [
 // "Sandbox" pill in the top-right corner — it's a plain on/off switch, remembered
 // per-device via localStorage, OFF by default so the app talks to the real Sheet
 // unless you deliberately turn it on. Nothing here ever touches the real backend.
-const SANDBOX_MODE_KEY = "asset-tracker-sandbox-mode";
-const SANDBOX_DATA_KEY = "asset-tracker-sandbox-data";
+const SANDBOX_MODE_KEY = CLIENT.storageKey("asset-tracker-sandbox-mode");
+const SANDBOX_DATA_KEY = CLIENT.storageKey("asset-tracker-sandbox-data");
 // A trimmed, realistic snapshot — not the full live inventory (that'd bloat this
 // file for no benefit) — but with the Electrical Panel structure kept in full,
 // since that's the area under active development and the one most worth having
@@ -4750,9 +4796,9 @@ function AssetTracker() {
     return (
       <div style={{ minHeight: "100vh", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'IBM Plex Sans', sans-serif", padding: 16 }}>
         <div style={{ background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 10, padding: 28, width: "100%", maxWidth: 380, textAlign: "center", boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)" }}>
-          <div style={{ fontWeight: 700, fontSize: 17, color: C.ink, marginBottom: 4 }}>BCA Asset Tracker</div>
+          <div style={{ fontWeight: 700, fontSize: 17, color: C.ink, marginBottom: 4 }}>{APP_NAME}</div>
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, marginBottom: 20 }}>
-            Brookside Christian Academy
+            {ORG_NAME}
           </div>
 
           {notAllowed ? (
@@ -4954,6 +5000,15 @@ function AssetTracker() {
     { label: "File loaded", value: document.lastModified, mono: true, hint: "When the browser says this copy of index.html was last modified. If it's older than your last deploy, you're on a cached page — reload with Ctrl+Shift+R." },
     { label: "Backend expected", value: FRONTEND_SCRIPT_VERSION, mono: true },
     { label: "Backend deployed", value: backendVersionText, mono: true, danger: !sandboxMode && backendScriptVersion && backendScriptVersion !== FRONTEND_SCRIPT_VERSION },
+    // Which tenant this page resolved to. Cheap to show and the only way to
+    // answer "why am I looking at the wrong school" from inside the app — a
+    // typo'd ?client= falls back to the default rather than refusing, so
+    // without this the fallback is invisible.
+    { label: "Client", value: CLIENT.orgName + " (" + CLIENT.id + ")",
+      hint: CLIENT.unknownRequest
+        ? "The address asked for \"" + CLIENT.unknownRequest + "\", which isn't a known client — this page fell back to the default."
+        : undefined,
+      danger: !!CLIENT.unknownRequest },
     { label: "Data source", value: sandboxMode ? "Sandbox — local fixture data" : "Google Sheet (live)" },
     { label: "Signed in", value: sandboxMode ? (currentUser || "not set") : (auth ? auth.email : "—") },
     { label: "Access", value: sandboxMode ? "editor (sandbox)" : (canEdit ? "editor" : "view-only") },
@@ -4969,7 +5024,7 @@ function AssetTracker() {
       >
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
           <Info size={17} style={{ color: C.brand }} />
-          <div style={{ fontWeight: 700, fontSize: 16, color: C.ink }}>About BCA Asset Tracker</div>
+          <div style={{ fontWeight: 700, fontSize: 16, color: C.ink }}>About {APP_NAME}</div>
         </div>
         <div style={{ fontSize: 13, color: C.muted, marginBottom: 18, lineHeight: 1.5 }}>
           What this browser has loaded, and what it's talking to.
@@ -7081,7 +7136,7 @@ function AssetTracker() {
 
       {/* Slim header */}
       <div style={{ borderBottom: `2px solid ${C.brand}`, padding: "10px 20px", position: "sticky", top: 0, background: C.bg, zIndex: 10, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-        <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: C.brandDark }}>BCA Asset Tracker</h1>
+        <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: C.brandDark }}>{APP_NAME}</h1>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <button
             onClick={toggleSandboxMode}
@@ -9483,7 +9538,11 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
   // clipboard. Falls back to the older execCommand approach when the async Clipboard
   // API isn't available (e.g. a plain file:// page, which isn't a secure context).
   function copyPanelLink() {
-    const url = `${window.location.origin}${window.location.pathname}?asset=${encodeURIComponent(panelLabel)}&tab=breakers`;
+    // The tenant rides along, or the link opens the default client's app for
+    // whoever receives it. Empty for the default tenant, so today's links keep
+    // exactly the shape they have.
+    const clientParam = CLIENT.urlParam();
+    const url = `${window.location.origin}${window.location.pathname}?asset=${encodeURIComponent(panelLabel)}&tab=breakers${clientParam ? "&" + clientParam : ""}`;
     const onCopied = () => { setLinkCopied(true); setTimeout(() => setLinkCopied(false), 1500); };
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(url).then(onCopied).catch(() => fallbackCopyToClipboard(url, onCopied));
@@ -9499,7 +9558,8 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
   // already has the encoder, the print layout, and the label sizing.
   function openPanelQrSheet() {
     const base = `${window.location.origin}${window.location.pathname}`.replace(/[^/]*$/, "");
-    window.open(`${base}panel-qr-sheet.html?only=${encodeURIComponent(panelLabel)}`, "_blank", "noopener");
+    const qrClientParam = CLIENT.urlParam();
+    window.open(`${base}panel-qr-sheet.html?only=${encodeURIComponent(panelLabel)}${qrClientParam ? "&" + qrClientParam : ""}`, "_blank", "noopener");
   }
   const columns = layout === "single-column" ? 1 : 2;
   const rowOf = n => (columns === 1 ? n : Math.ceil(n / 2));

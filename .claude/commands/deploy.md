@@ -13,7 +13,10 @@ Do this:
 2. Ask the live backend what it is currently running, so you can tell him whether a
    deploy is even needed:
 
-   `curl -s -L --max-time 45 "$(grep -m1 -o 'https://script.google.com/macros/s/[^"]*' index.html)"`
+   `curl -s -L --max-time 45 "$(grep -m1 -o 'https://script.google.com/macros/s/[^"]*' clients.js)"`
+
+   (The URL lives in `clients.js` now, not `index.html` — it is per-tenant. With
+   more than one tenant this needs the right entry, not the first match.)
 
    The JSON comes back with `scriptVersion`. It needs no sign-in and is a documented
    diagnostic.

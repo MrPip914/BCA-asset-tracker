@@ -17,6 +17,7 @@
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import vm from "node:vm";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -94,7 +95,45 @@ if (!scriptId || scriptId.startsWith("PASTE_")) {
 
 const backendVersion = readMatch("AssetTrackerSync.gs", /const SCRIPT_VERSION = "([^"]+)"/, "SCRIPT_VERSION");
 const frontendVersion = readMatch("index.html", /const FRONTEND_SCRIPT_VERSION = "([^"]+)"/, "FRONTEND_SCRIPT_VERSION");
-const apiUrl = readMatch("index.html", /const SHEET_API_URL = "([^"]+)"/, "SHEET_API_URL");
+// The /exec URL moved out of index.html into clients.js when the app became
+// multi-tenant. clients.js is browser code (it reads window.location), so it is
+// evaluated in a stub context rather than imported — and read as a registry
+// rather than regexed, so this cannot silently pick the wrong tenant's URL.
+function loadClients() {
+  const src = fs.readFileSync(path.join(REPO, "clients.js"), "utf8");
+  const ctx = { window: { location: { search: "" } }, URLSearchParams };
+  vm.createContext(ctx);
+  try {
+    new vm.Script(src, { filename: "clients.js" }).runInContext(ctx);
+  } catch (e) {
+    die(`Could not evaluate clients.js: ${e.message}`);
+  }
+  const registry = ctx.window.ASSET_TRACKER_CLIENTS;
+  const defaultId = ctx.window.ASSET_TRACKER_DEFAULT_CLIENT_ID;
+  if (!registry || !defaultId || !registry[defaultId]) die("clients.js did not define a usable tenant registry.");
+  return { registry, defaultId };
+}
+
+const { registry: clientRegistry, defaultId: defaultClientId } = loadClients();
+const clientIds = Object.keys(clientRegistry);
+
+// SINGLE-TENANT ON PURPOSE, for now. The script id it pushes to comes from one
+// config file, so with two tenants defined this would happily push to whichever
+// script is configured and then verify against the DEFAULT tenant's /exec —
+// reporting success for a deploy that went somewhere else. Pairing a script id
+// with a tenant is phase 2 of MULTI_CLIENT_DEPLOYMENT.md; until then, refuse
+// rather than deploy something whose target cannot be confirmed.
+if (clientIds.length > 1) {
+  die(
+    `clients.js defines ${clientIds.length} tenants (${clientIds.join(", ")}) but this script still\n` +
+      `deploys to ONE configured script id, and would verify against "${defaultClientId}" whichever\n` +
+      `one it pushed to.\n\n` +
+      `Teach it per-tenant script ids before adding a second tenant — see phase 2 in\n` +
+      `MULTI_CLIENT_DEPLOYMENT.md.`
+  );
+}
+
+const apiUrl = clientRegistry[defaultClientId].apiUrl;
 
 if (backendVersion !== frontendVersion) {
   die(
@@ -117,7 +156,7 @@ const branch = (() => {
   return r.status === 0 ? (r.stdout || "").trim() : null;
 })();
 
-console.log(`Deploying ${backendVersion}${branch ? ` from branch "${branch}"` : ""}`);
+console.log(`Deploying ${backendVersion}${branch ? ` from branch "${branch}"` : ""} to "${defaultClientId}" (${clientRegistry[defaultClientId].orgName})`);
 
 if (branch && branch !== "main") {
   console.log(
