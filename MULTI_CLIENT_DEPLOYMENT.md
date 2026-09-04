@@ -168,10 +168,33 @@ Roughly 30 minutes, most of it Google's UI:
 Worth turning into `ONBOARDING.md` with the exact clicks once the first one is done for
 real, rather than writing it from imagination now.
 
+## Decisions made
+
+**Ownership: Eric owns every client's Sheet and Script** (2026-09-04). One `clasp login`
+deploys all of them, `OWNER_EMAIL` stays a constant giving standing admin access to every
+client, and the one-tap phone deploy survives. The cost is accepted: each client's staff
+names, rooms and serials live in Eric's Drive, and a departing client is a Drive transfer.
+**To do: say so in writing to each client** rather than leaving it implicit.
+
+**Hosting: `assets.stama.tech`, live on GitHub Pages** (2026-09-04). A neutral product
+domain rather than any one client's, so a second client is not signing in at a first
+client's address. One `CNAME` to `mrpip914.github.io`, HTTPS enforced, and the old
+`mrpip914.github.io/BCA-asset-tracker/` address 301s to it, so existing bookmarks carry
+over. `https://assets.stama.tech` was added to the OAuth client's authorized origins
+alongside the github.io one, which stays registered as a fallback.
+
+Client URLs are therefore `https://assets.stama.tech/?client=<id>`, with `bca` as the
+default so a bare `assets.stama.tech` stays Brookside.
+
+One consequence worth remembering: because the site moved from a repo subpath to the root
+of the domain, any absolute path baked into a link or a printed QR sticker changes shape.
+Nothing was printed yet, so nothing had to be reissued — that window is now closed and a
+future host move would not be as free.
+
 ## Open questions — Eric's calls
 
-**1. Who owns each client's Sheet and Script?** This is the one that changes the plan
-rather than the details.
+**1. ~~Who owns each client's Sheet and Script?~~ Decided above — Eric owns them.** Kept
+for the reasoning, since it is what the deploy model rests on.
 
 Apps Script web apps execute as their owner. If **you** own every client's Sheet and script,
 one `clasp login` deploys all of them from your phone — the entire operational model here
@@ -197,12 +220,13 @@ which schools are customers is business information. Options: accept it, keep th
 of the repo and inject it at deploy, or go private (GitHub Pages on a private repo needs a
 paid plan). Lowest-friction is to accept it and revisit if a client objects.
 
-**4. Hosting, eventually.** GitHub Pages is fine for now. When a client wants their own
-domain — `assets.theirschool.org` — Pages runs out, because it allows one custom domain per
-repo. **Cloudflare Pages** serves the same static files, allows many custom domains on one
-project, and gives every branch an automatic preview URL, which would also solve staging
-without the `/releases/` machinery above. Free. Not worth moving until a domain or a phone-
-testable staging URL is actually wanted; worth knowing it is the exit.
+**4. ~~Hosting, eventually.~~ Partly settled: `assets.stama.tech` is live on GitHub Pages.**
+What remains open is the *per-client* domain case. Pages allows one custom domain per repo,
+so every client shares `assets.stama.tech` with their own `?client=` suffix. If a client
+ever wants `assets.theirschool.org`, **Cloudflare Pages** serves the same static files,
+allows many custom domains on one project, and gives every branch an automatic preview URL
+— which would also solve staging without the `/releases/` machinery above. Free. Still not
+worth moving until someone actually asks for it.
 
 ## Suggested phasing
 
