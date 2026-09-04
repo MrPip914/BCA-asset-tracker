@@ -1,8 +1,12 @@
 # Multi-client deployment
 
-**Status: proposal, nothing implemented.** This is the plan for running the app for several
-schools at once, with a development instance to work against instead of testing on a live
-client. Eric's call on the open questions at the bottom before any of it gets built.
+**Status: proposal, nothing implemented in the app.** This is the plan for running the app
+for several schools at once, with a development instance to work against instead of testing
+on a live client. Ownership and hosting are now decided (see Decisions made); the remaining
+open questions are at the bottom.
+
+The hosting half is already done and live: Brookside runs at `https://assets.stama.tech`
+as of 2026-09-04. Nothing in the app changed for it — no `?client=` yet, one backend.
 
 ## The finding that makes this small
 
@@ -26,14 +30,23 @@ keeps the blast radius at one client, permanently.
 **One repo, one deployed frontend, N tenants.** A tenant is a Google Sheet + its bound Apps
 Script deployment + a config file naming them.
 
-    clients/bca.json        → the school, production
-    clients/dev.json        → fake data, deploy branches at it freely
-    clients/<next>.json     → each new client
+    clients.js   — one file next to index.html, a few lines per tenant:
+                   bca    → the school, production
+                   dev    → fake data, deploy branches at it freely
+                   <next> → each new client
 
 The frontend picks its tenant at load and everything else follows from that. One deployed
 `index.html` for everybody, so a fix lands in one file rather than N copies — which matters
 because that file is 10k lines with no build step, and this repo's history is largely a
 record of what happens when two copies of one constant drift apart.
+
+**One file holding every tenant, not one file per tenant** (2026-09-04, revised from the
+first draft of this doc). Per-tenant JSON would have to be *fetched* before the app knows
+which backend to talk to — a network round trip and a loading state in front of every page
+load, and an async step in a codebase with no build to absorb it. A `<script src>` is
+already resolved when the app starts. Nothing in it is secret, so splitting the file would
+hide nothing: the `/exec` URLs have been public since the repo was, and are protected by
+sign-in rather than obscurity.
 
 ### What is per-client, in full
 
@@ -79,11 +92,19 @@ custom columns differ.
 
 `?client=<id>`, defaulting to `bca` when absent.
 
-The default is what protects the QR stickers. `panel-qr-sheet.html` prints stickers encoding
-`<base>/panel.html?p=BCA0082` and those are **physically taped inside panel doors** — they
-can never be reissued. With `bca` as the default, every sticker already out there keeps
-resolving to the right backend with no `client=` in it at all. New clients' stickers carry
-`&c=<id>` from the start.
+So a bare `https://assets.stama.tech` stays Brookside, and no existing link or bookmark has
+to change when the first second client arrives.
+
+**An earlier draft of this doc justified the default by saying it protected QR stickers
+already taped inside panel doors. That was wrong — no stickers were ever printed; the
+panels in the sheet were test data** (confirmed 2026-09-04). The default is worth keeping
+anyway, for the bookmark reason above, but it is a convenience now and not a constraint.
+
+That does change one thing for the better: `panel-qr-sheet.html` encodes
+`<base>/panel.html?p=<label>` into every sticker, so had any been printed they would carry
+the old repo-subpath address AND no `client=`. Nothing is out there, so both the domain move
+and the tenant suffix are free. **Print no stickers until `?client=` ships**, or that window
+closes again — a sticker is the one artifact in this app that cannot be re-deployed.
 
 Hostname would be cleaner than a query param, but GitHub Pages allows one custom domain per
 repo, so it is not available without splitting repos. See the hosting note at the end.
@@ -157,7 +178,7 @@ Roughly 30 minutes, most of it Google's UI:
 2. Extensions > Apps Script on the new Sheet — this creates the bound project.
 3. Deploy as Web App: execute as **me**, access **anyone**. Record the `/exec` URL,
    the Script ID and the deployment id.
-4. `clients/<id>.json` with the URL, name, org, label prefix.
+4. Add the tenant to `clients.js` — URL, name, org, label prefix.
 5. `node deploy.mjs --client <id>` — first real deploy, verified.
 6. Sign in once as owner; add the client's staff to the allowlist via Access.
 7. Load their inventory: paste their CSV into an **Import** tab, then BCA Admin >
@@ -214,7 +235,7 @@ Recommendation: you own them, disclosed in writing.
 everything you own. Fine for several small schools on this usage pattern, worth watching if
 it grows, and another consequence of question 1.
 
-**3. The repo is public, so `clients/` publishes your client list.** The `/exec` URLs
+**3. The repo is public, so `clients.js` publishes your client list.** The `/exec` URLs
 themselves are not secrets — that has been true since v18 put auth in front of them — but
 which schools are customers is business information. Options: accept it, keep the config out
 of the repo and inject it at deploy, or go private (GitHub Pages on a private repo needs a
@@ -232,8 +253,8 @@ worth moving until someone actually asks for it.
 
 | Phase | Work | Result |
 |---|---|---|
-| 0 | Extract config to `clients/bca.json` + `resolveClient()`; namespace `localStorage`; thread the config through the 3 HTML files | No behaviour change. BCA byte-identical in use. Verifiable before anything else moves. |
-| 1 | Dev tenant: Sheet, script, `clients/dev.json`, seed from `MOCK_SNAPSHOT` | Stop testing backend changes on the school. |
+| 0 | Extract config to `clients.js` + `resolveClient()`; namespace `localStorage`; thread the config through the 3 HTML files | No behaviour change. BCA byte-identical in use. Verifiable before anything else moves. |
+| 1 | Dev tenant: Sheet, script, a `dev` entry in `clients.js`, seed from `MOCK_SNAPSHOT` | Stop testing backend changes on the school. |
 | 2 | `deploy.mjs --client/--all/--status`; config moves to a per-tenant home file | One command to deploy or audit every backend. |
 | 3 | First real client onboarded; write `ONBOARDING.md` from what actually happened | Two live clients. |
 | 4 | Optional, only if wanted: per-client theming, pinned frontend releases, Cloudflare Pages | Staged rollout, custom domains. |
