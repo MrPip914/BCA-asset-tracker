@@ -7,6 +7,14 @@ outbound network requests to arbitrary domains, which is why this migration happ
 
 ## Working here
 
+**Answer Eric at summary level by default, not at implementation level.** He wants enough
+to understand the direction and make the call — the shape of the problem, the recommended
+path, what it costs, what it blocks. Not the code tour that got you there. Leave out file
+walkthroughs, function names, option-by-option comparisons and long tables unless he asks;
+he will ask, and asking is cheap. This is about the CHAT, not the work: keep investigating
+as thoroughly as ever, and keep writing this file, `BUGS.md` and commit messages at their
+existing level of detail — those are records, where the reasoning is the point.
+
 **A bug you find while doing something else goes in `BUGS.md`, not into the current
 session.** Log it, mention it in one line at the end of your response, and carry on with
 what was asked — Eric decides what gets fixed and when, and an unprioritized bug taking
