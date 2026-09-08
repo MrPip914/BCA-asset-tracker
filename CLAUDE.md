@@ -151,6 +151,13 @@ Two builds of the same repo, on one domain, published by `.github/workflows/page
 on Pages from my phone" and "this is what every client is running" used to be the same URL.
 That was survivable while Brookside was the only user of production and is not now.
 
+**The `github-pages` ENVIRONMENT must also allow the `dev` branch** (Settings > Environments
+> github-pages > Deployment branches). GitHub creates that environment restricted to the
+default branch, so a run triggered by a push to `dev` is refused before any step executes —
+the job fails in ~2 seconds with no logs, which reads like a broken workflow rather than a
+permission rule. If `/dev/` ever stops updating on a push to `dev` while a manual "Run
+workflow" from `main` still works, this is why.
+
 - **A subfolder, not a `dev.stama.tech` subdomain, because of Google sign-in.** Sign-in only
   works from an origin registered on the OAuth client. A subfolder is the SAME origin, so it
   needs no registration and cannot break sign-in; a subdomain would need adding, and the day
