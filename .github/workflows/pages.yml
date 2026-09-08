@@ -1,0 +1,111 @@
+# Publishes the site to GitHub Pages: `main` at the root, `dev` under /dev/.
+#
+# WHY A WORKFLOW instead of Pages' simpler "deploy from a branch" setting: that
+# setting serves exactly ONE branch, so "test it on Pages from my phone" and
+# "this is what every client is running" were the same URL. With paying clients
+# that is not an acceptable place to try things. This publishes both, from one
+# repo, on one domain:
+#
+#     https://assets.stama.tech/        <- main. What clients use.
+#     https://assets.stama.tech/dev/    <- dev. Where changes get tried first.
+#
+# Same origin for both, which is the reason for a subfolder rather than a
+# dev.stama.tech subdomain: Google sign-in only works from origins registered on
+# the OAuth client, so a separate hostname would need registering and would break
+# sign-in in a way that looks like a bug in whatever you were building.
+#
+# ONE-TIME SETUP: Settings > Pages > Build and deployment > Source must be set to
+# "GitHub Actions". Until it is, the deploy step fails and the site keeps serving
+# whatever the branch deploy last published — it does not go down.
+name: Publish site
+
+on:
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One publish at a time, and never cancel one in flight: the last deploy to
+# finish is what the world sees, so cancelling mid-run could leave the newer
+# commit unpublished while reporting success.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      # main is checked out explicitly rather than using the pushed ref, so a
+      # push to dev republishes the CURRENT live site at the root rather than
+      # whatever dev happens to contain.
+      - name: Check out main (the live site)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main-src
+
+      - name: Is there a dev branch yet?
+        id: dev
+        run: |
+          if git ls-remote --exit-code --heads "https://github.com/${GITHUB_REPOSITORY}.git" dev >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No dev branch — publishing the live site only. /dev/ appears once a dev branch exists."
+          fi
+
+      - name: Check out dev (the /dev/ build)
+        if: steps.dev.outputs.exists == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          path: dev-src
+
+      - name: Assemble the site
+        run: |
+          set -euo pipefail
+          copy_site () {   # $1 = checkout dir, $2 = destination
+            mkdir -p "$2"
+            rsync -a \
+              --exclude '.git' --exclude '.github' --exclude '.claude' \
+              --exclude 'node_modules' --exclude 'import' \
+              "$1"/ "$2"/
+          }
+
+          copy_site main-src _site
+
+          if [ "${{ steps.dev.outputs.exists }}" = "true" ]; then
+            copy_site dev-src _site/dev
+            # One custom domain, claimed at the root. A CNAME in a subfolder does
+            # nothing, but leaving a second one around invites confusion later.
+            rm -f _site/dev/CNAME
+          fi
+
+          # Fail loudly rather than publishing a site missing the app or the
+          # tenant registry — a half-assembled deploy would look like the app
+          # itself had broken.
+          for required in index.html clients.js panel.html CNAME; do
+            test -f "_site/$required" || { echo "::error::_site/$required missing"; exit 1; }
+          done
+          if [ "${{ steps.dev.outputs.exists }}" = "true" ]; then
+            test -f _site/dev/index.html || { echo "::error::_site/dev/index.html missing"; exit 1; }
+          fi
+
+          echo "Publishing:"; find _site -maxdepth 2 -type f | sort
+
+      - name: Upload
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy
+        id: deploy
+        uses: actions/deploy-pages@v4

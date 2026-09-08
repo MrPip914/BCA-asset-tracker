@@ -134,9 +134,13 @@ Three tiers, each with a job the others cannot do:
 Seed the dev Sheet from `MOCK_SNAPSHOT` via the existing **BCA Admin > Import inventory**
 menu, so it starts with data already in the current schema and no real names in it.
 
-For frontend work, serve the repo locally (`python -m http.server 8000`) and open
-`?client=dev` — `http://localhost:8000` is already registered as an authorized origin on the
-OAuth client. Nothing new to host.
+For frontend work there is a published dev build at **`https://assets.stama.tech/dev/`**,
+served from the `dev` branch by `.github/workflows/pages.yml` (see "Where the site is
+published" in `CLAUDE.md`). Serving the repo locally still works and is faster, but the
+published copy is the one that matters: **all testing here happens from a phone**, and until
+this existed the only thing reachable from a phone was production. That is why this landed
+before the dev tenant rather than as the deferred "staging" item it started as — a dev tenant
+you cannot open from a phone does not fit how this project is actually worked on.
 
 ## Releasing to clients
 
@@ -259,7 +263,11 @@ worth moving until someone actually asks for it.
 | 1 | **NEXT** — Dev tenant: Sheet, script, a `dev` entry in `clients.js`, seed from `MOCK_SNAPSHOT` | Stop testing backend changes on the school. |
 | 2 | `deploy.mjs --client/--all/--status`; config moves to a per-tenant home file | One command to deploy or audit every backend. |
 | 3 | First real client onboarded; write `ONBOARDING.md` from what actually happened | Two live clients. |
-| 4 | Optional, only if wanted: per-client theming, pinned frontend releases, Cloudflare Pages | Staged rollout, custom domains. |
+| 4 | Optional, only if wanted: per-client theming, pinned frontend releases, Cloudflare Pages | Staged rollout, custom domains, per-branch previews. |
+
+Out of order but done: the **published dev build** at `/dev/` (2026-09-04), which started
+life as part of phase 4's "staging" and was pulled forward once it was clear that testing
+happens from a phone, so an unpublished branch is untestable in practice.
 
 Phase 0 is the only one with any risk of regressing the school's app, and it is entirely
 mechanical — worth doing on its own branch, verified against BCA in Sandbox and then live,

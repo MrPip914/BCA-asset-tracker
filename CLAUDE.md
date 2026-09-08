@@ -139,6 +139,44 @@ per-device via `localStorage` (`SANDBOX_MODE_KEY`).
   first. Only flip Sandbox OFF and redeploy once the feature is actually done, so a
   schema change only needs *one* "paste + redeploy" instead of one per iteration.
 
+## Where the site is published
+
+Two builds of the same repo, on one domain, published by `.github/workflows/pages.yml`:
+
+    https://assets.stama.tech/        main — what clients use
+    https://assets.stama.tech/dev/    dev  — where changes get tried first
+
+**GitHub Pages' Source must stay set to "GitHub Actions"** (Settings > Pages). The simpler
+"deploy from a branch" setting serves exactly ONE branch, which is why this exists: "test it
+on Pages from my phone" and "this is what every client is running" used to be the same URL.
+That was survivable while Brookside was the only user of production and is not now.
+
+- **A subfolder, not a `dev.stama.tech` subdomain, because of Google sign-in.** Sign-in only
+  works from an origin registered on the OAuth client. A subfolder is the SAME origin, so it
+  needs no registration and cannot break sign-in; a subdomain would need adding, and the day
+  it is forgotten sign-in fails in a way that looks like a bug in whatever was being built.
+- **The workflow always checks out `main` explicitly for the root**, rather than publishing
+  whatever ref was pushed — so a push to `dev` republishes the current live site unchanged
+  at the root, instead of putting dev's code in front of clients.
+- **`/dev/` is skipped, not failed, when no `dev` branch exists.** The branch is checked for
+  with `git ls-remote` first, so the live site still publishes normally on its own.
+- **`CNAME` must stay in the artifact.** It is what claims the custom domain; the workflow
+  asserts it (along with `index.html`, `clients.js` and `panel.html`) rather than publishing
+  a half-assembled site, which would look like the app itself had broken.
+- **`isDevBuild` is derived from the PATH, in `clients.js`** — not stamped in by the publish
+  step. A build-time rewrite would make the two copies differ in their source, which is the
+  thing this whole design avoids, and it would not work when running locally.
+- **A dev build defaults to the `dev` tenant** when one exists, so untested code cannot
+  casually write to a client's live Sheet just because someone opened `/dev/` with no query
+  string. An explicit `?client=` still wins — reproducing a client bug against real data is
+  sometimes the point, and it should take saying so.
+- **The `Dev` badge is not decoration.** The two builds are identical apart from which
+  branch built them, so without a marker "am I looking at dev, or at what clients have?" is
+  unanswerable at a glance — and getting it wrong means either testing against real client
+  data or believing a fix shipped when it only ever ran in dev. It renders in the header,
+  on the sign-in screen (which is where you would first notice), and as a `Site` row in
+  About.
+
 ## Multiple clients (tenants)
 
 The app runs for more than one school from **one deployed frontend**. A tenant is a Google

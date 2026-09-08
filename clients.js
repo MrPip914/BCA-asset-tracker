@@ -51,6 +51,30 @@
   // new tenant the old one's stored session.
   var DEFAULT_CLIENT_ID = "bca";
 
+  // The tenant a DEV build falls back to, when one exists. See isDevBuild below.
+  var DEV_CLIENT_ID = "dev";
+
+  // Is this the copy published at /dev/ rather than the live site at the root?
+  // Derived from the path, not baked in by the publish step: a build-time rewrite
+  // would make the two copies differ in their source, which is exactly what this
+  // design avoids, and it would not work when running locally.
+  //
+  // The filename is stripped first, so /dev/, /dev/index.html and /dev/panel.html
+  // all count and / does not.
+  var dir = window.location.pathname.replace(/[^/]*$/, "");
+  var isDevBuild = /(^|\/)dev\/$/.test(dir);
+
+  // A dev build points at the dev tenant by DEFAULT, so untested code cannot
+  // casually write to a client's live Sheet just because someone opened /dev/
+  // with no query string. An explicit ?client= still wins — reproducing a client
+  // bug against real data is sometimes the point, and it should take saying so.
+  //
+  // Falls back to the ordinary default while no dev tenant exists, so /dev/ works
+  // from the day it is published rather than from the day phase 1 lands.
+  var fallbackId = isDevBuild && Object.prototype.hasOwnProperty.call(CLIENTS, DEV_CLIENT_ID)
+    ? DEV_CLIENT_ID
+    : DEFAULT_CLIENT_ID;
+
   var params = new URLSearchParams(window.location.search);
 
   // Two spellings for the same thing. "client" is the readable one used in links
@@ -59,7 +83,7 @@
   // to fit inside a panel door.
   var requested = (params.get("client") || params.get("c") || "").trim().toLowerCase();
 
-  var id = Object.prototype.hasOwnProperty.call(CLIENTS, requested) ? requested : DEFAULT_CLIENT_ID;
+  var id = Object.prototype.hasOwnProperty.call(CLIENTS, requested) ? requested : fallbackId;
 
   // An unrecognised id falls back to the default rather than refusing. A typo'd
   // link then shows the default tenant's sign-in screen, which is the same thing
@@ -77,6 +101,11 @@
     apiUrl: config.apiUrl,
     isDefault: id === DEFAULT_CLIENT_ID,
     unknownRequest: requested && requested !== id ? requested : null,
+
+    // True on the /dev/ copy. The app shows a DEV marker when it is set — two
+    // builds that look identical and talk to different data is the new way to
+    // get confused, and a marker is cheaper than the confusion.
+    isDevBuild: isDevBuild,
 
     /**
      * Namespace a localStorage key to this tenant.
@@ -103,6 +132,11 @@
      * Add this tenant to a URL built by the app — a copied deep link, a printed
      * QR sticker. Omitted for the default tenant so its links stay exactly as
      * they are today, which is the whole point of having a default.
+     *
+     * Measured against DEFAULT_CLIENT_ID, NOT against whatever this build falls
+     * back to. On the dev build that makes the param redundant but explicit —
+     * and a link copied there and opened at the root then still resolves to the
+     * tenant it was copied from, instead of silently becoming a client's.
      */
     urlParam: function () {
       return id === DEFAULT_CLIENT_ID ? "" : "c=" + encodeURIComponent(id);
