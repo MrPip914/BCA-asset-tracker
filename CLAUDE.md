@@ -198,7 +198,32 @@ onboard one.
   projects, each bound to its own Sheet. There is no tenant id in the backend, nothing to
   partition, and no cross-client query that could be got wrong — isolation is structural.
   The corollary is operational, not architectural: **a backend change now has to be
-  deployed to every tenant**, one `node deploy.mjs` each.
+  deployed to every tenant** — `node deploy.mjs <tenant>` each, or `--all`.
+  - **`node deploy.mjs --status` is how you learn which tenant is on which version.** It
+    asks every tenant's live `/exec` and prints a table, needs no sign-in, and cannot go
+    stale — unlike every "the live backend is vNN" line ever written into this file, three
+    of which did. **Check, don't read**, now has a one-command answer.
+  - **A bare `node deploy.mjs` refuses once there is more than one tenant** and lists them.
+    Guessing would deploy to a school instead of to `dev`.
+  - **`new-tenant.mjs` bootstraps a tenant; `deploy.mjs` cannot.** Deploy pulls the live
+    project expecting to find an existing copy of the backend to overwrite, and *updates* an
+    existing deployment — an empty project has neither. `new-tenant.mjs` creates the Sheet
+    and bound script (`clasp create-script --type sheets`), pushes the backend with a
+    manifest that declares the web app settings, creates the deployment, and records the ids.
+    - **It deliberately does NOT declare `oauthScopes`** in that manifest. Brookside's live
+      manifest does, and that is exactly what made adding a Drive call fail at runtime (see
+      "Wipe and import"). With no explicit list, Apps Script detects what each version needs.
+    - **A new tenant still needs one manual step**: open its script editor once, run
+      `forceAuthorizeExternalRequests`, approve the prompt. The web app executes as its
+      owner, so until those scopes are granted every request to it fails. That cannot be
+      scripted — it is a consent screen.
+    - The `/exec` URL is built from the **deployment** id, not the script id.
+  - **`set-tenant.mjs` records a tenant's ids** in `~/.bca-asset-tracker-deploy.json`, which
+    lives only in Cloud Shell's `$HOME`. It folds a pre-multi-tenant config (one top-level
+    `scriptId`) under the **default** tenant — read from `clients.js`, not assumed. The first
+    version assumed it belonged to whichever tenant was being written, so recording `dev`
+    silently deleted Brookside's script id; if the default cannot be determined it now leaves
+    the flat keys alone rather than dropping them.
 - **`window.ASSET_TRACKER_CLIENT` is the only source of per-school values.** Nothing else
   should name a school, a deployment URL or an ID prefix. `index.html` reads it once into
   `CLIENT` at module scope and derives `SHEET_API_URL`, `ASSET_LABEL_PREFIX`, `APP_NAME`

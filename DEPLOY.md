@@ -35,19 +35,42 @@ where the sign-in is stored.
    address you land on, which is what works where no browser can reach the terminal.
    The credential is written to `~/.clasprc.json` — never into this repo, which is public.
 
-3. **Record the Script ID** (Sheet > Extensions > Apps Script > Project Settings > Script ID).
-   This prompts for it rather than making you edit the command, which matters on a phone:
+3. **Record each tenant's Script ID** (its Sheet > Extensions > Apps Script > Project
+   Settings > Script ID). One per tenant — every tenant is a separate Apps Script project:
 
-       read -p "Paste your Script ID: " id && printf '{"scriptId":"%s"}\n' "$id" > ~/.bca-asset-tracker-deploy.json
+       read -p "Paste the Script ID: " id && node set-tenant.mjs bca "$id"
 
-   `deploy.mjs` reads `./deploy.config.json` first and falls back to that home-directory
-   copy. The home copy is what survives Cloud Shell re-cloning the repo each visit;
-   `deploy.config.example.json` is the template if you'd rather keep it in the repo folder
-   (that path is gitignored).
+   `node set-tenant.mjs --list` shows what is recorded. `deploy.mjs` reads
+   `./deploy.config.json` first and falls back to the home-directory copy
+   (`~/.bca-asset-tracker-deploy.json`). The home copy is what survives Cloud Shell
+   re-cloning the repo each visit; `deploy.config.example.json` is the template if you'd
+   rather keep it in the repo folder (that path is gitignored).
+
+   A config written before there were several tenants — one `scriptId` at the top level —
+   is folded under the default tenant automatically the first time `set-tenant.mjs` runs.
+   Nothing needs redoing by hand.
+
+4. **Bootstrapping a tenant that does not exist yet** is `new-tenant.mjs`, not this. It
+   creates the Sheet, its bound script, pushes the backend and creates the web app
+   deployment, because `deploy.mjs` can do none of those: it overwrites an existing copy
+   of the backend and updates an existing deployment, neither of which an empty project
+   has.
+
+       node new-tenant.mjs --id dev --name "Asset Tracker (dev)" --org "Development sandbox" --prefix DEV
 
 ## Deploying
 
-    node deploy.mjs
+    node deploy.mjs <tenant>     one tenant, e.g. dev or bca
+    node deploy.mjs --all        every tenant, reporting each
+    node deploy.mjs --status     ask every tenant what it is running right now
+
+**Every tenant has its own Apps Script project and its own Sheet**, so a backend change is
+not shipped until it has been deployed to each of them. That is the price of the isolation
+— and `--status` is there so "which tenant is on which version" is a command rather than a
+memory, since every such line ever written into a doc has gone stale.
+
+A bare `node deploy.mjs` works only while one tenant exists. With more, it refuses and
+lists them rather than guessing: the wrong guess deploys to a school instead of to `dev`.
 
 It will:
 

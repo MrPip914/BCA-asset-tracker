@@ -149,4 +149,7 @@
   // one the moment there are two.
   window.ASSET_TRACKER_CLIENTS = CLIENTS;
   window.ASSET_TRACKER_DEFAULT_CLIENT_ID = DEFAULT_CLIENT_ID;
+  // Exported so deploy.mjs knows which tenant is the safe one to experiment on,
+  // rather than keeping a second copy of the string "dev" that could drift.
+  window.ASSET_TRACKER_DEV_CLIENT_ID = DEV_CLIENT_ID;
 })();
