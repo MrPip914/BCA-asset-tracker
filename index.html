@@ -829,6 +829,72 @@ function columnOptions(col) {
   return Array.isArray(col?.options) ? col.options.filter(o => String(o).trim() !== "") : [];
 }
 
+// ---------- REQUIRED FIELDS ----------
+// PER TYPE, in typeSettings[id].requiredFields — the opposite call from
+// `restricted`, which is a flag on the column, and the two look similar enough
+// to be worth keeping straight. Restriction HAD to live on the column, because
+// deriving it from whoever currently claims a field means unticking that field
+// from its last owner turns it into a common field and splashes it across every
+// type (see SHIPPED_RESTRICTED_FIELDS). Required is derived from nothing:
+// unticking it for a type just means that type doesn't require it, which is the
+// obvious and correct outcome. And "required" is genuinely a per-type question —
+// a Serial is essential on a Computer and meaningless on a Stream Deck.
+//
+// Nothing is required as shipped. A rule only exists because someone set it.
+function requiredFieldsFor(type) {
+  const entry = typeEntryFor(type);
+  return Array.isArray(entry?.requiredFields) ? entry.requiredFields : [];
+}
+function isRequiredField(key, type) {
+  // A field the type doesn't have can't be required, whatever a stale settings
+  // row says. saveTypeSettings prunes those, but a settings blob can also be
+  // hand-edited or written by an older build, and a rule about an invisible
+  // field would refuse every save with nothing on screen to fix.
+  return fieldAppliesTo(key, type) && requiredFieldsFor(type).includes(key);
+}
+
+// Is this field blank on this draft? Three shapes, because three fields don't
+// store a plain string: the parent is `parentId`, the people are `personIds`
+// (an array) or the legacy slash-joined `person`, and anything multi-valued is
+// an array. Emptiness, never falsiness — 0 is a filled-in number, and treating
+// it as absent is the exact bug that makes a quantity of zero unsaveable.
+function fieldValueIsEmpty(key, draft) {
+  const raw = key === "parent" ? draft.parentId
+    : key === "person" ? ((draft.personIds || []).filter(Boolean).length ? draft.personIds : (draft.person || ""))
+    : draft[key];
+  if (Array.isArray(raw)) return raw.filter(Boolean).length === 0;
+  if (raw === 0) return false;
+  return String(raw ?? "").trim() === "";
+}
+
+// Every required field this draft hasn't filled in, as column objects so the
+// caller has both the label to say and the key to outline.
+//
+// ALL of them at once, unlike the data-type check which stops at the first.
+// Several blank fields are one thought — "I haven't finished filling this in" —
+// and reporting them one at a time turns finishing into four rejected saves.
+function missingRequiredFields(draft, columns) {
+  const required = new Set(requiredFieldsFor(draft.type));
+  if (!required.size) return [];
+  return (columns || []).filter(c => (
+    required.has(c.key)
+    && !TYPE_STRUCTURAL_FIELDS.has(c.key)
+    && fieldAppliesTo(c.key, draft.type)
+    && fieldValueIsEmpty(c.key, draft)
+  ));
+}
+
+// "Serial is required for a Computer." / "Serial and Hostname are required for
+// a Monitor." Names the fields AND the type, because the reason a save is being
+// refused is a rule about this type that the person may not have set.
+function missingRequiredMessage(missing, typeName) {
+  const names = missing.map(c => c.label);
+  const list = names.length === 1
+    ? names[0]
+    : names.slice(0, -1).join(", ") + " and " + names[names.length - 1];
+  return `${list} ${names.length === 1 ? "is" : "are"} required for a ${typeName}.`;
+}
+
 // Is this value acceptable for the column's data type? Returns "" when fine, or
 // a message naming what is wrong.
 //
@@ -1447,11 +1513,33 @@ function stripDraftUiState(draft) {
   return rest;
 }
 
-// The form-level message, repeated at the one field it concerns. Returns "" for
-// every other field, so a single channel can outline exactly one input without
-// every input reading the message and deciding for itself whether it applies.
-function fieldErrorFor(key, draft) {
-  return (draft?.errorFields || []).includes(key) ? (draft.formError || "") : "";
+// WHERE THE MESSAGE GOES, and it goes in exactly ONE place. The first version
+// rendered it at form level AND under the field, and a duplicate-tag refusal
+// printed the same long sentence twice on one screen — caught in browser
+// testing, since reading the two render sites separately makes each look right.
+//
+// The rule: beside the field when it names exactly one field AND that field is
+// on this form; at form level otherwise. "Otherwise" is doing real work — it
+// covers a message naming several blanks at once (one sentence, not the same
+// sentence three times) and one about a field this type doesn't render at all,
+// which is why the form-level line has to exist even though most refusals are
+// about a visible field.
+function fieldErrorFor(key, draft, cols) {
+  const keys = draft?.errorFields || [];
+  if (keys.length !== 1 || keys[0] !== key) return "";
+  return draft.formError || "";
+}
+// Does the FORM-level line render? True unless the message went to a field.
+function showsFormError(draft, cols) {
+  if (!draft?.formError) return false;
+  const keys = draft.errorFields || [];
+  if (keys.length !== 1) return true;
+  return !(cols || []).some(c => c.key === keys[0]);
+}
+// Is this input one the refusal concerns? Separate from the message, because
+// several fields can be outlined by one sentence that only one of them shows.
+function fieldIsInvalid(key, draft) {
+  return (draft?.errorFields || []).includes(key);
 }
 
 // Clears the refusal as soon as the value it complained about changes, so a
@@ -1674,7 +1762,7 @@ const FRONTEND_SCRIPT_VERSION = "v32";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-09.3";
+const APP_VERSION = "2026-09-09.4";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -3707,6 +3795,22 @@ function AssetTracker() {
     return null;
   }
 
+  // Required fields, checked on BOTH save paths — including the edit of an asset
+  // that predates the rule, which is the whole point (Eric's call, 2026-09-09):
+  // a rule you can dodge by editing something else is not a rule, and this is
+  // the only way a new requirement ever reaches the assets already on the sheet.
+  // The cost is that someone who opened an old asset to fix a typo gets stopped,
+  // which is why the message names the fields and the type rather than just
+  // saying no.
+  function requiredError(d) {
+    const missing = missingRequiredFields(d, columns);
+    if (!missing.length) return null;
+    return {
+      formError: missingRequiredMessage(missing, typeNameOf(d.type, typesList)),
+      errorFields: missing.map(c => c.key),
+    };
+  }
+
   async function saveDraft() {
     // A double-click can land in the same tick as the first click, before React
     // re-renders the Save button as disabled — so the visual disable can't be
@@ -3742,6 +3846,8 @@ function AssetTracker() {
       if (parentError) { setDraft({ ...draft, formError: parentError, errorFields: ["parent"] }); return; }
       const typeError = fieldTypeError(draft);
       if (typeError) { setDraft({ ...draft, ...typeError }); return; }
+      const blankError = requiredError(draft);
+      if (blankError) { setDraft({ ...draft, ...blankError }); return; }
       const createdEntry = {
         at: new Date().toISOString(), by: currentUser || "", assetLabel: draft.id,
         assetType: draft.type, action: "created",
@@ -3800,6 +3906,8 @@ function AssetTracker() {
       // admin import or a direct Sheet edit, neither of which goes near a form.
       const editTypeError = fieldTypeError(draftToSave);
       if (editTypeError) { setDraft({ ...draftToSave, ...editTypeError }); return; }
+      const editBlankError = requiredError(draftToSave);
+      if (editBlankError) { setDraft({ ...draftToSave, ...editBlankError }); return; }
       const editEntries = [];
       // parentId holds a stable label (id), not the display name — an asset's own
       // name field is edited like any other field (below), and everything that
@@ -4964,6 +5072,11 @@ function AssetTracker() {
         // field just above.
         excludedFields: fields.filter(k => !wanted.has(k)),
         onlyFields: fields.filter(k => wanted.has(k) && isRestricted(k)),
+        // PRUNED to the fields this type still has. A field the type doesn't
+        // carry can't be required, and a stale entry left here would spring the
+        // rule back the moment someone re-ticked the field — a rule nobody set,
+        // appearing from a decision made in a different session.
+        requiredFields: (draft.requiredFields || []).filter(k => wanted.has(k)),
       },
     };
     persist(assets, { columns: nextColumns, typesList: nextTypesList, typeSettings: nextTypeSettings });
@@ -6362,7 +6475,7 @@ function AssetTracker() {
                   parent on a type that has no Parent field, or over a tag on a
                   type that carries none, would otherwise look like a Save button
                   that simply does nothing. */}
-              {draft.formError && (
+              {showsFormError(draft, editFormColumns) && (
                 <div style={{ fontSize: 13, color: C.danger, marginBottom: 12 }}>{draft.formError}</div>
               )}
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12 }}>
@@ -6377,13 +6490,15 @@ function AssetTracker() {
                       childType={draft.type}
                       childId={selectedAsset.id}
                       assets={assets}
-                      error={fieldErrorFor("parent", draft)}
+                      error={fieldErrorFor("parent", draft, editFormColumns)}
                     />
                   ) : c.key === "person" ? (
                     <UserField
                       key={c.key}
                       value={usersAreAssets ? (draft.personIds || []) : (draft.person || "")}
-                      onChange={v => setDraft(usersAreAssets ? { ...draft, personIds: v } : { ...draft, person: v })}
+                      onChange={v => setDraft(usersAreAssets ? { ...draft, personIds: v, ...clearedError(draft, "person") } : { ...draft, person: v, ...clearedError(draft, "person") })}
+                      required={isRequiredField("person", draft.type)}
+                      error={fieldErrorFor("person", draft, editFormColumns)}
                       userOptions={userNames}
                       userAssets={usersAreAssets ? userAssets : undefined}
                       onManage={() => setShowUsersManager(true)}
@@ -6392,7 +6507,9 @@ function AssetTracker() {
                     <PeripheralsField
                       key={c.key}
                       value={draft.peripherals || ""}
-                      onChange={v => setDraft({ ...draft, peripherals: v })}
+                      onChange={v => setDraft({ ...draft, peripherals: v, ...clearedError(draft, "peripherals") })}
+                      required={isRequiredField("peripherals", draft.type)}
+                      error={fieldErrorFor("peripherals", draft, editFormColumns)}
                       options={peripheralsList}
                       onManage={() => setShowPeripheralsManager(true)}
                     />
@@ -6400,7 +6517,9 @@ function AssetTracker() {
                     <BulkTypeField
                       key={c.key}
                       value={draft.subType || ""}
-                      onChange={v => setDraft({ ...draft, subType: v })}
+                      onChange={v => setDraft({ ...draft, subType: v, ...clearedError(draft, "subType") })}
+                      required={isRequiredField("subType", draft.type)}
+                      error={fieldErrorFor("subType", draft, editFormColumns)}
                       options={bulkItemTypes}
                       onManage={() => setShowBulkItemTypesManager(true)}
                     />
@@ -6412,7 +6531,9 @@ function AssetTracker() {
                       onChange={v => setDraft({ ...draft, [c.key]: v, ...clearedError(draft, c.key) })}
                       dataType={columnDataType(c)}
                       options={columnOptions(c)}
-                      error={fieldErrorFor(c.key, draft)}
+                      required={isRequiredField(c.key, draft.type)}
+                      invalid={fieldIsInvalid(c.key, draft)}
+                      error={fieldErrorFor(c.key, draft, editFormColumns)}
                     />
                   )
                 ))}
@@ -7859,13 +7980,15 @@ function AssetTracker() {
                     childType={draft.type}
                     childId={draft.id}
                     assets={assets}
-                    error={fieldErrorFor("parent", draft)}
+                    error={fieldErrorFor("parent", draft, addFormColumns)}
                   />
                 ) : c.key === "person" ? (
                   <UserField
                     key={c.key}
                     value={usersAreAssets ? (draft.personIds || []) : (draft.person || "")}
-                    onChange={v => setDraft(usersAreAssets ? { ...draft, personIds: v } : { ...draft, person: v })}
+                    onChange={v => setDraft(usersAreAssets ? { ...draft, personIds: v, ...clearedError(draft, "person") } : { ...draft, person: v, ...clearedError(draft, "person") })}
+                    required={isRequiredField("person", draft.type)}
+                    error={fieldErrorFor("person", draft, addFormColumns)}
                     userOptions={userNames}
                     userAssets={usersAreAssets ? userAssets : undefined}
                     onManage={() => setShowUsersManager(true)}
@@ -7874,7 +7997,9 @@ function AssetTracker() {
                   <PeripheralsField
                     key={c.key}
                     value={draft.peripherals || ""}
-                    onChange={v => setDraft({ ...draft, peripherals: v })}
+                    onChange={v => setDraft({ ...draft, peripherals: v, ...clearedError(draft, "peripherals") })}
+                    required={isRequiredField("peripherals", draft.type)}
+                    error={fieldErrorFor("peripherals", draft, addFormColumns)}
                     options={peripheralsList}
                     onManage={() => setShowPeripheralsManager(true)}
                   />
@@ -7882,7 +8007,9 @@ function AssetTracker() {
                   <BulkTypeField
                     key={c.key}
                     value={draft.subType || ""}
-                    onChange={v => setDraft({ ...draft, subType: v })}
+                    onChange={v => setDraft({ ...draft, subType: v, ...clearedError(draft, "subType") })}
+                    required={isRequiredField("subType", draft.type)}
+                    error={fieldErrorFor("subType", draft, addFormColumns)}
                     options={bulkItemTypes}
                     onManage={() => setShowBulkItemTypesManager(true)}
                   />
@@ -7898,7 +8025,9 @@ function AssetTracker() {
                     onChange={v => setDraft({ ...draft, [c.key]: v, ...clearedError(draft, c.key) })}
                     dataType={columnDataType(c)}
                     options={columnOptions(c)}
-                    error={fieldErrorFor(c.key, draft)}
+                    required={isRequiredField(c.key, draft.type)}
+                    invalid={fieldIsInvalid(c.key, draft)}
+                    error={fieldErrorFor(c.key, draft, addFormColumns)}
                     // The Name placeholder previews exactly what saving blank
                     // will store, so the default is visible before it's chosen
                     // rather than appearing out of nowhere afterwards.
@@ -7907,7 +8036,7 @@ function AssetTracker() {
                 )
               ))}
             </div>
-            {draft.formError && <div style={{ fontSize: 13, color: C.danger, marginTop: 12 }}>{draft.formError}</div>}
+            {showsFormError(draft, addFormColumns) && <div style={{ fontSize: 13, color: C.danger, marginTop: 12 }}>{draft.formError}</div>}
             <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
               <button onClick={saveDraft} disabled={isSaving} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: isSaving ? C.border : C.success, color: "#fff", border: "none", fontWeight: 600, fontSize: 14, borderRadius: 10 }}>
                 {isSaving ? <Loader2 size={15} className="spin" /> : <Save size={15} />} {isSaving ? "Saving…" : "Save"}
@@ -8227,6 +8356,21 @@ function AssetTracker() {
   );
 }
 
+// The asterisk on a required field's label, and the message under a field that
+// refused a save. One pair of components rather than four copies, since the
+// four field components that need them are otherwise nothing alike.
+//
+// Marked up as well as coloured (aria-label + title), so "this is required" is
+// not carried by colour alone.
+function RequiredMark({ on }) {
+  if (!on) return null;
+  return <span aria-label="required" title="Required" style={{ color: C.danger, marginLeft: 3 }}>*</span>;
+}
+function FieldError({ message }) {
+  if (!message) return null;
+  return <span style={{ fontSize: 12, color: C.danger }}>{message}</span>;
+}
+
 // The generic asset-form input for one column. What it renders comes from the
 // column's DATA TYPE (see columnDataType), which replaced the one hardcoded
 // special case this had before — `type={c.key === "totalQuantity" ? "number" :
@@ -8238,24 +8382,20 @@ function AssetTracker() {
 // FORM-level one, repeated here (see fieldErrorFor) rather than a second copy —
 // a save is refused once, for one reason, and saying it twice in two wordings is
 // how the two drift.
-function Field({ label, value, onChange, placeholder, wide, dataType, options, error, required }) {
+function Field({ label, value, onChange, placeholder, wide, dataType, options, error, invalid, required }) {
   const kind = dataType || "text";
   // A long-text field always takes the full row: a textarea in a 180px grid cell
   // is narrower than the text it holds. `wide` stays an explicit override for a
   // plain text field that wants the same.
   const fullWidth = wide || kind === "textarea";
-  const border = error ? C.danger : C.border;
+  const border = (error || invalid) ? C.danger : C.border;
+  // The asterisk is the only advance warning that a save will be refused.
   const head = (
     <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>
-      {label}
-      {/* The asterisk is the only advance warning that a save will be refused.
-          Marked up as well as coloured, so it is not carried by colour alone. */}
-      {required && <span aria-label="required" title="Required" style={{ color: C.danger, marginLeft: 3 }}>*</span>}
+      {label}<RequiredMark on={required} />
     </span>
   );
-  const foot = error
-    ? <span style={{ fontSize: 12, color: C.danger }}>{error}</span>
-    : null;
+  const foot = <FieldError message={error} />;
   const inputStyle = { padding: "8px 10px", border: `1.5px solid ${border}`, fontSize: 14, borderRadius: 10, color: C.ink, fontFamily: "inherit" };
 
   if (kind === "select") {
@@ -8803,7 +8943,7 @@ function ParentField({ value, onChange, childType, childId, assets, error }) {
 // so every single-select field in the app looks and behaves the same way. To allow
 // clearing back to unselected, the caller prepends "" to `options` itself (see
 // BulkTypeField below) and maps it to a placeholder like "Select…" via labelForOption.
-function PickerField({ label, value, onChange, options, placeholder = "Select…", labelForOption, onManage, manageLabel, title, emptyLabel, wide, hideLabel }) {
+function PickerField({ label, value, onChange, options, placeholder = "Select…", labelForOption, onManage, manageLabel, title, emptyLabel, wide, hideLabel, required, error }) {
   const [open, setOpen] = useState(false);
   const getLabel = labelForOption || (o => o);
   const displayValue = value !== "" && value != null ? getLabel(value) : "";
@@ -8812,7 +8952,7 @@ function PickerField({ label, value, onChange, options, placeholder = "Select…
     <Wrapper style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: wide ? "1 / -1" : undefined }}>
       {!hideLabel && (
         <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>
-          {label}
+          <span>{label}<RequiredMark on={required} /></span>
           {onManage && (
             <button type="button" onClick={onManage} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4, display: "flex" }} aria-label={manageLabel || `Manage ${label}`}>
               <Settings size={12} color={C.accent} />
@@ -8821,6 +8961,7 @@ function PickerField({ label, value, onChange, options, placeholder = "Select…
         </span>
       )}
       <PickerTrigger value={displayValue} placeholder={placeholder} onClick={() => setOpen(true)} ariaLabel={`Select ${label}`} />
+      <FieldError message={error} />
       {open && (
         <SelectionModal
           title={title || `Select ${label}`}
@@ -8838,13 +8979,15 @@ function PickerField({ label, value, onChange, options, placeholder = "Select…
   );
 }
 
-function BulkTypeField({ value, onChange, options, onManage }) {
+function BulkTypeField({ value, onChange, options, onManage, required, error }) {
   // Include the current value even if it's not in the managed list (legacy/custom
   // data), so editing never silently drops it.
   const allOptions = !value || options.includes(value) ? options : [value, ...options];
   return (
     <PickerField
       label="Sub-type"
+      required={required}
+      error={error}
       value={value || ""}
       onChange={onChange}
       options={["", ...allOptions]}
@@ -8868,7 +9011,7 @@ function BulkTypeField({ value, onChange, options, onManage }) {
 //                       slash-joined string, byte for byte as before v28
 // The caller picks by passing userAssets or not, so neither path has to know the
 // other exists.
-function UserField({ value, onChange, userOptions, userAssets, onManage }) {
+function UserField({ value, onChange, userOptions, userAssets, onManage, required, error }) {
   const byAsset = Array.isArray(userAssets);
   const selected = byAsset
     ? (Array.isArray(value) ? value.filter(Boolean) : [])
@@ -8890,11 +9033,12 @@ function UserField({ value, onChange, userOptions, userAssets, onManage }) {
   return (
     <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 6 }}>
       <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>
-        User{selected.length > 1 ? "s" : ""}
+        <span>User{selected.length > 1 ? "s" : ""}<RequiredMark on={required} /></span>
         <button type="button" onClick={onManage} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4, display: "flex" }} aria-label="Manage users">
           <Settings size={12} color={C.accent} />
         </button>
       </span>
+      <FieldError message={error} />
       {allOptions.length === 0 ? (
         <div style={{ fontSize: 13, color: C.empty }}>No users defined yet — add some with the gear icon above.</div>
       ) : (
@@ -8923,7 +9067,7 @@ function UserField({ value, onChange, userOptions, userAssets, onManage }) {
   );
 }
 
-function PeripheralsField({ value, onChange, options, onManage }) {
+function PeripheralsField({ value, onChange, options, onManage, required, error }) {
   const selected = (value || "").split("/").map(s => s.trim()).filter(Boolean);
   // Include any legacy/custom values already on this asset that aren't in the managed list,
   // so editing never silently drops data.
@@ -8937,11 +9081,12 @@ function PeripheralsField({ value, onChange, options, onManage }) {
   return (
     <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 6 }}>
       <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>
-        Peripherals
+        <span>Peripherals<RequiredMark on={required} /></span>
         <button onClick={onManage} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4, display: "flex" }} aria-label="Manage peripherals">
           <Settings size={12} color={C.accent} />
         </button>
       </span>
+      <FieldError message={error} />
       {allOptions.length === 0 ? (
         <div style={{ fontSize: 13, color: C.empty }}>No peripherals defined yet — add some with the gear icon above.</div>
       ) : (
@@ -9015,6 +9160,7 @@ function TypeManagerModal({
       iconName: entry.iconName || "",
       parentTypes: entry.parentTypes || (TYPE_REGISTRY[t.id] ? [] : DEFAULT_PARENT_TYPES),
       fields: fieldOptions.filter(f => fieldAppliesTo(f.key, t.id)).map(f => f.key),
+      requiredFields: requiredFieldsFor(t.id).slice(),
       // Seeded from the EFFECTIVE data type — the column's override if it has
       // one, otherwise the shipped default — so the picker shows what is in
       // force rather than a blank. Which of those two it was is recovered at
@@ -9071,6 +9217,7 @@ function TypeManagerModal({
     // not a question anyone gets to answer. Same set the save-time validation
     // skips, named once so the two cannot drift.
     const bespoke = !pending && BESPOKE_FORM_FIELDS.has(key);
+    const required = (draft.requiredFields || []).includes(key);
     const kind = (draft.fieldTypes || {})[key] || "text";
     const setKind = v => setDraft({ ...draft, fieldTypes: { ...(draft.fieldTypes || {}), [key]: v } });
     return (
@@ -9125,6 +9272,32 @@ function TypeManagerModal({
               />
             </div>
           )}
+          {/* Required is meaningful for EVERY field, bespoke ones included —
+              "every Computer must have a User" is a rule someone would want,
+              and it is orthogonal to what kind of value the field holds. A
+              pending field has no key yet, so it can't carry a rule until the
+              save that invents one; its box is inert rather than absent so the
+              columns still line up. */}
+          <div
+            title={pending ? "Save the type first, then this field can be made required." : `Require ${label} on this type`}
+            style={{ width: 34, flexShrink: 0, display: "flex", justifyContent: "center", opacity: on && !pending ? 1 : 0.35 }}
+          >
+            <button
+              type="button"
+              role="checkbox"
+              aria-checked={required}
+              aria-label={`${label} is required`}
+              onClick={() => { if (on && !pending) setDraft({ ...draft, requiredFields: toggle(draft.requiredFields || [], key) }); }}
+              style={{
+                width: 16, height: 16, borderRadius: 4, padding: 0,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                border: `1.5px solid ${required ? C.danger : C.border}`,
+                background: required ? C.danger : "transparent",
+              }}
+            >
+              {required && <Check size={11} color="#fff" />}
+            </button>
+          </div>
           {pending && (
             <button
               type="button"
@@ -9229,6 +9402,13 @@ function TypeManagerModal({
                   carried exactly one bit — does this type have this field — and
                   a field now answers a second question (what kind of value it
                   holds) that a chip has nowhere to put. */}
+              {/* Two unlabelled controls at the end of every row would be a
+                  guess. One header, aligned to the same widths. */}
+              <div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: 0.5, textTransform: "uppercase", color: C.placeholder }}>
+                <span style={{ flex: 1, minWidth: 0 }}>Has</span>
+                <span style={{ width: 118, flexShrink: 0, textAlign: "center" }}>Kind</span>
+                <span style={{ width: 34, flexShrink: 0, textAlign: "center" }}>Req</span>
+              </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
                 {fieldOptions.map(f => fieldRow(f.key, f.label, false))}
                 {(draft.newFields || []).map(f => fieldRow(f.tempId, f.label, true))}

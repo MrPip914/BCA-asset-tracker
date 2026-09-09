@@ -16,6 +16,61 @@ version that fixed them.
 
 ## Open
 
+### Add asset suggests a colliding Asset ID when `nextAssetNumber` is unset
+**Found:** 2026-09-09, in browser testing of the required-fields work — the add form
+refused every save with a duplicate-tag error before the required rule was ever reached.
+**Needs a deploy:** no — `index.html` only.
+**Confirmed:** in Sandbox against `MOCK_SNAPSHOT`, which carries no `nextAssetNumber`.
+Opening Add asset pre-fills `BCA0001`, which the fixture already uses, so Save is
+refused until the tag is edited or cleared.
+
+`peekAssetNumber()` returns `nextAssetNumber || 1`. Phase 3 of the key refactor deleted
+its old `Math.max(counter, derived-from-assets)` guard, deliberately and with a good
+reason: that guard existed because a reused label was a reused primary key, and a real
+`id` makes that impossible. But it also meant a missing counter now yields 1 rather than
+one past the highest existing number, and `startAdd()` puts that straight into the form
+as the suggested tag.
+
+**On the live sheet this does not bite** — the counter reads 116 — so the exposure is a
+sheet that has never written the key: the sandbox fixture, a freshly imported tenant, or
+`dev` after a wipe. There it makes Add asset look broken on first use, since the refusal
+is about a value the app filled in itself.
+
+Worth deciding rather than fixing blind, because the honest options differ:
+- Seed the counter from the assets **once, at load**, when it is missing — close to the
+  deleted guard but without reviving it as a per-call rule.
+- Suggest nothing when the counter is unset. Tags are optional as of v32, so a blank tag
+  on a new asset is a legitimate state and the person types the sticker they actually
+  printed.
+- Leave it, and make `MOCK_SNAPSHOT` carry a `nextAssetNumber` so at least the sandbox
+  stops demonstrating it.
+
+**Blocks:** nothing. It made the add-form test clear the tag first, which is a
+one-line workaround, not an obstacle.
+
+---
+
+### `peekAssetNumber()`'s block comment describes behaviour that was deleted
+**Found:** 2026-09-09, reading that function while investigating the entry above.
+**Needs a deploy:** no — a comment in `index.html`.
+**Confirmed:** by reading it. The comment above the function says "Max — not 'the counter
+if it's set' — so it can also be seeded on an existing sheet that predates it (counter
+null -> derived wins)". The comment *inside* the function says that `Math.max` is
+DELETED as of v32. Both are in the same six lines, and they contradict each other.
+
+The inner comment is the true one. The outer one is left over from before phase 3 and now
+argues for behaviour the code no longer has — which matters more than an ordinary stale
+comment, because it is precisely the reasoning someone would rely on when deciding what to
+do about the bug above.
+
+This project has twice written down that a name or comment which no longer says what the
+code does is a bug rather than a tidy-up. Same class.
+
+**Blocks:** nothing.
+
+---
+
+
 ### `MOCK_SNAPSHOT` uses real staff names, and the repo is public
 **Found:** 2026-08-26, while scanning the v29 commit for anything that shouldn't be
 published — pre-existing, not introduced by that change.
