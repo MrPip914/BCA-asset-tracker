@@ -755,6 +755,132 @@ const RENAMED_COLUMN_KEYS = { itemName: "subType", label: "tag" };
 // on every asset, so dropping one would hide stored data.
 const RETIRED_COLUMN_KEYS = new Set(["campus", "building", "room"]);
 
+// ---------- FIELD DATA TYPES ----------
+// What KIND of value a column holds. Drives which input the asset forms render,
+// what a save will refuse, and how the list sorts the column.
+//
+// PER COLUMN, NOT PER TYPE, and that is the one real design choice here. A
+// column is one field across the whole Assets tab: the same key holding a date
+// on Computers and a number on TVs would make sorting, filtering and the Excel
+// export incoherent, for a flexibility nobody asked for. So a type decides
+// WHETHER it has a field (excludedFields/onlyFields); the column decides what
+// that field holds.
+//
+// The vocabulary is deliberately ChildEntityTable's, character for character —
+// text/textarea/number/date/select — so the app has ONE answer to "what kind of
+// field is this" rather than two that nearly match. `multiselect` is left out on
+// purpose: the three multi-valued fields in this app (person, peripherals, a
+// circuit's rooms) each have a bespoke component with its own managed list, and
+// a generic multiselect column would be a fourth thing that looks like them and
+// behaves differently.
+const COLUMN_DATA_TYPES = [
+  { value: "text", label: "Text" },
+  { value: "textarea", label: "Long text" },
+  { value: "number", label: "Number" },
+  { value: "date", label: "Date" },
+  { value: "select", label: "Choice list" },
+];
+const COLUMN_DATA_TYPE_VALUES = new Set(COLUMN_DATA_TYPES.map(t => t.value));
+
+// The shipped default for each built-in column. NOT written into a stored column
+// config on load, and that is the whole point: the column migration below only
+// ever ADDS newly-introduced columns, it never updates the properties of one
+// already stored — so a load-time backfill would have to be written, would have
+// to be careful never to overwrite a user's own choice, and would bake today's
+// default into every sheet forever. Resolving at READ time instead means there
+// is nothing to migrate, a default can still be corrected in a later release and
+// take effect everywhere it hasn't been overridden, and "reset to default" is
+// just deleting the key. Same shape as typeEntryFor merging over TYPE_REGISTRY.
+//
+// Anything not named here is text, which is what every one of these fields was
+// before this existed.
+const DEFAULT_COLUMN_DATA_TYPES = {
+  purchaseDate: "date",
+  warrantyUntil: "date",
+  totalQuantity: "number",
+  notes: "textarea",
+};
+// screenSize is deliberately NOT a number: it holds `24"`, which is what the add
+// form has always suggested as its placeholder.
+
+// The form columns that DON'T go through the generic Field component — each has
+// its own component because it edits something a text box can't (a hierarchy
+// picker, a chip toggle, a managed list with its own gear icon). Their data type
+// is therefore not a question anyone gets to answer, and validating one against
+// a column dataType would be checking a rule nothing enforces or renders.
+//
+// Named once here so the render branches and the save-time validation cannot
+// drift: a sixth bespoke field added to one and not the other would be validated
+// as plain text and refuse saves nothing on screen explains.
+const BESPOKE_FORM_FIELDS = new Set(["type", "parent", "person", "peripherals", "subType"]);
+
+function columnDataType(col) {
+  if (!col) return "text";
+  if (col.dataType && COLUMN_DATA_TYPE_VALUES.has(col.dataType)) return col.dataType;
+  return DEFAULT_COLUMN_DATA_TYPES[col.key] || "text";
+}
+
+// The options a `select` column offers. Stored on the column itself rather than
+// as a managed list with its own Config key: the three managed lists that DO
+// have one (vendors, peripherals, bulk item sub-types) each earned it by having
+// a manager modal and being shared across assets, and a school inventing a
+// three-value dropdown should cost neither.
+function columnOptions(col) {
+  return Array.isArray(col?.options) ? col.options.filter(o => String(o).trim() !== "") : [];
+}
+
+// Is this value acceptable for the column's data type? Returns "" when fine, or
+// a message naming what is wrong.
+//
+// Blank always passes — "must be filled in" is the REQUIRED rule, a separate
+// question with a separate answer, and conflating them would make every empty
+// optional date field an error.
+//
+// This has to exist even though <input type="date"> and type="number" stop most
+// of it at the keyboard: a value can predate the rule (the column's type was
+// changed under it), or arrive from the admin import or a direct Sheet edit,
+// neither of which goes near this form.
+function validateColumnValue(col, raw) {
+  const value = typeof raw === "string" ? raw.trim() : raw;
+  if (value === "" || value === null || value === undefined) return "";
+  const kind = columnDataType(col);
+  if (kind === "number") {
+    // Number(" ") is 0 and Number("") is 0, which is why the blank check above
+    // has to come first rather than being folded in here.
+    if (!isFinite(Number(value))) return `${col.label} must be a number.`;
+    return "";
+  }
+  if (kind === "date") {
+    // dateOnly first: a value that round-tripped through the Sheet before the
+    // plain-text fix comes back as a full ISO timestamp, and that is a valid
+    // date being displayed oddly, not bad data to refuse.
+    const d = dateOnly(String(value));
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return `${col.label} must be a date (YYYY-MM-DD).`;
+    // Round-tripped, not just parsed. `new Date("2026-02-31")` is not NaN — it
+    // rolls silently over to March 3rd, so a plain isNaN check accepts every
+    // impossible date there is and then stores a different day than was typed.
+    // UTC throughout, or a browser west of Greenwich shifts the day and every
+    // date fails validation on that machine alone.
+    const [yy, mm, dd] = d.split("-").map(Number);
+    const parsed = new Date(Date.UTC(yy, mm - 1, dd));
+    if (parsed.getUTCFullYear() !== yy || parsed.getUTCMonth() !== mm - 1 || parsed.getUTCDate() !== dd) {
+      return `${col.label} is not a real date.`;
+    }
+    return "";
+  }
+  if (kind === "select") {
+    const opts = columnOptions(col);
+    // An empty option list means the column is misconfigured, not that every
+    // value is wrong — refusing here would make the field unsaveable with no
+    // way to fix it from the form.
+    if (opts.length && !opts.includes(String(value))) {
+      return `${col.label} must be one of: ${opts.join(", ")}.`;
+    }
+    return "";
+  }
+  return "";
+}
+
 // The fields the type editor lets you switch on and off for a type. Everything
 // else in DEFAULT_COLUMNS is structural and not a per-type choice: name, type
 // and parent identify and place the asset, and status is the archive flag.
@@ -1297,14 +1423,42 @@ function parentageProblem(asset, assets, typesList) {
 // through anyway: a form left open while the chain changed underneath it, a type
 // switched after the parent was picked, or an asset whose stored parent was
 // never legal to begin with. Empty is valid — that's Unassigned.
-// The add/edit draft doubles as the form's own scratch state, so it can carry a
-// key that belongs on screen and not on the asset (`parentError`). Stripped on
-// the way into persist() rather than kept in a second parallel state, matching
-// how addBreakerDraft/allocationDraft already fold their error in — but those
-// never get spread onto a stored record, and this one would.
+// The add/edit draft doubles as the form's own scratch state, so it can carry
+// keys that belong on screen and not on the asset. Stripped on the way into
+// persist() rather than kept in a second parallel state, matching how
+// addBreakerDraft/allocationDraft already fold their error in — but those never
+// get spread onto a stored record, and this one would.
+//
+// TWO keys, and they were one until the form grew more than one way to refuse a
+// save. `formError` was `parentError` while the parent was the only thing that
+// could refuse one; by v32 it was carrying the duplicate-tag message too, and
+// data-type and required-field errors were about to move in. A name that no
+// longer says what the value holds has cost this project real time more than
+// once (see the phase-2 key refactor), so it was renamed before the third
+// occupant arrived rather than after.
+//
+// `errorFields` is what the rename made necessary: with one channel carrying
+// errors about several different fields, the message alone can't say WHICH
+// input to outline in red, and ParentField would show a duplicate-tag complaint
+// under the parent picker. It holds column keys — "parent", "tag", "serial" —
+// and is what every field-level error decoration reads.
 function stripDraftUiState(draft) {
-  const { parentError, ...rest } = draft;
+  const { formError, errorFields, ...rest } = draft;
   return rest;
+}
+
+// The form-level message, repeated at the one field it concerns. Returns "" for
+// every other field, so a single channel can outline exactly one input without
+// every input reading the message and deciding for itself whether it applies.
+function fieldErrorFor(key, draft) {
+  return (draft?.errorFields || []).includes(key) ? (draft.formError || "") : "";
+}
+
+// Clears the refusal as soon as the value it complained about changes, so a
+// message never outlives the thing it was about. Every form input goes through
+// this rather than each one remembering to reset the channel.
+function clearedError(draft, key) {
+  return (draft?.errorFields || []).includes(key) ? { formError: "", errorFields: [] } : {};
 }
 
 function validateParentChoice(childId, childType, parentId, assets, typesList) {
@@ -1520,7 +1674,7 @@ const FRONTEND_SCRIPT_VERSION = "v32";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-09.2";
+const APP_VERSION = "2026-09-09.3";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -1720,6 +1874,13 @@ const MOCK_SNAPSHOT = {
   // has a stored config exactly like this, so a fixture without one hides the
   // only case that matters — the same blind spot that let the first version of
   // the name backfill ship broken.
+  //
+  // DATA TYPES ARE DELIBERATELY MIXED here, for the same reason and by the same
+  // rule: `condition` carries an explicit dataType and options (the stored
+  // override path), every other column carries none (the read-time fallback in
+  // columnDataType — which is what resolves Purchase Date to a date picker
+  // without anything being stored). A fixture that was all one shape would
+  // exercise half of it, which is exactly how the personIds bug got through.
   columns: [
     { key: "name", label: "Name", width: 200, visible: true, custom: false },
     { key: "type", label: "Type", width: 140, visible: true, custom: false },
@@ -1729,6 +1890,7 @@ const MOCK_SNAPSHOT = {
     { key: "building", label: "Building", width: 130, visible: false, custom: false },
     { key: "room", label: "Room", width: 130, visible: true, custom: false },
     { key: "person", label: "User", width: 170, visible: true, custom: false },
+    { key: "condition", label: "Condition", width: 130, visible: true, custom: true, dataType: "select", options: ["Good", "Fair", "Needs replacing"] },
     { key: "status", label: "Status", width: 100, visible: true, custom: false },
   ],
   assets: [
@@ -2442,7 +2604,6 @@ function AssetTracker() {
   // missing Type) — shown above its Save button. "" = no error. The add form is
   // the only place `label` is editable at all (it's filtered out of the edit
   // form, see editFormColumns), so this is the only place it can be wrong.
-  const [addError, setAddError] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [confirmArchive, setConfirmArchive] = useState(null);
   const [confirmDeleteCol, setConfirmDeleteCol] = useState(null);
@@ -2450,6 +2611,7 @@ function AssetTracker() {
   const [confirmChangeDelete, setConfirmChangeDelete] = useState(null);
   const [showColManager, setShowColManager] = useState(false);
   const [newColName, setNewColName] = useState("");
+  const [newColType, setNewColType] = useState("text");
 
   // Loads the full snapshot — either from the Sheet backend, or (sandboxMode)
   // from localStorage/MOCK_SNAPSHOT, never touching the network. Never falls
@@ -3199,23 +3361,43 @@ function AssetTracker() {
     if (sortConfig) {
       const { key, dir } = sortConfig;
       const mult = dir === "desc" ? -1 : 1;
+      // How to compare comes from the column's DATA TYPE now. It used to be a
+      // sniff — parseFloat both values, and if both parsed, subtract — which is
+      // right often enough to look fine and wrong exactly where it matters: a
+      // column of `24"` screen sizes parses as numbers and sorts as numbers,
+      // then one blank or one `24-27"` silently drops the whole column back to
+      // string ordering mid-list, which reads as the sort being broken.
+      const col = columns.find(c => c.key === key);
+      const kind = key === "parent" ? "text" : columnDataType(col);
       const sortValue = x => {
         // Sorting the Path column on the full outermost-first string groups a
         // building's contents together and orders rooms within it, which is what
         // sorting by location is for. Sorting on the immediate parent's name
         // alone would scatter them.
         if (key === "parent") return pathOf(x, assets);
-        return (x[key] || "").toString();
+        const raw = (x[key] || "").toString();
+        // A date that round-tripped through the Sheet as a timestamp would
+        // otherwise sort after every plain yyyy-MM-dd, in its own block.
+        return kind === "date" ? dateOnly(raw) : raw;
       };
       list.sort((x, y) => {
         const xv = sortValue(x), yv = sortValue(y);
-        const xn = parseFloat(xv), yn = parseFloat(yv);
-        if (!isNaN(xn) && !isNaN(yn) && xv.trim() !== "" && yv.trim() !== "") return (xn - yn) * mult;
+        if (kind === "number") {
+          // Blanks last in BOTH directions. An empty cell is not a small number,
+          // and flipping the sort to find the largest shouldn't first show every
+          // asset that has no value at all.
+          const xb = xv.trim() === "", yb = yv.trim() === "";
+          if (xb || yb) return (xb ? 1 : 0) - (yb ? 1 : 0);
+          return (Number(xv) - Number(yv)) * mult;
+        }
+        // Dates are yyyy-MM-dd by now, which sorts correctly as text. Everything
+        // else keeps the collation it already had, numeric-aware so "Room 2"
+        // still lands before "Room 10".
         return xv.localeCompare(yv, undefined, { numeric: true, sensitivity: "base" }) * mult;
       });
     }
     return list;
-  }, [assets, query, scopeId, typeFilter, userFilter, statusFilter, sortConfig]);
+  }, [assets, query, scopeId, typeFilter, userFilter, statusFilter, sortConfig, columns]);
 
   // Which of the filtered assets the bulk "Move filtered to room" action can
   // actually touch: only types that are allowed to sit inside a Room. Asking the
@@ -3481,7 +3663,6 @@ function AssetTracker() {
   }
 
   function startAdd() {
-    setAddError("");
     // A generated id, not the label. This is the first point where the two
     // genuinely differ, and it is the point of the whole change: the label
     // becomes editable in phase 3 and the id never does. Minted client-side
@@ -3504,7 +3685,26 @@ function AssetTracker() {
   function cancelAdd() {
     setShowAdd(false);
     setDraft({});
-    setAddError("");
+  }
+
+  // Every generic field on the form, checked against its column's data type.
+  // Returns the draft keys to merge in on a refusal, or null when everything
+  // passes. Both save branches call it, so a value can't be legal on the way in
+  // and illegal on the way out.
+  //
+  // ONE error at a time, deliberately, and it is the first in form order rather
+  // than an arbitrary one: a list of four complaints under a form is read as a
+  // wall and fixed one at a time anyway, and the field is outlined where the eye
+  // already is. Required fields will want the opposite (see the plan) — several
+  // blanks are one thought, not four — which is why this returns the shape it
+  // does rather than a bare string.
+  function fieldTypeError(d) {
+    const cols = formColumnsFor(d.type).filter(c => !BESPOKE_FORM_FIELDS.has(c.key));
+    for (const c of cols) {
+      const message = validateColumnValue(c, d[c.key]);
+      if (message) return { formError: message, errorFields: [c.key] };
+    }
+    return null;
   }
 
   async function saveDraft() {
@@ -3518,23 +3718,30 @@ function AssetTracker() {
       // silently — the tag is editable in this form, so "Save did nothing"
       // is indistinguishable from "Save worked" to whoever typed the typo.
       //
+      // Through the DRAFT, same as the edit branch. This used to be its own
+      // `addError` useState, which meant two channels carrying the same kinds of
+      // message in two shapes, and only one of them could outline the field it
+      // was about — the add form passed the edit form's key to ParentField and so
+      // could never show a parent error at all.
+      //
       // The tag is NOT required as of v32: an asset can exist before anyone
       // prints a sticker for it, and a Room or a User is never given one at all.
       // Only the TYPE is required, since every field rule hangs off it.
       const tag = (draft.tag || "").trim();
-      if (!draft.type?.trim()) { setAddError("Type is required."); return; }
+      if (!draft.type?.trim()) { setDraft({ ...draft, formError: "Type is required.", errorFields: ["type"] }); return; }
       const conflict = findTagConflict(tag, draft.id);
       if (conflict) {
         // Name the existing asset — and say so when it's archived, since an
         // archived asset isn't in the default list view and "that ID is taken"
         // is otherwise baffling when nothing on screen is using it.
         const what = [typeNameOf(conflict.type, typesList), conflict.status === "Archived" ? "archived" : null].filter(Boolean).join(", ");
-        setAddError(`Asset ID "${conflict.tag}" is already in use${what ? ` (${what})` : ""}. Asset IDs must be unique — pick a different one, or clear it.`);
+        setDraft({ ...draft, errorFields: ["tag"], formError: `Asset ID "${conflict.tag}" is already in use${what ? ` (${what})` : ""}. Asset IDs must be unique — pick a different one, or clear it.` });
         return;
       }
       const parentError = validateParentChoice(draft.id, draft.type, draft.parentId, assets, typesList);
-      if (parentError) { setAddError(parentError); return; }
-      setAddError("");
+      if (parentError) { setDraft({ ...draft, formError: parentError, errorFields: ["parent"] }); return; }
+      const typeError = fieldTypeError(draft);
+      if (typeError) { setDraft({ ...draft, ...typeError }); return; }
       const createdEntry = {
         at: new Date().toISOString(), by: currentUser || "", assetLabel: draft.id,
         assetType: draft.type, action: "created",
@@ -3566,26 +3773,33 @@ function AssetTracker() {
       // adoptLegacyParentage) gets fixed — by opening it and pressing Save.
       const draftToSave = typeTakesParent(draft.type) ? draft : { ...draft, parentId: "" };
       const parentError = validateParentChoice(original.id, draftToSave.type, draftToSave.parentId, assets, typesList);
-      // parentError is shown BOTH inside ParentField and as a form-level line at
-      // the top of the form. The form-level copy is the one that matters here: a
-      // type with no Parent field renders no ParentField, so without it a refused
-      // save would look like a Save button that does nothing at all.
-      if (parentError) { setDraft({ ...draftToSave, parentError }); return; }
+      // The message is shown BOTH inside ParentField and as a form-level line at
+      // the top of the form — which is what `errorFields` naming "parent" selects.
+      // The form-level copy is the one that matters here: a type with no Parent
+      // field renders no ParentField, so without it a refused save would look
+      // like a Save button that does nothing at all.
+      if (parentError) { setDraft({ ...draftToSave, formError: parentError, errorFields: ["parent"] }); return; }
       // The tag is EDITABLE here as of v32 (retagging is the whole point of the
       // refactor), so this form can now introduce a duplicate the way only the
       // add form used to be able to. Refused the same way, through the same
       // check, excluding this asset so an untouched tag never collides with
       // itself. Reported as a form-level error rather than beside the field:
-      // `parentError` already established that channel, and a type whose tag
+      // `formError` already established that channel, and a type whose tag
       // field is hidden could otherwise refuse a save with nothing on screen
       // saying why.
       const editedTag = (draftToSave.tag || "").trim();
       const tagConflict = findTagConflict(editedTag, original.id);
       if (tagConflict) {
         const what = [typeNameOf(tagConflict.type, typesList), tagConflict.status === "Archived" ? "archived" : null].filter(Boolean).join(", ");
-        setDraft({ ...draftToSave, parentError: `Asset ID "${tagConflict.tag}" is already in use${what ? ` (${what})` : ""}. Asset IDs must be unique — pick a different one, or clear it.` });
+        setDraft({ ...draftToSave, errorFields: ["tag"], formError: `Asset ID "${tagConflict.tag}" is already in use${what ? ` (${what})` : ""}. Asset IDs must be unique — pick a different one, or clear it.` });
         return;
       }
+      // Data types are checked on the EDIT path too, not just on add, and that is
+      // the path that actually catches things: a value can predate the column's
+      // data type (it was text when this was typed), or have arrived from the
+      // admin import or a direct Sheet edit, neither of which goes near a form.
+      const editTypeError = fieldTypeError(draftToSave);
+      if (editTypeError) { setDraft({ ...draftToSave, ...editTypeError }); return; }
       const editEntries = [];
       // parentId holds a stable label (id), not the display name — an asset's own
       // name field is edited like any other field (below), and everything that
@@ -3595,7 +3809,7 @@ function AssetTracker() {
       // as "Unassigned" rather than a blank, so a move in or out of that state
       // is legible in the history.
       Object.keys(draftToSave).forEach(key => {
-        if (key === "comments" || key === "changes" || key === "allocations" || key === "parentError") return;
+        if (key === "comments" || key === "changes" || key === "allocations" || key === "formError" || key === "errorFields") return;
         // personIds is the one ARRAY among the flat fields, so it can't go
         // through the `||""` string compare below -- two equal arrays are never
         // ===, which would log an edit on every save. It also writes the legacy
@@ -4477,10 +4691,16 @@ function AssetTracker() {
     let key = slugify(newColName);
     let i = 1;
     while (columns.some(c => c.key === key)) key = slugify(newColName) + "_" + i++;
-    const nextColumns = [...columns, { key, label: newColName.trim(), width: 160, visible: true, custom: true }];
+    const created = { key, label: newColName.trim(), width: 160, visible: true, custom: true };
+    // A new key has no shipped default, so "text" is its default and anything
+    // else is a real override — applyFieldKind works that out rather than this
+    // deciding for itself, so there is one rule about when a dataType is stored.
+    applyFieldKind(created, newColType, "");
+    const nextColumns = [...columns, created];
     const nextAssets = assets.map(a => ({ ...a, [key]: "" }));
     persist(nextAssets, { columns: nextColumns });
     setNewColName("");
+    setNewColType("text");
   }
 
   function removeColumn(key) {
@@ -4655,6 +4875,29 @@ function AssetTracker() {
     setNewTypeName("");
   }
 
+  // Writes a chosen data type onto a column — but only as an OVERRIDE, and only
+  // when it differs from what the app ships for that key. A stored config that
+  // simply agrees with the default keeps no `dataType` at all, which is what
+  // keeps columnDataType's read-time fallback meaningful: bake today's default
+  // into every sheet and a later release can never correct it.
+  //
+  // Choices are dropped entirely unless the field is actually a choice list, so
+  // switching a column to Text and back doesn't quietly resurrect a stale list.
+  function applyFieldKind(col, kind, choicesText) {
+    const shipped = DEFAULT_COLUMN_DATA_TYPES[col.key] || "text";
+    const chosen = COLUMN_DATA_TYPE_VALUES.has(kind) ? kind : shipped;
+    if (chosen === shipped) delete col.dataType;
+    else col.dataType = chosen;
+    if (chosen === "select") {
+      const opts = String(choicesText || "").split("\n").map(o => o.trim()).filter(Boolean);
+      // De-duplicated: two identical rows in the picker are indistinguishable,
+      // and the second could never be selected in a way that reads differently.
+      col.options = [...new Set(opts)];
+    } else {
+      delete col.options;
+    }
+  }
+
   // One save for the whole type editor. Name lives in typesList (it's what the
   // picker lists), the rest in typeSettings (it's an override of the shipped
   // registry) — but they're one edit to the user, so they go in ONE persist():
@@ -4679,8 +4922,28 @@ function AssetTracker() {
       while (nextColumns.some(c => c.key === key)) key = slugify(label) + "_" + i++;
       // Hidden by default: a field belonging to one type would otherwise add a
       // mostly-empty column to everyone's table. It's in the Columns menu.
-      nextColumns = [...nextColumns, { key, label, width: 160, visible: false, custom: true, restricted: true }];
+      const created = { key, label, width: 160, visible: false, custom: true, restricted: true };
+      // The kind was chosen on the pending row, keyed by tempId — the real key
+      // doesn't exist until this loop invents it.
+      applyFieldKind(created, (draft.fieldTypes || {})[f.tempId], (draft.fieldChoices || {})[f.tempId]);
+      nextColumns = [...nextColumns, created];
       createdKeys.push(key);
+    });
+
+    // The per-field kind is a property of the COLUMN, so it is written for every
+    // field the editor showed — not only the ones this type has ticked. Editing
+    // a Computer and changing what Purchase Date holds changes it for Monitors
+    // too, which is what the note under that section says out loud.
+    nextColumns = nextColumns.map(c => {
+      if (!(c.key in (draft.fieldTypes || {}))) return c;
+      // The editor offers no kind for these, so it must not write one either —
+      // a stale dataType on `person` would be read by columnDataType and by
+      // nothing else, which is exactly the kind of dead setting that later reads
+      // as a bug in whatever does start honouring it.
+      if (BESPOKE_FORM_FIELDS.has(c.key)) return c;
+      const copy = { ...c };
+      applyFieldKind(copy, draft.fieldTypes[c.key], (draft.fieldChoices || {})[c.key]);
+      return copy;
     });
 
     const fields = typeEditableFields(nextColumns).map(c => c.key);
@@ -6093,12 +6356,14 @@ function AssetTracker() {
             </div>
           ) : (
             <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 18, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)", marginBottom: 20 }}>
-              {/* Form-level copy of the parent error. ParentField shows it too,
-                  but only exists for a type that takes a parent — without this,
-                  a save refused over a stored parent that has no field to edit
-                  would look like a Save button that simply does nothing. */}
-              {draft.parentError && (
-                <div style={{ fontSize: 13, color: C.danger, marginBottom: 12 }}>{draft.parentError}</div>
+              {/* Form-level copy of whatever refused the save. The field it
+                  concerns outlines itself in red via errorFields, but this line
+                  is the one that always renders — a save refused over a stored
+                  parent on a type that has no Parent field, or over a tag on a
+                  type that carries none, would otherwise look like a Save button
+                  that simply does nothing. */}
+              {draft.formError && (
+                <div style={{ fontSize: 13, color: C.danger, marginBottom: 12 }}>{draft.formError}</div>
               )}
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12 }}>
                 {editFormColumns.map(c => (
@@ -6108,11 +6373,11 @@ function AssetTracker() {
                     <ParentField
                       key={c.key}
                       value={draft.parentId || ""}
-                      onChange={v => setDraft({ ...draft, parentId: v, parentError: "" })}
+                      onChange={v => setDraft({ ...draft, parentId: v, formError: "", errorFields: [] })}
                       childType={draft.type}
                       childId={selectedAsset.id}
                       assets={assets}
-                      error={draft.parentError}
+                      error={fieldErrorFor("parent", draft)}
                     />
                   ) : c.key === "person" ? (
                     <UserField
@@ -6144,9 +6409,10 @@ function AssetTracker() {
                       key={c.key}
                       label={c.label}
                       value={draft[c.key] || ""}
-                      onChange={v => setDraft({ ...draft, [c.key]: v })}
-                      wide={c.key === "notes"}
-                      type={c.key === "totalQuantity" ? "number" : undefined}
+                      onChange={v => setDraft({ ...draft, [c.key]: v, ...clearedError(draft, c.key) })}
+                      dataType={columnDataType(c)}
+                      options={columnOptions(c)}
+                      error={fieldErrorFor(c.key, draft)}
                     />
                   )
                 ))}
@@ -7589,11 +7855,11 @@ function AssetTracker() {
                   <ParentField
                     key={c.key}
                     value={draft.parentId || ""}
-                    onChange={v => setDraft({ ...draft, parentId: v, parentError: "" })}
+                    onChange={v => setDraft({ ...draft, parentId: v, formError: "", errorFields: [] })}
                     childType={draft.type}
                     childId={draft.id}
                     assets={assets}
-                    error={draft.parentError}
+                    error={fieldErrorFor("parent", draft)}
                   />
                 ) : c.key === "person" ? (
                   <UserField
@@ -7625,20 +7891,23 @@ function AssetTracker() {
                     key={c.key}
                     label={c.label}
                     value={draft[c.key] || ""}
-                    // Editing the Asset ID clears a stale duplicate-ID error, so
-                    // the message never outlives the value it was complaining about.
-                    onChange={v => { if (c.key === "tag" && addError) setAddError(""); setDraft({ ...draft, [c.key]: v }); }}
-                    wide={c.key === "notes"}
+                    // Editing a field clears a stale error about that same field,
+                    // so a message never outlives the value it was complaining
+                    // about. Generic now: it used to special-case the Asset ID,
+                    // which was the only field that could be complained about.
+                    onChange={v => setDraft({ ...draft, [c.key]: v, ...clearedError(draft, c.key) })}
+                    dataType={columnDataType(c)}
+                    options={columnOptions(c)}
+                    error={fieldErrorFor(c.key, draft)}
                     // The Name placeholder previews exactly what saving blank
                     // will store, so the default is visible before it's chosen
                     // rather than appearing out of nowhere afterwards.
                     placeholder={c.key === "screenSize" ? 'e.g. 24"' : c.key === "name" ? suggestedNameFor(draft, assets, typesList) : undefined}
-                    type={c.key === "totalQuantity" ? "number" : undefined}
                   />
                 )
               ))}
             </div>
-            {addError && <div style={{ fontSize: 13, color: C.danger, marginTop: 12 }}>{addError}</div>}
+            {draft.formError && <div style={{ fontSize: 13, color: C.danger, marginTop: 12 }}>{draft.formError}</div>}
             <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
               <button onClick={saveDraft} disabled={isSaving} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: isSaving ? C.border : C.success, color: "#fff", border: "none", fontWeight: 600, fontSize: 14, borderRadius: 10 }}>
                 {isSaving ? <Loader2 size={15} className="spin" /> : <Save size={15} />} {isSaving ? "Saving…" : "Save"}
@@ -7916,9 +8185,25 @@ function AssetTracker() {
                 onChange={e => setNewColName(e.target.value)}
                 onKeyDown={e => e.key === "Enter" && addColumn()}
                 placeholder="New column name"
-                style={{ flex: 1, padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                style={{ flex: 1, minWidth: 0, padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
               />
-              <button onClick={addColumn} disabled={isSaving} style={{ padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600 }}>{isSaving ? "Saving…" : "Add"}</button>
+              {/* The kind is chosen HERE, where the column is born, rather than
+                  only in the type editor. A column created as Text and corrected
+                  afterwards is a column whose first few values were typed into
+                  the wrong kind of box. A choice list still has to go to the type
+                  editor for its choices — this is the one control that fits. */}
+              <div style={{ width: 120, flexShrink: 0 }}>
+                <PickerField
+                  label="New column kind"
+                  hideLabel
+                  value={newColType}
+                  onChange={setNewColType}
+                  options={COLUMN_DATA_TYPES.map(t => t.value)}
+                  labelForOption={v => (COLUMN_DATA_TYPES.find(t => t.value === v) || {}).label || v}
+                  title="Kind of value"
+                />
+              </div>
+              <button onClick={addColumn} disabled={isSaving} style={{ padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600, flexShrink: 0 }}>{isSaving ? "Saving…" : "Add"}</button>
             </div>
             )}
           </div>
@@ -7942,18 +8227,89 @@ function AssetTracker() {
   );
 }
 
-function Field({ label, value, onChange, placeholder, wide, type }) {
+// The generic asset-form input for one column. What it renders comes from the
+// column's DATA TYPE (see columnDataType), which replaced the one hardcoded
+// special case this had before — `type={c.key === "totalQuantity" ? "number" :
+// undefined}`, repeated at the add and edit call sites. That special case is why
+// Purchase Date and Warranty Until were plain text boxes for the app's whole
+// life despite being dates in every other sense.
+//
+// `error` outlines the field and prints the message under it. The message is the
+// FORM-level one, repeated here (see fieldErrorFor) rather than a second copy —
+// a save is refused once, for one reason, and saying it twice in two wordings is
+// how the two drift.
+function Field({ label, value, onChange, placeholder, wide, dataType, options, error, required }) {
+  const kind = dataType || "text";
+  // A long-text field always takes the full row: a textarea in a 180px grid cell
+  // is narrower than the text it holds. `wide` stays an explicit override for a
+  // plain text field that wants the same.
+  const fullWidth = wide || kind === "textarea";
+  const border = error ? C.danger : C.border;
+  const head = (
+    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>
+      {label}
+      {/* The asterisk is the only advance warning that a save will be refused.
+          Marked up as well as coloured, so it is not carried by colour alone. */}
+      {required && <span aria-label="required" title="Required" style={{ color: C.danger, marginLeft: 3 }}>*</span>}
+    </span>
+  );
+  const foot = error
+    ? <span style={{ fontSize: 12, color: C.danger }}>{error}</span>
+    : null;
+  const inputStyle = { padding: "8px 10px", border: `1.5px solid ${border}`, fontSize: 14, borderRadius: 10, color: C.ink, fontFamily: "inherit" };
+
+  if (kind === "select") {
+    return (
+      <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: fullWidth ? "1 / -1" : undefined }}>
+        {head}
+        <PickerField
+          label={label}
+          hideLabel
+          value={value || ""}
+          onChange={onChange}
+          // The blank option is what CLEARS the field. Without it a value picked
+          // by mistake could never be unpicked, which matters more here than in
+          // the managed-list pickers: this column may not be required at all.
+          options={["", ...(options || [])]}
+          labelForOption={o => o || "—"}
+          title={`Select ${label}`}
+          emptyLabel="No choices configured for this field yet."
+        />
+        {foot}
+      </label>
+    );
+  }
+  if (kind === "textarea") {
+    return (
+      <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
+        {head}
+        <textarea
+          value={value || ""}
+          onChange={e => onChange(e.target.value)}
+          placeholder={placeholder}
+          rows={3}
+          style={{ ...inputStyle, resize: "vertical" }}
+        />
+        {foot}
+      </label>
+    );
+  }
+  // A date input refuses to display a full ISO timestamp, and a value written
+  // before writeTable_ forced plain text is exactly that — so normalize on the
+  // way in rather than showing an empty box over a stored value.
+  const shown = kind === "date" ? dateOnly(value || "") : (value || "");
   return (
-    <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: wide ? "1 / -1" : undefined }}>
-      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>{label}</span>
+    <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: fullWidth ? "1 / -1" : undefined }}>
+      {head}
       <input
-        type={type || "text"}
-        inputMode={type === "number" ? "numeric" : undefined}
-        value={value}
+        type={kind === "date" ? "date" : kind === "number" ? "number" : "text"}
+        inputMode={kind === "number" ? "decimal" : undefined}
+        value={shown}
         onChange={e => onChange(e.target.value)}
         placeholder={placeholder}
-        style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+        style={inputStyle}
       />
+      {foot}
     </label>
   );
 }
@@ -8659,6 +9015,16 @@ function TypeManagerModal({
       iconName: entry.iconName || "",
       parentTypes: entry.parentTypes || (TYPE_REGISTRY[t.id] ? [] : DEFAULT_PARENT_TYPES),
       fields: fieldOptions.filter(f => fieldAppliesTo(f.key, t.id)).map(f => f.key),
+      // Seeded from the EFFECTIVE data type — the column's override if it has
+      // one, otherwise the shipped default — so the picker shows what is in
+      // force rather than a blank. Which of those two it was is recovered at
+      // save time, so seeding all of them here doesn't stamp an override onto
+      // every column (see saveTypeSettings).
+      fieldTypes: Object.fromEntries(fieldOptions.map(f => [f.key, columnDataType(f)])),
+      // One option per line rather than comma-separated: a choice list for a
+      // school reads "Good / Fair / Needs replacing", and the day one of those
+      // wants a comma in it a separator-based editor has no answer.
+      fieldChoices: Object.fromEntries(fieldOptions.map(f => [f.key, columnOptions(f).join("\n")])),
       newFields: [],
     });
     setNewFieldName("");
@@ -8684,8 +9050,104 @@ function TypeManagerModal({
   const addPendingField = () => {
     const label = newFieldName.trim();
     if (!label || !draft || fieldLabelTaken(label)) return;
-    setDraft({ ...draft, newFields: [...(draft.newFields || []), { tempId: crypto.randomUUID(), label }] });
+    setDraft({
+      ...draft,
+      newFields: [...(draft.newFields || []), { tempId: crypto.randomUUID(), label }],
+      fieldTypes: { ...(draft.fieldTypes || {}) },
+      fieldChoices: { ...(draft.fieldChoices || {}) },
+    });
     setNewFieldName("");
+  };
+
+  // One field: is it on for this type, what kind of value does it hold, and (for
+  // a choice list) what are the choices. A pending field — invented in this
+  // session and not yet a column — renders the same row, so the thing you just
+  // created is configured the same way as the ones that already existed rather
+  // than appearing as a differently-shaped chip.
+  const fieldRow = (key, label, pending) => {
+    const on = pending || draft.fields.includes(key);
+    // person, peripherals and subType are edited by their own components (a chip
+    // toggle, a managed list), never by the generic Field — so their data type is
+    // not a question anyone gets to answer. Same set the save-time validation
+    // skips, named once so the two cannot drift.
+    const bespoke = !pending && BESPOKE_FORM_FIELDS.has(key);
+    const kind = (draft.fieldTypes || {})[key] || "text";
+    const setKind = v => setDraft({ ...draft, fieldTypes: { ...(draft.fieldTypes || {}), [key]: v } });
+    return (
+      <div key={key} style={{ display: "flex", flexDirection: "column", gap: 4, padding: "5px 0", borderBottom: `1px solid ${C.border}` }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <button
+            type="button"
+            role="checkbox"
+            aria-checked={on}
+            aria-label={`${label} applies to this type`}
+            // A pending field is on by definition -- it was invented FOR this
+            // type -- so its toggle is inert rather than absent, which keeps
+            // every row the same shape and the columns lined up.
+            onClick={() => { if (!pending) setDraft({ ...draft, fields: toggle(draft.fields, key) }); }}
+            style={{
+              width: 16, height: 16, flexShrink: 0, borderRadius: 4, padding: 0,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              border: `1.5px solid ${on ? C.brand : C.border}`,
+              background: on ? C.brand : "transparent",
+            }}
+          >
+            {on && <Check size={11} color="#fff" />}
+          </button>
+          <span style={{ flex: 1, minWidth: 0, fontSize: 13, color: on ? C.ink : C.empty, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {label}
+            {pending && <span style={{ marginLeft: 6, fontSize: 10, fontFamily: "'IBM Plex Mono', monospace", color: C.accent }}>NEW</span>}
+          </span>
+          {/* A field with its own component has no kind to choose — offering
+              one would promise a setting that does nothing, which is worse than
+              offering nothing at all. It still gets a slot, so the rows line up
+              and the absence reads as "not applicable" rather than as a bug. */}
+          {bespoke ? (
+            <div
+              title={`${label} has its own editor, so it holds one particular kind of value.`}
+              style={{ width: 118, flexShrink: 0, fontSize: 12, color: C.empty, textAlign: "center" }}
+            >
+              Built in
+            </div>
+          ) : (
+            /* Dimmed rather than hidden when the field is off: the row keeps its
+               shape, and the kind it WOULD have is still visible, so ticking a
+               field back on doesn't reveal a setting that was never on screen. */
+            <div style={{ width: 118, flexShrink: 0, opacity: on ? 1 : 0.45 }}>
+              <PickerField
+                label={`${label} kind`}
+                hideLabel
+                value={kind}
+                onChange={setKind}
+                options={COLUMN_DATA_TYPES.map(t => t.value)}
+                labelForOption={v => (COLUMN_DATA_TYPES.find(t => t.value === v) || {}).label || v}
+                title={`${label}: kind of value`}
+              />
+            </div>
+          )}
+          {pending && (
+            <button
+              type="button"
+              aria-label={`Remove ${label}`}
+              onClick={() => setDraft({ ...draft, newFields: draft.newFields.filter(x => x.tempId !== key) })}
+              style={{ background: "none", border: "none", padding: 2, display: "flex", color: C.muted, flexShrink: 0 }}
+            >
+              <X size={13} />
+            </button>
+          )}
+        </div>
+        {kind === "select" && on && (
+          <textarea
+            value={(draft.fieldChoices || {})[key] || ""}
+            onChange={e => setDraft({ ...draft, fieldChoices: { ...(draft.fieldChoices || {}), [key]: e.target.value } })}
+            placeholder={"One choice per line"}
+            rows={3}
+            style={{ marginLeft: 24, padding: "5px 8px", border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 12, fontFamily: "inherit", background: C.surface, color: C.ink, resize: "vertical" }}
+            aria-label={`${label} choices`}
+          />
+        )}
+      </div>
+    );
   };
 
   const chip = (on, label, key, onClick) => (
@@ -8763,28 +9225,13 @@ function TypeManagerModal({
 
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Fields</span>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                {fieldOptions.map(f => chip(
-                  draft.fields.includes(f.key), f.label, f.key,
-                  () => setDraft({ ...draft, fields: toggle(draft.fields, f.key) })
-                ))}
-                {/* Fields invented here but not yet saved. Removable while they
-                    are still pending; once saved they're ordinary columns and
-                    are deleted from the Columns menu, which already owns that
-                    (destructive) action rather than having a second copy here. */}
-                {(draft.newFields || []).map(f => (
-                  <span key={f.tempId} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "4px 6px 4px 10px", borderRadius: 999, fontSize: 12, border: `1px dashed ${C.brand}`, background: "transparent", color: C.brandDark, fontWeight: 600 }}>
-                    {f.label}
-                    <button
-                      type="button"
-                      aria-label={`Remove ${f.label}`}
-                      onClick={() => setDraft({ ...draft, newFields: draft.newFields.filter(x => x.tempId !== f.tempId) })}
-                      style={{ background: "none", border: "none", padding: 0, display: "flex", color: C.muted }}
-                    >
-                      <X size={12} />
-                    </button>
-                  </span>
-                ))}
+              {/* A ROW PER FIELD, not the chip row this used to be. The chip
+                  carried exactly one bit — does this type have this field — and
+                  a field now answers a second question (what kind of value it
+                  holds) that a chip has nowhere to put. */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                {fieldOptions.map(f => fieldRow(f.key, f.label, false))}
+                {(draft.newFields || []).map(f => fieldRow(f.tempId, f.label, true))}
               </div>
               <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
                 <input
@@ -8804,6 +9251,15 @@ function TypeManagerModal({
               </div>
               <div style={{ fontSize: 12, color: C.empty }}>
                 A new field belongs to the types you tick it for, and is hidden from the main table until you show it from the Columns menu.
+              </div>
+              {/* Said once, under the whole section, rather than beside each
+                  row's picker. Whether a type HAS a field is this type's
+                  business; what that field HOLDS is the field's own, shared by
+                  every type using it — and silently changing another type's form
+                  from inside this one is exactly the kind of surprise worth
+                  spending a line of text to prevent. */}
+              <div style={{ fontSize: 12, color: C.empty }}>
+                A field's kind applies everywhere that field is used, not only to this type.
               </div>
             </div>
 
