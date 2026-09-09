@@ -103,7 +103,58 @@ it, but it is worth stating because this refactor is otherwise unusually forgivi
 ## 3. Phases
 
 Each phase is independently deployable and independently useful. Stopping after any of
-them leaves a coherent app.
+them leaves a coherent app. Phase 0 is infrastructure rather than refactor, and is a
+prerequisite for phases 2 onward.
+
+### Phase 0 — stand up the `dev` tenant (prerequisite)
+
+**As of 2026-09-09 there is nowhere to deploy this except production.** Worth stating
+plainly because the frontend's `/dev/` build makes it look otherwise:
+
+- `clients.js` defines exactly one tenant, `bca`. `DEV_CLIENT_ID = "dev"` is reserved but
+  no entry exists, and the resolver falls back to the default "while no dev tenant
+  exists" — so `https://assets.stama.tech/dev/` currently talks to **BCA's live backend
+  and live Sheet**. The frontend dev split is real; the backend one is not.
+- `deploy.mjs` pushes to the single script id in `~/.bca-asset-tracker-deploy.json`, which
+  is BCA production. `CLAUDE.md`'s branch-deploy instructions already say so.
+- **`deploy.mjs:127` refuses to run if `clients.js` defines more than one tenant**, rather
+  than push to one script and verify against another's `/exec`. So adding a `dev` entry
+  breaks *all* deploys until this is fixed. It is on the critical path, not a nicety.
+
+Three steps, in order:
+
+1. **Copy the live Sheet.** Google Sheets → File → Make a copy. This copies the Sheet AND
+   its bound Apps Script project in one action, from a phone. `authUsers` comes along, so
+   access is preserved. Then Deploy → New deployment → Web app (execute as owner, access
+   Anyone) for its own `/exec`. Note the new Script ID.
+   - **A live copy, deliberately, not the `MOCK_SNAPSHOT` seed** that
+     `MULTI_CLIENT_DEPLOYMENT.md` suggests for general dev work. What this refactor has to
+     validate is the *un-migrated → migrated transition*, and only real data carries the
+     real edge cases: four panels with sub-panel feeds, the `BCR`/`BCB`/`BCC` labels the
+     counter never issued, ~130 assets, and the full audit history.
+   - **Re-copy before each rehearsal, not once.** Migrating dev leaves it migrated while
+     live is still un-migrated — validating the end state rather than the transition. A
+     fresh copy is one menu action; take one each time.
+   - A Claude Code cloud session **cannot** do this step or pull the data itself: `/exec`
+     needs a signed-in session since v18, and credential handling is blocked there (the
+     same reason `clasp login` cannot run there — see `CLAUDE.md` on why the deploy config
+     lives in `$HOME`).
+2. **Teach `deploy.mjs` per-tenant script ids** — phase 2 of `MULTI_CLIENT_DEPLOYMENT.md`.
+   Minimum viable: map tenant id → script id in the config, take `--client=<id>`, and
+   verify against *that* tenant's `apiUrl` rather than the default's. `--all` and
+   `--status` can wait; targeting one named tenant correctly cannot.
+3. **Add the `dev` entry to `clients.js`** (`labelPrefix` can stay `BCA` so the copied data
+   keeps counting its own labels). Only after step 2, or deploys break.
+
+After this, `/dev/` defaults to the dev tenant on its own — that logic already exists and
+is waiting for the entry.
+
+**Phase 1 could safely skip all of this.** It is purely additive: `id` is empty on every
+existing row and `a.id || a.label` is identical behaviour until something writes an id.
+Phases 2–4 are what genuinely need a dev tenant, since Sandbox never contacts Apps Script
+and so cannot reach a write path at all. Build Phase 0 because the rest of the refactor
+needs it, not because v31 is risky — that distinction is what makes it worth doing
+properly rather than rushing.
 
 ### Phase 1 — backend v31: add the `id` column (additive, safe)
 
