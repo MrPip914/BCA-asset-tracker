@@ -166,6 +166,14 @@ for the 2026-08-21 data-loss incident.
   same reasoning as `~/.bca-asset-tracker-deploy.json`. **A cloud Claude Code session cannot
   use any of this** — its container is re-cloned per session and holds no `$HOME` state — so
   this is a LOCAL-only capability, unlike everything else in the repo.
+  - **Two `$HOME` files now key off the same tenant ids, and they are deliberately separate.**
+    `set-tenant.mjs` writes `~/.bca-asset-tracker-deploy.json` (`tenants.<id>.scriptId`), and
+    `sheet.mjs` writes `~/.bca-asset-tracker-sheets-tenants.json` (`<id>: sheetId`). Folding the
+    sheet id into the deploy config would look tidier and be wrong: they live on **different
+    machines**. The deploy config's home is Cloud Shell's persistent `$HOME`, which is what makes
+    a redeploy one tap from Eric's phone; the sheets config is on his Windows machine, next to a
+    service-account key that must never reach Cloud Shell. Merging them would either drag the key
+    somewhere it does not belong or leave half the file meaningless wherever it sat.
 - **Zero dependencies, deliberately.** The service-account JWT is signed with `node:crypto`
   and exchanged for an access token by hand, ~20 lines. This repo has no build step and no
   `node_modules`, and a cleanup tool that needs an `npm install` first is one that doesn't
