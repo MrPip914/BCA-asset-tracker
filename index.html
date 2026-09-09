@@ -498,7 +498,7 @@ function personNamesOf(asset, assets) {
   const ids = personLabelsOf(asset);
   if (ids.length) {
     return ids.map(id => {
-      const u = (assets || []).find(a => a.label === id);
+      const u = (assets || []).find(a => a.id === id);
       return u ? nameOf(u) : "(deleted user)";
     });
   }
@@ -948,7 +948,7 @@ function describeAuditFor(entry, viewerLabel, assets, typesList) {
   // entry's own stored type is the one thing left worth adding; it is built in
   // the same shape suggestedNameFor() would have used, so a deleted asset reads
   // like a live one rather than as a bare id.
-  const subjectAsset = (assets || []).find(a => a.label === entry.assetLabel);
+  const subjectAsset = (assets || []).find(a => a.id === entry.assetLabel);
   const deadType = subjectAsset ? "" : typeNameOf(entry.assetType, typesList);
   const subject = subjectAsset
     ? nameOf(subjectAsset)
@@ -997,13 +997,16 @@ const AUDIT_LINK_STYLE = {
 // outlive the assets they describe, so a link there would open nothing.
 function auditSegments(entry, viewerLabel, assets, typesList) {
   const text = describeAuditFor(entry, viewerLabel, assets, typesList);
-  const byLabel = l => (assets || []).find(a => a.label === l);
+  const byLabel = l => (assets || []).find(a => a.id === l);
   const links = [];
   const add = (t, label) => {
     const str = String(t || "");
     if (!str || !label || str === UNASSIGNED_LABEL || str === "—") return;
     if (!byLabel(label)) return;
-    links.push({ text: str, label });
+    // `id`, not `label`: this is the asset KEY the segment links to, resolved
+    // through `related`. Calling it a label was accurate only while the two
+    // were the same string.
+    links.push({ text: str, id: label });
   };
 
   const isSubjectView = !viewerLabel || entry.assetLabel === viewerLabel;
@@ -1044,7 +1047,7 @@ function auditSegments(entry, viewerLabel, assets, typesList) {
       String(side || "").split(",").map(n => n.trim()).filter(Boolean).forEach(n => {
         if (links.some(l => l.text === n)) return;
         const hits = people.filter(u => nameOf(u) === n);
-        if (hits.length === 1) add(n, hits[0].label);
+        if (hits.length === 1) add(n, hits[0].id);
       });
     });
   } else if (entry.action === "allocated") {
@@ -1069,7 +1072,7 @@ function auditSegments(entry, viewerLabel, assets, typesList) {
     const hit = sorted.find(l => text.startsWith(l.text, i));
     if (hit) {
       if (buf) { out.push(buf); buf = ""; }
-      out.push({ text: hit.text, label: hit.label });
+      out.push({ text: hit.text, id: hit.id });
       i += hit.text.length;
     } else {
       buf += text[i];
@@ -1091,12 +1094,12 @@ function auditSegments(entry, viewerLabel, assets, typesList) {
 // pre-rename value everywhere a room is resolved from an id.
 function roomNameFor(roomId, assets) {
   if (!roomId) return "";
-  const room = assets.find(a => a.type === "Room" && a.label === roomId);
+  const room = assets.find(a => a.type === "Room" && a.id === roomId);
   return room ? nameOf(room) : "";
 }
 function buildingNameFor(buildingId, assets) {
   if (!buildingId) return "";
-  const building = assets.find(a => a.type === "Building" && a.label === buildingId);
+  const building = assets.find(a => a.type === "Building" && a.id === buildingId);
   return building ? nameOf(building) : "";
 }
 
@@ -1123,18 +1126,18 @@ const UNASSIGNED_LABEL = "Unassigned";
 
 function parentOf(asset, assets) {
   if (!asset || !asset.parentId) return null;
-  return (assets || []).find(a => a.label === asset.parentId) || null;
+  return (assets || []).find(a => a.id === asset.parentId) || null;
 }
 
 // The chain above `asset`, nearest parent first, stopping at the root — or at
 // the first repeat if the data contains a loop.
 function ancestorsOf(asset, assets) {
   const out = [];
-  const seen = new Set(asset?.label ? [asset.label] : []);
+  const seen = new Set(asset?.id ? [asset.id] : []);
   let cur = parentOf(asset, assets);
-  while (cur && !seen.has(cur.label) && out.length < MAX_PARENT_DEPTH) {
+  while (cur && !seen.has(cur.id) && out.length < MAX_PARENT_DEPTH) {
     out.push(cur);
-    seen.add(cur.label);
+    seen.add(cur.id);
     cur = parentOf(cur, assets);
   }
   return out;
@@ -1154,18 +1157,18 @@ function nearestAncestorOfType(asset, assets, type) {
 // inventory's scale — a few hundred assets, only while a detail view is open.
 function descendantsOf(asset, assets) {
   if (!asset) return [];
-  return (assets || []).filter(a => a.label !== asset.label && ancestorsOf(a, assets).some(p => p.label === asset.label));
+  return (assets || []).filter(a => a.id !== asset.id && ancestorsOf(a, assets).some(p => p.id === asset.id));
 }
 
-// Would pointing `childLabel` at `parentId` close a loop? True when the proposed
+// Would pointing `childId` at `parentId` close a loop? True when the proposed
 // parent IS the child, or already sits somewhere below it. ancestorsOf is itself
 // loop-safe, so this stays correct even when the existing data is already bad.
-function wouldCreateCycle(childLabel, parentId, assets) {
-  if (!parentId || !childLabel) return false;
-  if (parentId === childLabel) return true;
-  const parent = (assets || []).find(a => a.label === parentId);
+function wouldCreateCycle(childId, parentId, assets) {
+  if (!parentId || !childId) return false;
+  if (parentId === childId) return true;
+  const parent = (assets || []).find(a => a.id === parentId);
   if (!parent) return false;
-  return ancestorsOf(parent, assets).some(a => a.label === childLabel);
+  return ancestorsOf(parent, assets).some(a => a.id === childId);
 }
 
 // Resolves a parentId to the parent's display name. A dangling id (its asset was
@@ -1175,7 +1178,7 @@ function wouldCreateCycle(childLabel, parentId, assets) {
 // different state.
 function parentNameFor(parentId, assets) {
   if (!parentId) return "";
-  const p = (assets || []).find(a => a.label === parentId);
+  const p = (assets || []).find(a => a.id === parentId);
   return p ? nameOf(p) : "(deleted asset)";
 }
 
@@ -1221,9 +1224,9 @@ function pathOf(asset, assets) {
 // could theoretically collide or change) is what's actually wanted.
 function effectiveBuildingId(asset, assets) {
   if (!asset) return "";
-  if (asset.type === "Building") return asset.label;
+  if (asset.type === "Building") return asset.id;
   const b = nearestAncestorOfType(asset, assets, "Building");
-  return b ? b.label : "";
+  return b ? b.id : "";
 }
 
 // Is this asset's stored parent actually legal for its type? Storage is
@@ -1237,15 +1240,15 @@ function parentageProblem(asset, assets, typesList) {
   // a built-in reads like its name but for a user-created type is a raw uuid.
   const own = typeNameOf(asset.type, typesList);
   if (!typeTakesParent(asset.type)) return `A ${own} doesn't sit inside anything, but this one has a parent. Press Edit and then Save to clear it.`;
-  const parent = (assets || []).find(a => a.label === asset.parentId);
+  const parent = (assets || []).find(a => a.id === asset.parentId);
   if (!parent) return `Its parent (${asset.parentId}) no longer exists.`;
   if (!canBeParentOf(parent.type, asset.type)) return `A ${own} can't sit inside a ${typeNameOf(parent.type, typesList)}.`;
   // Asking ancestorsOf(asset) whether it contains `asset` can never say yes — it
-  // seeds its visited set with asset.label and stops at the first repeat, so the
+  // seeds its visited set with asset.id and stops at the first repeat, so the
   // asset is excluded by construction. The loop this asset is actually part of is
   // the one you'd close by re-pointing it where it already points, which is
   // exactly the question wouldCreateCycle answers.
-  if (wouldCreateCycle(asset.label, asset.parentId, assets)) return "It's part of a loop — something above it is also below it.";
+  if (wouldCreateCycle(asset.id, asset.parentId, assets)) return "It's part of a loop — something above it is also below it.";
   if (ancestorsOf(asset, assets).length >= MAX_PARENT_DEPTH) return "Its chain of parents is unreasonably long, which usually means a loop.";
   return null;
 }
@@ -1266,17 +1269,17 @@ function stripDraftUiState(draft) {
   return rest;
 }
 
-function validateParentChoice(childLabel, childType, parentId, assets, typesList) {
+function validateParentChoice(childId, childType, parentId, assets, typesList) {
   if (!parentId) return null;
   const own = typeNameOf(childType, typesList);
   if (!typeTakesParent(childType)) return `A ${own} doesn't sit inside anything.`;
-  const parent = (assets || []).find(a => a.label === parentId);
+  const parent = (assets || []).find(a => a.id === parentId);
   if (!parent) return "That parent no longer exists — pick another.";
   if (!canBeParentOf(parent.type, childType)) {
     const allowed = parentTypesFor(childType).map(t => typeNameOf(t, typesList)).join(" or ");
     return `A ${own} can't sit inside a ${typeNameOf(parent.type, typesList)}. It can go in: ${allowed}.`;
   }
-  if (wouldCreateCycle(childLabel, parentId, assets)) {
+  if (wouldCreateCycle(childId, parentId, assets)) {
     return `That would put ${nameOf(parent)} inside itself — it's already somewhere below this asset.`;
   }
   return null;
@@ -1479,7 +1482,7 @@ const FRONTEND_SCRIPT_VERSION = "v31";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-08.1";
+const APP_VERSION = "2026-09-09.1";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -1642,6 +1645,16 @@ const SANDBOX_DATA_KEY = CLIENT.storageKey("asset-tracker-sandbox-data");
 // since that's the area under active development and the one most worth having
 // good fixture data for. Update this by hand when you want the sandbox to start
 // from a different baseline; it's plain data, safe to edit directly.
+// THREE assets here carry a real `id` that is NOT their label, and the rest carry
+// none at all. That mix is deliberate and load-bearing (v31/phase 2): the backend
+// returns an empty `id` for every row written before v31 and a real one after, so
+// a fixture that was all one shape would exercise only half the code and hide the
+// other half -- which is exactly how the personIds bug stayed invisible in Sandbox
+// while it wiped assignments on the live sheet. The three were picked to cover the
+// ways an asset gets referenced: BCR0006 is a Room reached by parentId,
+// roomsServedIds, an allocation and two audit rows; BCA0001 is a leaf device whose
+// only referrers are its own audit history; BCA0084 is a sub-panel that is the
+// target of a feedsPanelLabel and the owner of 21 breaker panelLabels.
 const MOCK_SNAPSHOT = {
   scriptVersion: FRONTEND_SCRIPT_VERSION,
   // The type list in the OLD pre-id shape — a plain array of name strings, which
@@ -1682,7 +1695,7 @@ const MOCK_SNAPSHOT = {
     { label: "BCB0002", type: "Building", name: "Building 200", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
     { label: "BCB0003", type: "Building", name: "Building 300", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
     { label: "BCB0004", type: "Building", name: "Building 400", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
-    { label: "BCR0006", type: "Room", name: "Room 102", parentId: "BCB0001", person: "Jen Kramer", notes: "", status: "Active" },
+    { id: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", label: "BCR0006", type: "Room", name: "Room 102", parentId: "BCB0001", person: "Jen Kramer", notes: "", status: "Active" },
     { label: "BCR0008", type: "Room", name: "Room 200", parentId: "BCB0002", person: "Aaron Cantrell", notes: "", status: "Active" },
     { label: "BCR0011", type: "Room", name: "Room 300", parentId: "BCB0003", person: "Denise Sloan", notes: "", status: "Active" },
     { label: "BCR0014", type: "Room", name: "Room 400", parentId: "BCB0004", person: "Kelly Mackinga", notes: "", status: "Active" },
@@ -1694,9 +1707,9 @@ const MOCK_SNAPSHOT = {
     // the moment v28 ships, so the sandbox exercises the conversion button
     // rather than starting past it -- the same reasoning as the stored column
     // config carrying retired keys.
-    { label: "BCA0001", type: "Computer", parentId: "BCR0006", brand: "Dell", model: "OptiPlex 7010", serial: "MOCK-CMP-001", person: "Jen Kramer", peripherals: "Keyboard, Mouse", notes: "", status: "Active" },
-    { label: "BCA0002", type: "Monitor", parentId: "BCR0006", brand: "Dell", model: "P2419H", serial: "MOCK-MON-001", person: "Jen Kramer", notes: "", status: "Active" },
-    { label: "BCA0003", type: "Phone", parentId: "BCR0006", brand: "Cisco", model: "8841", serial: "MOCK-PHN-001", person: "Jen Kramer", notes: "", status: "Active" },
+    { id: "b81c60de-2f47-4a93-8e15-0d7c39ab6215", label: "BCA0001", type: "Computer", parentId: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", brand: "Dell", model: "OptiPlex 7010", serial: "MOCK-CMP-001", person: "Jen Kramer", peripherals: "Keyboard, Mouse", notes: "", status: "Active" },
+    { label: "BCA0002", type: "Monitor", parentId: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", brand: "Dell", model: "P2419H", serial: "MOCK-MON-001", person: "Jen Kramer", notes: "", status: "Active" },
+    { label: "BCA0003", type: "Phone", parentId: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", brand: "Cisco", model: "8841", serial: "MOCK-PHN-001", person: "Jen Kramer", notes: "", status: "Active" },
     { label: "BCA0011", type: "Phone", parentId: "BCR0008", brand: "Cisco", model: "8841", serial: "MOCK-PHN-002", person: "Aaron Cantrell", notes: "", status: "Active" },
     { label: "BCA0015", type: "Stream Deck", parentId: "BCR0008", brand: "Elgato", model: "Stream Deck MK.2", serial: "MOCK-SD-001", person: "Aaron Cantrell", notes: "", status: "Active" },
     { label: "BCA0024", type: "TV", parentId: "BCR0011", brand: "Samsung", model: "55\" QLED", serial: "MOCK-TV-001", person: "Denise Sloan", notes: "", status: "Active" },
@@ -1705,7 +1718,7 @@ const MOCK_SNAPSHOT = {
     // is called by its sub-type. The stale room/roomId/itemName this used to carry
     // went with the columns themselves in v25 — there is no legacy shape left for
     // a fixture to reproduce.
-    { label: "BCA0081", type: "Bulk Item", subType: "Chairs", totalQuantity: "40", allocations: [{ roomId: "BCR0006", quantity: "20" }, { roomId: "BCR0008", quantity: "20" }], notes: "", status: "Active" },
+    { label: "BCA0081", type: "Bulk Item", subType: "Chairs", totalQuantity: "40", allocations: [{ roomId: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", quantity: "20" }, { roomId: "BCR0008", quantity: "20" }], notes: "", status: "Active" },
     // Every panel below follows the same design: mostly single-pole breakers
     // feeding room outlet/lighting circuits, plus exactly one of each other
     // BreakerType (Tandem, Quad, Split Double-Pole) for catalog variety, one
@@ -1722,7 +1735,7 @@ const MOCK_SNAPSHOT = {
           { id: "c82-1", breakerId: "b82-1", label: "Outlets", roomsServedIds: ["BCR0020"], feedsPanelLabel: "", notes: "- North wall outlets" },
         ] },
         { id: "b82-2", panelLabel: "BCA0082", cells: ["2a", "2b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
-          { id: "c82-2", breakerId: "b82-2", label: "Outlets", roomsServedIds: ["BCR0006"], feedsPanelLabel: "", notes: "- North wall outlets" },
+          { id: "c82-2", breakerId: "b82-2", label: "Outlets", roomsServedIds: ["3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80"], feedsPanelLabel: "", notes: "- North wall outlets" },
         ] },
         { id: "b82-3", panelLabel: "BCA0082", cells: ["3a", "3b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
           { id: "c82-3", breakerId: "b82-3", label: "Outlets", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "- Counter outlets, north wall" },
@@ -1734,7 +1747,7 @@ const MOCK_SNAPSHOT = {
           { id: "c82-5", breakerId: "b82-5", label: "Lighting", roomsServedIds: ["BCR0020"], feedsPanelLabel: "", notes: "- Ceiling lights" },
         ] },
         { id: "b82-6", panelLabel: "BCA0082", cells: ["6a", "6b"], breakerTypeId: "type-single-pole", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
-          { id: "c82-6", breakerId: "b82-6", label: "Lighting", roomsServedIds: ["BCR0006"], feedsPanelLabel: "", notes: "- Ceiling lights" },
+          { id: "c82-6", breakerId: "b82-6", label: "Lighting", roomsServedIds: ["3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80"], feedsPanelLabel: "", notes: "- Ceiling lights" },
         ] },
         { id: "b82-7", panelLabel: "BCA0082", cells: ["7a", "7b"], breakerTypeId: "type-single-pole", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
           { id: "c82-7", breakerId: "b82-7", label: "Lighting", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "- Ceiling lights" },
@@ -1749,7 +1762,7 @@ const MOCK_SNAPSHOT = {
           { id: "c82-9a", breakerId: "b82-9a", label: "Outlets", roomsServedIds: ["BCR0020"], feedsPanelLabel: "", notes: "- South wall outlets" },
         ] },
         { id: "b82-9b", panelLabel: "BCA0082", cells: ["9b"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp82-quad-9", circuits: [
-          { id: "c82-9b", breakerId: "b82-9b", label: "Outlets", roomsServedIds: ["BCR0006"], feedsPanelLabel: "", notes: "- South wall outlets\n- Desk outlets" },
+          { id: "c82-9b", breakerId: "b82-9b", label: "Outlets", roomsServedIds: ["3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80"], feedsPanelLabel: "", notes: "- South wall outlets\n- Desk outlets" },
         ] },
         { id: "b82-11a", panelLabel: "BCA0082", cells: ["11a"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp82-quad-9", circuits: [
           { id: "c82-11a", breakerId: "b82-11a", label: "Outlets", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "- Counter outlets, south wall" },
@@ -1777,10 +1790,10 @@ const MOCK_SNAPSHOT = {
           { id: "c82-16-18", breakerId: "b82-16-18", label: "Range/Oven", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "- Range/oven" },
         ] },
         { id: "b82-17", panelLabel: "BCA0082", cells: ["17a", "17b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
-          { id: "c82-17", breakerId: "b82-17", label: "Outlets", roomsServedIds: ["BCR0006"], feedsPanelLabel: "", notes: "- Closet outlets" },
+          { id: "c82-17", breakerId: "b82-17", label: "Outlets", roomsServedIds: ["3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80"], feedsPanelLabel: "", notes: "- Closet outlets" },
         ] },
         { id: "b82-19-21", panelLabel: "BCA0082", cells: ["19a", "19b", "21a", "21b"], breakerTypeId: "type-double-pole", ampRating: "60", status: "Active", serial: "", installedDate: "", notes: "Feed to Room 300 sub-panel (BCA0084)", circuits: [
-          { id: "c82-19-21", breakerId: "b82-19-21", label: "Feed to Room 300 sub-panel", roomsServedIds: [], feedsPanelLabel: "BCA0084", notes: "- Feeds downstream sub-panel; no direct loads" },
+          { id: "c82-19-21", breakerId: "b82-19-21", label: "Feed to Room 300 sub-panel", roomsServedIds: [], feedsPanelLabel: "5a4e7b12-9c38-41d6-af70-2b8e6d05c9a3", notes: "- Feeds downstream sub-panel; no direct loads" },
         ] },
         { id: "b82-20", panelLabel: "BCA0082", cells: ["20a", "20b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
           { id: "c82-20", breakerId: "b82-20", label: "Outlets", roomsServedIds: ["BCR0018"], feedsPanelLabel: "", notes: "- East wall outlets\n- Shelving unit outlet" },
@@ -1879,69 +1892,69 @@ const MOCK_SNAPSHOT = {
       ],
     },
     {
-      label: "BCA0084", type: "Electrical Panel", parentId: "BCR0011", brand: "Square D", model: "QO112L125GRB", serial: "B300-SQD-4472",
+      id: "5a4e7b12-9c38-41d6-af70-2b8e6d05c9a3", label: "BCA0084", type: "Electrical Panel", parentId: "BCR0011", brand: "Square D", model: "QO112L125GRB", serial: "B300-SQD-4472",
       notes: "Sub-panel fed from Main Distribution Panel (Storage Room), 125A main lug.", status: "Active",
       panelSlotCount: 20, panelLayout: "two-column",
       breakers: [
-        { id: "b84-1", panelLabel: "BCA0084", cells: ["1a", "1b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+        { id: "b84-1", panelLabel: "5a4e7b12-9c38-41d6-af70-2b8e6d05c9a3", cells: ["1a", "1b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
           { id: "c84-1", breakerId: "b84-1", label: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "", notes: "- North wall outlets" },
         ] },
-        { id: "b84-2", panelLabel: "BCA0084", cells: ["2a", "2b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+        { id: "b84-2", panelLabel: "5a4e7b12-9c38-41d6-af70-2b8e6d05c9a3", cells: ["2a", "2b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
           { id: "c84-2", breakerId: "b84-2", label: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "", notes: "- South wall outlets" },
         ] },
-        { id: "b84-3", panelLabel: "BCA0084", cells: ["3a", "3b"], breakerTypeId: "type-single-pole", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+        { id: "b84-3", panelLabel: "5a4e7b12-9c38-41d6-af70-2b8e6d05c9a3", cells: ["3a", "3b"], breakerTypeId: "type-single-pole", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
           { id: "c84-3", breakerId: "b84-3", label: "Lighting", roomsServedIds: ["BCR0011"], feedsPanelLabel: "", notes: "- Ceiling lights" },
         ] },
-        { id: "b84-4a", panelLabel: "BCA0084", cells: ["4a"], breakerTypeId: "type-tandem", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-tandem-4", circuits: [
+        { id: "b84-4a", panelLabel: "5a4e7b12-9c38-41d6-af70-2b8e6d05c9a3", cells: ["4a"], breakerTypeId: "type-tandem", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-tandem-4", circuits: [
           { id: "c84-4a", breakerId: "b84-4a", label: "Exterior lighting", roomsServedIds: ["BCR0011"], feedsPanelLabel: "", notes: "- Entry door exterior light" },
         ] },
-        { id: "b84-4b", panelLabel: "BCA0084", cells: ["4b"], breakerTypeId: "type-tandem", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-tandem-4", circuits: [
+        { id: "b84-4b", panelLabel: "5a4e7b12-9c38-41d6-af70-2b8e6d05c9a3", cells: ["4b"], breakerTypeId: "type-tandem", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-tandem-4", circuits: [
           { id: "c84-4b", breakerId: "b84-4b", label: "Closet light", roomsServedIds: ["BCR0011"], feedsPanelLabel: "", notes: "- Closet light" },
         ] },
-        { id: "b84-5", panelLabel: "BCA0084", cells: ["5a", "5b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+        { id: "b84-5", panelLabel: "5a4e7b12-9c38-41d6-af70-2b8e6d05c9a3", cells: ["5a", "5b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
           { id: "c84-5", breakerId: "b84-5", label: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "", notes: "- East wall outlets" },
         ] },
-        { id: "b84-6a", panelLabel: "BCA0084", cells: ["6a"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-quad-6", circuits: [
+        { id: "b84-6a", panelLabel: "5a4e7b12-9c38-41d6-af70-2b8e6d05c9a3", cells: ["6a"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-quad-6", circuits: [
           { id: "c84-6a", breakerId: "b84-6a", label: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "", notes: "- West wall outlets" },
         ] },
-        { id: "b84-6b", panelLabel: "BCA0084", cells: ["6b"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-quad-6", circuits: [
+        { id: "b84-6b", panelLabel: "5a4e7b12-9c38-41d6-af70-2b8e6d05c9a3", cells: ["6b"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-quad-6", circuits: [
           { id: "c84-6b", breakerId: "b84-6b", label: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "", notes: "- Desk area outlets" },
         ] },
-        { id: "b84-8a", panelLabel: "BCA0084", cells: ["8a"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-quad-6", circuits: [
+        { id: "b84-8a", panelLabel: "5a4e7b12-9c38-41d6-af70-2b8e6d05c9a3", cells: ["8a"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-quad-6", circuits: [
           { id: "c84-8a", breakerId: "b84-8a", label: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "", notes: "- Workbench outlets" },
         ] },
-        { id: "b84-8b", panelLabel: "BCA0084", cells: ["8b"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-quad-6", circuits: [
+        { id: "b84-8b", panelLabel: "5a4e7b12-9c38-41d6-af70-2b8e6d05c9a3", cells: ["8b"], breakerTypeId: "type-quad", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-quad-6", circuits: [
           { id: "c84-8b", breakerId: "b84-8b", label: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "", notes: "- Under-window outlets" },
         ] },
-        { id: "b84-7", panelLabel: "BCA0084", cells: ["7a", "7b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+        { id: "b84-7", panelLabel: "5a4e7b12-9c38-41d6-af70-2b8e6d05c9a3", cells: ["7a", "7b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
           { id: "c84-7", breakerId: "b84-7", label: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "", notes: "- Window wall outlets" },
         ] },
-        { id: "b84-9a", panelLabel: "BCA0084", cells: ["9a"], breakerTypeId: "type-split-double", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-split-9", circuits: [
+        { id: "b84-9a", panelLabel: "5a4e7b12-9c38-41d6-af70-2b8e6d05c9a3", cells: ["9a"], breakerTypeId: "type-split-double", ampRating: "15", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-split-9", circuits: [
           { id: "c84-9a", breakerId: "b84-9a", label: "Garbage disposal", roomsServedIds: ["BCR0011"], feedsPanelLabel: "", notes: "- Under-sink garbage disposal" },
         ] },
-        { id: "b84-9b-11a", panelLabel: "BCA0084", cells: ["9b", "11a"], breakerTypeId: "type-split-double", ampRating: "30", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-split-9", circuits: [
+        { id: "b84-9b-11a", panelLabel: "5a4e7b12-9c38-41d6-af70-2b8e6d05c9a3", cells: ["9b", "11a"], breakerTypeId: "type-split-double", ampRating: "30", status: "Active", serial: "", installedDate: "", notes: "", groupId: "grp84-split-9", circuits: [
           { id: "c84-9b-11a", breakerId: "b84-9b-11a", label: "Microwave", roomsServedIds: ["BCR0011"], feedsPanelLabel: "", notes: "- Countertop microwave" },
         ] },
-        { id: "b84-11b", panelLabel: "BCA0084", cells: ["11b"], breakerTypeId: "type-split-double", ampRating: "15", status: "Spare", serial: "", installedDate: "", notes: "", groupId: "grp84-split-9", circuits: [] },
-        { id: "b84-10", panelLabel: "BCA0084", cells: ["10a", "10b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+        { id: "b84-11b", panelLabel: "5a4e7b12-9c38-41d6-af70-2b8e6d05c9a3", cells: ["11b"], breakerTypeId: "type-split-double", ampRating: "15", status: "Spare", serial: "", installedDate: "", notes: "", groupId: "grp84-split-9", circuits: [] },
+        { id: "b84-10", panelLabel: "5a4e7b12-9c38-41d6-af70-2b8e6d05c9a3", cells: ["10a", "10b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
           { id: "c84-10", breakerId: "b84-10", label: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "", notes: "- North wall outlets (secondary run)" },
         ] },
-        { id: "b84-12-14", panelLabel: "BCA0084", cells: ["12a", "12b", "14a", "14b"], breakerTypeId: "type-double-pole", ampRating: "30", status: "Active", serial: "", installedDate: "", notes: "Electric dryer", circuits: [
+        { id: "b84-12-14", panelLabel: "5a4e7b12-9c38-41d6-af70-2b8e6d05c9a3", cells: ["12a", "12b", "14a", "14b"], breakerTypeId: "type-double-pole", ampRating: "30", status: "Active", serial: "", installedDate: "", notes: "Electric dryer", circuits: [
           { id: "c84-12-14", breakerId: "b84-12-14", label: "Dryer", roomsServedIds: ["BCR0011"], feedsPanelLabel: "", notes: "- Electric dryer" },
         ] },
-        { id: "b84-13", panelLabel: "BCA0084", cells: ["13a", "13b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+        { id: "b84-13", panelLabel: "5a4e7b12-9c38-41d6-af70-2b8e6d05c9a3", cells: ["13a", "13b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
           { id: "c84-13", breakerId: "b84-13", label: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "", notes: "- Closet outlets" },
         ] },
-        { id: "b84-15-17", panelLabel: "BCA0084", cells: ["15a", "15b", "17a", "17b"], breakerTypeId: "type-double-pole", ampRating: "60", status: "Active", serial: "", installedDate: "", notes: "Reserved feed for a future shed sub-panel (not yet installed).", circuits: [
+        { id: "b84-15-17", panelLabel: "5a4e7b12-9c38-41d6-af70-2b8e6d05c9a3", cells: ["15a", "15b", "17a", "17b"], breakerTypeId: "type-double-pole", ampRating: "60", status: "Active", serial: "", installedDate: "", notes: "Reserved feed for a future shed sub-panel (not yet installed).", circuits: [
           { id: "c84-15-17", breakerId: "b84-15-17", label: "Feed to shed sub-panel", roomsServedIds: [], feedsPanelLabel: "BCA0101", notes: "- Feeds downstream sub-panel; no direct loads" },
         ] },
-        { id: "b84-16", panelLabel: "BCA0084", cells: ["16a", "16b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+        { id: "b84-16", panelLabel: "5a4e7b12-9c38-41d6-af70-2b8e6d05c9a3", cells: ["16a", "16b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
           { id: "c84-16", breakerId: "b84-16", label: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "", notes: "- South wall outlets (secondary run)" },
         ] },
-        { id: "b84-18", panelLabel: "BCA0084", cells: ["18a", "18b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+        { id: "b84-18", panelLabel: "5a4e7b12-9c38-41d6-af70-2b8e6d05c9a3", cells: ["18a", "18b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
           { id: "c84-18", breakerId: "b84-18", label: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "", notes: "- East wall outlets (secondary run)" },
         ] },
-        { id: "b84-19", panelLabel: "BCA0084", cells: ["19a", "19b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
+        { id: "b84-19", panelLabel: "5a4e7b12-9c38-41d6-af70-2b8e6d05c9a3", cells: ["19a", "19b"], breakerTypeId: "type-single-pole", ampRating: "20", status: "Active", serial: "", installedDate: "", notes: "", circuits: [
           { id: "c84-19", breakerId: "b84-19", label: "Outlets", roomsServedIds: ["BCR0011"], feedsPanelLabel: "", notes: "- Entry wall outlets" },
         ] },
       ],
@@ -2017,7 +2030,7 @@ const MOCK_SNAPSHOT = {
     // Mitsubishi mini-split indoor units — one per Room, linked via roomId like any
     // other device. Maintenance items mirror the real-world service schedule: filter
     // cleaning is a monthly DIY task, coil cleaning is an annual pro-service task.
-    { label: "BCA0086", type: "Mini Split", parentId: "BCR0006", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
+    { label: "BCA0086", type: "Mini Split", parentId: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
       { task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "", owner: "", at: "", by: "" },
       { task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
     ] },
@@ -2163,22 +2176,22 @@ const MOCK_SNAPSHOT = {
   //     under its room's "activity on contents".
   auditLog: [
     {
-      at: "2026-08-10T16:20:00.000Z", by: "Eric", assetLabel: "BCA0001", assetType: "Computer",
+      at: "2026-08-10T16:20:00.000Z", by: "Eric", assetLabel: "b81c60de-2f47-4a93-8e15-0d7c39ab6215", assetType: "Computer",
       action: "created", related: relate({ at: "BCR0008" }),
     },
     {
-      at: "2026-08-18T15:05:00.000Z", by: "Eric", assetLabel: "BCA0001", assetType: "Computer",
+      at: "2026-08-18T15:05:00.000Z", by: "Eric", assetLabel: "b81c60de-2f47-4a93-8e15-0d7c39ab6215", assetType: "Computer",
       action: "edited", field: "Serial", from: "MOCK-CMP-000", to: "MOCK-CMP-001", related: "",
     },
     {
-      at: "2026-08-22T17:40:00.000Z", by: "Eric", assetLabel: "BCA0001", assetType: "Computer",
+      at: "2026-08-22T17:40:00.000Z", by: "Eric", assetLabel: "b81c60de-2f47-4a93-8e15-0d7c39ab6215", assetType: "Computer",
       action: "edited", field: "Parent", from: "Room 200", to: "Room 102",
-      related: relate({ from: "BCR0008", to: "BCR0006" }),
+      related: relate({ from: "BCR0008", to: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80" }),
     },
     {
       at: "2026-08-24T18:12:00.000Z", by: "Eric", assetLabel: "BCA0002", assetType: "Monitor",
       action: "edited", field: "Parent", from: "Unassigned", to: "Room 102",
-      related: relate({ to: "BCR0006" }),
+      related: relate({ to: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80" }),
     },
   ],
 };
@@ -2264,7 +2277,7 @@ function AssetTracker() {
 
   const [mainTab, setMainTab] = useState("assets"); // "assets" | "maintenance" — top-level page tab
   const [view, setView] = useState("list"); // "list" | "detail"
-  const [selectedLabel, setSelectedLabel] = useState(null);
+  const [selectedId, setSelectedId] = useState(null);
   const [detailEditing, setDetailEditing] = useState(false);
   const [editNote, setEditNote] = useState("");
   const [detailTab, setDetailTab] = useState("details"); // "details" | "comments" | "changes" | "audit" | "allocations"
@@ -2671,6 +2684,20 @@ function AssetTracker() {
 
       const parented = data.assets
         .map(a => ({ comments: [], changes: [], allocations: [], status: "Active", subType: "", purchaseDate: "", warrantyUntil: "", ...a }))
+        // THE asset key, adopted before anything else reads one. An asset written
+        // before v31 has no `id`, so its LABEL is its id -- which is what makes
+        // this whole change need no migration: every reference already stored in
+        // the sheet (parentId, personIds, a child row's assetLabel, a breaker's
+        // panelLabel, AuditLog's assetLabel and related) is already a valid id.
+        // Same trick typesList uses, where a built-in type's id is its own name.
+        //
+        // Must run BEFORE the personIds normalize and adoptLegacyNames below:
+        // the name backfill walks the parent chain, and it has to walk it by the
+        // ids everything downstream will actually be joined on.
+        //
+        // From here on `a.id` is populated on every asset and is the ONLY thing
+        // that should be compared for identity. `a.label` is display text.
+        .map(a => (a.id ? a : { ...a, id: a.label }))
         // The sandbox fixture is hand-written and the backend is not, so normalize
         // here rather than trusting either: personIds must be an ARRAY on every
         // asset from this point on. It arrives as one from doGet and is absent
@@ -2745,7 +2772,7 @@ function AssetTracker() {
     loadData();
   }, [sandboxMode, authSatisfied]);
 
-  // Consumes a shared deep link (?asset=BCA0082&tab=breakers) once, on the
+  // Consumes a shared deep link (?asset=<id or label>&tab=breakers) once, on the
   // first load where assets are actually available — jumps straight to that
   // asset/tab instead of the list view. Guarded by a ref (not an empty-deps
   // effect) since `assets` starts null and only becomes usable after loadData()
@@ -2755,9 +2782,13 @@ function AssetTracker() {
     if (!assets || urlDeepLinkAppliedRef.current) return;
     urlDeepLinkAppliedRef.current = true;
     const params = new URLSearchParams(window.location.search);
-    const assetLabel = params.get("asset");
-    if (!assetLabel) return;
-    const target = assets.find(a => a.label === assetLabel);
+    const wanted = params.get("asset");
+    if (!wanted) return;
+    // Matched on the id OR the label, permanently. Deep links outlive the app
+    // build that made them: every link copied before v31 carries a LABEL, and
+    // for an asset created after it the two are different strings. Id first, so
+    // a label that happens to collide with another asset's id cannot win.
+    const target = assets.find(a => a.id === wanted) || assets.find(a => a.label === wanted);
     if (!target) return;
     openDetail(target, params.get("tab") || undefined);
   }, [assets]);
@@ -3085,7 +3116,7 @@ function AssetTracker() {
       // directly on the building. The place itself is excluded: you're looking
       // *inside* it, and listing it as one of its own contents reads as an error
       // (it's also what made the bulk move-to-room drag the room along).
-      if (scopeId && !ancestorsOf(a, assets).some(p => p.label === scopeId)) return false;
+      if (scopeId && !ancestorsOf(a, assets).some(p => p.id === scopeId)) return false;
       if (typeFilter !== "All types" && (a.type || "Other") !== typeFilter) return false;
       if (userFilter !== "All users" && !personNamesOf(a, assets).includes(userFilter)) return false;
       if (statusFilter !== "All statuses" && (a.status || "Active") !== statusFilter) return false;
@@ -3142,12 +3173,12 @@ function AssetTracker() {
   // way the filter did. No scope, or a scope that isn't a Room, means there's no
   // single room to move things out of, so the toolbar doesn't offer the action.
   const bulkMoveSourceId = useMemo(() => {
-    const scoped = scopeId ? (assets || []).find(a => a.label === scopeId) : null;
+    const scoped = scopeId ? (assets || []).find(a => a.id === scopeId) : null;
     return scoped && scoped.type === "Room" ? scopeId : "";
   }, [scopeId, assets]);
 
   const roomMovable = useMemo(
-    () => filtered.filter(a => a.label !== bulkMoveSourceId && canBeParentOf("Room", a.type)),
+    () => filtered.filter(a => a.id !== bulkMoveSourceId && canBeParentOf("Room", a.type)),
     [filtered, bulkMoveSourceId]
   );
 
@@ -3237,7 +3268,7 @@ function AssetTracker() {
     status: { label: "Status", value: statusFilter, setValue: setStatusFilter, options: STATUS_FILTER_OPTIONS },
   };
 
-  const selectedAsset = assets ? assets.find(a => a.label === selectedLabel) : null;
+  const selectedAsset = assets ? assets.find(a => a.id === selectedId) : null;
 
   // label -> positions in auditLog, built once per change to the log rather than
   // by scanning it per asset per render.
@@ -3272,11 +3303,11 @@ function AssetTracker() {
   // Also memoized because it walks every asset's parent chain, and it likewise
   // sat in the render body.
   const selectedDescendantLabels = useMemo(() => (
-    selectedAsset ? new Set(descendantsOf(selectedAsset, assets).map(a => a.label)) : new Set()
+    selectedAsset ? new Set(descendantsOf(selectedAsset, assets).map(a => a.id)) : new Set()
   ), [selectedAsset, assets]);
 
   function openDetail(asset, initialTab) {
-    setSelectedLabel(asset.label);
+    setSelectedId(asset.id);
     setView("detail");
     setDetailEditing(false);
     setEditNote("");
@@ -3311,7 +3342,7 @@ function AssetTracker() {
 
   function closeDetail() {
     setView("list");
-    setSelectedLabel(null);
+    setSelectedId(null);
     setDetailEditing(false);
   }
 
@@ -3353,7 +3384,7 @@ function AssetTracker() {
   // An asset's `label` is the app-wide primary key: roomId/buildingId,
   // panelLabel, feedsPanelLabel and every AuditLog row point at it, and every
   // lookup that uses it matches ALL rows sharing it — edit does
-  // `assets.map(a => a.label === selectedLabel ? ...)`, delete does the mirror
+  // `assets.map(a => a.id === selectedId ? ...)`, delete does the mirror
   // `filter`, and the backend groups child rows (comments/changes/breakers/...)
   // by it. Two assets sharing a label therefore aren't two assets that happen
   // to collide, they're one merged asset with no way to tell them apart again,
@@ -3367,7 +3398,12 @@ function AssetTracker() {
 
   function startAdd() {
     setAddError("");
-    setDraft({ ...emptyDraftFrom(columns), label: assetLabelForNumber(peekAssetNumber()), type: "Computer", status: "Active", comments: [], changes: [], allocations: [] });
+    // A generated id, not the label. This is the first point where the two
+    // genuinely differ, and it is the point of the whole change: the label
+    // becomes editable in phase 3 and the id never does. Minted client-side
+    // because a uuid needs no counter and no coordination -- unlike a label,
+    // which draws from nextAssetNumber behind the revision check.
+    setDraft({ ...emptyDraftFrom(columns), id: crypto.randomUUID(), label: assetLabelForNumber(peekAssetNumber()), type: "Computer", status: "Active", comments: [], changes: [], allocations: [] });
     setShowAdd(true);
   }
 
@@ -3430,7 +3466,7 @@ function AssetTracker() {
       // than a loss. This is how an asset damaged by the old migration (see
       // adoptLegacyParentage) gets fixed — by opening it and pressing Save.
       const draftToSave = typeTakesParent(draft.type) ? draft : { ...draft, parentId: "" };
-      const parentError = validateParentChoice(original.label, draftToSave.type, draftToSave.parentId, assets, typesList);
+      const parentError = validateParentChoice(original.id, draftToSave.type, draftToSave.parentId, assets, typesList);
       // parentError is shown BOTH inside ParentField and as a form-level line at
       // the top of the form. The form-level copy is the one that matters here: a
       // type with no Parent field renders no ParentField, so without it a refused
@@ -3455,9 +3491,9 @@ function AssetTracker() {
           const before = personLabelsOf(original);
           const after = (draftToSave.personIds || []).filter(Boolean);
           if (before.join(",") === after.join(",")) return;
-          const nameFor = id => { const u = assets.find(x => x.label === id); return u ? nameOf(u) : "(deleted user)"; };
+          const nameFor = id => { const u = assets.find(x => x.id === id); return u ? nameOf(u) : "(deleted user)"; };
           editEntries.push({
-            at: new Date().toISOString(), by: currentUser || "", assetLabel: original.label,
+            at: new Date().toISOString(), by: currentUser || "", assetLabel: original.id,
             assetType: draftToSave.type || original.type, action: "edited", field: "User",
             from: before.map(nameFor).join(", ") || "—",
             to: after.map(nameFor).join(", ") || "—",
@@ -3485,7 +3521,7 @@ function AssetTracker() {
         const from = displayValueFor(oldVal);
         const to = displayValueFor(newVal);
         editEntries.push({
-          at: new Date().toISOString(), by: currentUser || "", assetLabel: original.label,
+          at: new Date().toISOString(), by: currentUser || "", assetLabel: original.id,
           assetType: draftToSave.type || original.type, action: "edited", field: fieldLabel, from, to,
           // Only a parent change names other assets. from/to hold display names
           // for this entry's own wording; the ids are how the two rooms find it.
@@ -3510,13 +3546,13 @@ function AssetTracker() {
       const savedDraft = stripDraftUiState(draftToSave);
       if (usersAreAssets && Array.isArray(savedDraft.personIds)) {
         savedDraft.person = savedDraft.personIds
-          .map(id => { const u = assets.find(x => x.label === id); return u ? nameOf(u) : ""; })
+          .map(id => { const u = assets.find(x => x.id === id); return u ? nameOf(u) : ""; })
           .filter(Boolean).join("/");
       }
-      const next = assets.map(a => (a.label === selectedLabel ? { ...a, ...savedDraft } : a));
+      const next = assets.map(a => (a.id === selectedId ? { ...a, ...savedDraft } : a));
       if (editNote.trim()) {
         editEntries.push({
-          at: new Date().toISOString(), by: currentUser || "", assetLabel: original.label,
+          at: new Date().toISOString(), by: currentUser || "", assetLabel: original.id,
           assetType: draftToSave.type || original.type, action: "noted", note: editNote.trim(),
         });
       }
@@ -3539,14 +3575,14 @@ function AssetTracker() {
   function canDeleteAsset(asset) {
     const refs = [];
     assets.forEach(a => {
-      if (a.label === asset.label) return;
-      if (a.parentId === asset.label) refs.push(a.label);
+      if (a.id === asset.id) return;
+      if (a.parentId === asset.id) refs.push(a.label);
       // An assignment dangles exactly like a parent does. Archiving a User is the
       // normal way to retire someone -- it keeps their history and every
       // assignment intact -- so this only blocks the permanent delete, which is
       // already the heavily-confirmed path.
-      if (personLabelsOf(a).includes(asset.label)) refs.push(`${a.label} (assigned)`);
-      (a.allocations || []).forEach(al => { if (al.roomId === asset.label) refs.push(`${a.label} (allocation)`); });
+      if (personLabelsOf(a).includes(asset.id)) refs.push(`${a.label} (assigned)`);
+      (a.allocations || []).forEach(al => { if (al.roomId === asset.id) refs.push(`${a.label} (allocation)`); });
       (a.breakers || []).forEach(b => (b.circuits || []).forEach(c => {
         if ((c.roomsServedIds || []).includes(asset.label)) refs.push(`${a.label} Slot ${slotsLabel_(b)} (circuit "${c.label}")`);
       }));
@@ -3560,41 +3596,41 @@ function AssetTracker() {
     return null;
   }
 
-  async function doDelete(label) {
+  async function doDelete(id) {
     if (savingRef.current) return; // double-submit guard, see savingRef
-    const asset = assets.find(a => a.label === label);
+    const asset = assets.find(a => a.id === id);
     const deletedEntry = {
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: label,
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: id,
       assetType: asset ? asset.type : "", action: "deleted",
       related: relate({ at: asset ? asset.parentId : "" }),
     };
-    await persist(assets.filter(a => a.label !== label), { auditLog: logAudit([deletedEntry]) });
+    await persist(assets.filter(a => a.id !== id), { auditLog: logAudit([deletedEntry]) });
     setConfirmDelete(null);
-    if (selectedLabel === label) closeDetail();
+    if (selectedId === id) closeDetail();
   }
 
-  async function archiveAsset(label) {
+  async function archiveAsset(id) {
     if (savingRef.current) return; // double-submit guard, see savingRef
-    const asset = assets.find(a => a.label === label);
+    const asset = assets.find(a => a.id === id);
     const entry = {
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: label,
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: id,
       assetType: asset ? asset.type : "", action: "archived",
       related: relate({ at: asset ? asset.parentId : "" }),
     };
-    const next = assets.map(a => (a.label === label ? { ...a, status: "Archived" } : a));
+    const next = assets.map(a => (a.id === id ? { ...a, status: "Archived" } : a));
     await persist(next, { auditLog: logAudit([entry]) });
     setConfirmArchive(null);
   }
 
-  async function restoreAsset(label) {
+  async function restoreAsset(id) {
     if (savingRef.current) return; // double-submit guard, see savingRef
-    const asset = assets.find(a => a.label === label);
+    const asset = assets.find(a => a.id === id);
     const entry = {
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: label,
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: id,
       assetType: asset ? asset.type : "", action: "restored",
       related: relate({ at: asset ? asset.parentId : "" }),
     };
-    const next = assets.map(a => (a.label === label ? { ...a, status: "Active" } : a));
+    const next = assets.map(a => (a.id === id ? { ...a, status: "Active" } : a));
     await persist(next, { auditLog: logAudit([entry]) });
   }
 
@@ -3607,6 +3643,9 @@ function AssetTracker() {
     const nextLabel = assetLabelForNumber(peekAssetNumber());
     const copy = {
       ...source,
+      // Its own id, or the spread above would hand the copy the SOURCE's key and
+      // the two would be one asset everywhere that matters.
+      id: crypto.randomUUID(),
       label: nextLabel,
       serial: "",       // unique per unit — never copied
       hostname: "",     // unique per unit — never copied
@@ -3634,7 +3673,7 @@ function AssetTracker() {
   // Bulk actions on the currently filtered set — powered by the active User / Room filter.
   async function reassignFilteredTo(newUser) {
     if (!newUser.trim()) return;
-    const targets = new Set(filtered.filter(a => fieldAppliesTo("person", a.type)).map(a => a.label));
+    const targets = new Set(filtered.filter(a => fieldAppliesTo("person", a.type)).map(a => a.id));
     // Once users are records the target is a label; before that it is still the
     // raw name, and both paths write `person` so the sheet stays readable either
     // way. `related` names the people involved, which is what puts the change in
@@ -3642,18 +3681,18 @@ function AssetTracker() {
     const toUser = usersAreAssets ? userAssets.find(u => nameOf(u) === newUser) : null;
     const entries = [];
     const next = assets.map(a => {
-      if (!targets.has(a.label)) return a;
+      if (!targets.has(a.id)) return a;
       const fromNames = personNamesOf(a, assets);
       if (fromNames.length === 1 && fromNames[0] === newUser) return a;
       const fromIds = personLabelsOf(a);
       entries.push({
-        at: new Date().toISOString(), by: currentUser || "", assetLabel: a.label,
+        at: new Date().toISOString(), by: currentUser || "", assetLabel: a.id,
         assetType: a.type, action: "edited", field: "User",
         from: fromNames.join(", ") || "—", to: newUser,
-        related: relate({ unassigned: fromIds, assigned: toUser ? toUser.label : "" }),
+        related: relate({ unassigned: fromIds, assigned: toUser ? toUser.id : "" }),
       });
       return toUser
-        ? { ...a, personIds: [toUser.label], person: newUser }
+        ? { ...a, personIds: [toUser.id], person: newUser }
         : { ...a, person: newUser };
     });
     await persist(next, { auditLog: entries.length ? logAudit(entries) : auditLog });
@@ -3668,14 +3707,14 @@ function AssetTracker() {
     // close a loop. Skipping those (rather than refusing the whole batch) keeps
     // the action useful: everything that can legally move does.
     const targets = new Set(
-      roomMovable.filter(a => a.label !== newRoomId && !wouldCreateCycle(a.label, newRoomId, assets)).map(a => a.label)
+      roomMovable.filter(a => a.id !== newRoomId && !wouldCreateCycle(a.id, newRoomId, assets)).map(a => a.id)
     );
     const entries = [];
     const newRoomName = roomNameFor(newRoomId, assets);
     const next = assets.map(a => {
-      if (!targets.has(a.label) || a.parentId === newRoomId) return a;
+      if (!targets.has(a.id) || a.parentId === newRoomId) return a;
       entries.push({
-        at: new Date().toISOString(), by: currentUser || "", assetLabel: a.label,
+        at: new Date().toISOString(), by: currentUser || "", assetLabel: a.id,
         assetType: a.type, action: "edited", field: "Parent",
         related: relate({ from: a.parentId, to: newRoomId }),
         from: parentNameFor(a.parentId, assets) || UNASSIGNED_LABEL, to: newRoomName,
@@ -3696,7 +3735,7 @@ function AssetTracker() {
     if (savingRef.current) return; // double-submit guard, see savingRef
     if (!commentDraft.trim() || !selectedAsset) return;
     const comment = { text: commentDraft.trim(), at: new Date().toISOString(), by: currentUser || "" };
-    const next = assets.map(a => (a.label === selectedLabel ? { ...a, comments: [...(a.comments || []), comment] } : a));
+    const next = assets.map(a => (a.id === selectedId ? { ...a, comments: [...(a.comments || []), comment] } : a));
     await persist(next, { columns });
     setCommentDraft("");
   }
@@ -3704,7 +3743,7 @@ function AssetTracker() {
   async function deleteComment(idx) {
     if (savingRef.current) return; // double-submit guard, see savingRef
     const next = assets.map(a => {
-      if (a.label !== selectedLabel) return a;
+      if (a.id !== selectedId) return a;
       const comments = (a.comments || []).filter((_, i) => i !== idx);
       return { ...a, comments };
     });
@@ -3722,7 +3761,7 @@ function AssetTracker() {
       at: new Date().toISOString(),
       by: currentUser || "",
     };
-    const next = assets.map(a => (a.label === selectedLabel ? { ...a, changes: [...(a.changes || []), entry] } : a));
+    const next = assets.map(a => (a.id === selectedId ? { ...a, changes: [...(a.changes || []), entry] } : a));
     await persist(next, { columns });
     setChangeDraft({ changeType: "", vendor: "", cost: "", note: "" });
   }
@@ -3730,7 +3769,7 @@ function AssetTracker() {
   async function deleteChange(idx) {
     if (savingRef.current) return; // double-submit guard, see savingRef
     const next = assets.map(a => {
-      if (a.label !== selectedLabel) return a;
+      if (a.id !== selectedId) return a;
       const changes = (a.changes || []).filter((_, i) => i !== idx);
       return { ...a, changes };
     });
@@ -3766,12 +3805,12 @@ function AssetTracker() {
       ? existing.map(a => (a.roomId === roomId ? { ...a, quantity: qty } : a))
       : [...existing, { roomId, quantity: qty }];
     const entry = {
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel,
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId,
       assetType: selectedAsset.type, action: "allocated", room: roomNameFor(roomId, assets), quantity: qty,
       related: relate({ to: roomId }),
       previousQuantity: existingForRoom ? existingForRoom.quantity : null,
     };
-    const next = assets.map(a => (a.label === selectedLabel ? { ...a, allocations: nextAllocations } : a));
+    const next = assets.map(a => (a.id === selectedId ? { ...a, allocations: nextAllocations } : a));
     await persist(next, { auditLog: logAudit([entry]) });
     setAllocationDraft({ roomId: "", quantity: "", error: "" });
   }
@@ -3783,11 +3822,11 @@ function AssetTracker() {
     const existingForRoom = existing.find(a => a.roomId === roomId);
     const nextAllocations = existing.filter(a => a.roomId !== roomId);
     const entry = {
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel,
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId,
       assetType: selectedAsset.type, action: "unallocated", room: roomNameFor(roomId, assets), quantity: existingForRoom ? existingForRoom.quantity : 0,
       related: relate({ from: roomId }),
     };
-    const next = assets.map(a => (a.label === selectedLabel ? { ...a, allocations: nextAllocations } : a));
+    const next = assets.map(a => (a.id === selectedId ? { ...a, allocations: nextAllocations } : a));
     await persist(next, { auditLog: logAudit([entry]) });
     setConfirmAllocationRemove(null);
   }
@@ -3807,7 +3846,7 @@ function AssetTracker() {
       at: new Date().toISOString(),
       by: currentUser || "",
     };
-    const next = assets.map(a => (a.label === selectedLabel ? { ...a, maintenanceItems: [...(a.maintenanceItems || []), item] } : a));
+    const next = assets.map(a => (a.id === selectedId ? { ...a, maintenanceItems: [...(a.maintenanceItems || []), item] } : a));
     await persist(next, { columns });
     setMaintenanceDraft({ task: "", frequency: freq.label, lastPerformed: "", owner: "" });
   }
@@ -3841,7 +3880,7 @@ function AssetTracker() {
       owner: maintenanceEditDraft.owner.trim(),
     };
     const mkEntry = (field, from, to) => ({
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel,
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId,
       assetType: selectedAsset.type, action: "maintenance_edited", field: `${original.task} — ${field}`, from, to,
     });
     const entries = [];
@@ -3852,7 +3891,7 @@ function AssetTracker() {
       entries.push(mkEntry("Last performed", formatDateOnly(original.lastPerformed) || "—", formatDateOnly(updated.lastPerformed) || "—"));
     }
     const nextItems = items.map((it, i) => (i === idx ? updated : it));
-    const next = assets.map(a => (a.label === selectedLabel ? { ...a, maintenanceItems: nextItems } : a));
+    const next = assets.map(a => (a.id === selectedId ? { ...a, maintenanceItems: nextItems } : a));
     await persist(next, { auditLog: entries.length ? logAudit(entries) : auditLog });
     cancelEditMaintenance();
   }
@@ -3864,9 +3903,9 @@ function AssetTracker() {
     const item = items[idx];
     const today = new Date().toISOString().slice(0, 10);
     const nextItems = items.map((it, i) => (i === idx ? { ...it, lastPerformed: today } : it));
-    const next = assets.map(a => (a.label === selectedLabel ? { ...a, maintenanceItems: nextItems } : a));
+    const next = assets.map(a => (a.id === selectedId ? { ...a, maintenanceItems: nextItems } : a));
     const entry = {
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId, assetType: selectedAsset.type,
       action: "maintenance_completed", field: item.task,
       from: item.lastPerformed ? formatDateOnly(item.lastPerformed) : "never", to: formatDateOnly(today),
     };
@@ -3879,9 +3918,9 @@ function AssetTracker() {
     const items = selectedAsset.maintenanceItems || [];
     const item = items[idx];
     const nextItems = items.filter((_, i) => i !== idx);
-    const next = assets.map(a => (a.label === selectedLabel ? { ...a, maintenanceItems: nextItems } : a));
+    const next = assets.map(a => (a.id === selectedId ? { ...a, maintenanceItems: nextItems } : a));
     const entry = {
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel,
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId,
       assetType: selectedAsset.type, action: "maintenance_removed", field: item.task,
     };
     await persist(next, { auditLog: logAudit([entry]) });
@@ -3900,7 +3939,7 @@ function AssetTracker() {
   }
 
   function updateBreakers(nextBreakers) {
-    return assets.map(a => (a.label === selectedLabel ? { ...a, breakers: nextBreakers } : a));
+    return assets.map(a => (a.id === selectedId ? { ...a, breakers: nextBreakers } : a));
   }
 
   // Panel slot count/layout drive the visual diagram in the Breakers tab —
@@ -3911,13 +3950,13 @@ function AssetTracker() {
     if (!selectedAsset) return;
     const original = selectedAsset;
     const mk = (field, from, to) => ({
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: original.type,
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId, assetType: original.type,
       action: "edited", field, from, to,
     });
     const entries = [];
     if (String(original.panelSlotCount || "") !== String(slotCount || "")) entries.push(mk("Panel Slot Count", original.panelSlotCount || "—", slotCount || "—"));
     if ((original.panelLayout || "") !== (layout || "")) entries.push(mk("Panel Layout", original.panelLayout || "—", layout || "—"));
-    const next = assets.map(a => (a.label === selectedLabel ? { ...a, panelSlotCount: slotCount, panelLayout: layout } : a));
+    const next = assets.map(a => (a.id === selectedId ? { ...a, panelSlotCount: slotCount, panelLayout: layout } : a));
     persist(next, { auditLog: entries.length ? logAudit(entries) : auditLog });
   }
 
@@ -3954,7 +3993,7 @@ function AssetTracker() {
     const newBreakers = type.members.map((member, i) => {
       const cells = resolveRelativeCells(member.cells, startSlot);
       return {
-        id: crypto.randomUUID(), panelLabel: selectedAsset.label, cells,
+        id: crypto.randomUUID(), panelLabel: selectedAsset.id, cells,
         breakerTypeId: type.id, groupId,
         ampRating: draft[`amp_${i}`] !== undefined && draft[`amp_${i}`] !== "" ? draft[`amp_${i}`] : member.ampRating,
         serial, installedDate, notes,
@@ -3964,7 +4003,7 @@ function AssetTracker() {
     const conflictCell = newBreakers.flatMap(b => b.cells).find(c => takenCells.has(c));
     if (conflictCell) return { error: `Slot ${conflictCell.slice(0, -1)} is already in use.` };
     const entry = {
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId, assetType: selectedAsset.type,
       action: "breaker_added", field: `Slot ${resolvedSlots.join("/")}`,
       to: `${type.name} (${newBreakers.map(b => b.ampRating ? b.ampRating + "A" : "?A").join(" / ")})`,
     };
@@ -4025,7 +4064,7 @@ function AssetTracker() {
     const anchor = members[0];
     const nextInstance = { serial: instanceDraft.serial || "", installedDate: instanceDraft.installedDate || "", notes: instanceDraft.notes || "" };
     const mk = (field, from, to) => ({
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId, assetType: selectedAsset.type,
       action: "breaker_edited", field, from, to,
     });
     const entries = [];
@@ -4084,7 +4123,7 @@ function AssetTracker() {
     const nextUnassigned = orphaned.length
       ? [...(selectedAsset.unassignedCircuits || []), ...orphaned]
       : null;
-    const stamp = { at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type };
+    const stamp = { at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId, assetType: selectedAsset.type };
     // One entry per circuit that moved, not a single lumped one — each circuit
     // ending up unattached is its own fact someone may later go looking for.
     const entries = [
@@ -4117,7 +4156,7 @@ function AssetTracker() {
     const updated = { ...original, serial: draft.serial || "", ampRating: draft.ampRating || "", installedDate: draft.installedDate || "" };
     const nextBreakers = existing.map(b => (b.id === original.id ? updated : b));
     const entry = {
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId, assetType: selectedAsset.type,
       action: "breaker_swapped", field: `Slot ${slotsLabel_(original)}`,
       from: original.serial || "—", to: updated.serial || "—",
     };
@@ -4144,7 +4183,7 @@ function AssetTracker() {
   // "leave that one as it is" — only a move between a breaker and the
   // unassigned list touches both at once.
   function updatePanelCircuits(nextBreakers, nextUnassigned) {
-    return assets.map(a => (a.label === selectedLabel ? {
+    return assets.map(a => (a.id === selectedId ? {
       ...a,
       breakers: nextBreakers || a.breakers || [],
       unassignedCircuits: nextUnassigned || a.unassignedCircuits || [],
@@ -4183,7 +4222,7 @@ function AssetTracker() {
     const existing = selectedAsset.breakers || [];
     if (breakerId && !existing.some(b => b.id === breakerId)) return "Breaker not found.";
     const circuit = {
-      id: crypto.randomUUID(), breakerId: breakerId || "", panelLabel: selectedLabel,
+      id: crypto.randomUUID(), breakerId: breakerId || "", panelLabel: selectedId,
       label: draft.label.trim(), notes: (draft.notes || "").trim(),
       roomsServedIds, feedsPanelLabel,
     };
@@ -4192,7 +4231,7 @@ function AssetTracker() {
       : null;
     const nextUnassigned = breakerId ? null : [...(selectedAsset.unassignedCircuits || []), circuit];
     const entry = {
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId, assetType: selectedAsset.type,
       action: "circuit_added", field: circuit.label, from: circuitLocationLabel(breakerId),
       related: relate({ serves: roomsServedIds, feeds: feedsPanelLabel }),
       to: feedsPanelLabel ? `Feeds ${feedsPanelLabel}` : `Serves ${roomsServedIds.map(id => roomNameFor(id, assets)).join(", ")}`,
@@ -4215,7 +4254,7 @@ function AssetTracker() {
     // `related` defaults to none: of the four things editable here, only the two
     // that name other assets pass one.
     const mk = (field, from, to, related = "") => ({
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId, assetType: selectedAsset.type,
       action: "circuit_edited", field: `${original.label} — ${field}`, from, to, related,
     });
     const entries = [];
@@ -4251,7 +4290,7 @@ function AssetTracker() {
       : null;
     const nextUnassigned = breakerId ? null : (selectedAsset.unassignedCircuits || []).filter(c => c.id !== id);
     const entry = {
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId, assetType: selectedAsset.type,
       action: "circuit_removed", field: circuit.label, from: circuitLocationLabel(breakerId),
       related: relate({ serves: circuit.roomsServedIds || [], feeds: circuit.feedsPanelLabel || "" }),
     };
@@ -4286,7 +4325,7 @@ function AssetTracker() {
     const toLabel = circuitLocationLabel(toBreakerId);
     // panelLabel is restated rather than assumed: a circuit that predates the
     // v13 schema won't have one until something writes it.
-    const movedCircuit = { ...circuit, breakerId: toBreakerId, panelLabel: selectedLabel };
+    const movedCircuit = { ...circuit, breakerId: toBreakerId, panelLabel: selectedId };
     const nextBreakers = existing.map(b => {
       if (b.id === breakerId) return { ...b, circuits: (b.circuits || []).filter(c => c.id !== circuit.id) };
       if (b.id === toBreakerId) return { ...b, circuits: [...(b.circuits || []), movedCircuit] };
@@ -4297,7 +4336,7 @@ function AssetTracker() {
       ? (toBreakerId ? unassigned : [...unassigned, movedCircuit])
       : unassigned.filter(c => c.id !== circuit.id);
     const entry = {
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedLabel, assetType: selectedAsset.type,
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId, assetType: selectedAsset.type,
       action: "circuit_reassigned", field: circuit.label, from: fromLabel, to: toLabel,
     };
     persist(updatePanelCircuits(nextBreakers, nextUnassigned), { auditLog: logAudit([entry]) });
@@ -4398,22 +4437,27 @@ function AssetTracker() {
       ...assets.flatMap(a => String(a.person || "").split("/").map(x => x.trim())),
     ].filter(Boolean))].sort((a, b) => a.localeCompare(b));
 
-    const byName = new Map((assets || []).filter(a => a.type === "User").map(u => [nameOf(u), u.label]));
+    // name -> KEY, because that is what personIds holds. A label would be wrong
+    // for any User created after v31, whose id is not its label.
+    const byName = new Map((assets || []).filter(a => a.type === "User").map(u => [nameOf(u), u.id]));
     let counter = peekAssetNumber();
     const created = [];
     wanted.forEach(name => {
       if (byName.has(name)) return;
+      // A label is still issued from the counter (it is what people read), but
+      // the id is what the assignment below actually points at.
       const label = assetLabelForNumber(counter++);
-      byName.set(name, label);
+      const id = crypto.randomUUID();
+      byName.set(name, id);
       created.push({
-        label, type: "User", name, status: "Active",
+        id, label, type: "User", name, status: "Active",
         comments: [], changes: [], allocations: [],
       });
     });
 
     const stamp = { at: new Date().toISOString(), by: currentUser || "" };
     const entries = created.map(u => ({
-      ...stamp, assetLabel: u.label, assetType: "User", action: "created", related: "",
+      ...stamp, assetLabel: u.id, assetType: "User", action: "created", related: "",
     }));
 
     const next = [...assets, ...created].map(a => {
@@ -5688,9 +5732,9 @@ function AssetTracker() {
     // names it as an associated resource -- things that moved in or out, a
     // quantity allocated here, a circuit that serves it. Merged into one list,
     // newest first, because they are all equally this asset's news.
-    const relatedIdx = auditIndex.byRelated.get(selectedAsset.label) || [];
+    const relatedIdx = auditIndex.byRelated.get(selectedAsset.id) || [];
     const assetAuditEntries = [...new Set([
-      ...(auditIndex.bySubject.get(selectedAsset.label) || []),
+      ...(auditIndex.bySubject.get(selectedAsset.id) || []),
       ...relatedIdx,
     ])].sort((a, b) => b - a).map(i => auditLog[i]);
     // Activity on what is INSIDE it, collapsed by default. Deliberately not
@@ -5771,7 +5815,7 @@ function AssetTracker() {
       // stays an exact match on this asset rather than anything below it.
       contentAllocations = assets
         .filter(a => a.type === "Bulk Item")
-        .flatMap(b => (b.allocations || []).filter(al => al.roomId === selectedAsset.label).map(al => ({ bulk: b, quantity: al.quantity })));
+        .flatMap(b => (b.allocations || []).filter(al => al.roomId === selectedAsset.id).map(al => ({ bulk: b, quantity: al.quantity })));
     }
     const contentsCount = contentDevices.length + contentRooms.length + contentAllocations.length;
 
@@ -5909,7 +5953,7 @@ function AssetTracker() {
                 )}
                 {(selectedAsset.status || "Active") !== "Archived" ? (
                   <button
-                    onClick={() => setConfirmArchive(selectedAsset.label)}
+                    onClick={() => setConfirmArchive(selectedAsset.id)}
                     style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: "transparent", color: C.brandDark, border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 14, borderRadius: 10 }}
                   >
                     <Archive size={15} /> Archive
@@ -5917,14 +5961,14 @@ function AssetTracker() {
                 ) : (
                   <>
                     <button
-                      onClick={() => restoreAsset(selectedAsset.label)}
+                      onClick={() => restoreAsset(selectedAsset.id)}
                       disabled={isSaving}
                       style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: "transparent", color: isSaving ? C.placeholder : C.brandDark, border: `1.5px solid ${isSaving ? C.border : C.brandDark}`, fontWeight: 600, fontSize: 14, borderRadius: 10 }}
                     >
                       {isSaving ? <Loader2 size={15} className="spin" /> : <ArchiveRestore size={15} />} {isSaving ? "Saving…" : "Restore"}
                     </button>
                     <button
-                      onClick={() => setConfirmDelete(selectedAsset.label)}
+                      onClick={() => setConfirmDelete(selectedAsset.id)}
                       style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: "transparent", color: C.danger, border: `1.5px solid ${C.danger}`, fontWeight: 600, fontSize: 14, borderRadius: 10 }}
                     >
                       <Trash2 size={15} /> Permanently delete
@@ -5953,7 +5997,7 @@ function AssetTracker() {
                       value={draft.parentId || ""}
                       onChange={v => setDraft({ ...draft, parentId: v, parentError: "" })}
                       childType={draft.type}
-                      childLabel={selectedAsset.label}
+                      childId={selectedAsset.id}
                       assets={assets}
                       error={draft.parentError}
                     />
@@ -6092,7 +6136,7 @@ function AssetTracker() {
                   {contentDevices.map(d => {
                     const DIcon = iconFor(d.type);
                     return (
-                      <button key={d.label} onClick={() => openDetail(d)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
+                      <button key={d.id} onClick={() => openDetail(d)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
                         <DIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
                         <span style={{ fontSize: 14, color: C.ink, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                           {typeNameOf(d.type, typesList)}{d.brand ? ` · ${d.brand}` : ""}{selectedAsset.type === "Building" && roomNameOf(d, assets) ? ` · ${roomNameOf(d, assets)}` : ""}
@@ -6110,7 +6154,7 @@ function AssetTracker() {
                   {contentAllocations.map(({ bulk, quantity }) => {
                     const BIcon = iconFor(bulk.type);
                     return (
-                      <button key={bulk.label} onClick={() => openDetail(bulk)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
+                      <button key={bulk.id} onClick={() => openDetail(bulk)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
                         <BIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
                         <span style={{ fontSize: 14, color: C.ink, flex: 1 }}>{nameOf(bulk) !== bulk.label ? nameOf(bulk) : typeNameOf(bulk.type, typesList)}</span>
                         <span style={{ fontWeight: 600, color: C.brandDark }}>× {quantity}</span>
@@ -6511,16 +6555,16 @@ function AssetTracker() {
             const row = (entry, i) => (
               <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "9px 14px" }}>
                 <div style={{ fontSize: 13, color: C.ink, marginBottom: 3 }}>
-                  {auditSegments(entry, selectedAsset.label, assets, typesList).map((seg, k) => (
+                  {auditSegments(entry, selectedAsset.id, assets, typesList).map((seg, k) => (
                     typeof seg === "string" ? <React.Fragment key={k}>{seg}</React.Fragment> : (
                       <button
                         key={k}
                         onClick={() => {
-                          const target = assets.find(a => a.label === seg.label);
+                          const target = assets.find(a => a.id === seg.id);
                           if (target) openDetail(target);
                         }}
                         style={AUDIT_LINK_STYLE}
-                        title={`Open ${seg.label}`}
+                        title={`Open ${seg.text}`}
                       >
                         {seg.text}
                       </button>
@@ -6564,7 +6608,7 @@ function AssetTracker() {
         </div>
 
         {confirmDelete && (() => {
-          const assetToDelete = assets.find(a => a.label === confirmDelete);
+          const assetToDelete = assets.find(a => a.id === confirmDelete);
           const blockReason = assetToDelete ? canDeleteAsset(assetToDelete) : null;
           return (
             <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20 }}>
@@ -6703,7 +6747,7 @@ function AssetTracker() {
           const memberIds = members.map(m => m.id);
           const breakerType = breakerTypes.find(t => t.id === anchor.breakerTypeId);
           const groupSlotLabel = [...new Set(members.flatMap(m => slotsFromCells(m.cells)))].sort((a, b) => parseFloat(a) - parseFloat(b)).join("/") || "—";
-          const otherPanels = assets.filter(a => a.type === "Electrical Panel" && a.label !== selectedAsset.label);
+          const otherPanels = assets.filter(a => a.type === "Electrical Panel" && a.id !== selectedAsset.id);
           const labelStyle = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent };
           const inputStyle = { padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink };
           const closeModal = () => setBreakerModal(null);
@@ -7434,7 +7478,7 @@ function AssetTracker() {
                     value={draft.parentId || ""}
                     onChange={v => setDraft({ ...draft, parentId: v, parentError: "" })}
                     childType={draft.type}
-                    childLabel={draft.label}
+                    childId={draft.id}
                     assets={assets}
                     error={draft.parentError}
                   />
@@ -7572,7 +7616,7 @@ function AssetTracker() {
 
             {filtered.map(a => (
               <div
-                key={a.label}
+                key={a.id}
                 className="row-body"
                 onClick={() => openDetail(a)}
                 style={{ display: "grid", gridTemplateColumns: gridTemplate, alignItems: "center", cursor: "pointer", background: C.surface, borderTop: `1px solid ${C.border}` }}
@@ -7681,7 +7725,7 @@ function AssetTracker() {
                 const AssetIcon = iconFor(asset.type);
                 return (
                   <div
-                    key={`${asset.label}-${idx}`}
+                    key={`${asset.id}-${idx}`}
                     className="row-body"
                     onClick={() => openDetail(asset, "maintenance")}
                     style={{ display: "grid", gridTemplateColumns: "220px 170px 110px 130px 130px 130px 120px", alignItems: "center", cursor: "pointer", background: C.surface, borderTop: `1px solid ${C.border}` }}
@@ -7871,11 +7915,11 @@ function TypeField({ value, onChange, types, onManage }) {
 function RoomField({ value, onChange, assets, label = "Room", hideLabel, excludeId }) {
   const [open, setOpen] = useState(false);
   const all = assets || [];
-  const rooms = all.filter(a => a.type === "Room" && a.label !== excludeId);
+  const rooms = all.filter(a => a.type === "Room" && a.id !== excludeId);
   const placeholder = rooms.length ? "Select a room…" : "No Room assets yet";
   // Shows the full path, not the bare room name — two buildings can each have a
   // "Kitchen", and the browser's breadcrumb is gone once the modal closes.
-  const chosen = value ? all.find(a => a.label === value) : null;
+  const chosen = value ? all.find(a => a.id === value) : null;
   const triggerText = !value ? "" : !chosen ? "(deleted room)"
     : [...ancestorsOf(chosen, all).reverse().map(p => nameOf(p)), nameOf(chosen)].join(PATH_SEPARATOR);
   const excluded = useMemo(() => (excludeId ? new Set([excludeId]) : undefined), [excludeId]);
@@ -7917,7 +7961,7 @@ function RoomField({ value, onChange, assets, label = "Room", hideLabel, exclude
 // configuration than the fifteen lines of shared tree-walking are worth.
 function HierarchyNav({ assets, scopeId, setScopeId }) {
   const all = assets || [];
-  const scope = scopeId ? all.find(a => a.label === scopeId) : null;
+  const scope = scopeId ? all.find(a => a.id === scopeId) : null;
   // A scope whose asset has vanished (deleted in another tab) falls back to the
   // top rather than showing an empty list with no way out.
   const effectiveScope = scope ? scopeId : "";
@@ -7927,7 +7971,7 @@ function HierarchyNav({ assets, scopeId, setScopeId }) {
   const parentKeyOf = a => {
     const pid = a.parentId;
     if (!pid) return null;
-    return all.some(x => x.label === pid) ? pid : null;
+    return all.some(x => x.id === pid) ? pid : null;
   };
   const childPlaces = all
     .filter(a => isPlaceType(a.type) && parentKeyOf(a) === (effectiveScope || null))
@@ -7956,7 +8000,7 @@ function HierarchyNav({ assets, scopeId, setScopeId }) {
     <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", marginBottom: 12, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)" }}>
       <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 1 }}>
         {crumb("All assets", null, trail.length === 0)}
-        {trail.map((a, i) => crumb(nameOf(a), a.label, i === trail.length - 1))}
+        {trail.map((a, i) => crumb(nameOf(a), a.id, i === trail.length - 1))}
       </div>
       {childPlaces.length > 0 && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 9 }}>
@@ -7964,9 +8008,9 @@ function HierarchyNav({ assets, scopeId, setScopeId }) {
             const Icon = iconFor(p.type);
             return (
               <button
-                key={p.label}
+                key={p.id}
                 type="button"
-                onClick={() => setScopeId(p.label)}
+                onClick={() => setScopeId(p.id)}
                 style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 11px", borderRadius: 14, fontSize: 13, fontWeight: 500, border: `1.5px solid ${C.border}`, background: "transparent", color: C.ink }}
               >
                 <Icon size={13} style={{ color: C.brand, flexShrink: 0 }} />
@@ -8033,20 +8077,20 @@ function HierarchyBrowserModal({
   const parentKeyOf = a => {
     const pid = a.parentId;
     if (!pid) return null;
-    return all.some(x => x.label === pid) ? pid : null;
+    return all.some(x => x.id === pid) ? pid : null;
   };
   const childrenOf = key => all
-    .filter(a => !blocked.has(a.label) && parentKeyOf(a) === key)
+    .filter(a => !blocked.has(a.id) && parentKeyOf(a) === key)
     .sort((x, y) => nameOf(x).localeCompare(nameOf(y), undefined, { numeric: true, sensitivity: "base" }));
 
-  const canPick = a => isSelectable(a) && !blocked.has(a.label);
+  const canPick = a => isSelectable(a) && !blocked.has(a.id);
   // Does anything inside this lead somewhere pickable? Drives whether the row is
   // shown at all, and whether it gets an "open" chevron. The visited set guards
   // the same loop case every other walk in this file does.
   const hasSelectableInside = (a, seen = new Set()) => {
-    if (seen.has(a.label)) return false;
-    seen.add(a.label);
-    return childrenOf(a.label).some(c => canPick(c) || hasSelectableInside(c, seen));
+    if (seen.has(a.id)) return false;
+    seen.add(a.id);
+    return childrenOf(a.id).some(c => canPick(c) || hasSelectableInside(c, seen));
   };
 
   // Open where the current selection lives, so an existing choice is on screen
@@ -8054,12 +8098,12 @@ function HierarchyBrowserModal({
   // several selected, the first one wins — there's no level that shows them all.
   const initialLevel = () => {
     const first = selectedIds[0];
-    const current = first ? all.find(a => a.label === first) : null;
+    const current = first ? all.find(a => a.id === first) : null;
     return current ? parentKeyOf(current) : null;
   };
   const [levelId, setLevelId] = useState(initialLevel);
 
-  const levelAsset = levelId ? all.find(a => a.label === levelId) : null;
+  const levelAsset = levelId ? all.find(a => a.id === levelId) : null;
   // Guard against a levelId that no longer resolves (the asset was deleted in
   // another tab while this was open) by falling back to the top.
   const effectiveLevelId = levelAsset ? levelId : null;
@@ -8068,9 +8112,9 @@ function HierarchyBrowserModal({
 
   const toggle = a => {
     if (multi) {
-      setPicked(p => (p.includes(a.label) ? p.filter(x => x !== a.label) : [...p, a.label]));
+      setPicked(p => (p.includes(a.id) ? p.filter(x => x !== a.id) : [...p, a.id]));
     } else {
-      onChange(a.label);
+      onChange(a.id);
       onClose();
     }
   };
@@ -8113,7 +8157,7 @@ function HierarchyBrowserModal({
         {multi && picked.length > 0 && (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 8 }}>
             {picked.map(id => {
-              const a = all.find(x => x.label === id);
+              const a = all.find(x => x.id === id);
               return (
                 <button
                   key={id}
@@ -8132,7 +8176,7 @@ function HierarchyBrowserModal({
 
         <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 1, marginBottom: 8, paddingBottom: 8, borderBottom: `1px solid ${C.border}` }}>
           {crumb("All", null, trail.length === 0)}
-          {trail.map((a, i) => crumb(nameOf(a), a.label, i === trail.length - 1))}
+          {trail.map((a, i) => crumb(nameOf(a), a.id, i === trail.length - 1))}
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 2, overflowY: "auto" }}>
@@ -8162,15 +8206,15 @@ function HierarchyBrowserModal({
           {rows.map(a => {
             const selectable = canPick(a);
             const openable = hasSelectableInside(a);
-            const isCurrent = isPicked(a.label);
+            const isCurrent = isPicked(a.id);
             const Icon = iconFor(a.type);
             return (
-              <div key={a.label} style={{ display: "flex", alignItems: "stretch", gap: 2 }}>
+              <div key={a.id} style={{ display: "flex", alignItems: "stretch", gap: 2 }}>
                 <button
                   // A row you can't choose still opens on its body — otherwise
                   // the only way into a Building (when choosing a Room) would be
                   // the small chevron, and the obvious click would do nothing.
-                  onClick={() => { if (selectable) toggle(a); else setLevelId(a.label); }}
+                  onClick={() => { if (selectable) toggle(a); else setLevelId(a.id); }}
                   style={{
                     flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 8, padding: "9px 10px",
                     background: isCurrent ? C.hover : "transparent", border: "none", borderRadius: 10,
@@ -8183,7 +8227,7 @@ function HierarchyBrowserModal({
                 </button>
                 {openable && (
                   <button
-                    onClick={() => setLevelId(a.label)}
+                    onClick={() => setLevelId(a.id)}
                     className="icon-btn"
                     aria-label={`Open ${nameOf(a)}`}
                     style={{ background: "none", border: "none", padding: "0 8px", borderRadius: 10, color: C.muted, display: "flex", alignItems: "center", flexShrink: 0 }}
@@ -8223,10 +8267,10 @@ function HierarchyBrowserModal({
 // the registry (parentTypesFor), so a Computer gets Rooms, a Condenser gets
 // Buildings, and a Room gets both Buildings and other Rooms, with no list here
 // to keep in step. The picking itself happens in HierarchyBrowserModal above.
-function ParentField({ value, onChange, childType, childLabel, assets, error }) {
+function ParentField({ value, onChange, childType, childId, assets, error }) {
   const [open, setOpen] = useState(false);
   const allowedTypes = parentTypesFor(childType);
-  const anyCandidate = (assets || []).some(a => allowedTypes.includes(a.type) && a.label !== childLabel);
+  const anyCandidate = (assets || []).some(a => allowedTypes.includes(a.type) && a.id !== childId);
 
   // The asset itself and everything below it, hidden from the tree outright
   // rather than offered and then refused on save. Nothing below this asset can
@@ -8236,12 +8280,12 @@ function ParentField({ value, onChange, childType, childLabel, assets, error }) 
   // equivalent notion of "would loop".
   const excluded = useMemo(() => {
     const s = new Set();
-    if (!childLabel) return s;
-    s.add(childLabel);
-    const self = (assets || []).find(a => a.label === childLabel);
-    if (self) descendantsOf(self, assets).forEach(d => s.add(d.label));
+    if (!childId) return s;
+    s.add(childId);
+    const self = (assets || []).find(a => a.id === childId);
+    if (self) descendantsOf(self, assets).forEach(d => s.add(d.id));
     return s;
-  }, [childLabel, assets]);
+  }, [childId, assets]);
 
   // An empty parent reads as the state it IS ("Unassigned"), not as a prompt to
   // fill something in — it's a legitimate resting place for a spare in a drawer
@@ -8253,7 +8297,7 @@ function ParentField({ value, onChange, childType, childLabel, assets, error }) 
   // share a name in different buildings, and the browser's breadcrumb is gone
   // once the modal closes. A dangling id resolves to "(deleted asset)" rather
   // than "" — blank is indistinguishable from Unassigned, a different state.
-  const chosen = value ? (assets || []).find(a => a.label === value) : null;
+  const chosen = value ? (assets || []).find(a => a.id === value) : null;
   const triggerText = !value ? "" : !chosen ? "(deleted asset)"
     : [...ancestorsOf(chosen, assets).reverse().map(p => nameOf(p)), nameOf(chosen)].join(PATH_SEPARATOR);
 
@@ -8364,8 +8408,8 @@ function UserField({ value, onChange, userOptions, userAssets, onManage }) {
   // removed managed name, or a User record since archived -- so editing another
   // field never silently drops them.
   const allOptions = byAsset
-    ? [...userAssets.map(u => ({ key: u.label, label: nameOf(u) })),
-       ...selected.filter(l => !userAssets.some(u => u.label === l))
+    ? [...userAssets.map(u => ({ key: u.id, label: nameOf(u) })),
+       ...selected.filter(l => !userAssets.some(u => u.id === l))
                   .map(l => ({ key: l, label: "(archived or deleted user)" }))]
     : [...userOptions, ...selected.filter(s => !userOptions.includes(s))].map(n => ({ key: n, label: n }));
 
@@ -9047,7 +9091,7 @@ function BreakersTabContent({
     .filter(a => a.type === "Electrical Panel")
     .flatMap(a => (a.breakers || []).map(b => ({ panel: a, breaker: b })))
     .flatMap(({ panel, breaker }) => (breaker.circuits || []).map(c => ({ panel, breaker, circuit: c })))
-    .find(({ circuit }) => circuit.feedsPanelLabel === selectedAsset.label);
+    .find(({ circuit }) => circuit.feedsPanelLabel === selectedAsset.id);
 
   const slotCount = parseInt(selectedAsset.panelSlotCount, 10) || 0;
   const labelStyle = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent };
@@ -9055,7 +9099,7 @@ function BreakersTabContent({
   const selectedType = addBreakerDraft ? breakerTypes.find(t => t.id === addBreakerDraft.breakerTypeId) : null;
   const closeAddBreakerForm = () => setAddBreakerDraft(null);
   const unassignedCircuits = selectedAsset.unassignedCircuits || [];
-  const otherPanels = assets.filter(a => a.type === "Electrical Panel" && a.label !== selectedAsset.label);
+  const otherPanels = assets.filter(a => a.type === "Electrical Panel" && a.id !== selectedAsset.id);
 
   return (
     <>
@@ -9083,7 +9127,7 @@ function BreakersTabContent({
           allAssets={assets}
           breakerTypes={breakerTypes}
           panelAsset={selectedAsset}
-          panelLabel={selectedAsset.label}
+          panelLabel={selectedAsset.id}
           canEdit={canEdit}
           onReconfigure={() => setShowPanelConfig(true)}
           onSlotClick={id => {
@@ -9120,7 +9164,7 @@ function BreakersTabContent({
         </div>
         <ChildEntityTable
           canEdit={canEdit}
-          key={selectedAsset.label}
+          key={selectedAsset.id}
           items={unassignedCircuits}
           fields={CIRCUIT_TABLE_FIELDS}
           initialDraft={CIRCUIT_TABLE_INITIAL_DRAFT}
@@ -9338,7 +9382,7 @@ const LEGEND_SIDE_PAD_IN = 0.5;
 // since a bare asset id means nothing to whoever's standing at the panel.
 function legendServes(circuit, allAssets) {
   if (circuit.feedsPanelLabel) {
-    const target = allAssets.find(a => a.label === circuit.feedsPanelLabel);
+    const target = allAssets.find(a => a.id === circuit.feedsPanelLabel);
     const room = target ? roomNameOf(target, allAssets) : "";
     return `Feeds → ${circuit.feedsPanelLabel}${room ? ` (${room})` : ""}`;
   }
@@ -10037,7 +10081,7 @@ function RoomsServedField({ value, onChange, assets }) {
       {selected.length > 0 && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
           {selected.map(id => {
-            const room = all.find(a => a.label === id);
+            const room = all.find(a => a.id === id);
             const where = room ? buildingNameOf(room, all) : "";
             return (
               <button
@@ -10119,7 +10163,7 @@ function CircuitTargetFields({ values, setValues, assets, otherPanels }) {
           hideLabel
           value={values.feedsPanelLabel || ""}
           onChange={v => setValues({ ...values, feedsPanelLabel: v })}
-          options={["", ...otherPanels.map(p => p.label)]}
+          options={["", ...otherPanels.map(p => p.id)]}
           placeholder="Select a panel…"
           // A panel has no name of its own, so its Asset ID IS its identity —
           // but an ID alone ("BCA0083") is unidentifiable when you're standing in
@@ -10127,7 +10171,7 @@ function CircuitTargetFields({ values, setValues, assets, otherPanels }) {
           // bare list of ids before.
           labelForOption={id => {
             if (!id) return "Select a panel…";
-            const p = otherPanels.find(x => x.label === id);
+            const p = otherPanels.find(x => x.id === id);
             if (!p) return id;
             const where = pathOf(p, assets);
             return where ? `${p.label} — ${where}` : p.label;

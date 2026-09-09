@@ -1670,6 +1670,40 @@ When you do:
     that yet (no frontend change ships with it), but phase 2 must not land until v31 is live
     on the tenant it is being tested against.
 
+- **Phase 2 of the key refactor is BUILT but NOT MERGED as of 2026-09-09**, on
+  `claude/happy-pascal-xw25f1`. `id` is now the app's identity and `label` is display text.
+  - **`loadData()` adopts `id = a.id || a.label` first in its map chain**, before the
+    personIds normalize and before `adoptLegacyNames` — which walks the parent chain and so
+    has to walk it by the ids everything downstream joins on. From that point `a.id` is
+    populated on every asset and is the ONLY thing that should be compared for identity.
+  - **New assets mint `crypto.randomUUID()`** (`startAdd`, `duplicateAsset`,
+    `convertUsersToAssets`). Labels are still issued from `nextAssetNumber` and are still
+    required and unique-checked — nothing user-visible changed in this phase.
+  - **`MOCK_SNAPSHOT` is deliberately MIXED**: three assets carry an id that is not their
+    label (a Room reached by parentId/roomsServedIds/an allocation/two audit rows, a leaf
+    device, and a sub-panel that is a feedsPanelLabel target and owns 21 breaker
+    panelLabels); every other row carries none. A fixture that was all one shape would
+    exercise half the code — the `personIds` lesson, applied deliberately this time.
+  - **Every address accepts an id OR a label, permanently**: the `?asset=` deep link,
+    `panel.html?p=`, and the QR sheet's `?only=`. Links and stickers outlive the build that
+    made them, and a sticker taped inside a panel door can never be reprinted out of
+    existence.
+  - **Renaming stale parameters is what found the one real bug.** `childLabel` → `childId`
+    exposed `childId={selectedAsset.label}` on the edit form. It type-checks, it renders,
+    and it is correct on every legacy row — so only the rename surfaced it. `doDelete`,
+    `archiveAsset`, `restoreAsset` and the audit segment's `seg.label` were renamed for the
+    same reason. **A name that no longer says what the value is has cost this project real
+    time more than once; treat one as a bug, not a tidy-up.**
+  - **What deliberately still reads `label`**: `findLabelConflict` and
+    `assetNumberFromLabel` (both genuinely about labels), the Excel export's "Asset ID"
+    column, the detail header, and every "is this asset's name just its label?" display
+    test.
+  - **DO NOT MERGE TO `main` UNTIL EVERY TENANT IS ON v31.** The frontend ships from `main`
+    to all tenants at once while backends deploy one at a time, so merging while `bca` is
+    on v30 would put a UUID-minting frontend in front of a backend that drops the column —
+    leaving new assets with neither an id nor a matching label. `node deploy.mjs --status`
+    is the check. This is the hazard the whole plan is ordered around.
+
 - **v30 is DEPLOYED, confirmed 2026-09-04** by fetching the `/exec` URL and reading
   `scriptVersion` back. It makes the admin import read a **tab in the Sheet** instead of
   Drive. v29 shipped the `DriveApp` version, which failed at runtime — "You do not have

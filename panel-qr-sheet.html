@@ -200,7 +200,7 @@
   })();
 
   var panels = [];
-  // ?only=BCA0082 preselects a single panel — what the QR button on a panel's
+  // ?only=<id or label> preselects a single panel — what the QR button on a panel's
   // Layout tab in index.html links to, for reprinting one sticker without
   // deselecting every other panel by hand. Absent, everything starts checked.
   var onlyLabel = (new URLSearchParams(window.location.search).get("only") || "").trim().toUpperCase();
@@ -325,16 +325,19 @@
         // pre-v15 roomId/buildingId read as a fallback so labels are right
         // against an un-migrated sheet too. Same rule as panel.html and the
         // backend's effectiveParentId_.
+        // Keyed on `id || label` (v31): parentId holds an asset KEY, and for a
+        // panel created after v31 that is not its label -- keyed on the label
+        // alone the chain walk below dead-ends and the sticker loses its location.
         var byLabel = {};
-        assets.forEach(function (a) { byLabel[a.label] = a; });
+        assets.forEach(function (a) { byLabel[a.id || a.label] = a; });
         function effectiveParent(a) {
           return String((a && a.parentId) || "").trim();
         }
         function nearestOfType(startAsset, type) {
           var seen = {}, cur = byLabel[effectiveParent(startAsset)], depth = 0;
-          while (cur && !seen[cur.label] && depth < 50) {
+          while (cur && !seen[cur.id || cur.label] && depth < 50) {
             if (cur.type === type) return cur;
-            seen[cur.label] = true;
+            seen[cur.id || cur.label] = true;
             cur = byLabel[effectiveParent(cur)];
             depth++;
           }
@@ -350,7 +353,11 @@
             return {
               label: a.label,
               where: [room, building].filter(Boolean).join(" · "),
-              checked: !onlyLabel || a.label.toUpperCase() === onlyLabel,
+              // Matched on the id OR the label: index.html now sends the key,
+              // while any ?only= link made before v31 carries a label.
+              checked: !onlyLabel
+                || String(a.id || "").toUpperCase() === onlyLabel
+                || String(a.label || "").toUpperCase() === onlyLabel,
             };
           })
           .sort(function (a, b) { return a.label.localeCompare(b.label); });

@@ -190,7 +190,25 @@ to the label alone fails.
 After this the sheet has an `id` column that is empty for every row, and everything
 behaves exactly as before.
 
-### Phase 2 — frontend: switch internal identity to `id` (no user-visible change)
+### Phase 2 — frontend: switch internal identity to `id` — **BUILT 2026-09-09, not merged**
+
+Landed as described below. Two things the plan did not anticipate:
+
+- **New assets get a generated id in this phase, not phase 3.** Keeping `id = label`
+  for new assets would have made phase 2 a pure rename that proved nothing — the whole
+  point is to show the app works when the two differ, and `MOCK_SNAPSHOT` plus the dev
+  tenant are where that gets exercised. `startAdd`, `duplicateAsset` and
+  `convertUsersToAssets` all mint one.
+- **Renaming the stale parameters found a real bug.** `childLabel` → `childId` exposed
+  `childId={selectedAsset.label}` on the edit form — a label being passed where an id
+  was expected, which would have made the parent picker's self/descendant exclusion
+  silently wrong for any asset whose id is not its label. Nothing else caught it: it
+  type-checks, it renders, and on the legacy rows it is correct. `doDelete`,
+  `archiveAsset`, `restoreAsset` and `seg.label` were renamed for the same reason.
+
+Covered by `test-frontend-assetid.js`, which runs the real chain helpers sliced out of
+`index.html` over the real fixture; verified by mutation that a half-converted
+comparison (a stored reference against a label) fails it.
 
 The big mechanical phase. `label` is still displayed as "Asset ID" everywhere and is still
 required; only what the app *joins on* changes.
