@@ -158,9 +158,10 @@ what keeps it from mattering.
 
 The full sequence:
 
-1. Build and verify against the **dev tenant**, branch deployed there.
-2. Merge to `main`.
-3. `node deploy.mjs --all` — backend to every client, each verified against its own `/exec`.
+1. Build and verify at `assets.stama.tech/dev/`, with the branch deployed to the **dev
+   tenant** (`node deploy.mjs dev`).
+2. Merge `dev` into `main`.
+3. `node deploy.mjs --all` — backend to every tenant, each verified against its own `/exec`.
 4. `node deploy.mjs --status` — confirm every tenant reports the new version.
 5. Frontend is already live from `main`; a hard refresh picks it up.
 
@@ -261,7 +262,7 @@ worth moving until someone actually asks for it.
 |---|---|---|
 | 0 | **DONE** (2026-09-04) — `clients.js`, namespaced `localStorage` with a one-time adoption of the old keys, config threaded through all 3 HTML files, tenant carried on every built URL | No behaviour change for Brookside. Verified in a headless browser: renders, sandbox loads, About names the tenant, a second tenant gets its own branding/keys/prefix, an unknown id falls back, and the old storage keys migrate for the default tenant only. |
 | 1 | **NEXT** — Dev tenant: Sheet, script, a `dev` entry in `clients.js`, seed from `MOCK_SNAPSHOT` | Stop testing backend changes on the school. |
-| 2 | `deploy.mjs --client/--all/--status`; config moves to a per-tenant home file | One command to deploy or audit every backend. |
+| 2 | **DONE** (2026-09-08) — `deploy.mjs <tenant>/--all/--status`, per-tenant config via `set-tenant.mjs`, and `new-tenant.mjs` to bootstrap a tenant | One command to deploy or audit every backend. Pulled forward from after phase 1, because adding a second tenant to `clients.js` is what makes the old single-target deploy refuse — the two are not separable. |
 | 3 | First real client onboarded; write `ONBOARDING.md` from what actually happened | Two live clients. |
 | 4 | Optional, only if wanted: per-client theming, pinned frontend releases, Cloudflare Pages | Staged rollout, custom domains, per-branch previews. |
 

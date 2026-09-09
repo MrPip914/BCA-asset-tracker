@@ -40,6 +40,19 @@
       labelPrefix: "BCA",
       apiUrl: "https://script.google.com/macros/s/AKfycbzXaKRuCrTesxobxP-b2me1TSn0YoGogoYhNPTWU4qWWjXANXGlPuDzJSKGClOTsfOXRQ/exec",
     },
+
+    // Throwaway data, its own Sheet, its own Apps Script deployment. This is what
+    // /dev/ falls back to (see isDevBuild above), and it is the answer to the
+    // problem that Sandbox mode structurally cannot exercise a backend write path
+    // while the only real backend belonged to the school.
+    //
+    // Deploy branches at it freely:  node deploy.mjs dev
+    dev: {
+      appName: "Asset Tracker (dev)",
+      orgName: "Development sandbox",
+      labelPrefix: "DEV",
+      apiUrl: "https://script.google.com/macros/s/AKfycbyMI_-SlWIYy1DxO0pjtAl31uQbWN5bFZLq9WMrTfrwHbeqNw4xfaGElEGdgT3yvUFI/exec",
+    },
   };
 
   // A bare https://assets.stama.tech is Brookside. That is what keeps every
@@ -149,4 +162,7 @@
   // one the moment there are two.
   window.ASSET_TRACKER_CLIENTS = CLIENTS;
   window.ASSET_TRACKER_DEFAULT_CLIENT_ID = DEFAULT_CLIENT_ID;
+  // Exported so deploy.mjs knows which tenant is the safe one to experiment on,
+  // rather than keeping a second copy of the string "dev" that could drift.
+  window.ASSET_TRACKER_DEV_CLIENT_ID = DEV_CLIENT_ID;
 })();

@@ -27,24 +27,37 @@ verbatim — never the Apps Script editor steps.** `AssetTrackerSync.gs` changes
 until deployed, so whenever you change that file (or notice `SCRIPT_VERSION` here is ahead
 of the live `/exec`), end your response with exactly this, filled in:
 
-> **Deploy v<NN>** — open this, then tap the command in Step 3:
+> **Deploy v<NN>** — open this, then tap the commands in Step 3:
 >
 > https://shell.cloud.google.com/cloudshell/open?cloudshell_git_repo=https://github.com/MrPip914/BCA-asset-tracker&cloudshell_tutorial=cloudshell-deploy.md
 >
-> Look for `✓ Live backend is now v<NN>.` as the last line. Anything starting with `✗`
-> means it did not deploy, and says why.
+> Try it on dev first: `node deploy.mjs dev`. Then the school: `node deploy.mjs bca`
+> (or `node deploy.mjs --all` for every tenant).
+>
+> Look for `✓ <tenant> is now v<NN>. Deploy confirmed.` as the last line. Anything
+> starting with `✗` means it did not deploy, and says why.
+
+**Name the tenant. A bare `node deploy.mjs` now REFUSES** and lists them, because there is
+more than one and guessing would deploy to a school instead of to dev. `node deploy.mjs
+--status` says what each tenant is running — use it instead of stating a live version from
+memory or from a line in this file.
 
 **To deploy a BRANCH** (testing a backend change before merging — the normal case for
-unmerged work, since Sandbox cannot cover a write path), give him the same link plus the
-one command that switches to it, and say plainly that this is the production URL:
+unmerged work, since Sandbox cannot cover a write path), send it to **dev**, which exists
+for exactly this:
 
 > Open the link above, then tap the terminal and run:
 >
-> `git fetch origin && git checkout -B <branch> origin/<branch> && node deploy.mjs`
+> `git fetch origin && git checkout -B <branch> origin/<branch> && node deploy.mjs dev`
 >
-> This is the URL the school's app uses, so your branch is live for everyone until you
-> deploy something else. To undo: `git checkout -B main origin/main && ALLOW_DOWNGRADE=1
-> node deploy.mjs`.
+> That is the dev tenant's own Sheet — throwaway data, nothing a school can see. To undo:
+> `git checkout -B main origin/main && ALLOW_DOWNGRADE=1 node deploy.mjs dev`.
+
+Only send a branch to a school's tenant if he asks for that specifically, and then say
+plainly that it is their live data behind it. **This used to be the only option** — the
+warning that a branch deploy is testing in production is kept below because it is still
+true of a school's tenant, but it is no longer the default, and telling him to test on
+production when dev exists would be wrong.
 
 That link opens Google Cloud Shell, clones this repo, and shows `cloudshell-deploy.md` as
 a walkthrough where every command has a tap-to-run button. Eric's sign-in and Script ID
@@ -67,8 +80,10 @@ Three things that make this non-optional rather than a convenience:
     cannot cover a write path at all. An earlier version of this rule said "never deploy
     from a feature branch", which conflated *behind* with *unmerged* and left him told to
     merge untested code. Branch-ness is not the hazard; being behind is.
-  - What IS true: the production `/exec` is the one the school uses, so pushing an
-    untested branch there is testing in production. Say so plainly rather than refusing.
+  - What IS true: a school's `/exec` is the one that school uses, so pushing an untested
+    branch *there* is testing in production. Say so plainly rather than refusing — but
+    since 2026-09-08 the **dev tenant** is the place for it, and that sentence is now
+    about a deliberate exception rather than about the normal case.
 - **The frontend ships separately** (GitHub Pages, from `main`) and has run ahead of both
   the backend and `main` before. Matching `SCRIPT_VERSION` and `FRONTEND_SCRIPT_VERSION`
   in the same commit is what keeps the pair honest; deploying one without the other is
@@ -93,7 +108,8 @@ Three things that make this non-optional rather than a convenience:
   pure logic. See "Direct Sheet access" below, which is required reading before using it.
 - `AssetTrackerSync.gs` — Google Apps Script backend, deployed as a Web App bound to a
   Google Sheet. This is NOT part of the static site deploy — it lives entirely inside
-  Google's infrastructure. **Deploy it with `node deploy.mjs`** (see `DEPLOY.md`), which
+  Google's infrastructure. **Deploy it with `node deploy.mjs <tenant>`** (see `DEPLOY.md`),
+  once per tenant — each has its own Apps Script project — which
   pushes this file, cuts a new version, repoints the existing deployment so the `/exec`
   URL is unchanged, and then fetches the live `/exec` to confirm the backend really is
   reporting the new version. Needs a one-time `clasp login` wherever it runs; Google's
@@ -229,6 +245,13 @@ Two builds of the same repo, on one domain, published by `.github/workflows/page
 on Pages from my phone" and "this is what every client is running" used to be the same URL.
 That was survivable while Brookside was the only user of production and is not now.
 
+**The `github-pages` ENVIRONMENT must also allow the `dev` branch** (Settings > Environments
+> github-pages > Deployment branches). GitHub creates that environment restricted to the
+default branch, so a run triggered by a push to `dev` is refused before any step executes —
+the job fails in ~2 seconds with no logs, which reads like a broken workflow rather than a
+permission rule. If `/dev/` ever stops updating on a push to `dev` while a manual "Run
+workflow" from `main` still works, this is why.
+
 - **A subfolder, not a `dev.stama.tech` subdomain, because of Google sign-in.** Sign-in only
   works from an origin registered on the OAuth client. A subfolder is the SAME origin, so it
   needs no registration and cannot break sign-in; a subdomain would need adding, and the day
@@ -269,7 +292,32 @@ onboard one.
   projects, each bound to its own Sheet. There is no tenant id in the backend, nothing to
   partition, and no cross-client query that could be got wrong — isolation is structural.
   The corollary is operational, not architectural: **a backend change now has to be
-  deployed to every tenant**, one `node deploy.mjs` each.
+  deployed to every tenant** — `node deploy.mjs <tenant>` each, or `--all`.
+  - **`node deploy.mjs --status` is how you learn which tenant is on which version.** It
+    asks every tenant's live `/exec` and prints a table, needs no sign-in, and cannot go
+    stale — unlike every "the live backend is vNN" line ever written into this file, three
+    of which did. **Check, don't read**, now has a one-command answer.
+  - **A bare `node deploy.mjs` refuses once there is more than one tenant** and lists them.
+    Guessing would deploy to a school instead of to `dev`.
+  - **`new-tenant.mjs` bootstraps a tenant; `deploy.mjs` cannot.** Deploy pulls the live
+    project expecting to find an existing copy of the backend to overwrite, and *updates* an
+    existing deployment — an empty project has neither. `new-tenant.mjs` creates the Sheet
+    and bound script (`clasp create-script --type sheets`), pushes the backend with a
+    manifest that declares the web app settings, creates the deployment, and records the ids.
+    - **It deliberately does NOT declare `oauthScopes`** in that manifest. Brookside's live
+      manifest does, and that is exactly what made adding a Drive call fail at runtime (see
+      "Wipe and import"). With no explicit list, Apps Script detects what each version needs.
+    - **A new tenant still needs one manual step**: open its script editor once, run
+      `forceAuthorizeExternalRequests`, approve the prompt. The web app executes as its
+      owner, so until those scopes are granted every request to it fails. That cannot be
+      scripted — it is a consent screen.
+    - The `/exec` URL is built from the **deployment** id, not the script id.
+  - **`set-tenant.mjs` records a tenant's ids** in `~/.bca-asset-tracker-deploy.json`, which
+    lives only in Cloud Shell's `$HOME`. It folds a pre-multi-tenant config (one top-level
+    `scriptId`) under the **default** tenant — read from `clients.js`, not assumed. The first
+    version assumed it belonged to whichever tenant was being written, so recording `dev`
+    silently deleted Brookside's script id; if the default cannot be determined it now leaves
+    the flat keys alone rather than dropping them.
 - **`window.ASSET_TRACKER_CLIENT` is the only source of per-school values.** Nothing else
   should name a school, a deployment URL or an ID prefix. `index.html` reads it once into
   `CLIENT` at module scope and derives `SHEET_API_URL`, `ASSET_LABEL_PREFIX`, `APP_NAME`

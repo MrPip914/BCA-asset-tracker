@@ -62,6 +62,29 @@ say when a sign-in attempt fails for a transport reason rather than an auth one.
 
 ---
 
+### Picking a type reopens the type manager behind the picker
+**Found:** 2026-09-08, while browser-testing the type-name display fix — pre-existing,
+present identically on the commit before that change.
+**Needs a deploy:** no — `index.html` only.
+**Confirmed:** in Chromium against Sandbox mode, on both the fixed build and `HEAD`
+before it. Sequence: open the add form, open **Manage asset types** from the gear beside
+Type, add a type, close the manager, open the Type picker, choose any type. The picker
+closes and the asset takes the chosen type correctly — and the *type manager* reopens on
+top of the form, needing a second dismissal before Save is clickable.
+
+Only reproduces once the manager has been opened earlier in the same form session, so it
+reads as the manager's own open-state not being cleared when it is closed from its X (the
+picker's gear presumably sets it, and closing the picker restores whatever it thinks the
+previous state was).
+
+Cosmetic — nothing is mis-saved, the type does get picked — but it puts a modal in front
+of Save right at the moment someone has just created a type, which is exactly when a new
+user is least sure whether their click worked.
+
+**Blocks:** nothing.
+
+---
+
 ## Fixed
 
 ### Custom column values are never saved — fixed in v26

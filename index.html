@@ -601,10 +601,18 @@ function nearestPlaceNameOf(asset, assets) {
 // editable text from then on. So it can go stale — move that mini split and the
 // name still says Room 102. That's the deliberate trade: a name that silently
 // rewrote itself would make a real name indistinguishable from a placeholder.
-function suggestedNameFor(asset, assets) {
-  const type = (asset?.type || "").trim();
-  if (!type) return "";
-  if (FIXED_IN_PLACE_TYPES.has(type)) {
+function suggestedNameFor(asset, assets, typesList) {
+  const typeId = (asset?.type || "").trim();
+  if (!typeId) return "";
+  // The type's NAME, never its id. A built-in type's id IS its original name, so
+  // this read identically until the first user-created type — whose id is a raw
+  // uuid — named its assets "54da0bb7-d2d9-… BCA0090". typeNameOf falls back to
+  // the id, which keeps a type missing from the managed list readable.
+  const type = typeNameOf(typeId, typesList);
+  // Matched against the ID: FIXED_IN_PLACE_TYPES names built-ins, whose ids are
+  // their names, and matching on a resolved name would let a renamed type slip
+  // out of the set (or an unrelated one collide into it).
+  if (FIXED_IN_PLACE_TYPES.has(typeId)) {
     const place = nearestPlaceNameOf(asset, assets);
     if (place) return `${place} ${type}`;
   }
@@ -650,7 +658,7 @@ function nameFromFieldOf(a) {
 // cannot be reconstructed, and any name still wrong is now just a name someone
 // has to retype. That is why the removal waited until a save had written every
 // repaired name into the sheet.
-function adoptLegacyNames(list) {
+function adoptLegacyNames(list, typesList) {
   const stillBlank = a => !(a.name || "").trim();
   // 1. A Bulk Item with no name of its own takes a copy of its sub-type
   //    ("Chairs"), which is what it was called before Sub-Type went back to
@@ -662,9 +670,9 @@ function adoptLegacyNames(list) {
   });
   // 2. Places next, so a nameless room has a name of its own before anything
   //    inside it is named after it.
-  const places = stored.map(a => (stillBlank(a) && isPlaceType(a.type)) ? { ...a, name: suggestedNameFor(a, stored) } : a);
+  const places = stored.map(a => (stillBlank(a) && isPlaceType(a.type)) ? { ...a, name: suggestedNameFor(a, stored, typesList) } : a);
   // 3. Everything else, resolved against a list whose places are all named.
-  return places.map(a => stillBlank(a) ? { ...a, name: suggestedNameFor(a, places) } : a);
+  return places.map(a => stillBlank(a) ? { ...a, name: suggestedNameFor(a, places, typesList) } : a);
 }
 
 const DEFAULT_COLUMNS = [
@@ -1471,7 +1479,7 @@ const FRONTEND_SCRIPT_VERSION = "v30";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-04.2";
+const APP_VERSION = "2026-09-08.1";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -2653,6 +2661,13 @@ function AssetTracker() {
       // change would adopt parents and names using the PREVIOUS rules.
       const loadedTypeSettings = data.typeSettings && typeof data.typeSettings === "object" ? data.typeSettings : {};
       applyTypeSettings(loadedTypeSettings, storedCols);
+      // Resolved here rather than at its setState below, because adoptLegacyNames
+      // needs it: a name is built from the type's NAME, and only this list maps a
+      // type id to one. Migrated the same way columns are above — see the note at
+      // setTypesList for why only LOCKED types are restored.
+      const loadedTypes = ensureLockedTypes(adoptLegacyTypesList(
+        Array.isArray(data.typesList) && data.typesList.length ? data.typesList : DEFAULT_TYPES
+      ));
 
       const parented = data.assets
         .map(a => ({ comments: [], changes: [], allocations: [], status: "Active", subType: "", purchaseDate: "", warrantyUntil: "", ...a }))
@@ -2665,7 +2680,7 @@ function AssetTracker() {
       // suggestion for fixed equipment reads the chain above the asset ("Room 102
       // Mini Split") — running it inside the first map would walk a list whose
       // parentIds were still half-adopted.
-      const loadedAssets = adoptLegacyNames(parented);
+      const loadedAssets = adoptLegacyNames(parented, loadedTypes);
       setAssets(loadedAssets);
       // No scriptVersion at all means an old backend that predates this check entirely —
       // still a real mismatch, not a "nothing to compare" case. In sandbox mode the
@@ -2691,9 +2706,7 @@ function AssetTracker() {
       // always a version gap and never a choice. An ordinary type the user
       // deliberately deleted stays deleted, which re-adding every entry in
       // TYPE_OPTIONS would undo on every single load.
-      setTypesList(ensureLockedTypes(adoptLegacyTypesList(
-        Array.isArray(data.typesList) && data.typesList.length ? data.typesList : DEFAULT_TYPES
-      )));
+      setTypesList(loadedTypes);
       setTypeSettings(loadedTypeSettings);
       // Absent/0/garbage all mean "never stored" — peekAssetNumber() seeds it
       // from the loaded assets instead, and the first asset created writes it.
@@ -3081,6 +3094,9 @@ function AssetTracker() {
       // name finds the equipment inside it however many levels down it sits.
       const chainNames = [roomNameOf(a, assets), buildingNameOf(a, assets), ...ancestorsOf(a, assets).map(p => nameOf(p))];
       if (chainNames.some(n => n && n.toLowerCase().includes(q))) return true;
+      // The type by NAME. The raw scan below sees a.type, which is an id — so a
+      // user-created type was findable only by typing its uuid.
+      if (typeNameOf(a.type, typesList).toLowerCase().includes(q)) return true;
       return Object.values(a).some(v => typeof v === "string" && v.toLowerCase().includes(q));
     });
     if (sortConfig) {
@@ -3188,7 +3204,7 @@ function AssetTracker() {
       if (maintenanceFrequencyFilter !== "All frequencies" && r.item.frequencyLabel !== maintenanceFrequencyFilter) return false;
       if (maintenanceOwnerFilter !== "All owners" && r.item.owner !== maintenanceOwnerFilter) return false;
       if (!q) return true;
-      return [r.item.task, r.item.owner, r.asset.label, roomNameOf(r.asset, assets), r.asset.type]
+      return [r.item.task, r.item.owner, r.asset.label, roomNameOf(r.asset, assets), typeNameOf(r.asset.type, typesList)]
         .some(v => (v || "").toLowerCase().includes(q));
     });
     if (maintenanceSortConfig) {
@@ -3379,7 +3395,7 @@ function AssetTracker() {
         // Name the existing asset — and say so when it's archived, since an
         // archived asset isn't in the default list view and "that ID is taken"
         // is otherwise baffling when nothing on screen is using it.
-        const what = [conflict.type, conflict.status === "Archived" ? "archived" : null].filter(Boolean).join(", ");
+        const what = [typeNameOf(conflict.type, typesList), conflict.status === "Archived" ? "archived" : null].filter(Boolean).join(", ");
         setAddError(`Asset ID "${conflict.label}" is already in use${what ? ` (${what})` : ""}. Asset IDs must be unique — pick a different one.`);
         return;
       }
@@ -3396,7 +3412,7 @@ function AssetTracker() {
       // placeholder — so a new asset is named at creation rather than relying on
       // nameOf()'s Asset ID fallback forever. Typed over, whatever was typed wins.
       const named = { ...stripDraftUiState(draft), label };
-      if (!(named.name || "").trim()) named.name = suggestedNameFor(named, assets);
+      if (!(named.name || "").trim()) named.name = suggestedNameFor(named, assets, typesList);
       // `label` last, so the asset stores the trimmed value that was validated
       // above rather than the raw draft string.
       await persist(
@@ -3456,9 +3472,18 @@ function AssetTracker() {
         const newVal = draftToSave[key] || "";
         if (oldVal === newVal) return;
         const isParentField = key === "parentId";
+        // `type` stores an id, so an unresolved entry reads "Type changed from
+        // "Computer" to "54da0bb7-…"". An audit row's text is written once and
+        // kept forever, so it has to be resolved here rather than at render.
+        const isTypeField = key === "type";
         const fieldLabel = isParentField ? "Parent" : (columns.find(c => c.key === key)?.label || key);
-        const from = isParentField ? (parentNameFor(oldVal, assets) || UNASSIGNED_LABEL) : oldVal;
-        const to = isParentField ? (parentNameFor(newVal, assets) || UNASSIGNED_LABEL) : newVal;
+        // Named apart from the personIds branch's own nameFor above, which it
+        // would otherwise shadow-and-not-shadow depending on the branch taken.
+        const displayValueFor = v => isParentField ? (parentNameFor(v, assets) || UNASSIGNED_LABEL)
+          : isTypeField ? typeNameOf(v, typesList)
+          : v;
+        const from = displayValueFor(oldVal);
+        const to = displayValueFor(newVal);
         editEntries.push({
           at: new Date().toISOString(), by: currentUser || "", assetLabel: original.label,
           assetType: draftToSave.type || original.type, action: "edited", field: fieldLabel, from, to,
@@ -3594,8 +3619,8 @@ function AssetTracker() {
     // it names the source ("Computer BCA0001") and would be wrong on the copy the
     // moment it exists. Comparing against the suggestion is what tells them apart
     // — there's no flag saying which a name is, and there shouldn't be.
-    if ((copy.name || "").trim() === suggestedNameFor(source, assets)) {
-      copy.name = suggestedNameFor(copy, assets);
+    if ((copy.name || "").trim() === suggestedNameFor(source, assets, typesList)) {
+      copy.name = suggestedNameFor(copy, assets, typesList);
     }
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: nextLabel,
@@ -4670,7 +4695,9 @@ function AssetTracker() {
           return;
         }
         if (!fieldAppliesTo(c.key, a.type)) { row[c.label] = ""; return; }
-        row[c.label] = c.key === "person" ? personTextOf(a, assets) : (a[c.key] || "");
+        row[c.label] = c.key === "person" ? personTextOf(a, assets)
+          : c.key === "type" ? typeNameOf(a.type, typesList)
+          : (a[c.key] || "");
       });
       // A column config with no `parent` shouldn't cost the export its location
       // columns — the whole point of writing them here is that they don't depend
@@ -4690,14 +4717,14 @@ function AssetTracker() {
     const commentRows = [];
     assets.forEach(a => {
       (a.comments || []).forEach(cm => {
-        commentRows.push({ "Asset ID": a.label, Type: a.type, Room: displayRoom(a), When: formatWhen(cm.at), Comment: cm.text, "Logged by": cm.by || "" });
+        commentRows.push({ "Asset ID": a.label, Type: typeNameOf(a.type, typesList), Room: displayRoom(a), When: formatWhen(cm.at), Comment: cm.text, "Logged by": cm.by || "" });
       });
     });
     const changeRows = [];
     assets.forEach(a => {
       (a.changes || []).forEach(ch => {
         changeRows.push({
-          "Asset ID": a.label, Type: a.type, Room: displayRoom(a), When: formatWhen(ch.at),
+          "Asset ID": a.label, Type: typeNameOf(a.type, typesList), Room: displayRoom(a), When: formatWhen(ch.at),
           "Change type": ch.changeType, Vendor: ch.vendor, Cost: parseFloat(ch.cost) || "", Note: ch.note,
           "Logged by": ch.by || "",
         });
@@ -5845,6 +5872,10 @@ function AssetTracker() {
                           // so it falls through to the plain stored value.
                           c.key === "parent" ? (pathOf(selectedAsset, assets) || UNASSIGNED_LABEL)
                           : c.key === "person" ? personTextOf(selectedAsset, assets)
+                          // `type` stores an id, which for a built-in happens to
+                          // read as its name and for a user-created type is a raw
+                          // uuid. Same resolution the list's Type cell does.
+                          : c.key === "type" ? typeNameOf(selectedAsset.type, typesList)
                           : selectedAsset[c.key]
                         }
                         wide={c.key === "notes" || c.key === "parent"}
@@ -6033,7 +6064,7 @@ function AssetTracker() {
             <>
               {contentsCount === 0 ? (
                 <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>
-                  Nothing linked to this {selectedAsset.type.toLowerCase()} yet.
+                  Nothing linked to this {typeNameOf(selectedAsset.type, typesList).toLowerCase()} yet.
                 </div>
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -6064,7 +6095,7 @@ function AssetTracker() {
                       <button key={d.label} onClick={() => openDetail(d)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
                         <DIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
                         <span style={{ fontSize: 14, color: C.ink, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {d.type}{d.brand ? ` · ${d.brand}` : ""}{selectedAsset.type === "Building" && roomNameOf(d, assets) ? ` · ${roomNameOf(d, assets)}` : ""}
+                          {typeNameOf(d.type, typesList)}{d.brand ? ` · ${d.brand}` : ""}{selectedAsset.type === "Building" && roomNameOf(d, assets) ? ` · ${roomNameOf(d, assets)}` : ""}
                         </span>
                         <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.accent }}>{d.label}</span>
                         <ChevronRight size={14} style={{ color: C.placeholder }} />
@@ -6081,7 +6112,7 @@ function AssetTracker() {
                     return (
                       <button key={bulk.label} onClick={() => openDetail(bulk)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
                         <BIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
-                        <span style={{ fontSize: 14, color: C.ink, flex: 1 }}>{nameOf(bulk) !== bulk.label ? nameOf(bulk) : bulk.type}</span>
+                        <span style={{ fontSize: 14, color: C.ink, flex: 1 }}>{nameOf(bulk) !== bulk.label ? nameOf(bulk) : typeNameOf(bulk.type, typesList)}</span>
                         <span style={{ fontWeight: 600, color: C.brandDark }}>× {quantity}</span>
                         <ChevronRight size={14} style={{ color: C.placeholder }} />
                       </button>
@@ -7444,7 +7475,7 @@ function AssetTracker() {
                     // The Name placeholder previews exactly what saving blank
                     // will store, so the default is visible before it's chosen
                     // rather than appearing out of nowhere afterwards.
-                    placeholder={c.key === "screenSize" ? 'e.g. 24"' : c.key === "name" ? suggestedNameFor(draft, assets) : undefined}
+                    placeholder={c.key === "screenSize" ? 'e.g. 24"' : c.key === "name" ? suggestedNameFor(draft, assets, typesList) : undefined}
                     type={c.key === "totalQuantity" ? "number" : undefined}
                   />
                 )
