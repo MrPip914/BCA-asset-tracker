@@ -1635,9 +1635,9 @@ When you do:
 
 ## Known constraints / things to watch
 
-- **v31 is NOT deployed yet as of 2026-09-09** — and do not take that sentence on faith
-  either, for exactly the reason every entry below says: `node deploy.mjs --status` answers
-  it in one command, per tenant, and cannot go stale. It adds an `id` column to the Assets
+- **v31 is superseded by the v32 deploy below and is history.** Do not take that on faith
+  either, for exactly the reason every entry here says: `node deploy.mjs --status` answers
+  it in one command, per tenant, and cannot go stale. It added an `id` column to the Assets
   tab: the asset's real primary key, and the first phase of `ASSET_KEY_REFACTOR_PLAN.md`.
   - **Purely additive, and identical in behaviour until something writes an id.** The column
     is empty on every existing row, and both join sites read `a.id || a.label`, so an
@@ -1670,8 +1670,9 @@ When you do:
     that yet (no frontend change ships with it), but phase 2 must not land until v31 is live
     on the tenant it is being tested against.
 
-- **Phase 2 of the key refactor is BUILT but NOT MERGED as of 2026-09-09**, on
-  `claude/happy-pascal-xw25f1`. `id` is now the app's identity and `label` is display text.
+- **Phase 2 of the key refactor is MERGED and LIVE, confirmed 2026-09-09** — v32 is
+  deployed to every tenant (`node deploy.mjs --status`) and `main` carries the frontend, so
+  `assets.stama.tech` serves it. `id` is now the app's identity and `label` is display text.
   - **`loadData()` adopts `id = a.id || a.label` first in its map chain**, before the
     personIds normalize and before `adoptLegacyNames` — which walks the parent chain and so
     has to walk it by the ids everything downstream joins on. From that point `a.id` is
@@ -1698,14 +1699,25 @@ When you do:
     `assetNumberFromLabel` (both genuinely about labels), the Excel export's "Asset ID"
     column, the detail header, and every "is this asset's name just its label?" display
     test.
-  - **DO NOT MERGE TO `main` UNTIL EVERY TENANT IS ON v31.** The frontend ships from `main`
-    to all tenants at once while backends deploy one at a time, so merging while `bca` is
-    on v30 would put a UUID-minting frontend in front of a backend that drops the column —
-    leaving new assets with neither an id nor a matching label. `node deploy.mjs --status`
-    is the check. This is the hazard the whole plan is ordered around.
+  - **The release order was BACKEND FIRST, and that is the rule to reuse.** The frontend
+    ships from `main` to all tenants at once while backends deploy one at a time, so merging
+    while `bca` was on v30 would have put a UUID-minting frontend in front of a backend that
+    drops the column — leaving new assets with neither an id nor a matching label. That
+    hazard is what the whole plan was ordered around, and `node deploy.mjs --status` was the
+    gate: `main` was not merged until it reported v32 on both tenants.
+    - **The deploy took two attempts, and the near-miss is worth keeping.** The first run
+      reported `✓ bca is now v30` — Cloud Shell was checked out on `main`, which still
+      carried v30, so it deployed v30 over v30. Harmless only because the versions were
+      equal; against a v31 tenant `deploy.mjs` would have refused it as a downgrade. **The
+      version in the confirmation line is the thing to read, not the checkmark**, and a
+      Cloud Shell deploy of unmerged work needs `git fetch origin && git checkout -B <branch>
+      origin/<branch>` first — the tutorial link clones the DEFAULT branch, so a re-opened
+      link silently puts you back on `main`.
 
-- **Phase 3 is BUILT but NOT DEPLOYED as of 2026-09-09** (backend v32), on
-  `claude/happy-pascal-xw25f1`. `label` becomes **`tag`** — the sticker on the thing:
+- **Phase 3 is DEPLOYED and MERGED, confirmed 2026-09-09** (backend v32) by
+  `node deploy.mjs --status` reporting v32 on `bca` and `dev`, and by the live
+  `assets.stama.tech` serving `FRONTEND_SCRIPT_VERSION = "v32"`. `label` becomes **`tag`** —
+  the sticker on the thing:
   optional, editable, and absent entirely on a type that never carries one.
   - **The backend change is one name in `ASSET_FIELDS`.** `label` is KEPT and is written
     from the client's own value, **not mirrored from `tag`** — the plan originally said to
@@ -1775,9 +1787,12 @@ When you do:
     run holds the old ids and its next save would write them straight back.
   - **Everyone must be OUT of the app while it runs**, for the same reason.
   - **Ordering**: it can only run after v31+ is deployed AND one save has written the `id`
-    column — before that there is no column to write into. On `bca` that means after the
-    v32 deploy, and the Sheet must be shared with the service account first (as of
-    2026-09-09 only `dev` is).
+    column — before that there is no column to write into. **`dev` is migrated; `bca` is
+    not, as of 2026-09-09.** v32 is deployed there and the frontend is live, so what remains
+    on `bca` is one save in the app (which fills the `id` column for every row at once, since
+    every save rewrites the whole Assets tab) and sharing that Sheet with the service account
+    — as of 2026-09-09 only `dev` is shared. Check with `node sheet.mjs tenants`, not with
+    this line.
   - `sheet.mjs` gained `export` on six helpers so this reuses its auth, backup, plain-text
     write and revision bump rather than re-rolling them. The decision logic lives in the
     `-lib` half with no network in it, because rehearsing an AuditLog rewrite against a live
