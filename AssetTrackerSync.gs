@@ -49,7 +49,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v30";
+const SCRIPT_VERSION = "v31";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -98,6 +98,21 @@ const SHEET_NAMES = {
 // the replacement column is populated on every row first. The sheet's own
 // version history is the only way back.
 const ASSET_FIELDS = [
+  // `id` (v31) is the asset's real primary key, and every cross-reference in
+  // every tab is joined on it from here on -- parentId, personIds, a child row's
+  // assetLabel, a breaker's panelLabel.
+  //
+  // It is EMPTY on every row written before v31, and that is the whole migration
+  // strategy rather than an oversight: the frontend adopts `id = a.id || a.label`
+  // on load, so an existing asset's id IS its label. Every reference already
+  // stored in this sheet is therefore already a valid id -- nothing to rewrite,
+  // no backfill, and AuditLog (the one tab with no rewrite path) never has to be
+  // touched at all. Same trick typesList uses, where a built-in type's id is its
+  // original name. Only assets created after v31 get a generated id.
+  //
+  // Both join sites below read `a.id || a.label` for that reason, and must keep
+  // doing so until `label` itself is retired. See ASSET_KEY_REFACTOR_PLAN.md.
+  "id",
   "label", "name", "type", "subType", "screenSize", "hostname", "parentId",
   // `personIds` (v28) is the assignment: comma-joined labels of User assets, the
   // app's first many-to-many between assets. `person` is the pre-v28 slash-joined
@@ -270,9 +285,12 @@ function nearestAncestorRow_(startRow, byLabel, type) {
   const seen = {};
   let cur = byLabel[effectiveParentId_(startRow)];
   let depth = 0;
-  while (cur && !seen[cur.label] && depth < 50) {
+  // Visited by the same key the map is built on (v31), or a row whose id differs
+  // from its label is never recognised as already seen and the loop guard fails
+  // to guard -- which on this path would hang a PUBLIC page.
+  while (cur && !seen[cur.id || cur.label] && depth < 50) {
     if (cur.type === type) return cur;
-    seen[cur.label] = true;
+    seen[cur.id || cur.label] = true;
     cur = byLabel[effectiveParentId_(cur)];
     depth++;
   }
@@ -772,18 +790,33 @@ function publicPanelPayload_(requestedLabel) {
   if (!wanted) return { ok: false, error: "No panel specified." };
 
   const assetRows = readTable_(SHEET_NAMES.assets, ASSET_FIELDS);
-  const panelRow = assetRows.filter(a =>
-    a.type === "Electrical Panel" && String(a.label || "").trim().toUpperCase() === wanted
-  )[0];
+  // Matched on the id OR the label, and both are permanent. A QR sticker taped
+  // inside a panel door encodes the label (a UUID under a QR code is unreadable
+  // to whoever is standing at the panel), and a sticker is the one artifact here
+  // that can never be redeployed -- so the label has to keep resolving for as
+  // long as the sticker exists. A panel created after v31 has an id that is not
+  // its label, which is why this cannot just match one of them.
+  const panelRow = assetRows.filter(a => {
+    if (a.type !== "Electrical Panel") return false;
+    const id = String(a.id || "").trim().toUpperCase();
+    const label = String(a.label || "").trim().toUpperCase();
+    return (id && id === wanted) || (label && label === wanted);
+  })[0];
   // Deliberately the same message whether the label names a non-panel asset or
   // nothing at all — a public endpoint shouldn't confirm which asset IDs exist.
   if (!panelRow) return { ok: false, error: "No electrical panel found for that code." };
 
-  // Label -> row, for the parent-chain walks below.
+  // Key -> row, for the parent-chain walks below. Keyed on the same `id || label`
+  // that parentId actually holds (v31) -- keyed on the label alone, a chain
+  // through any asset created after v31 would dead-end at it.
   const byLabel = {};
-  assetRows.forEach(a => { byLabel[a.label] = a; });
+  assetRows.forEach(a => { byLabel[a.id || a.label] = a; });
 
-  const panelLabel = panelRow.label;
+  // What the Breakers/Circuits tabs store in panelLabel, which doPost stamps
+  // from the panel's own `id || label`. NOT the same as `wanted` above: that is
+  // whatever the sticker said, and for a post-v31 panel reached by its label the
+  // two differ.
+  const panelLabel = panelRow.id || panelRow.label;
   // Read once, filter twice — this panel's own breakers below, and (further
   // down) the single upstream breaker that feeds this panel, which by definition
   // lives on a different one.
@@ -836,7 +869,9 @@ function publicPanelPayload_(requestedLabel) {
   // is exactly what this endpoint exists to avoid. Only rooms this panel actually
   // references are included — it's a lookup map, not a room directory.
   const roomNameById = {};
-  assetRows.forEach(a => { if (a.type === "Room") roomNameById[a.label] = displayName_(a); });
+  // Keyed on `id || label` (v31): the ids looked up here come from
+  // roomsServedIds and from panelRoom below, both of which are references.
+  assetRows.forEach(a => { if (a.type === "Room") roomNameById[a.id || a.label] = displayName_(a); });
 
   const panel = pickPublic_(panelRow, PUBLIC_PANEL_FIELDS);
   // The "where am I" header. A panel's Room and Building are found by walking up
@@ -850,7 +885,7 @@ function publicPanelPayload_(requestedLabel) {
   const referencedRoomIds = {};
   breakers.forEach(b => b.circuits.forEach(c => (c.roomsServedIds || []).forEach(id => { referencedRoomIds[id] = true; })));
   unassignedCircuits.forEach(c => (c.roomsServedIds || []).forEach(id => { referencedRoomIds[id] = true; }));
-  if (panelRoom) referencedRoomIds[panelRoom.label] = true;
+  if (panelRoom) referencedRoomIds[panelRoom.id || panelRoom.label] = true;
   const rooms = {};
   Object.keys(referencedRoomIds).forEach(id => {
     if (roomNameById[id] !== undefined) rooms[id] = roomNameById[id];
@@ -867,10 +902,15 @@ function publicPanelPayload_(requestedLabel) {
   if (feedingCircuit) {
     const feedingBreaker = allBreakerRows.filter(b => b.id === feedingCircuit.breakerId)[0];
     const upstreamLabel = feedingBreaker ? feedingBreaker.panelLabel : (feedingCircuit.panelLabel || "");
-    const upstreamPanel = assetRows.filter(a => a.label === upstreamLabel && a.type === "Electrical Panel")[0];
+    // upstreamLabel came out of a stored panelLabel, so it is an `id || label`
+    // key (v31) -- matched against the same, not against the label alone.
+    const upstreamPanel = assetRows.filter(a => (a.id || a.label) === upstreamLabel && a.type === "Electrical Panel")[0];
     const upstreamRoom = upstreamPanel ? nearestAncestorRow_(upstreamPanel, byLabel, "Room") : null;
     fedFrom = {
-      panelLabel: upstreamLabel,
+      // The LABEL where there is one, not the key: this becomes a "?p=" link and
+      // a visible panel code on the public page, and publicPanelPayload_ accepts
+      // either. Falls back to the key for a panel with no label of its own.
+      panelLabel: (upstreamPanel && upstreamPanel.label) || upstreamLabel,
       panelRoomName: upstreamRoom ? displayName_(upstreamRoom) : "",
       circuitLabel: feedingCircuit.label || "",
       cells: feedingBreaker && feedingBreaker.cells
@@ -1016,7 +1056,10 @@ function handleAuthenticatedRead_(body, e) {
     });
 
     const assets = assetRows.map(a => {
-      const label = a.label;
+      // v31: the asset's key, falling back to its label for any row written
+      // before the id column existed. Every child-row filter below joins on
+      // this, and doPost writes those rows keyed the same way.
+      const label = a.id || a.label;
       return {
         ...a,
         // Stored comma-joined in one cell (same as a circuit's roomsServed);
@@ -1280,20 +1323,24 @@ function doPost(e) {
       const breakerRows = [];
       const circuitRows = [];
       assets.forEach(a => {
-        (a.comments || []).forEach(c => commentRows.push({ assetLabel: a.label, text: c.text, at: c.at, by: c.by || "" }));
+        // v31: key child rows on the asset's id, falling back to its label for a
+        // row that has none yet. Must match doGet's join exactly -- they are the
+        // two halves of one contract, and a mismatch orphans every child row.
+        const key = a.id || a.label;
+        (a.comments || []).forEach(c => commentRows.push({ assetLabel: key, text: c.text, at: c.at, by: c.by || "" }));
         (a.changes || []).forEach(c => changeRows.push({
-          assetLabel: a.label, changeType: c.changeType, vendor: c.vendor || "", cost: c.cost || "", note: c.note || "", at: c.at, by: c.by || "",
+          assetLabel: key, changeType: c.changeType, vendor: c.vendor || "", cost: c.cost || "", note: c.note || "", at: c.at, by: c.by || "",
         }));
-        (a.allocations || []).forEach(al => allocationRows.push({ assetLabel: a.label, room: al.roomId, quantity: al.quantity }));
+        (a.allocations || []).forEach(al => allocationRows.push({ assetLabel: key, room: al.roomId, quantity: al.quantity }));
         (a.maintenanceItems || []).forEach(m => maintenanceRows.push({
-          assetLabel: a.label, task: m.task, frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
+          assetLabel: key, task: m.task, frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
           lastPerformed: m.lastPerformed || "", owner: m.owner || "", at: m.at, by: m.by || "",
         }));
         // panelLabel is derived from the parent asset here (not trusted from the
         // client payload), same as assetLabel is for every other child row above.
         (a.breakers || []).forEach(b => {
           breakerRows.push({
-            id: b.id, panelLabel: a.label,
+            id: b.id, panelLabel: key,
             cells: (b.cells || []).join(","),
             ampRating: b.ampRating, status: b.status, serial: b.serial || "",
             installedDate: b.installedDate || "", notes: b.notes || "",
@@ -1304,7 +1351,7 @@ function doPost(e) {
           // keeps it from ever disagreeing with the breaker this circuit hangs off
           // of, since both are stamped from the one asset that contains them.
           (b.circuits || []).forEach(c => circuitRows.push({
-            id: c.id, breakerId: b.id, panelLabel: a.label, label: c.label,
+            id: c.id, breakerId: b.id, panelLabel: key, label: c.label,
             roomsServed: (c.roomsServedIds || []).join(","), feedsPanelLabel: c.feedsPanelLabel || "",
             notes: c.notes || "",
           }));
@@ -1313,7 +1360,7 @@ function doPost(e) {
         // the only thing tying the row to anything. doGet reads them straight back
         // as unassignedCircuits on this panel.
         (a.unassignedCircuits || []).forEach(c => circuitRows.push({
-          id: c.id, breakerId: "", panelLabel: a.label, label: c.label,
+          id: c.id, breakerId: "", panelLabel: key, label: c.label,
           roomsServed: (c.roomsServedIds || []).join(","), feedsPanelLabel: c.feedsPanelLabel || "",
           notes: c.notes || "",
         }));
@@ -1460,11 +1507,14 @@ function backfillAuditIds_() {
   lock.waitLock(30000);
   try {
     const assetRows = readTable_(SHEET_NAMES.assets, ASSET_FIELDS);
-    // name -> label, first writer wins (see the ambiguity note above).
+    // name -> KEY, first writer wins (see the ambiguity note above). The key is
+    // `id || label` as of v31, not the label: what this writes lands in AuditLog's
+    // `related`, which is read back as an asset id. Filling it with a label would
+    // resolve to nothing for any asset whose id is not its label.
     const labelByName = {};
     assetRows.forEach(a => {
       const nm = String(a.name || "").trim();
-      if (nm && !(nm in labelByName)) labelByName[nm] = a.label;
+      if (nm && !(nm in labelByName)) labelByName[nm] = a.id || a.label;
     });
     const resolve = nm => {
       const key = String(nm || "").trim();
@@ -1811,6 +1861,22 @@ function adminParseAssetCsv_(source) {
     // Two assets sharing a label are not two assets — every lookup in the app
     // matches ALL rows carrying that label, so they merge with no way back apart.
     throw new Error("Duplicate labels: " + dupes.slice(0, 5).join(", ") + (dupes.length > 5 ? "..." : ""));
+  }
+
+  // The same check on `id` (v31), and this is now the one that matters most: the
+  // id is what every cross-reference joins on and what child rows are keyed by,
+  // so two rows sharing one merges their comments, changes, allocations and
+  // maintenance into a single asset. A file with no id column skips this
+  // entirely — every row's id is blank, and the frontend adopts the label as the
+  // id on load, at which point the label check above is the same guarantee.
+  const seenIds = {}, dupeIds = [];
+  rows.forEach(r => {
+    const v = String(r.id || "").trim();
+    if (!v) return;
+    if (seenIds[v]) dupeIds.push(v); else seenIds[v] = true;
+  });
+  if (dupeIds.length) {
+    throw new Error("Duplicate ids: " + dupeIds.slice(0, 5).join(", ") + (dupeIds.length > 5 ? "..." : ""));
   }
 
   // ASSET_FIELDS first so the tab keeps its canonical column order, then any

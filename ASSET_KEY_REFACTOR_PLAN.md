@@ -157,7 +157,14 @@ counter behaviour Phase 3 rewrites. **Set the dev entry's `labelPrefix` to `"BCA
 validating with copied Brookside data**, and put it back afterwards. One line, and without
 it the tag-issuance testing is measuring a different code path than the one that will run.
 
-### Phase 1 — backend v31: add the `id` column (additive, safe)
+### Phase 1 — backend v31: add the `id` column (additive, safe) — **BUILT 2026-09-09, not yet deployed**
+
+Landed as described below, plus five sites in the public `?panel=` path and
+`backfillAuditIds_` that the plan had not enumerated — all found by auditing for a
+bare `a.label` join after the named edits were made, not by the plan. Covered by
+`test-backend-assetid.js`, which slices both join blocks out of the .gs and
+round-trips fake data through them; verified by mutation that reverting either side
+to the label alone fails.
 
 `AssetTrackerSync.gs` only. No frontend change, no behaviour change.
 

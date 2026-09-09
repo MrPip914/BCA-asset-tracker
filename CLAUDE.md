@@ -1635,6 +1635,41 @@ When you do:
 
 ## Known constraints / things to watch
 
+- **v31 is NOT deployed yet as of 2026-09-09** — and do not take that sentence on faith
+  either, for exactly the reason every entry below says: `node deploy.mjs --status` answers
+  it in one command, per tenant, and cannot go stale. It adds an `id` column to the Assets
+  tab: the asset's real primary key, and the first phase of `ASSET_KEY_REFACTOR_PLAN.md`.
+  - **Purely additive, and identical in behaviour until something writes an id.** The column
+    is empty on every existing row, and both join sites read `a.id || a.label`, so an
+    existing asset's key IS its label. Nothing in the sheet changes meaning.
+  - **That fallback is the whole migration strategy.** Every reference already stored —
+    `parentId`, `personIds`, a child row's `assetLabel`, a breaker's `panelLabel`,
+    AuditLog's `assetLabel` and `related` — is therefore *already a valid id*. No backfill,
+    no migration script, and **AuditLog is never touched**, which matters because it is the
+    one tab with no rewrite path (see the v25 entry). Same trick `typesList` uses, where a
+    built-in type's id is its original name.
+  - **doGet and doPost are two halves of one contract.** If they key on different things,
+    every comment, change, allocation, maintenance item, breaker and circuit is written
+    under one key and read under another — they vanish, silently, with `SCRIPT_VERSION`
+    still matching its frontend. `test-backend-assetid.js` slices BOTH blocks out of the
+    .gs as source text and round-trips fake data through them, so a change to one side and
+    not the other fails. Verified by mutation: reverting either site to the label alone
+    fails the suite.
+  - **The public `?panel=` path needed the same treatment**, at five sites — the panel
+    lookup now accepts an id OR a label (a QR sticker taped inside a panel door encodes the
+    label and can never be redeployed), the parent-chain map is keyed on `id || label`
+    because that is what `parentId` holds, `nearestAncestorRow_`'s visited set matches (or
+    the loop guard stops guarding, on a *public* page), and the room-name map and upstream
+    panel lookup likewise.
+  - **`backfillAuditIds_` writes keys, not labels**, since what it fills is `related`.
+  - The admin import now also refuses duplicate **ids**, which is the merge hazard once the
+    id is what child rows are keyed by. A file with no id column skips the check entirely.
+  - **Deploy order is mandatory and is the one real hazard here: backend first.** A frontend
+    that wrote a generated id against a v30 backend would have the column dropped, leaving a
+    row with neither an id nor a matching label — unreferenceable. Nothing in phase 1 does
+    that yet (no frontend change ships with it), but phase 2 must not land until v31 is live
+    on the tenant it is being tested against.
+
 - **v30 is DEPLOYED, confirmed 2026-09-04** by fetching the `/exec` URL and reading
   `scriptVersion` back. It makes the admin import read a **tab in the Sheet** instead of
   Drive. v29 shipped the `DriveApp` version, which failed at runtime — "You do not have
