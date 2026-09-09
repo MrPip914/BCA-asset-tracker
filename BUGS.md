@@ -16,6 +16,48 @@ version that fixed them.
 
 ## Open
 
+### The deploy config can silently land in a DISPOSABLE directory
+**Found:** 2026-09-09, when `node deploy.mjs dev` in Cloud Shell reported "No Apps Script
+ID configured for tenant dev" — on a machine that had deployed to `dev` earlier the same
+day, with no change to `deploy.mjs`, `set-tenant.mjs` or `clients.js` since 09-08.
+**Needs a deploy:** no — Node tooling only, nothing in `AssetTrackerSync.gs`.
+**Confirmed:** by reading the two halves against each other, not reproduced on the affected
+machine (it is Eric's Cloud Shell `$HOME`, which no session here can see).
+
+`deploy.mjs`'s `loadConfig()` reads **`<repo>/deploy.config.json` FIRST**, and only falls
+back to `~/.bca-asset-tracker-deploy.json`. First hit wins — the two are never merged.
+`set-tenant.mjs` mirrors that: `const target = fs.existsSync(REPO_CONFIG) ? REPO_CONFIG :
+HOME_CONFIG`, and `new-tenant.mjs` records a brand-new tenant by shelling out to it.
+
+So if a `deploy.config.json` ever exists in the Cloud Shell clone, **every tenant id
+recorded from then on is written into the repo directory** — which is gitignored, is not the
+`$HOME` that Cloud Shell persists, and does not survive a fresh clone. The tutorial link
+clones the repo, so re-opening it is enough to lose it.
+
+The comment on that line says the repo-first order exists so `set-tenant` "never creates a
+second one that silently shadows the first", which is a real hazard and correctly handled —
+but it solves the shadowing problem by preferring the copy that is **less** durable, which
+is the wrong way round for a file whose entire purpose is to persist in `$HOME` so a
+redeploy is one tap from a phone.
+
+Worth deciding rather than fixing blind:
+- **Always write `$HOME`**, and have `deploy.mjs` warn (not die) when a repo-level config is
+  also present and shadowing it. Keeps one durable home; makes the shadow visible.
+- **Merge the two**, repo over home, per tenant. Most forgiving, but two places a tenant id
+  can hide is exactly what the current comment is trying to avoid.
+- **Refuse to start when both exist**, naming both paths. Safest, most annoying on a phone.
+
+The error message is already good — it prints the path it actually looked at, which is what
+made this diagnosable at all. What it cannot say is that the ids used to be somewhere else.
+
+**Blocks:** nothing permanently. Recovery is `find ~ -name deploy.config.json` to look for
+an older clone still holding the ids, then re-recording them with `set-tenant.mjs` (which
+now writes `$HOME`, since the repo copy is gone). Worst case it is one trip to the Apps
+Script editor per tenant.
+
+---
+
+
 ### Add asset suggests a colliding Asset ID when `nextAssetNumber` is unset
 **Found:** 2026-09-09, in browser testing of the required-fields work — the add form
 refused every save with a duplicate-tag error before the required rule was ever reached.
