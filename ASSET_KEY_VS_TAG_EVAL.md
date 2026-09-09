@@ -1,6 +1,11 @@
 # Asset key vs. asset tag — evaluation
 
-**Status: evaluation only. Nothing implemented. No decision made.**
+**Status: evaluation only. Its RECOMMENDATION (§5) is superseded — see
+`ASSET_KEY_REFACTOR_PLAN.md`.** The cost analysis below still stands and is the input
+to that plan; only the conclusion changed, when Eric set the priority as a foundation
+for future expansion rather than minimising risk to existing data. That reverses the
+call: §5 recommends Option A because it is cheapest, and Option B is the one that
+actually fixes the foundation.
 Written 2026-09-08 against backend v30 (confirmed live by fetching `/exec` and reading
 `scriptVersion`, not by trusting a line in `CLAUDE.md`).
 

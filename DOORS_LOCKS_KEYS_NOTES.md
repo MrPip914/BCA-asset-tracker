@@ -45,4 +45,12 @@ Consequences worth knowing up front:
 
 What *does* carry over from Panels unchanged: `ChildEntityTable` for the Locks-under-a-Door
 list, UUID identity for Locks/Keys, per-mutation audit entries with `snake_case` action
-names, and label-based references to Assets (a lock's Door is `doorLabel`).
+names, and id-based references to Assets.
+
+> **Superseded, 2026-09-09.** That last clause used to read "label-based references to
+> Assets (a lock's Door is `doorLabel`)". `ASSET_KEY_REFACTOR_PLAN.md` gives Assets a real
+> `id` and demotes the label to a tag, so a lock's Door is `doorId`. This module is in fact
+> the sharpest argument for that refactor: `LockKeys` rows are two foreign keys and nothing
+> else, which is exactly where an unrenameable display-string key hurts most — a mistagged
+> door could never be corrected, only archived and recreated, breaking every join row
+> pointing at it. Build this module on ids, or build it after that refactor lands.
