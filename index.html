@@ -52,7 +52,7 @@ import { createPortal } from "react-dom";
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import * as XLSX from "xlsx";
 import {
-  Search, Plus, X, Pencil, Trash2, Save, ChevronRight, ChevronDown, ArrowLeft, MessageSquare,
+  Search, Plus, X, Pencil, Trash2, Save, ChevronRight, ChevronDown, ChevronUp, ArrowLeft, MessageSquare,
   Monitor, Phone, Tv, Camera, HardDrive, HelpCircle, Columns3, Lock, Filter, Check, DoorOpen, Download,
   Wrench, UserCircle, Settings, History, Archive, ArchiveRestore, Building2, Package, Copy, Zap, Repeat, ArrowLeftRight, Menu,
   FlaskConical, RotateCcw, AlertTriangle, Loader2, Printer, MapPin, QrCode, Info, LogOut, Users,
@@ -129,25 +129,25 @@ const DEFAULT_BULK_ITEM_TYPES = [];
 // that: no icon, no field rules, DEFAULT_PARENT_TYPES.
 const DEFAULT_PARENT_TYPES = ["Room"];
 const TYPE_REGISTRY = {
-  Computer: { icon: HardDrive, parentTypes: ["Room"], onlyFields: ["hostname"] },
-  Monitor: { icon: Monitor, parentTypes: ["Room"], onlyFields: ["screenSize"] },
-  Phone: { icon: Phone, parentTypes: ["Room"] },
-  TV: { icon: Tv, parentTypes: ["Room"], onlyFields: ["screenSize"] },
-  DocuCam: { icon: Camera, parentTypes: ["Room"] },
-  "Stream Deck": { parentTypes: ["Room"] },
-  "Mini Split": { parentTypes: ["Room"] },
+  Computer: { icon: HardDrive, categoryId: "Equipment", parentTypes: ["Room"], onlyFields: ["hostname"] },
+  Monitor: { icon: Monitor, categoryId: "Equipment", parentTypes: ["Room"], onlyFields: ["screenSize"] },
+  Phone: { icon: Phone, categoryId: "Equipment", parentTypes: ["Room"] },
+  TV: { icon: Tv, categoryId: "Equipment", parentTypes: ["Room"], onlyFields: ["screenSize"] },
+  DocuCam: { icon: Camera, categoryId: "Equipment", parentTypes: ["Room"] },
+  "Stream Deck": { categoryId: "Equipment", parentTypes: ["Room"] },
+  "Mini Split": { categoryId: "Facilities", parentTypes: ["Room"] },
   // An outdoor unit doesn't sit inside any one Room, so it sits directly in a
   // Building instead of inheriting one through a Room like every other device.
-  Condenser: { parentTypes: ["Building"] },
+  Condenser: { categoryId: "Facilities", parentTypes: ["Building"] },
   // A Room is a space, not a device — no brand/model/serial/etc. It sits in the
   // Building it's in, or inside another Room (a closet within a classroom).
   Room: {
-    locked: true, icon: DoorOpen, parentTypes: ["Building", "Room"],
+    locked: true, icon: DoorOpen, categoryId: "Places", parentTypes: ["Building", "Room"],
     excludedFields: ["tag", "brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
   },
   // One level up from a Room, with even less in common with a device asset.
   Building: {
-    locked: true, icon: Building2, parentTypes: ["Campus"],
+    locked: true, icon: Building2, categoryId: "Places", parentTypes: ["Campus"],
     excludedFields: ["tag", "brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
   },
   // A site — a group of Buildings, and the top of the tree. Added once the app
@@ -157,7 +157,7 @@ const TYPE_REGISTRY = {
   // the parent chain paying for itself: nothing else in the app needed telling
   // that the world got a level deeper.
   Campus: {
-    locked: true, icon: MapPin, parentTypes: [],
+    locked: true, icon: MapPin, categoryId: "Places", parentTypes: [],
     excludedFields: ["tag", "brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
   },
   // Tables, chairs... not individually tagged or tied to one room — a pooled
@@ -167,14 +167,14 @@ const TYPE_REGISTRY = {
   // (e.g. "Folding Chair", "Cafeteria Table"). Stored as `itemName` before v24;
   // see adoptLegacySubType.
   "Bulk Item": {
-    locked: true, icon: Package, parentTypes: [], onlyFields: ["totalQuantity", "subType"],
+    locked: true, icon: Package, categoryId: "Equipment", parentTypes: [], onlyFields: ["totalQuantity", "subType"],
     excludedFields: ["hostname", "screenSize", "peripherals", "serial", "person"],
     modules: ["allocations"],
   },
   // Otherwise device-like (real brand/model/serial, purchase date, warranty, room
   // placement) — it just doesn't have peripherals like a computer does.
   "Electrical Panel": {
-    locked: true, icon: Zap, parentTypes: ["Room"], excludedFields: ["peripherals"],
+    locked: true, icon: Zap, categoryId: "Facilities", parentTypes: ["Room"], excludedFields: ["peripherals"],
     modules: ["breakers"], defaultTab: "breakers",
   },
   // A person. Users became records (v28) so an asset can point AT one by id
@@ -189,7 +189,7 @@ const TYPE_REGISTRY = {
   // fields, and no `person` field of its own -- a user is not assigned to a user.
   // Locked because personIds now reference it structurally.
   User: {
-    locked: true, icon: UserCircle, parentTypes: [],
+    locked: true, icon: UserCircle, categoryId: "People", parentTypes: [],
     excludedFields: [
       "tag",
       "brand", "model", "serial", "peripherals", "hostname", "screenSize",
@@ -198,6 +198,74 @@ const TYPE_REGISTRY = {
   },
   Other: { parentTypes: ["Room"] },
 };
+
+// ---------- TYPE CATEGORIES ----------
+// A type is filed under a category, and every list of types groups by it.
+//
+// ITS OWN CONFIG KEY (`typeCategories`, backend v33), not a name string on each
+// type — Eric's call, 2026-09-09, knowing it costs a deploy. The cheap version
+// needed no backend change at all: put the category NAME on each type and derive
+// the list from whoever names one. What that cannot do is the two things a
+// category list is for. It can only be ordered by something else (the order
+// types happen to appear in), and it cannot hold a category nobody has filed a
+// type under yet — so you could never create the scheme and then sort types into
+// it, which is the way anyone would actually do this.
+//
+// So a category is a record with an id, and a type points at one by id
+// (typeSettings[id].categoryId), which puts categories under the app's ordinary
+// reference convention: renaming one is a single-row edit with nothing to keep
+// in sync. ARRAY ORDER IS DISPLAY ORDER.
+//
+// A BUILT-IN CATEGORY'S ID IS ITS OWN NAME, the same trick typesList and the
+// asset key refactor both used: every shipped registry entry already names a
+// valid id, so this needs no seeding step and no migration, and a stored list
+// written before a new shipped category existed still resolves the ones it has.
+const DEFAULT_TYPE_CATEGORIES = [
+  { id: "Equipment", name: "Equipment" },
+  { id: "Places", name: "Places" },
+  { id: "Facilities", name: "Facilities" },
+  { id: "People", name: "People" },
+];
+// Everything with no category, or with one that no longer exists. A DANGLING
+// categoryId is deliberately not an error: deleting a category leaves the types
+// that named it pointing nowhere, and they simply land here — the same
+// permissive-storage stance removeType and parentageProblem already take, and
+// what lets category deletion need no in-use block.
+const UNCATEGORIZED_LABEL = "Uncategorized";
+
+function categoryIdOf(typeId) {
+  return typeEntryFor(typeId)?.categoryId || "";
+}
+// Puts back any SHIPPED category missing from a stored list, in shipped order,
+// so a list saved before a new one existed still offers it — the same job
+// ensureLockedTypes does for types, and for the same reason. A category the user
+// has renamed is already present by id, so its name is left alone.
+function ensureShippedCategories(list) {
+  const have = new Set((list || []).map(c => c.id));
+  const next = (list || []).slice();
+  DEFAULT_TYPE_CATEGORIES.forEach((c, i) => {
+    if (have.has(c.id)) return;
+    // At its shipped position rather than appended, so a new arrival reads as a
+    // peer rather than as an afterthought below everything else -- the lesson
+    // ensureLockedTypes learned when User landed under Other.
+    next.splice(Math.min(i, next.length), 0, { ...c });
+  });
+  return next;
+}
+// Types grouped for display: each category in list order holding its types in
+// their own order, then a trailing Uncategorized group. Empty categories are
+// KEPT (that is half of what the config key bought), except the Uncategorized
+// one, which is not a category and only appears when something is in it.
+function groupTypesByCategory(types, categories) {
+  const groups = (categories || []).map(c => ({ id: c.id, name: c.name, types: [] }));
+  const byId = new Map(groups.map(g => [g.id, g]));
+  const loose = { id: "", name: UNCATEGORIZED_LABEL, types: [] };
+  (types || []).forEach(t => {
+    const g = byId.get(categoryIdOf(t.id));
+    (g || loose).types.push(t);
+  });
+  return loose.types.length ? [...groups, loose] : groups;
+}
 
 // The icons a user can pick for a type, by name. A name rather than a component
 // because a setting has to survive JSON: the component is looked up here at
@@ -1744,7 +1812,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v32";
+const FRONTEND_SCRIPT_VERSION = "v33";
 // The version of THIS file — shown in About (the account menu), so "is my browser
 // actually running the build I just deployed, or a cached one?" is answerable in
 // two clicks instead of by reading view-source.
@@ -1762,7 +1830,7 @@ const FRONTEND_SCRIPT_VERSION = "v32";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-09.4";
+const APP_VERSION = "2026-09-09.5";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -1954,6 +2022,17 @@ const MOCK_SNAPSHOT = {
   typesList: [
     "Computer", "Monitor", "Phone", "TV", "DocuCam", "Stream Deck", "Mini Split",
     "Condenser", "Room", "Building", "Campus", "Bulk Item", "Electrical Panel", "Other",
+  ],
+  // A STORED category list that is deliberately INCOMPLETE and RE-ORDERED: it
+  // omits "People" (a shipped category) and puts Facilities before Equipment.
+  // So the sandbox exercises ensureShippedCategories topping a stored list up,
+  // and proves the stored order wins over the shipped one — neither of which a
+  // fixture with no list at all could show, and the top-up is exactly the path
+  // that only runs on a sheet written before a category was added.
+  typeCategories: [
+    { id: "Facilities", name: "Facilities" },
+    { id: "Equipment", name: "Equipment" },
+    { id: "Places", name: "Places" },
   ],
   // A column config as an OLDER client would have saved it — carrying the
   // Campus/Building/Room columns that are now retired. Present so the sandbox
@@ -2515,6 +2594,7 @@ function AssetTracker() {
   // the module-level TYPE_SETTINGS by applyTypeSettings — see the hazard note
   // there: every write must go through persist(), which does both.
   const [typeSettings, setTypeSettings] = useState({});
+  const [typeCategories, setTypeCategories] = useState(DEFAULT_TYPE_CATEGORIES);
   const [showTypesManager, setShowTypesManager] = useState(false);
   const [newTypeName, setNewTypeName] = useState("");
   const [breakerTypes, setBreakerTypes] = useState(SEEDED_BREAKER_TYPES);
@@ -3051,6 +3131,15 @@ function AssetTracker() {
       // TYPE_OPTIONS would undo on every single load.
       setTypesList(loadedTypes);
       setTypeSettings(loadedTypeSettings);
+      // Shipped defaults when the sheet has never stored a list -- which is
+      // every sheet until the first config save after v33, and is why the
+      // categories work with no seeding step. A stored list is topped up with
+      // any shipped category added since it was written.
+      setTypeCategories(ensureShippedCategories(
+        Array.isArray(data.typeCategories) && data.typeCategories.length
+          ? data.typeCategories
+          : DEFAULT_TYPE_CATEGORIES
+      ));
       // Absent/0/garbage all mean "never stored" — peekAssetNumber() seeds it
       // from the loaded assets instead, and the first asset created writes it.
       const storedNextNumber = Number(data.nextAssetNumber);
@@ -3213,6 +3302,7 @@ function AssetTracker() {
       bulkItemTypes: nextBulkItemTypes = bulkItemTypes,
       typesList: nextTypesList = typesList,
       typeSettings: nextTypeSettings = typeSettings,
+      typeCategories: nextTypeCategories = typeCategories,
       breakerTypes: nextBreakerTypes = breakerTypes,
       nextAssetNumber: nextNumberToIssue = nextAssetNumber,
       // Defaults to undefined, NOT to the current list, which is the opposite of
@@ -3247,6 +3337,7 @@ function AssetTracker() {
       config: nextColumns !== columns || nextChangeTypes !== changeTypes || nextVendors !== vendors
         || nextPeripheralsList !== peripheralsList || nextUsersList !== usersList || nextBulkItemTypes !== bulkItemTypes
         || nextTypesList !== typesList || nextTypeSettings !== typeSettings
+        || nextTypeCategories !== typeCategories
         || nextNumberToIssue !== nextAssetNumber
         || nextAuthUsers !== undefined,
       breakerTypes: nextBreakerTypes !== breakerTypes,
@@ -3272,6 +3363,7 @@ function AssetTracker() {
       // so the module-level copy has to be current by the time it runs.
       applyTypeSettings(nextTypeSettings, nextColumns);
       setTypeSettings(nextTypeSettings);
+      setTypeCategories(nextTypeCategories);
       setBreakerTypes(nextBreakerTypes);
       setNextAssetNumber(nextNumberToIssue);
       if (nextAuthUsers !== undefined) setAccessUsers(nextAuthUsers);
@@ -3279,7 +3371,8 @@ function AssetTracker() {
         assets: nextAssets, columns: nextColumns, changeTypes: nextChangeTypes,
         vendors: nextVendors, auditLog: nextAuditLog, peripheralsList: nextPeripheralsList, usersList: nextUsersList,
         bulkItemTypes: nextBulkItemTypes, typesList: nextTypesList,
-        typeSettings: nextTypeSettings, breakerTypes: nextBreakerTypes,
+        typeSettings: nextTypeSettings, typeCategories: nextTypeCategories,
+        breakerTypes: nextBreakerTypes,
         nextAssetNumber: nextNumberToIssue, _dirty: dirty,
         // Spread conditionally so the key is genuinely ABSENT on an ordinary
         // save, not present-but-undefined — JSON.stringify drops undefined
@@ -3382,10 +3475,20 @@ function AssetTracker() {
   // Type filter options are type IDS, sorted by the name they currently show.
   const types = useMemo(() => {
     if (!assets) return [];
-    const set = new Set(assets.map(a => a.type || "Other"));
-    return ["All types", ...Array.from(set).sort((x, y) =>
-      typeNameOf(x, typesList).localeCompare(typeNameOf(y, typesList)))];
-  }, [assets, typesList]);
+    const present = new Set(assets.map(a => a.type || "Other"));
+    // Ordered BY CATEGORY, then alphabetically inside each — the filter groups
+    // by category, so the list has to arrive already sorted into the runs the
+    // headings describe, or one heading appears several times down the list.
+    // Same requirement as the Type picker; both go through groupTypesByCategory.
+    const ordered = groupTypesByCategory(
+      Array.from(present).map(id => ({ id, name: typeNameOf(id, typesList) })),
+      typeCategories
+    ).flatMap(g => g.types
+      .slice()
+      .sort((x, y) => x.name.localeCompare(y.name))
+      .map(t => t.id));
+    return ["All types", ...ordered];
+  }, [assets, typesList, typeCategories]);
 
   // The User assets, and whether the app is in "users are records" mode at all.
   // One boolean rather than a migration flag in Config: the presence of a User
@@ -3599,7 +3702,14 @@ function AssetTracker() {
   const gridTemplate = visibleColumns.map(c => `${c.width}px`).join(" ") + " 36px";
 
   const filterConfigs = {
-    type: { label: "Type", value: typeFilter, setValue: setTypeFilter, options: types, labelForOption: id => (id === "All types" ? id : typeNameOf(id, typesList)) },
+    type: {
+      label: "Type", value: typeFilter, setValue: setTypeFilter, options: types,
+      labelForOption: id => (id === "All types" ? id : typeNameOf(id, typesList)),
+      // "All types" is not a type and belongs under no heading — an empty group
+      // name renders no heading at all, which is what keeps it at the top on its
+      // own rather than absorbed into whichever category happens to be first.
+      groupForOption: id => (id === "All types" ? "" : (typeCategories.find(c => c.id === categoryIdOf(id)) || {}).name || UNCATEGORIZED_LABEL),
+    },
     person: { label: "User", value: userFilter, setValue: setUserFilter, options: users },
     status: { label: "Status", value: statusFilter, setValue: setStatusFilter, options: STATUS_FILTER_OPTIONS },
   };
@@ -5072,6 +5182,7 @@ function AssetTracker() {
         // field just above.
         excludedFields: fields.filter(k => !wanted.has(k)),
         onlyFields: fields.filter(k => wanted.has(k) && isRestricted(k)),
+        categoryId: draft.categoryId || undefined,
         // PRUNED to the fields this type still has. A field the type doesn't
         // carry can't be required, and a stale entry left here would spring the
         // rule back the moment someone re-ticked the field — a rule nobody set,
@@ -5080,6 +5191,15 @@ function AssetTracker() {
       },
     };
     persist(assets, { columns: nextColumns, typesList: nextTypesList, typeSettings: nextTypeSettings });
+  }
+
+  // The category list is ordinary config, so it saves like everything else. It
+  // does NOT rewrite the types that point at a category being deleted: a type
+  // left holding a dangling categoryId reads as Uncategorized, which is a real
+  // answer, and rewriting them would turn "I removed a heading" into an edit of
+  // every type under it.
+  function saveTypeCategories(next) {
+    persist(assets, { typeCategories: next });
   }
 
   // Drops the override so the type falls back to what the app ships. For a
@@ -6024,6 +6144,8 @@ function AssetTracker() {
       countFor={id => (assets || []).filter(a => a.type === id).length}
       fieldOptions={typeEditableFields(columns)}
       hasOverrides={typeHasOverrides}
+      categories={typeCategories}
+      onSaveCategories={saveTypeCategories}
     />
   );
 
@@ -6481,7 +6603,7 @@ function AssetTracker() {
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12 }}>
                 {editFormColumns.map(c => (
                   c.key === "type" ? (
-                    <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v })} types={typesList} onManage={() => setShowTypesManager(true)} />
+                    <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v, ...clearedError(draft, "type") })} types={typesList} categories={typeCategories} onManage={() => setShowTypesManager(true)} />
                   ) : c.key === "parent" ? (
                     <ParentField
                       key={c.key}
@@ -7971,7 +8093,7 @@ function AssetTracker() {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12 }}>
               {addFormColumns.map(c => (
                 c.key === "type" ? (
-                  <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v })} types={typesList} onManage={() => setShowTypesManager(true)} />
+                  <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v, ...clearedError(draft, "type") })} types={typesList} categories={typeCategories} onManage={() => setShowTypesManager(true)} />
                 ) : c.key === "parent" ? (
                   <ParentField
                     key={c.key}
@@ -8475,11 +8597,17 @@ function PickerTrigger({ value, placeholder, onClick, ariaLabel }) {
 // `value` is a type's stable `id`, not the name shown in the picker — see the
 // DEFAULT_TYPES comment. The option list is ids too, with the name resolved for
 // display only, so renaming a type changes what this shows and nothing else.
-function TypeField({ value, onChange, types, onManage }) {
+function TypeField({ value, onChange, types, onManage, categories }) {
   const [open, setOpen] = useState(false);
-  const ids = types.map(t => t.id);
+  // Ordered BY CATEGORY, since the picker groups by it: the list has to be
+  // sorted into the same runs the headings describe or a category's heading
+  // would appear several times down the list.
+  const grouped = groupTypesByCategory(types, categories || []);
+  const ids = grouped.flatMap(g => g.types.map(t => t.id));
+  const groupNameFor = new Map(grouped.flatMap(g => g.types.map(t => [t.id, g.name])));
   // A type removed from the managed list stays selectable on the asset already
-  // using it, so opening the form doesn't silently blank its Type.
+  // using it, so opening the form doesn't silently blank its Type. It sits
+  // outside every category, which is honest — it is not in the list at all.
   const options = ids.includes(value) || !value ? ids : [value, ...ids];
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -8498,6 +8626,7 @@ function TypeField({ value, onChange, types, onManage }) {
           options={options}
           value={value}
           onChange={onChange}
+          groupForOption={id => groupNameFor.get(id) || UNCATEGORIZED_LABEL}
           labelForOption={id => typeNameOf(id, types)}
           onClose={() => setOpen(false)}
           onManage={onManage}
@@ -9143,8 +9272,15 @@ function Detail({ label, value, wide, italic }) {
 function TypeManagerModal({
   types, newValue, onNewValueChange, onAdd, onSave, onReset, onRemove, onClose,
   isSaving, canEdit, isLocked, nameTaken, countFor, fieldOptions, hasOverrides,
+  categories, onSaveCategories,
 }) {
   const [confirmId, setConfirmId] = useState(null);
+  // The category manager is a THIRD view of this modal, alongside the type list
+  // and the type editor -- not a modal of its own. It is reached from the type
+  // editor's Category row, so stacking another overlay on top of a modal that is
+  // itself opened from inside a picker would be four layers deep.
+  const [editingCategories, setEditingCategories] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState("");
   const [draft, setDraft] = useState(null); // { id, name, iconName, parentTypes, fields, newFields }
   const [newFieldName, setNewFieldName] = useState("");
 
@@ -9161,6 +9297,7 @@ function TypeManagerModal({
       parentTypes: entry.parentTypes || (TYPE_REGISTRY[t.id] ? [] : DEFAULT_PARENT_TYPES),
       fields: fieldOptions.filter(f => fieldAppliesTo(f.key, t.id)).map(f => f.key),
       requiredFields: requiredFieldsFor(t.id).slice(),
+      categoryId: categoryIdOf(t.id),
       // Seeded from the EFFECTIVE data type — the column's override if it has
       // one, otherwise the shipped default — so the picker shows what is in
       // force rather than a blank. Which of those two it was is recovered at
@@ -9175,8 +9312,29 @@ function TypeManagerModal({
     });
     setNewFieldName("");
     setConfirmId(null);
+    setEditingCategories(false);
   };
   const cancelEdit = () => setDraft(null);
+
+  // Order is the array's own order, so a move is a swap and there is no sort key
+  // that could disagree with it.
+  const moveCategory = (list, i, delta) => {
+    const j = i + delta;
+    if (j < 0 || j >= list.length) return list;
+    const next = list.slice();
+    [next[i], next[j]] = [next[j], next[i]];
+    return next;
+  };
+  // A generated id, never the name — that is what makes the rename above a
+  // one-row edit. (A SHIPPED category's id is its own name, which is a different
+  // thing: those ids already exist in the registry and must not change.)
+  const addCategory = () => {
+    const name = newCategoryName.trim();
+    if (!name || isSaving) return;
+    if ((categories || []).some(c => c.name.trim().toLowerCase() === name.toLowerCase())) return;
+    onSaveCategories([...(categories || []), { id: crypto.randomUUID(), name }]);
+    setNewCategoryName("");
+  };
 
   const clean = (draft?.name || "").trim();
   const duplicate = !!draft && !!clean && nameTaken(clean, draft.id);
@@ -9346,12 +9504,84 @@ function TypeManagerModal({
       <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 460, maxHeight: "80vh", overflowY: "auto" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>
-            {draft ? `Edit type` : "Manage asset types"}
+            {editingCategories ? "Categories" : draft ? `Edit type` : "Manage asset types"}
           </div>
-          <button onClick={draft ? cancelEdit : onClose} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+          <button
+            onClick={editingCategories ? () => setEditingCategories(false) : draft ? cancelEdit : onClose}
+            className="icon-btn"
+            style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}
+          ><X size={18} /></button>
         </div>
 
-        {draft ? (
+        {editingCategories ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ fontSize: 12, color: C.empty }}>
+              Categories group the type list and the Type picker. The order here is the order they appear in.
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {(categories || []).map((c, i) => {
+                const inCat = types.filter(t => categoryIdOf(t.id) === c.id).length;
+                return (
+                  <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <div style={{ display: "flex", flexDirection: "column", flexShrink: 0 }}>
+                      {/* Order IS the stored array order, so moving a category is
+                          a swap in that array — no sort key to keep consistent. */}
+                      <button
+                        type="button" aria-label={`Move ${c.name} up`} disabled={i === 0}
+                        onClick={() => onSaveCategories(moveCategory(categories, i, -1))}
+                        style={{ background: "none", border: "none", padding: 0, display: "flex", color: i === 0 ? C.border : C.muted }}
+                      ><ChevronUp size={13} /></button>
+                      <button
+                        type="button" aria-label={`Move ${c.name} down`} disabled={i === categories.length - 1}
+                        onClick={() => onSaveCategories(moveCategory(categories, i, 1))}
+                        style={{ background: "none", border: "none", padding: 0, display: "flex", color: i === categories.length - 1 ? C.border : C.muted }}
+                      ><ChevronDown size={13} /></button>
+                    </div>
+                    {/* Renaming is a ONE-ROW edit with nothing to keep in sync,
+                        because a type stores the category's id and not its name.
+                        That is the whole reason this is a record. */}
+                    <input
+                      value={c.name}
+                      onChange={e => onSaveCategories(categories.map(x => (x.id === c.id ? { ...x, name: e.target.value } : x)))}
+                      aria-label={`Category name for ${c.name}`}
+                      style={{ flex: 1, minWidth: 0, padding: "5px 8px", border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 13, fontFamily: "inherit", background: C.surface, color: C.ink }}
+                    />
+                    <span style={{ fontSize: 11, color: C.empty, flexShrink: 0, minWidth: 46, textAlign: "right" }}>
+                      {inCat} type{inCat === 1 ? "" : "s"}
+                    </span>
+                    {/* No in-use block, unlike deleting a type or a room. A type
+                        left pointing at a deleted category just reads as
+                        Uncategorized — nothing dangles, nothing breaks — so the
+                        count is information, not a refusal. */}
+                    <button
+                      type="button" aria-label={`Remove ${c.name}`}
+                      onClick={() => onSaveCategories(categories.filter(x => x.id !== c.id))}
+                      className="icon-btn"
+                      style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex", flexShrink: 0 }}
+                    ><Trash2 size={14} color={C.danger} /></button>
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{ display: "flex", gap: 6, borderTop: `1px solid ${C.border}`, paddingTop: 10 }}>
+              <input
+                value={newCategoryName}
+                onChange={e => setNewCategoryName(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addCategory(); } }}
+                placeholder="New category, e.g. Networking"
+                style={{ flex: 1, padding: "6px 8px", border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 13, fontFamily: "inherit", background: C.surface, color: C.ink }}
+              />
+              <button
+                type="button" onClick={addCategory} disabled={isSaving}
+                style={{ padding: "6px 12px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 13, fontWeight: 600 }}
+              >{isSaving ? "Saving…" : "Add"}</button>
+            </div>
+            <button
+              type="button" onClick={() => setEditingCategories(false)}
+              style={{ alignSelf: "flex-start", padding: "6px 12px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 13, color: C.ink }}
+            >Done</button>
+          </div>
+        ) : draft ? (
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
               <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Name</span>
@@ -9381,6 +9611,26 @@ function TypeManagerModal({
                   );
                 })}
               </div>
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>
+                Category
+                <button type="button" onClick={() => setEditingCategories(true)} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4, display: "flex" }} aria-label="Manage categories">
+                  <Settings size={12} color={C.accent} />
+                </button>
+              </span>
+              <PickerField
+                label="Category"
+                hideLabel
+                value={draft.categoryId || ""}
+                onChange={v => setDraft({ ...draft, categoryId: v })}
+                // The blank row is Uncategorized, a real answer rather than a
+                // missing one: "Other" ships with no category on purpose.
+                options={["", ...(categories || []).map(c => c.id)]}
+                labelForOption={id => (id ? ((categories || []).find(c => c.id === id) || {}).name || id : UNCATEGORIZED_LABEL)}
+                title="Category"
+              />
             </div>
 
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -9468,7 +9718,13 @@ function TypeManagerModal({
               Renaming a type updates it everywhere — assets keep their type. Room, Building, Bulk Item, Campus and Electrical Panel are built into the app and can't be removed.
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
-              {types.map(t => {
+              {groupTypesByCategory(types, categories || []).map(group => (
+                group.types.length === 0 ? null : (
+                <React.Fragment key={group.id || "__loose__"}>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: 0.5, textTransform: "uppercase", color: C.placeholder, marginTop: 4 }}>
+                    {group.name}
+                  </div>
+                  {group.types.map(t => {
                 const locked = isLocked ? isLocked(t.id) : false;
                 const inUse = countFor ? countFor(t.id) : 0;
                 const Ico = iconFor(t.id);
@@ -9519,7 +9775,10 @@ function TypeManagerModal({
                     )}
                   </div>
                 );
-              })}
+                  })}
+                </React.Fragment>
+                )
+              ))}
             </div>
 
             {canEdit && (
@@ -9641,8 +9900,22 @@ function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onR
 // Generic modal picker mirroring the column-filter popup's look: centered card,
 // scrollable list of option buttons, checkmark on the selected one. Used for any
 // single-select field (Type/Room/Building) that shouldn't use a native <select>.
-function SelectionModal({ title, options, value, onChange, onClose, labelForOption, emptyLabel, onManage, manageLabel }) {
+function SelectionModal({ title, options, value, onChange, onClose, labelForOption, emptyLabel, onManage, manageLabel, groupForOption }) {
   const getLabel = labelForOption || (o => o);
+  // OPTIONAL grouping, and flat when absent — which is every caller but the type
+  // picker. Frequency, Vendor, Breaker Type and ChildEntityTable's generic
+  // selects pass nothing and render exactly as before. Forking this into a
+  // second, grouped picker is how the app would end up with two dropdown
+  // behaviours, which is the thing SelectionModal exists to prevent.
+  const grouped = groupForOption
+    ? options.reduce((acc, opt) => {
+        const g = groupForOption(opt) || "";
+        const last = acc[acc.length - 1];
+        if (last && last.name === g) last.options.push(opt);
+        else acc.push({ name: g, options: [opt] });
+        return acc;
+      }, [])
+    : null;
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 40, padding: 16 }}>
       <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 300, maxHeight: "70vh", overflowY: "auto" }}>
@@ -9661,23 +9934,36 @@ function SelectionModal({ title, options, value, onChange, onClose, labelForOpti
           <div style={{ fontSize: 13, color: C.empty, padding: "4px 2px 8px" }}>{emptyLabel}</div>
         )}
         <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-          {options.map(opt => {
-            const isSelected = opt === (value || "");
-            return (
-              <button
-                key={opt || "__none__"}
-                onClick={() => { onChange(opt); onClose(); }}
-                style={{
-                  display: "flex", alignItems: "center", justifyContent: "space-between",
-                  padding: "9px 10px", background: isSelected ? C.hover : "transparent", border: "none",
-                  borderRadius: 10, fontSize: 14, textAlign: "left", color: opt ? C.ink : C.empty, fontWeight: isSelected ? 600 : 400,
-                }}
-              >
-                {getLabel(opt)}
-                {isSelected && <Check size={15} color={C.brand} />}
-              </button>
-            );
-          })}
+          {(grouped || [{ name: null, options }]).map((group, gi) => (
+            <React.Fragment key={group.name == null ? "__all__" : group.name + gi}>
+              {group.name ? (
+                <div style={{
+                  fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: 0.5,
+                  textTransform: "uppercase", color: C.placeholder,
+                  padding: gi === 0 ? "2px 10px 4px" : "10px 10px 4px",
+                }}>
+                  {group.name}
+                </div>
+              ) : null}
+              {group.options.map(opt => {
+                const isSelected = opt === (value || "");
+                return (
+                  <button
+                    key={opt || "__none__"}
+                    onClick={() => { onChange(opt); onClose(); }}
+                    style={{
+                      display: "flex", alignItems: "center", justifyContent: "space-between",
+                      padding: "9px 10px", background: isSelected ? C.hover : "transparent", border: "none",
+                      borderRadius: 10, fontSize: 14, textAlign: "left", color: opt ? C.ink : C.empty, fontWeight: isSelected ? 600 : 400,
+                    }}
+                  >
+                    {getLabel(opt)}
+                    {isSelected && <Check size={15} color={C.brand} />}
+                  </button>
+                );
+              })}
+            </React.Fragment>
+          ))}
         </div>
       </div>
     </div>
@@ -9770,6 +10056,18 @@ function ColumnFilterModal({ activeCol, filterConfigs, sortConfig, setSortConfig
   if (!activeCol || !filterConfigs[activeCol]) return null;
   const cfg = filterConfigs[activeCol];
   const getLabel = cfg.labelForOption || (o => o);
+  // Grouped when the config supplies a rule, flat otherwise — same optional
+  // shape SelectionModal takes, so the Type column groups by category and
+  // User/Status are untouched.
+  const grouped = cfg.groupForOption
+    ? cfg.options.reduce((acc, opt) => {
+        const g = cfg.groupForOption(opt) || "";
+        const last = acc[acc.length - 1];
+        if (last && last.name === g) last.options.push(opt);
+        else acc.push({ name: g, options: [opt] });
+        return acc;
+      }, [])
+    : null;
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
       {/* The CARD is a flex column that never scrolls; only the option list
@@ -9785,23 +10083,36 @@ function ColumnFilterModal({ activeCol, filterConfigs, sortConfig, setSortConfig
           <button onClick={onClose} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 2, overflowY: "auto", minHeight: 0, flex: 1 }}>
-          {cfg.options.map(opt => {
-            const isSelected = opt === cfg.value;
-            return (
-              <button
-                key={opt}
-                onClick={() => { cfg.setValue(opt); onClose(); }}
-                style={{
-                  display: "flex", alignItems: "center", justifyContent: "space-between",
-                  padding: "9px 10px", background: isSelected ? C.hover : "transparent", border: "none",
-                  borderRadius: 10, fontSize: 14, textAlign: "left", color: C.ink, fontWeight: isSelected ? 600 : 400,
-                }}
-              >
-                {getLabel(opt)}
-                {isSelected && <Check size={15} color={C.brand} />}
-              </button>
-            );
-          })}
+          {(grouped || [{ name: null, options: cfg.options }]).map((group, gi) => (
+            <React.Fragment key={group.name == null ? "__all__" : group.name + gi}>
+              {group.name ? (
+                <div style={{
+                  fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: 0.5,
+                  textTransform: "uppercase", color: C.placeholder,
+                  padding: gi === 0 ? "2px 10px 4px" : "10px 10px 4px",
+                }}>
+                  {group.name}
+                </div>
+              ) : null}
+              {group.options.map(opt => {
+                const isSelected = opt === cfg.value;
+                return (
+                  <button
+                    key={opt}
+                    onClick={() => { cfg.setValue(opt); onClose(); }}
+                    style={{
+                      display: "flex", alignItems: "center", justifyContent: "space-between",
+                      padding: "9px 10px", background: isSelected ? C.hover : "transparent", border: "none",
+                      borderRadius: 10, fontSize: 14, textAlign: "left", color: C.ink, fontWeight: isSelected ? 600 : 400,
+                    }}
+                  >
+                    {getLabel(opt)}
+                    {isSelected && <Check size={15} color={C.brand} />}
+                  </button>
+                );
+              })}
+            </React.Fragment>
+          ))}
         </div>
         <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 12, paddingTop: 12, display: "flex", gap: 6, flexShrink: 0 }}>
           {[["asc", "Sort A → Z"], ["desc", "Sort Z → A"]].map(([dir, lbl]) => {

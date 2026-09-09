@@ -721,6 +721,36 @@ parent, the same cascade the id migration removed for Rooms.
 - Names needn't be unique for correctness, but add and rename both refuse a duplicate: two
   types both reading "Printer" in the picker is a trap for whoever is choosing.
 
+**A type is filed under a CATEGORY, and every list of types groups by it** (backend v33).
+`typeCategories` is its own Config key holding `[{ id, name }]` with **array order as display
+order**; a type points at one through `typeSettings[id].categoryId`.
+- **Eric chose the key over the free version, knowing it cost a deploy.** The cheap version
+  was a category NAME on each type with the list derived from whoever names one — no backend
+  change at all. What it cannot do is the two things a category list is for: it can only be
+  ordered by something else (the order types happen to appear in), and it cannot hold a
+  category nobody has filed a type under yet, so you could never build the scheme and then
+  sort types into it. **The argument that made the cheap version tempting is still worth
+  keeping**, because it is reusable: the store-an-id rule is about names held in several
+  places written at several times, and a category has exactly one holder (`typeSettings`, one
+  blob rewritten atomically), so a name there would have been safe — just not capable.
+- **A built-in category's id IS its own name** ("Places"), the same trick `typesList` and the
+  asset key refactor used: every shipped registry entry already names a valid id, so this
+  needed no seeding step and no migration. `ensureShippedCategories()` tops a stored list up
+  with any category added in a later release, at its shipped position rather than appended —
+  the lesson `ensureLockedTypes` learned when User landed under `Other`.
+- **A DANGLING `categoryId` is not an error, it is Uncategorized.** Deleting a category does
+  not rewrite the types that named it, so deletion needs no in-use block — only a
+  confirmation naming how many types fall back. Same permissive-storage stance as `removeType`
+  and `parentageProblem`. **Renaming is a one-row edit** with nothing to keep in sync, which
+  is the entire point of storing the id.
+- **`Other` ships with no category on purpose** — the catch-all belongs in Uncategorized, and
+  it keeps that bucket exercised in the shipped state.
+- **`SelectionModal` and `ColumnFilterModal` take an OPTIONAL `groupForOption`** and render
+  flat when it's absent, which is every caller but the Type picker and the Type column filter.
+  Forking either into a grouped twin is how the app would end up with two dropdown behaviours
+  — the thing `SelectionModal` exists to prevent. Both callers must hand it options already
+  sorted into category runs, or one heading appears several times down the list.
+
 **Per-type settings are a user-editable overlay on `TYPE_REGISTRY`** (the type editor,
 2026-08-25). The registry is the shipped default and is never written to; overrides live in
 Config under `typeSettings` keyed by type id (backend v24) and are merged on top at read time
@@ -744,6 +774,72 @@ default" is just deleting it.
   editor stays one commit and a cancelled edit leaves no stray column. They're created hidden —
   a field belonging to one type would otherwise add a mostly-empty column to everyone's table.
   Deleting one stays in the Columns menu, which already owns that destructive action.
+**Three things a type now decides that it didn't before** (backend **v33**, 2026-09-09 —
+see `TYPE_MANAGEMENT_PLAN.md`): which **category** it is filed under, which of its fields are
+**required**, and — a per-column question rather than a per-type one — what **kind of value**
+each field holds. Two of the three needed no backend change at all, and the exception is the
+one worth remembering.
+
+- **A column's `dataType` and a type's `requiredFields` cost NOTHING to add**, because
+  `doPost` stringifies the whole `columns` and `typeSettings` blobs and the only thing the
+  backend reads inside a column object is `customColumnKeys_`, which touches `custom` and
+  `key`. **A new Config KEY is the one thing that blob-freedom does not cover** — `doPost`
+  writes a fixed key list and silently drops the rest — which is exactly what categories
+  needed, and why that one phase cost a version bump and a deploy to every tenant. Reuse
+  that test for any future per-field or per-type setting: a property on an existing blob is
+  free, a key of its own is a release.
+- **The data type is PER COLUMN, resolved at READ time** (`columnDataType()`): the column's
+  own override, then `DEFAULT_COLUMN_DATA_TYPES`, then text. Per column because one key
+  holding a date on Computers and a number on TVs breaks sorting, filtering and the export
+  for a flexibility nobody asked for — a type decides *whether* it has a field, the column
+  decides what that field *holds*, and the editor says so on screen because changing it from
+  inside one type's editor changes every other type's form. Read-time because the column
+  migration only ever ADDS newly-introduced columns and never updates the properties of
+  stored ones, so a load-time backfill would bake today's defaults into every sheet forever.
+  `applyFieldKind` stores an override only when it DIFFERS from the shipped default and
+  removes it when it returns — "same as shipped" is never a stored fact.
+  - **This was not purely additive.** The app's entire data-type awareness was
+    `type={c.key === "totalQuantity" ? "number" : undefined}` at two call sites, which is why
+    `purchaseDate` and `warrantyUntil` were plain text boxes for the app's whole life. The
+    general mechanism replaced that and gave them real date pickers on the way past.
+  - **The vocabulary is `ChildEntityTable`'s**, character for character —
+    text/textarea/number/date/select — so the app has one answer to "what kind of field is
+    this". `multiselect` is deliberately absent: `person`, `peripherals` and a circuit's
+    rooms each have a bespoke component with its own managed list, and a generic multiselect
+    column would be a fourth thing that looks like them and behaves differently.
+    `BESPOKE_FORM_FIELDS` names that set once, so the render and the save-time validation
+    cannot drift — and the editor shows "Built in" rather than a kind picker for them, since
+    offering a setting that does nothing is worse than offering none.
+- **Required is PER TYPE, and that is the opposite call from `restricted`** — a flag on the
+  column. The two look alike and are not: restriction HAD to live on the column, because
+  deriving it from whoever claims a field means unticking it from its last owner turns it
+  into a common field and splashes it across every type. Required is derived from nothing, so
+  per-type is simply the more expressive reading. **Nothing is required as shipped.**
+  - **Enforced on EVERY save, add and edit** (Eric's call). It is the only way a new rule
+    reaches the assets already on the sheet, and a rule you can dodge by editing something
+    else is not a rule. The cost is that someone who opened an old asset to fix a typo gets
+    stopped; the whole mitigation is that the message names the fields *and* the type.
+  - **At the FORM and nowhere else**, same posture as every other guard here — so existing
+    assets can violate a new rule, and `duplicateAsset`, `convertUsersToAssets`, the bulk
+    toolbar actions and the Sheet's admin import all bypass it.
+  - **Emptiness, never falsiness**: `0` and `"0"` are filled in. And `fieldValueIsEmpty` knows
+    the three fields that don't store a plain string — the parent is `parentId`, the people
+    are `personIds` or the legacy slash-joined `person`. Miss that fallback and every asset on
+    an un-converted sheet reads as unassigned, so a rule about User refuses every save.
+  - **A rule naming a field the type doesn't have is ignored at READ time**, not only pruned
+    on save: a settings blob can be hand-edited or written by an older build, and a rule about
+    an invisible field would refuse every save with nothing on screen to fix. Structural
+    fields go the same way, which is also what keeps **"Parent is required" out of scope** —
+    Unassigned is a deliberate state, not a gap to nag about.
+- **`draft.formError` + `draft.errorFields` replaced `draft.parentError`.** It was already
+  carrying the duplicate-tag message as well as the parent one, and data-type and required
+  errors were the third and fourth occupants. `errorFields` is what the rename made necessary:
+  one channel carrying errors about several fields can't say which input to outline.
+  **The message renders in exactly ONE place** — beside the field when it names one field
+  that is on this form, at form level otherwise. The first version rendered both and printed
+  the same sentence twice; each render site read correctly on its own, which is why only the
+  browser caught it. The add form's separate `addError` state is gone with it.
+
 - **What the editor can't do, and why.** An icon is stored as a NAME from a curated map
   (`TYPE_ICON_CHOICES`), since a React component can't survive JSON; an unknown name falls back
   to the shipped icon. A ticked field enters `onlyFields` only when it is *already* restricted
@@ -1634,6 +1730,24 @@ When you do:
   once already (Cowork made the same mistake and fixed its own process after).
 
 ## Known constraints / things to watch
+
+- **v33 is PENDING A DEPLOY as of 2026-09-09 — and do not read that as fact either.**
+  `node deploy.mjs --status` answers it per tenant in one command and cannot go stale, which
+  is the standing instruction this section has now recorded going wrong four separate times
+  about itself. It adds ONE Config key, `typeCategories` (see "A type is filed under a
+  CATEGORY" under Data model): one line in `doGet`, one `configRows.push` in `doPost`, no
+  `ASSET_FIELDS` entry, no new tab, no migration.
+  - **Until it is deployed, a category edit works in-session and is forgotten on reload.**
+    `doPost` writes a fixed list of config keys and drops the rest, so the key is discarded on
+    every save — the same window the pre-v24 `typeSettings` work sat in. Nothing else is
+    affected: the shipped categories still group the pickers, because they come from
+    `TYPE_REGISTRY` and need nothing stored.
+  - **RELEASE ORDER IS BACKEND FIRST**, the rule the phase-2 key refactor established: the
+    frontend ships from `main` to every tenant at once while backends deploy one at a time, so
+    merging first would put a category-writing frontend in front of a backend that drops the
+    key. Deploy, confirm with `--status`, then merge.
+  - The other two features in that change — field data types and required fields — are
+    frontend-only and are unaffected by whether this deploy has happened.
 
 - **v31 is superseded by the v32 deploy below and is history.** Do not take that on faith
   either, for exactly the reason every entry here says: `node deploy.mjs --status` answers

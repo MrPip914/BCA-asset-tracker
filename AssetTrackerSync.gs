@@ -49,7 +49,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v32";
+const SCRIPT_VERSION = "v33";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -1157,6 +1157,14 @@ function handleAuthenticatedRead_(body, e) {
       // (see TYPE_SETTINGS in index.html). An object, not a list, unlike every
       // other managed key here.
       typeSettings: config.typeSettings || null,
+      // The category each type is filed under, as an ordered list of
+      // { id, name }. ARRAY ORDER IS DISPLAY ORDER -- that is the whole reason
+      // this is a key of its own rather than a name on each type, which would
+      // have needed no backend change at all: a derived list can only be ordered
+      // by something else (the order types happen to appear in), and cannot hold
+      // a category nobody has filed a type under yet.
+      // A type points at one by id, in typeSettings[id].categoryId.
+      typeCategories: config.typeCategories || null,
       // Monotonic counter for the next BCA asset number to issue — see
       // peekAssetNumber() in index.html. Not a managed list like the rest of
       // Config, just a number that has to survive asset deletion (deriving it
@@ -1443,6 +1451,7 @@ function doPost(e) {
         configRows.push({ key: "bulkItemTypes", value: JSON.stringify(body.bulkItemTypes || []) });
         configRows.push({ key: "typesList", value: JSON.stringify(body.typesList || []) });
         configRows.push({ key: "typeSettings", value: JSON.stringify(body.typeSettings || {}) });
+        configRows.push({ key: "typeCategories", value: JSON.stringify(body.typeCategories || []) });
         // The access allowlist, PRESERVED from the sheet unless this save
         // explicitly carries one. Every other key above is rewritten from the
         // posted body, which is exactly the hazard here: a client that predates

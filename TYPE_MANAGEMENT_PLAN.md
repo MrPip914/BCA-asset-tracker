@@ -1,6 +1,10 @@
 # Type management: categories, required fields, field data types — plan
 
-Status: **decided 2026-09-09, building.** Written from Eric's three asks; the three
+Status: **all three BUILT, 2026-09-09.** Phases 1 and 2 (field data types, required
+fields) are frontend-only and need no deploy. Phase 3 (categories) is backend **v33** and is
+PENDING A DEPLOY — check with `node deploy.mjs --status`, never with this line.
+
+Originally: Written from Eric's three asks; the three
 open questions at the bottom were put to him and answered, and this document has been
 updated to match rather than left describing the version he did not pick.
 
