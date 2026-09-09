@@ -1651,7 +1651,7 @@ When you do:
   - Covered by `test-backend-admin.js`, which is the only place it *can* be covered —
     Sandbox never contacts Apps Script, and this is a menu path a browser cannot reach.
 - **v29 is DEPLOYED, confirmed 2026-08-26** by fetching the `/exec` URL and reading
-  `scriptVersion` back. Superseded by v30 above; kept because it is what is live right now.
+  `scriptVersion` back. Superseded by v30 above, which is what is live now; kept for the record.
 - **v28 is DEPLOYED, confirmed 2026-08-26** by fetching the `/exec` URL and reading
   `scriptVersion` back. It adds the `personIds` column to Assets (see "Users are assets"
   under Data model), so assignments persist and the users conversion is safe to run
@@ -1827,28 +1827,46 @@ When you do:
     round-trips (the Circuits tab was rewritten with a `notes` column on the first save after
     the deploy, and the legacy `description` column is gone — its old values were dropped at
     that rewrite, intended, since nothing had read them since the frontend collapsed
-    label/description into `label`), and doGet returns `nextAssetNumber`. That counter still
-    reads `null` because no asset has been created since the deploy; the first one created
-    writes it, and until then `peekAssetNumber()` seeds from max+1 as designed.
-- **The live Sheet is fully migrated to the v9 id-based schema** (as of the 2026-08-13
-  session) and is still in that shape — the v15 parent chain has NOT been deployed or
-  migrated, so live assets still carry `roomId`/`buildingId` and no `parentId`. The app reads
-  that correctly (see the v15 note above); `PARENT_CHILD_MIGRATION.md` covers what changes
-  when it deploys. As of v9:
-  `roomId`/`buildingId`/`allocations[].roomId`/`Circuit.roomsServedIds` are all
-  stable ids on every live asset, all 4 real panels (BCA0082–85) were rebuilt with the
-  `cells`/`BreakerType` model (BCA0082 is the main panel, 32 slots, with 3 real sub-panel
-  feeds to BCA0083/84/85; each sub-panel is sized to its building's real room count — 3/3/4
-  rooms — with one reserved-but-not-yet-installed future sub-panel feed each), and the live
-  `BreakerTypes` tab (previously empty despite the v9 deploy) was seeded with the 5 catalog
-  types. The migration was written via a one-off PowerShell script against `SHEET_API_URL`
-  (not through the UI) since it touched ~130 assets at once; no migration script was kept
-  in the repo. Check `backendScriptVersion` in the UI if this ever seems stale.
-- Mitsubishi mini-split/condenser sample data now exists in both Sandbox and the live
-  Sheet: one "Mini Split" indoor unit per Room (18 on live) and one "Condenser" outdoor
-  unit per Building (4 on live, zone count matched to that building's room count), each
-  with seeded maintenance items (Monthly filter clean + Annual coil clean for Mini Splits;
-  Annual inspection/cleaning for Condensers).
+    label/description into `label`), and doGet returns `nextAssetNumber`. That counter reads
+    116 on the live Sheet as of 2026-09-08 — this entry said it "still reads `null` because no
+    asset has been created since the deploy", which stopped being true the first time anyone
+    added one. `peekAssetNumber()` returning `max(counter, derived)` is what made the stale
+    value harmless, and is why nobody noticed.
+- **The live Sheet's schema is current, verified 2026-09-08** by reading the Assets tab
+  directly (`node sheet.mjs tabs bca`) rather than by trusting a line here. Its header row is
+  exactly `ASSET_FIELDS`: `parentId` is present and populated on 135 of 161 rows, and not one
+  of the six columns v25 deleted (`roomId`/`buildingId`/`room`/`building`/`campus`/`itemName`)
+  survives. So the parent chain is fully migrated and the rollback v25 closed is closed. No
+  custom columns exist either, which is why the tab is the bare 20.
+  - **This entry said the opposite until 2026-09-08** — that v15 had "NOT been deployed or
+    migrated" and live assets "still carry `roomId`/`buildingId` and no `parentId`". It was
+    written on 2026-08-13, was true then, and was never revisited, so it outlived ten
+    backend versions. It is the same failure the deploy-state entries above record about
+    themselves, in the same section that already warns about it twice — but about the SHEET
+    rather than the script, which is worse, because there is no `curl` that answers it and
+    no banner that catches it. `node sheet.mjs tabs <tenant>` is the check.
+- **There are no Electrical Panel assets on the live Sheet, and the Breakers, Circuits and
+  BreakerTypes tabs are all empty** (verified 2026-09-08). This file previously described
+  four real panels — BCA0082 as a 32-slot main with sub-panel feeds to BCA0083/84/85, each
+  sized to its building's room count, plus a `BreakerTypes` tab seeded with the 5 catalog
+  types — and a great deal of the Data model section is still written as though that data is
+  sitting there: the printed door card, the panel diagram, the "fed from" banner, the
+  same-panel Move Circuit restriction.
+  - **The FEATURE is real and the code is all there; the DATA is not.** Nothing below about
+    how panels work is wrong — it just describes behaviour with no live rows to exercise it.
+  - **`MOCK_SNAPSHOT` is where panel data lives**, and deliberately: it carries the full
+    Panel/Breaker/Circuit structure (5 panels with populated `breakers` arrays). So Sandbox
+    mode is the only place panel work can be tried end to end, which inverts the usual
+    relationship — for this one area the fixture is richer than production, not a trimmed
+    subset of it. Seed the dev tenant by hand if a real backend write path needs exercising.
+- Mitsubishi mini-split sample data exists on the live Sheet: **18 "Mini Split" indoor units
+  across 19 Rooms**, with seeded maintenance items (Monthly filter clean + Annual coil clean).
+  - **The 4 "Condenser" outdoor units this entry used to claim are not there** — the live
+    Sheet has zero, against 6 Buildings. There is one "Evaporative Cooler" instead, a
+    user-created type whose id is a generated UUID (`179b3e3f-…`), which is the id scheme
+    working exactly as designed: it resolves through `typesList` and needs no registry entry.
+  - Sandbox is again the richer copy — `MOCK_SNAPSHOT` still carries Condensers, which is
+    what keeps the `parentTypes: ["Building"]` case in "The parent chain" exercisable.
 - ~~No auth beyond the cosmetic name tag~~ — **fixed in v18**, see Authentication under
   Architecture. Worth recording why it mattered more than it looked: the GitHub repo is
   **public**, so `SHEET_API_URL` in `index.html` was published the whole time. The
