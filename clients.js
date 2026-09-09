@@ -50,7 +50,21 @@
     dev: {
       appName: "Asset Tracker (dev)",
       orgName: "Development sandbox",
-      labelPrefix: "DEV",
+      // BCA rather than DEV, deliberately, and it is not cosmetic. Dev is seeded
+      // from a client's real Sheet (`node sheet.mjs copy bca dev`), so the assets
+      // already in it carry that client's labels. peekAssetNumber() derives its
+      // next number by matching ASSET_LABEL_RE, which is built from THIS prefix —
+      // so a DEV prefix cannot see BCA0115 sitting in the sheet, and every asset
+      // created here would be numbered off the stored counter alone, in a second
+      // sequence running alongside the real one. Testing against production-shaped
+      // data means the labels too.
+      //
+      // The cost, stated because it is real: a label no longer says which tenant
+      // it came from. Nothing in the app resolves a reference through the prefix
+      // (label is an opaque key everywhere), and the two Sheets never mix, so this
+      // is a readability loss and not a correctness one — but a screenshot from
+      // dev now looks exactly like one from production.
+      labelPrefix: "BCA",
       apiUrl: "https://script.google.com/macros/s/AKfycbyMI_-SlWIYy1DxO0pjtAl31uQbWN5bFZLq9WMrTfrwHbeqNw4xfaGElEGdgT3yvUFI/exec",
     },
   };
