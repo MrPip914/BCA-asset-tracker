@@ -87,6 +87,10 @@ Three things that make this non-optional rather than a convenience:
   from esm.sh/unpkg via an import map. Babel Standalone transpiles the JSX in-browser
   at load time. To edit: just edit the JSX inline inside the `<script type="text/babel">`
   block and reload — no build/compile step exists or is needed.
+- `sheet.mjs` — direct read/write access to a tenant's Google Sheet via the Sheets API
+  and a service account, bypassing the app and its backend entirely. For data CLEANUP —
+  the fixes that have no UI and shouldn't grow one. `test-sheet-tool.mjs` unit-tests its
+  pure logic. See "Direct Sheet access" below, which is required reading before using it.
 - `AssetTrackerSync.gs` — Google Apps Script backend, deployed as a Web App bound to a
   Google Sheet. This is NOT part of the static site deploy — it lives entirely inside
   Google's infrastructure. **Deploy it with `node deploy.mjs`** (see `DEPLOY.md`), which
@@ -119,6 +123,72 @@ Three things that make this non-optional rather than a convenience:
     would have shown a permanent false "Backend outdated" warning; it went unnoticed
     only because sign-in was broken and nobody reached the header. **What changed in a
     version goes in the commit message and in this file, not in the constant.**
+
+## Direct Sheet access (`sheet.mjs`)
+
+**Claude Code can read and write a tenant's Sheet directly, through the Sheets API with a
+service account** (Eric's call, 2026-09-09). This is for **data cleanup** — correcting a
+mis-typed parent across forty rows, seeding the dev tenant, reshaping an incoming client
+inventory — work the app has no UI for and that Eric explicitly did not want to build one
+for. It is not a second way to do what the app already does.
+
+**It bypasses `doPost`, and therefore every guard this project has.** No editor/viewer
+role check, no audit row describing what changed, no server-side refusal of a destructive
+write. That was the accepted trade, stated when the decision was made rather than
+discovered later. **File > Version history remains the only real undo**, exactly as it was
+for the 2026-08-21 data-loss incident.
+
+- **Access is per-Sheet and structural.** The service account
+  (`asset-tracker-claude@bca-asset-tracker-test.iam.gserviceaccount.com`) holds **no project
+  role**; it reaches a spreadsheet only because that spreadsheet was shared with it, like a
+  person. So a tenant is opted in one Share dialog at a time, and the Drive API is
+  deliberately NOT enabled — without it the account cannot enumerate or find files at all,
+  only open the ids it is handed. As of 2026-09-09 only the **dev** Sheet is shared.
+- **The credential is a downloaded key and lives in `$HOME`, never the repo**, which is
+  public: `~/.bca-asset-tracker-sheets.json` (the key, as Google emitted it) and
+  `~/.bca-asset-tracker-sheets-tenants.json` (`{ "dev": "<sheetId>" }`). Same convention and
+  same reasoning as `~/.bca-asset-tracker-deploy.json`. **A cloud Claude Code session cannot
+  use any of this** — its container is re-cloned per session and holds no `$HOME` state — so
+  this is a LOCAL-only capability, unlike everything else in the repo.
+- **Zero dependencies, deliberately.** The service-account JWT is signed with `node:crypto`
+  and exchanged for an access token by hand, ~20 lines. This repo has no build step and no
+  `node_modules`, and a cleanup tool that needs an `npm install` first is one that doesn't
+  get run when it's needed.
+
+**Four rules it replicates from `AssetTrackerSync.gs`, because their failure is silent and
+each has already cost this project something:**
+
+- **Plain text before values.** A `repeatCell` setting `numberFormat: TEXT` runs BEFORE the
+  write, and `valueInputOption` is `RAW`. This is `writeTable_`'s `setNumberFormat("@")` met
+  from the REST side — without it Sheets converts a `yyyy-MM-dd` string into a real Date that
+  reads back as a full ISO timestamp. Ordering is load-bearing: formatting afterwards is too
+  late, the cell is already a Date.
+- **The sheet's own header row is authoritative.** `readTable_` keys every row off whatever
+  the sheet says, so a write that reorders or drops headers silently re-labels every value
+  under them. `sheet.mjs` fills the EXISTING header order and never rewrites the header row.
+- **An unknown key is refused, not dropped.** A typo (`lable`) would otherwise be ignored and
+  the write would report success while the value never landed. Adding a real column is a
+  schema change and belongs in `ASSET_FIELDS`, not here.
+- **Writing zero rows over a populated tab needs `--allow-empty`.** The same shape as
+  `doPost`'s mass-deletion guard, for the same reason: in a full-overwrite model "I sent
+  nothing" and "delete everything" are the same request on the wire.
+
+**And one thing it does that the app cannot do for itself: it bumps the revision counters.**
+A browser left open holds a pre-cleanup snapshot, and its next save would overwrite the whole
+edit. Bumping `rev_assets`/`rev_config`/`rev_breakerTypes` makes that save fail `doPost`'s
+optimistic-concurrency check, so the app reloads instead of clobbering. `write` does it
+automatically for the domain of the tab it touched (`TAB_DOMAIN`), and it is **not optional** —
+it is the single cheapest thing that stops direct editing from fighting the app. Note
+`AuditLog` has no counter and is deliberately absent from that map: it is append-only.
+
+Every `write` also dumps the whole Sheet to `~/.bca-asset-tracker-backups/<tenant>-<stamp>/`
+first. Not a substitute for version history — it is local and unversioned — but it is
+immediate and diffable, which version history is not.
+
+**`test-sheet-tool.mjs` covers the pure logic** (header authority, unknown keys, missing keys
+padding rather than shifting, `colLetter` past Z). It is the only place that logic *can* be
+covered: Sandbox never contacts anything, and rehearsing a destructive write against a live
+Sheet is the thing being avoided.
 
 ## Local Sandbox mode
 
@@ -341,6 +411,13 @@ onboard one.
     session (v18+), so a script could only get one by copying a live credential out of a
     browser. Inside the bound script there is no credential at all — the Sheet's own
     authorization is the auth — and it works from a phone, which is where Eric operates.
+    - **This reasoning still holds for wipe/import and is NOT contradicted by `sheet.mjs`**
+      (2026-09-09), which reaches the Sheet through a different door: the Sheets API with a
+      service account, not `/exec` with a stolen session. That door did not exist in this
+      project when the paragraph above was written, and it closes the objection — a service
+      account key is its own credential, not a copy of a person's. What stays true is the
+      part about phones: a full replace is still better as a menu Eric can run from one,
+      and `sheet.mjs` is for surgical edits, not for replacing the inventory.
   - **Menu handlers must NOT end in `_`.** Apps Script treats a trailing underscore as
     private and silently refuses to wire it to a menu item. Every helper here keeps the
     underscore; only the four `menu*`/`onOpen` entry points drop it.
