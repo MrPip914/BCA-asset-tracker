@@ -41,6 +41,45 @@ this. Decide which.
 
 ---
 
+### A user-created type collides with a built-in added later
+**Found:** 2026-09-09, while auditing the app for other places where legacy ids and
+generated UUIDs coexist (the same shape as the asset key refactor).
+**Needs a deploy:** no — `index.html` only; `typesList` is a JSON blob in Config, so
+its shape is entirely the frontend's business.
+**Confirmed:** by reading `ensureLockedTypes` (index.html ~line 339) against `addType`
+(~line 4640). Not reproduced against live data, because it needs a release that does
+not exist yet — see Blocks.
+
+A built-in type's id IS its original name (`Room`'s id is the string `"Room"`), while a
+type someone creates in the manager gets a `crypto.randomUUID()`. That split is
+deliberate and is what made the type-id migration free. The gap is in how a MISSING
+built-in is restored: `ensureLockedTypes` matches on **id only** —
+`new Set(list.map(t => t.id))` — and never looks at names.
+
+So if a user has already created a type called "Door" (id: a UUID), and a later release
+adds `Door` to `TYPE_REGISTRY` as a locked type, `ensureLockedTypes` finds no entry with
+id `"Door"` and inserts `{ id: "Door", name: "Door" }` beside the one that is already
+there. The result is two entries reading "Door" in the picker — the exact trap `addType`
+and the rename path both refuse to create, arriving through a door neither of them
+guards. One carries the structural behaviour (its tabs, its field rules, its
+`parentTypes`); the other is inert, and every asset the user already filed under their
+own "Door" stays pointed at the inert one, since `typeEntryFor(<uuid>)` misses the
+registry entirely.
+
+Nothing detects it and nothing repairs it. The fix is a decision rather than a patch:
+either `ensureLockedTypes` skips a locked type whose NAME is already taken (leaving the
+user's type inert but unduplicated, and the built-in absent — which breaks the "the app
+depends on this type existing" premise `locked` encodes), or the restore ADOPTS the
+existing entry by rewriting its id to the built-in's (which is a load-time rewrite of
+stored data, the thing this codebase avoids everywhere else, and it would race between
+browsers), or the collision is surfaced to the user to resolve. Worth choosing before
+shipping the type, not after.
+
+**Blocks:** nothing today — it needs a future release that adds a locked type whose name
+a user has already used. It is timely rather than urgent because **Doors/Locks/Keys is
+"Planned next"** in `CLAUDE.md`, and "Door" is exactly the kind of name a user would have
+invented for themselves in the meantime.
+
 ### A failed sign-in hangs on "Checking your access…" forever
 **Found:** 2026-08-24, while testing v22 sign-in against a backend still running v21.
 **Needs a deploy:** no — `index.html` only.
