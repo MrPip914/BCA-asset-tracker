@@ -267,21 +267,47 @@ Now the user-visible payoff. This is where the original request actually lands.
 1. Backend: add `"tag"` to `ASSET_FIELDS`, **keep `"label"`**, and write both (`label`
    mirrors `tag`) so the change stays reversible — the v23/v24 playbook.
 2. Frontend: `adoptLegacyTag()` in the load map — `tag = a.tag ?? a.label`.
-3. **Fix `nameOf()`.** It currently falls back to `asset.label`; once the tag is optional,
+3. **Make the tag configurable per type** (decision 2): drop `label` from
+   `TYPE_STRUCTURAL_FIELDS` so the type editor can exclude it, and ship `tag` in
+   `excludedFields` for Room, Building, Campus and User.
+4. **`adoptLegacyTag()` declines to adopt a label as a tag for a type whose tag field is
+   excluded** (decision 3), which is what clears the BCR/BCB/BCC and User labels without a
+   separate migration.
+5. **Fix `nameOf()`.** It currently falls back to `asset.label`; once the tag is optional,
    an unnamed untagged asset renders as an empty string in the list, the detail header,
-   `parentNameFor()` and every audit sentence. Decide the fallback (see Q2, §7). This is
-   the one item in the whole plan that is a design decision rather than a rename.
-4. Drop `label`'s exclusion from `editFormColumns` (`index.html:5726`) — retagging becomes
+   `parentNameFor()` and every audit sentence. Settled (decision 1, §7): a third rung of
+   `nameOf()` — name, then tag, then `"<type> <short id>"`.
+6. Drop `label`'s exclusion from `editFormColumns` (`index.html:5726`) — retagging becomes
    an ordinary field edit, which is the entire point.
-5. Tag issuance becomes explicit: an "Issue tag" action drawing from the existing counter.
+7. Tag issuance becomes explicit: an "Issue tag" action drawing from the existing counter.
    Rename `peekAssetNumber`/`advanceAssetNumber`/`assetLabelForNumber`/`ASSET_LABEL_RE`
    into tag vocabulary. `peekAssetNumber`'s `Math.max(counter, derived)` guard can be
    **deleted** — it exists because a reused label inherits a dead asset's audit history,
    and with a real key that is no longer possible.
-6. `findLabelConflict` → `findTagConflict`, downgraded from a hard save-blocking error to
-   a warning. A duplicate tag is now cosmetic, not a merge.
-7. Places and people default to no tag (see Q1).
-8. Detail header, `label` column, export and sticker all read `tag`.
+8. `findLabelConflict` → `findTagConflict`, **still blocking** (decision 4), but skipping
+   empty tags — an unconditional check would make every untagged asset collide.
+9. Detail header, `label` column, export and sticker all read `tag`.
+
+### Phase 4 — backend v33, destructive, DEFERRED INDEFINITELY (2026-09-09)
+
+**Eric's plan is to build phases 1–3 in dev and ship them to production as ONE push**,
+avoiding incremental production updates. That is fine for 1–3, which are additive, and it is
+the reason phase 4 is now explicitly held back rather than merely "optional".
+
+**Batching phase 4 with them would be destructive, and the window is one ordinary save
+wide.** A version mismatch only shows a *banner* — it does not refuse writes — and
+`writeTable_` clears the tab and writes only the columns it is handed, filling `""` for any
+field the client did not send. So in the gap between deploying a label-dropping backend to a
+school and the frontend merge reaching every browser, one save from a stale tab writes `id`
+blank, `tag` blank, and no `label` at all: every asset loses its identity, and every child
+row keys to the same empty string. Version history is the only way back.
+
+That cannot happen on phases 1–3, because `label` stays in `ASSET_FIELDS` and a stale tab's
+save is harmless — which is exactly what `CLAUDE.md` means by "an old frontend against a new
+backend is harmless". **Phase 4 is the exception to that rule.** It buys only tidiness:
+dropping a column that is still correct, and renaming some misnamed ones. Do it later as its
+own deliberate exercise, once production has run v32 long enough that every row carries a
+populated tag — or never.
 
 ### Phase 4 — backend v33, destructive, later and optional
 
@@ -366,20 +392,54 @@ worst bugs (`personIds` wiping assignments, `usersAreAssets` rendering unassigne
 
 ---
 
-## 7. Open decisions — needed before Phase 3, not before Phase 1
+## 7. Decisions — settled 2026-09-09
 
-Phases 1 and 2 can start without answering these.
+Eric's answers, with what each one costs to build and the consequences worth knowing.
 
-1. **Can places and people hold a tag at all?** Incapable is cleaner (one `excludedFields`
-   line per registry entry) but a Building might want a plaque. Recommend: capable,
-   defaulting to none.
-2. **What does an unnamed, untagged asset display as?** Options: require `name`; fall back
-   to `"<type> <short id>"`; fall back to the type alone. Recommend `"<type> <short id>"` —
-   it matches the existing deleted-asset fallback in `describeAuditFor`, which already
-   renders `"<type> <label>"` for exactly this "nothing else is left" case.
-3. **Is a duplicate tag warned about or allowed silently?** No longer a data question.
-   Recommend: warn inline, allow save.
-4. **Do the existing `BCR`/`BCB`/`BCC` labels become tags, or keys with no tag?** If keys
-   with no tag, those prefixes disappear from the UI entirely.
-5. **One tag counter or one per prefix?** Today there is one, and only `BCA` numbers are
-   ever generated. Recommend: leave as one.
+**1. An unnamed, untagged asset displays as `"<type> <short id>"`** — "Computer 3f2a91c4".
+Chosen because it matches the fallback `describeAuditFor` already uses for a deleted asset,
+so the app gains no new convention. `nameOf()` gets a third rung: name, then tag, then this.
+In practice it will rarely show — `adoptLegacyNames` suggests a name for almost everything —
+but it is what stops a blank rendering anywhere.
+
+**2. The tag field is CONFIGURABLE PER TYPE, defaulting OFF for Room, Building, Campus and
+User.** Not a fixed rule either way: the type editor decides, like every other field.
+- **The engine already exists and this is one line.** The editor turns an unticked field into
+  `excludedFields` today. What blocks `label` from appearing there is
+  `TYPE_STRUCTURAL_FIELDS = new Set(["name","type","parent","label","status"])`, which holds
+  it out of the editor's list — and `label` is in that set precisely *because* it was the
+  primary key. Once it is only a tag it stops being structural, so taking it out is the
+  correct change rather than a workaround. The four types get `tag` in their registry
+  `excludedFields` as the shipped default; anyone can tick it back on.
+
+**3. Existing BCR / BCB / BCC and User labels are CLEARED, not carried over as tags.**
+- **Done in `adoptLegacyTag()` rather than as a separate data migration.** The adoption
+  simply does not take a label as a tag for a type whose tag field is excluded, so the clear
+  happens on the first save with nothing to run by hand. A load-time *rewrite* is what
+  `CLAUDE.md` warns against; this is a load-time *read* that declines to adopt, which is the
+  same shape as every other `adoptLegacy*` and carries no race.
+- **`label` still holds the old value until phase 4**, so this stays reversible: turn the tag
+  field back on for Rooms and re-adopt. After phase 4 drops the column it is gone for good —
+  one more reason phase 4 waits.
+- Rooms and Buildings are named, so nothing renders blank as a result; decision 1 covers the
+  case where something somehow is not.
+
+**4. A duplicate tag is BLOCKED at save, as today.** `findLabelConflict` keeps its behaviour,
+renamed to `findTagConflict`.
+- **It must skip empty tags.** With the tag optional, an unconditional uniqueness check makes
+  every untagged asset collide with every other one. Only non-empty tags are compared.
+- **The consequence Eric accepted:** swapping two assets' tags is now a three-step edit —
+  clear one, set the other, set the first — because the intermediate state is a duplicate.
+  Worth knowing before the first time someone tries it, not worth designing around.
+- `peekAssetNumber()`'s `Math.max(counter, derived)` reuse guard can still be deleted: it
+  exists because a reused *label* inherited a dead asset's audit history, which a real key
+  makes impossible regardless of what the tag says.
+
+### Still open
+
+Nothing blocking. One question deferred until the tag exists and can be looked at:
+
+- **Whether one tag counter still serves every type.** Today there is one and only `BCA`
+  numbers are generated. With places and people no longer consuming numbers, the sequence
+  gets denser and the question of per-prefix counters mostly answers itself — but it is worth
+  a look once real usage exists rather than a guess now.
