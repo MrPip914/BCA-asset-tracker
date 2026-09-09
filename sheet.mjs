@@ -6,6 +6,7 @@
 //   node sheet.mjs read <tenant> <Tab>           dump a tab as JSON (stdout)
 //   node sheet.mjs read <tenant> --all <dir>     dump EVERY tab into a directory
 //   node sheet.mjs write <tenant> <Tab> <file>   replace a tab's rows from a JSON file
+//   node sheet.mjs copy <src> <dest> [--scrub]  seed a dev tenant from another Sheet
 //   node sheet.mjs bump <tenant> <domain...>     bump rev_assets / rev_config / rev_breakerTypes
 //
 // WHY THIS EXISTS, given the app already writes the Sheet. Cleaning up data —
@@ -409,6 +410,248 @@ async function bumpRevisions(sheetId, domains) {
   return result;
 }
 
+// ------------------------------------------------------------------ copy
+// Seed one tenant's Sheet from another's, so data manipulation happens against
+// a real-shaped dataset in an environment nothing depends on.
+//
+// DESTINATIONS ARE AN ALLOWLIST, NOT A FLAG. The failure worth engineering
+// against here is not a bad row, it is the whole thing running in the direction
+// nobody meant — a full-overwrite copy pointed at a client's live Sheet. This
+// project has already had a write run backwards once (v22 deployed over a live
+// v24), and the only reason that was recoverable is that deploy.mjs refuses to
+// go backwards. Same shape of guard, same reason. A production tenant is absent
+// from this set and there is deliberately no switch that adds one.
+const COPY_DESTINATIONS = new Set(["dev"]);
+
+// Config keys carried across. Everything NOT listed belongs to the DESTINATION
+// and is left exactly as it was:
+//   authUsers  — who may sign in to DEV. Copying the source's allowlist would
+//                both hand a client's users an account here and drop whoever
+//                was already using dev, which is the lockout hazard doPost's
+//                own authUsers handling exists to avoid, met from a new angle.
+//   rev_*      — bumped at the end rather than copied. A browser holding a
+//                pre-copy snapshot must fail its next save and reload; copying
+//                the source's counters could hand it a number it already has.
+const CONFIG_CONTENT_KEYS = [
+  "columns", "changeTypes", "vendors", "peripheralsList", "usersList",
+  "bulkItemTypes", "typesList", "typeSettings", "nextAssetNumber",
+];
+
+// Sheet1 is the leftover default tab every new Google Sheet is born with. The
+// backend never touches it and it has no header row, so it is not data.
+const SKIP_TABS = new Set(["Sheet1"]);
+
+// Tab order matters. Config goes FIRST because it names the custom columns, and
+// a tab's real column set is ASSET_FIELDS plus those (backend v26) — so the
+// destination has to learn them before any row that uses one lands. AuditLog
+// goes LAST because it is the one append-only tab and the least interesting to
+// half-write if something fails partway.
+const COPY_ORDER = ["Config", "Assets", "Comments", "Changes", "Allocations",
+  "Maintenance", "BreakerTypes", "Breakers", "Circuits", "AuditLog"];
+
+// A destination tab that has never been written has no header row, and the
+// backend is normally the only thing that writes one. `write` refuses to invent
+// headers, correctly — inventing a column set is how every value under it gets
+// silently re-labelled. A COPY is the one case where that is not invention: the
+// headers are the SOURCE sheet's own, written by writeTable_ from its field
+// list. So they are copied, never authored here.
+//
+// A destination that already has headers keeps its own ORDER (rows are written
+// by header name, so the two need not match) and is only ever WIDENED — never
+// reordered, never shrunk. Shrinking would strand the values under a dropped
+// column; the same rule appendNewRows_ follows for AuditLog.
+async function alignHeaders(destId, tab, srcHeaders) {
+  const destGrid = await readGrid(destId, tab);
+  const destHeaders = (destGrid[0] || []).map(String);
+  if (!destHeaders.length) {
+    await writeHeaderRow(destId, tab, srcHeaders);
+    return { headers: srcHeaders, added: srcHeaders, seeded: true };
+  }
+  const added = srcHeaders.filter((h) => !destHeaders.includes(h));
+  if (added.length) {
+    const widened = destHeaders.concat(added);
+    await writeHeaderRow(destId, tab, widened);
+    return { headers: widened, added, seeded: false };
+  }
+  return { headers: destHeaders, added: [], seeded: false };
+}
+
+async function writeHeaderRow(sheetId, tab, headers) {
+  const meta = await sheetMeta(sheetId);
+  const target = meta.tabs.find((t) => t.title === tab);
+  if (!target) die(`No tab named "${tab}" in the destination.`);
+  // Text format first, exactly as writeRows does for the data range: a header is
+  // a string, and a column called "2026" is not a number.
+  await api(`${API}/${sheetId}:batchUpdate`, {
+    method: "POST",
+    body: JSON.stringify({
+      requests: [{
+        repeatCell: {
+          range: {
+            sheetId: target.gid, startRowIndex: 0, endRowIndex: 1,
+            startColumnIndex: 0, endColumnIndex: headers.length,
+          },
+          cell: { userEnteredFormat: { numberFormat: { type: "TEXT" } } },
+          fields: "userEnteredFormat.numberFormat",
+        },
+      }],
+    }),
+  });
+  await api(
+    `${API}/${sheetId}/values/${encodeURIComponent(quote(tab) + "!A1")}?valueInputOption=RAW`,
+    { method: "PUT", body: JSON.stringify({ values: [headers] }) }
+  );
+}
+
+// ---------------------------------------------------------------- scrubbing
+// Replaces the identifying values while leaving the STRUCTURE alone — every
+// label, parentId, personIds and breaker group survives untouched, because the
+// bugs a dev copy exists to reproduce live in the shape of the data, not in what
+// the strings say. Names map consistently (one person is the same "Person 4"
+// everywhere they appear), so an assignment still reads as an assignment.
+//
+// Best effort on FREE TEXT, and that limit is worth stating rather than
+// implying: notes and comments are blanked rather than rewritten, because a
+// human sentence can name anyone and nothing here can reliably tell.
+export function buildScrubber(assetRows, usersListNames) {
+  const names = new Set();
+  assetRows.forEach((r) => {
+    if (r.type === "User" && String(r.name || "").trim()) names.add(String(r.name).trim());
+  });
+  (usersListNames || []).forEach((n) => { if (String(n).trim()) names.add(String(n).trim()); });
+
+  const nameMap = new Map();
+  [...names].sort().forEach((n, i) => nameMap.set(n, `Person ${i + 1}`));
+  const fakeName = (n) => nameMap.get(String(n || "").trim()) || n;
+
+  // `person` is the pre-v28 slash-joined list of names; each part maps on its own.
+  const fakePersonField = (v) => String(v || "").split("/").map((p) => p.trim())
+    .filter(Boolean).map(fakeName).join(" / ");
+
+  const seq = (m, k) => { if (!m.has(k)) m.set(k, m.size + 1); return m.get(k); };
+  const snMap = new Map(), hostMap = new Map();
+
+  return {
+    nameMap,
+    scrub(tab, row) {
+      const r = { ...row };
+      if (tab === "Assets") {
+        if (r.type === "User") r.name = fakeName(r.name);
+        if (r.person) r.person = fakePersonField(r.person);
+        if (r.serial) r.serial = "SN-" + String(seq(snMap, r.serial)).padStart(5, "0");
+        if (r.hostname) r.hostname = "host-" + String(seq(hostMap, r.hostname)).padStart(4, "0");
+        if (r.notes) r.notes = "";
+      }
+      if (tab === "Comments") { r.text = "(scrubbed)"; r.by = fakeName(r.by); }
+      if (tab === "Changes") { r.note = ""; r.by = fakeName(r.by); }
+      if (tab === "Maintenance") { r.owner = fakeName(r.owner); r.by = fakeName(r.by); }
+      if (tab === "Breakers" || tab === "Circuits") { if (r.notes) r.notes = ""; }
+      if (tab === "AuditLog") {
+        r.by = fakeName(r.by);
+        r.note = "";
+        // from/to carry a field's old and new value, which for a User field is a
+        // person's name. Mapped when it matches someone, left alone otherwise —
+        // it is just as likely to be a room name or an amp rating.
+        if (r.from) r.from = fakePersonField(r.from);
+        if (r.to) r.to = fakePersonField(r.to);
+      }
+      return r;
+    },
+    // usersList is a plain array of names in Config.
+    scrubUsersList(list) { return (list || []).map(fakeName); },
+  };
+}
+
+async function cmdCopy(source, dest, flags) {
+  if (!source || !dest) die("Usage: node sheet.mjs copy <source> <dest> [--scrub] [--dry-run]");
+  if (source === dest) die("Source and destination are the same tenant.");
+  if (!COPY_DESTINATIONS.has(dest)) {
+    die(`"${dest}" is not a permitted copy destination.\n\n` +
+      `  Allowed: ${[...COPY_DESTINATIONS].join(", ")}\n` +
+      `  A copy is a full overwrite of every tab. Pointing one at a client's\n` +
+      `  live Sheet is the one mistake this refuses to make, so there is no\n` +
+      `  flag for it — edit COPY_DESTINATIONS deliberately if that ever changes.`);
+  }
+  const srcId = sheetIdFor(source);
+  const destId = sheetIdFor(dest);
+
+  const srcMeta = await sheetMeta(srcId);
+  const destMeta = await sheetMeta(destId);
+  const destTabs = new Set(destMeta.tabs.map((t) => t.title));
+  console.log(`${srcMeta.title}  →  ${destMeta.title}${flags.scrub ? "   (scrubbed)" : ""}\n`);
+
+  // Read EVERYTHING before writing anything. A copy that dies halfway leaves the
+  // destination as neither the old data nor the new, and the read is where a
+  // permissions or schema surprise shows up.
+  const srcTabs = srcMeta.tabs.map((t) => t.title).filter((t) => !SKIP_TABS.has(t));
+  const ordered = COPY_ORDER.filter((t) => srcTabs.includes(t))
+    .concat(srcTabs.filter((t) => !COPY_ORDER.includes(t)));
+
+  const loaded = {};
+  for (const tab of ordered) {
+    if (!destTabs.has(tab)) {
+      die(`The destination has no "${tab}" tab.\n` +
+        `  Creating tabs is a schema change and belongs in AssetTrackerSync.gs.`);
+    }
+    loaded[tab] = gridToRows(await readGrid(srcId, tab));
+  }
+
+  const assetRows = (loaded.Assets && loaded.Assets.rows) || [];
+  let usersListNames = [];
+  if (loaded.Config) {
+    const row = loaded.Config.rows.find((r) => r.key === "usersList");
+    if (row) { try { usersListNames = JSON.parse(row.value); } catch { usersListNames = []; } }
+  }
+  const scrubber = flags.scrub ? buildScrubber(assetRows, usersListNames) : null;
+  if (scrubber) console.log(`  ${scrubber.nameMap.size} names mapped to Person N\n`);
+
+  // Config is a merge, not a replacement — see CONFIG_CONTENT_KEYS.
+  if (loaded.Config) {
+    const destConfig = gridToRows(await readGrid(destId, "Config"));
+    const kept = destConfig.rows.filter((r) => !CONFIG_CONTENT_KEYS.includes(r.key));
+    const taken = loaded.Config.rows
+      .filter((r) => CONFIG_CONTENT_KEYS.includes(r.key))
+      .map((r) => {
+        if (scrubber && r.key === "usersList") {
+          try { return { ...r, value: JSON.stringify(scrubber.scrubUsersList(JSON.parse(r.value))) }; }
+          catch { return r; }
+        }
+        return r;
+      });
+    loaded.Config = { headers: destConfig.headers, rows: kept.concat(taken) };
+    const preserved = kept.map((r) => r.key).filter((k) => !k.startsWith(REVISION_KEY_PREFIX));
+    console.log(`  Config: ${taken.length} keys copied, preserved: ${preserved.join(", ") || "none"}`);
+  }
+
+  // The destination as it stands, before any of it is overwritten. Version
+  // history is the real backstop, as ever, but this one is local and diffable.
+  // `write` has always done this; `copy` replaces EVERY tab in one command, so
+  // there is strictly more to lose here than anywhere else in this file.
+  if (!flags.dryRun) console.log(`  backup: ${await backup(destId, dest)}`);
+
+  for (const tab of ordered) {
+    const { headers, rows } = loaded[tab];
+    const out = scrubber && tab !== "Config" ? rows.map((r) => scrubber.scrub(tab, r)) : rows;
+    const before = gridToRows(await readGrid(destId, tab)).rows.length;
+    console.log(`  ${tab.padEnd(14)} ${String(before).padStart(4)} → ${String(out.length).padStart(4)} rows`);
+    if (flags.dryRun) continue;
+
+    const aligned = await alignHeaders(destId, tab, headers);
+    if (aligned.seeded) console.log(`      seeded header row: ${aligned.added.join(", ")}`);
+    else if (aligned.added.length) console.log(`      widened by: ${aligned.added.join(", ")}`);
+    await writeRows(destId, tab, aligned.headers, out);
+  }
+
+  if (flags.dryRun) { console.log("\n✓ Dry run, nothing written."); return; }
+
+  // Every domain, unconditionally — a copy touches all of them, and a browser
+  // left open on the destination holds a snapshot of data that no longer exists.
+  // Without this its next save overwrites the whole copy.
+  const to = await bumpRevisions(destId, REVISION_DOMAINS);
+  Object.entries(to).forEach(([d, v]) => console.log(`✓ rev_${d} → ${v}`));
+  console.log(`\n✓ Copied ${ordered.length} tabs into ${dest}.`);
+}
+
 // ------------------------------------------------------------------ entry
 // Guarded so the pure helpers above can be imported by test-sheet-tool.mjs
 // without the CLI running as a side effect of the import.
@@ -420,6 +663,7 @@ const [cmd, ...rest] = process.argv.slice(2);
 const flags = {
   dryRun: rest.includes("--dry-run"),
   allowEmpty: rest.includes("--allow-empty"),
+  scrub: rest.includes("--scrub"),
 };
 const args = rest.filter((a) => !a.startsWith("--"));
 
@@ -430,6 +674,7 @@ const USAGE = `
   node sheet.mjs read <tenant> <Tab>
   node sheet.mjs read <tenant> --all <dir>
   node sheet.mjs write <tenant> <Tab> <file.json> [--dry-run] [--allow-empty]
+  node sheet.mjs copy <source> <dest> [--scrub] [--dry-run]
   node sheet.mjs bump <tenant> <domain...>
 
   key:     ${KEY_PATH}
@@ -457,6 +702,8 @@ try {
     const [tenant, tab, file] = args;
     if (!tenant || !tab || !file) die("Usage: node sheet.mjs write <tenant> <Tab> <file.json>");
     await cmdWrite(tenant, tab, file, flags);
+  } else if (cmd === "copy") {
+    await cmdCopy(args[0], args[1], flags);
   } else if (cmd === "bump") {
     const [tenant, ...domains] = args;
     const bad = domains.filter((d) => !REVISION_DOMAINS.includes(d));
