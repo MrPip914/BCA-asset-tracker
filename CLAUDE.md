@@ -1704,6 +1704,51 @@ When you do:
     leaving new assets with neither an id nor a matching label. `node deploy.mjs --status`
     is the check. This is the hazard the whole plan is ordered around.
 
+- **Phase 3 is BUILT but NOT DEPLOYED as of 2026-09-09** (backend v32), on
+  `claude/happy-pascal-xw25f1`. `label` becomes **`tag`** — the sticker on the thing:
+  optional, editable, and absent entirely on a type that never carries one.
+  - **The backend change is one name in `ASSET_FIELDS`.** `label` is KEPT and is written
+    from the client's own value, **not mirrored from `tag`** — the plan originally said to
+    mirror it, which is self-defeating: clearing a Room's tag would clear its label with it,
+    destroying the rollback being preserved. Nothing in the UI writes `label` any more.
+  - **The tag is a per-type CHOICE, not a fixed rule** (Eric's call). It ships excluded on
+    Room/Building/Campus/User and can be switched on for any of them in the type editor.
+    What made that nearly free: the editor already turns an unticked field into
+    `excludedFields`, and the only thing holding `label` out of its list was
+    `TYPE_STRUCTURAL_FIELDS` — which contained it *because* it was the primary key. Once it
+    is only a sticker it stops being structural, so removing it is the correct change.
+  - **`adoptLegacyTag()` DECLINES rather than clears.** A type whose tag field is excluded
+    simply does not inherit its label as a tag, so the BCR/BCB/BCC and User labels are gone
+    from the UI with no migration to run. That is a load-time READ that declines, not the
+    load-time REWRITE this file warns against — no race between browsers, nothing by hand.
+    An explicitly-empty stored tag is never re-adopted, or clearing one would undo itself on
+    the next load.
+  - **`nameOf()` has three rungs now**: name, then tag, then `"<type> <short id>"`. The last
+    is a genuine last resort — `adoptLegacyNames` fills a blank name on everything it loads,
+    so only an in-session object (an add-form draft) reaches it. Its `typesList` argument is
+    OPTIONAL and its absence degrades rather than breaks: `typeNameOf` falls back to the type
+    id, and a built-in type's id IS its name.
+  - **A duplicate tag is still REFUSED, but for a different reason.** It used to be a data
+    question (two assets sharing a primary key are one merged asset); now it is only two
+    stickers reading the same thing, refused because that is a trap for whoever holds them.
+    **Empty tags are skipped** — load-bearing, since an unconditional check would make every
+    untagged asset collide with every other one and nothing could save. The EDIT form runs
+    the same check with the asset excluded, which the plan never mentioned and which the
+    add-only label never needed.
+    - **Consequence:** swapping two assets' tags is a three-step edit (clear one, set the
+      other, set the first), because the intermediate state is a duplicate. Accepted.
+  - **`peekAssetNumber()`'s `Math.max(counter, derived)` guard is DELETED.** It existed
+    because a reused label was a reused primary key, so a new asset inherited a dead one's
+    audit history. A real `id` makes that impossible, and deriving from the assets stopped
+    meaning anything once most rows have no tag at all.
+  - **The public panel path publishes `tag`** and accepts a tag, an id OR a label at
+    `?panel=` — three permanent ways in, because a sticker taped inside a panel door outlives
+    all of them.
+  - Covered by `test-frontend-tag.js`, which runs the real registry, the real
+    `recomputeDerivedTypeSets` and the real `nameOf`. Verified by mutation that all three
+    silent-failure modes fail it: a Room that stops excluding the tag, a `nameOf` that loses
+    its last rung, and a conflict check that stops skipping empties.
+
 - **v30 is DEPLOYED, confirmed 2026-09-04** by fetching the `/exec` URL and reading
   `scriptVersion` back. It makes the admin import read a **tab in the Sheet** instead of
   Drive. v29 shipped the `DriveApp` version, which failed at runtime — "You do not have

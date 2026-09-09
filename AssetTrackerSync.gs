@@ -49,7 +49,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v31";
+const SCRIPT_VERSION = "v32";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -113,6 +113,16 @@ const ASSET_FIELDS = [
   // Both join sites below read `a.id || a.label` for that reason, and must keep
   // doing so until `label` itself is retired. See ASSET_KEY_REFACTOR_PLAN.md.
   "id",
+  // `tag` (v32) is the human-readable asset tag -- the sticker on the thing.
+  // What `label` used to be, minus the identity: optional, editable, not unique
+  // by construction, and absent entirely on a type that never carries one.
+  //
+  // `label` is KEPT and is written from the client's own value, NOT mirrored
+  // from `tag`. That distinction is the rollback: phase 3 clears the tag on
+  // Rooms/Buildings/Campuses/Users, and a mirror would clear their labels with
+  // it, destroying the very thing being kept as the way back. Nothing in the UI
+  // writes `label` any more -- it rides along untouched until phase 4 drops it.
+  "tag",
   "label", "name", "type", "subType", "screenSize", "hostname", "parentId",
   // `personIds` (v28) is the assignment: comma-joined labels of User assets, the
   // app's first many-to-many between assets. `person` is the pre-v28 slash-joined
@@ -253,7 +263,11 @@ const AUDIT_FIELDS = [
 // renders the resolved roomName/buildingName below — so they were dropped rather
 // than swapped for parentId when the parent chain landed. A public endpoint
 // should publish the fewest fields that still answer the question.
-const PUBLIC_PANEL_FIELDS = ["label", "panelSlotCount", "panelLayout"];
+// `tag` joins `label` here (v32): the tag is what a panel is called on the
+// public page and on its sticker, and a panel created after v32 has one where it
+// has no label at all. `label` stays until phase 4 so a page served to a browser
+// mid-rollout still finds something to print.
+const PUBLIC_PANEL_FIELDS = ["tag", "label", "panelSlotCount", "panelLayout"];
 const PUBLIC_BREAKER_FIELDS = ["id", "cells", "ampRating", "groupId", "breakerTypeId", "notes"];
 const PUBLIC_CIRCUIT_FIELDS = ["id", "breakerId", "label", "roomsServedIds", "feedsPanelLabel", "notes"];
 const PUBLIC_BREAKER_TYPE_FIELDS = ["id", "name", "slotSpan", "members"];
@@ -799,8 +813,12 @@ function publicPanelPayload_(requestedLabel) {
   const panelRow = assetRows.filter(a => {
     if (a.type !== "Electrical Panel") return false;
     const id = String(a.id || "").trim().toUpperCase();
+    const tag = String(a.tag || "").trim().toUpperCase();
     const label = String(a.label || "").trim().toUpperCase();
-    return (id && id === wanted) || (label && label === wanted);
+    // Three ways in, all permanent: the key (a copied link), the tag (a sticker
+    // printed after v32), and the label (every sticker printed before it). A
+    // sticker taped inside a panel door outlives any of them.
+    return (id && id === wanted) || (tag && tag === wanted) || (label && label === wanted);
   })[0];
   // Deliberately the same message whether the label names a non-panel asset or
   // nothing at all — a public endpoint shouldn't confirm which asset IDs exist.
@@ -910,7 +928,7 @@ function publicPanelPayload_(requestedLabel) {
       // The LABEL where there is one, not the key: this becomes a "?p=" link and
       // a visible panel code on the public page, and publicPanelPayload_ accepts
       // either. Falls back to the key for a panel with no label of its own.
-      panelLabel: (upstreamPanel && upstreamPanel.label) || upstreamLabel,
+      panelLabel: (upstreamPanel && (upstreamPanel.tag || upstreamPanel.label)) || upstreamLabel,
       panelRoomName: upstreamRoom ? displayName_(upstreamRoom) : "",
       circuitLabel: feedingCircuit.label || "",
       cells: feedingBreaker && feedingBreaker.cells

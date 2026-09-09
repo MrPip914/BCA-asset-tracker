@@ -143,12 +143,12 @@ const TYPE_REGISTRY = {
   // Building it's in, or inside another Room (a closet within a classroom).
   Room: {
     locked: true, icon: DoorOpen, parentTypes: ["Building", "Room"],
-    excludedFields: ["brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
+    excludedFields: ["tag", "brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
   },
   // One level up from a Room, with even less in common with a device asset.
   Building: {
     locked: true, icon: Building2, parentTypes: ["Campus"],
-    excludedFields: ["brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
+    excludedFields: ["tag", "brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
   },
   // A site — a group of Buildings, and the top of the tree. Added once the app
   // had to describe more than one location (the school itself plus a separate
@@ -158,7 +158,7 @@ const TYPE_REGISTRY = {
   // that the world got a level deeper.
   Campus: {
     locked: true, icon: MapPin, parentTypes: [],
-    excludedFields: ["brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
+    excludedFields: ["tag", "brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
   },
   // Tables, chairs... not individually tagged or tied to one room — a pooled
   // quantity, distributed across rooms via the Allocations tab instead. That
@@ -191,6 +191,7 @@ const TYPE_REGISTRY = {
   User: {
     locked: true, icon: UserCircle, parentTypes: [],
     excludedFields: [
+      "tag",
       "brand", "model", "serial", "peripherals", "hostname", "screenSize",
       "purchaseDate", "warrantyUntil", "person", "subType", "totalQuantity",
     ],
@@ -319,6 +320,8 @@ function typeHasOverrides(typeId) {
 // was removed from the managed list — the id is the original name for a built-in
 // and a raw uuid for a user-created one, but showing something beats showing
 // nothing, and the asset's Type field is where it gets corrected.
+// Called by nameOf() above, which is defined earlier -- both are hoisted
+// function declarations, so the order is fine.
 function typeNameOf(typeId, typesList) {
   const found = (typesList || []).find(t => t.id === typeId);
   return found ? found.name : (typeId || "");
@@ -509,8 +512,28 @@ function personTextOf(asset, assets) {
   return personNamesOf(asset, assets).join(", ");
 }
 
-function nameOf(asset) {
-  return (asset?.name || "").trim() || asset?.label || "";
+function nameOf(asset, typesList) {
+  const name = (asset?.name || "").trim();
+  if (name) return name;
+  // The tag second, which is what `label` used to serve as here.
+  const tag = (asset?.tag || "").trim();
+  if (tag) return tag;
+  // Nothing left. Built in the same shape describeAuditFor() uses for an asset
+  // that has been deleted -- "<type> <short id>" -- so the one case reads like
+  // the other rather than as a bare uuid.
+  //
+  // This is a genuine last resort: adoptLegacyNames() fills a blank name on every
+  // asset it loads, so nothing off the sheet reaches here. What does is an
+  // in-session object that never went through that map -- an add-form draft,
+  // mostly -- which is exactly when a placeholder is wanted.
+  //
+  // `typesList` is optional and its absence degrades rather than breaks:
+  // typeNameOf falls back to the type ID, and a built-in type's id IS its name,
+  // so only a user-created type reads as a uuid at a site that had no list to
+  // pass. Worth knowing before threading it somewhere new.
+  const type = typeNameOf(asset?.type, typesList);
+  const shortId = String(asset?.id || "").slice(0, 8);
+  return `${type} ${shortId}`.trim();
 }
 
 // Options for the structured per-asset change log
@@ -616,7 +639,7 @@ function suggestedNameFor(asset, assets, typesList) {
     const place = nearestPlaceNameOf(asset, assets);
     if (place) return `${place} ${type}`;
   }
-  return `${type} ${asset.label || ""}`.trim();
+  return `${type} ${asset.tag || String(asset.id || "").slice(0, 8)}`.trim();
 }
 
 // adoptLegacySubType() is gone (v25) along with the `itemName` column it read.
@@ -705,7 +728,11 @@ const DEFAULT_COLUMNS = [
   { key: "warrantyUntil", label: "Warranty Until", width: 130 },
   { key: "peripherals", label: "Peripherals", width: 240 },
   { key: "notes", label: "Notes", width: 240 },
-  { key: "label", label: "Asset ID", width: 110 },
+  // The sticker on the thing. OPTIONAL as of v32, and absent entirely on a type
+  // whose registry entry excludes it (Room/Building/Campus/User by default,
+  // switchable per type in the type editor). Its key was "label" while it was
+  // also the primary key; RENAMED_COLUMN_KEYS migrates a stored config.
+  { key: "tag", label: "Asset ID", width: 110 },
   { key: "status", label: "Status", width: 100 },
 ].map(c => ({ ...c, visible: ["name", "type", "subType", "parent", "person", "status"].includes(c.key), custom: false }));
 
@@ -714,7 +741,11 @@ const DEFAULT_COLUMNS = [
 // nothing writes any more) AND gain `subType` from the add pass below, showing
 // the same thing twice. Mapping the key preserves the user's position and width
 // for it, which dropping and re-adding would not.
-const RENAMED_COLUMN_KEYS = { itemName: "subType" };
+// `label` -> `tag` (v32) for the same reason `itemName` -> `subType` did: the
+// stored config on every existing sheet still names the old key, and without
+// this the load would keep the dead column AND gain the new one from the add
+// pass, showing the same thing twice.
+const RENAMED_COLUMN_KEYS = { itemName: "subType", label: "tag" };
 
 // Default columns that USED to exist and must be dropped from a stored column
 // config on load. The migration below only ever ADDS newly-introduced defaults,
@@ -725,9 +756,16 @@ const RENAMED_COLUMN_KEYS = { itemName: "subType" };
 const RETIRED_COLUMN_KEYS = new Set(["campus", "building", "room"]);
 
 // The fields the type editor lets you switch on and off for a type. Everything
-// else in DEFAULT_COLUMNS is structural and not a per-type choice: name, type,
-// parent and label identify the asset, and status is the archive flag.
-const TYPE_STRUCTURAL_FIELDS = new Set(["name", "type", "parent", "label", "status"]);
+// else in DEFAULT_COLUMNS is structural and not a per-type choice: name, type
+// and parent identify and place the asset, and status is the archive flag.
+//
+// `tag` is deliberately NOT in here, and used to be (as `label`). It sat in this
+// set precisely BECAUSE it was the primary key -- and once it is only the
+// sticker on the thing it stops being structural, so a type deciding it carries
+// no tag is an ordinary field choice like any other. That is what makes "should
+// a Room have an Asset ID?" configurable rather than a code change (Eric's call,
+// 2026-09-09); the registry just ships the default.
+const TYPE_STRUCTURAL_FIELDS = new Set(["name", "type", "parent", "status"]);
 function typeEditableFields(columns) {
   return columns.filter(c => !TYPE_STRUCTURAL_FIELDS.has(c.key));
 }
@@ -1289,7 +1327,7 @@ function validateParentChoice(childId, childType, parentId, assets, typesList) {
 // one flat list. Any column not named here (custom user-added columns) falls
 // into a trailing "Custom Fields" group rather than being dropped.
 const DETAIL_FIELD_GROUPS = [
-  { title: "Overview", keys: ["name", "type", "subType", "screenSize", "totalQuantity", "label", "status"] },
+  { title: "Overview", keys: ["name", "type", "subType", "screenSize", "totalQuantity", "tag", "status"] },
   // Path is the whole of "where is it" now — the Campus/Building/Room columns
   // that used to sit beside it here are gone, along with the filter that kept
   // them out of the editable form. A key naming a column that no longer exists
@@ -1464,7 +1502,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v31";
+const FRONTEND_SCRIPT_VERSION = "v32";
 // The version of THIS file — shown in About (the account menu), so "is my browser
 // actually running the build I just deployed, or a cached one?" is answerable in
 // two clicks instead of by reading view-source.
@@ -1482,7 +1520,7 @@ const FRONTEND_SCRIPT_VERSION = "v31";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-09.1";
+const APP_VERSION = "2026-09-09.2";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -1532,16 +1570,16 @@ function normalizeRevisions(raw) {
 // The BCR/BCB labels on Rooms/Buildings predate this and are never generated —
 // only BCA numbers are ever issued, for every type.
 const ASSET_LABEL_PREFIX = CLIENT.labelPrefix;
-const assetLabelForNumber = n => ASSET_LABEL_PREFIX + String(n).padStart(4, "0");
+const assetTagForNumber = n => ASSET_LABEL_PREFIX + String(n).padStart(4, "0");
 // Built from the prefix rather than written out, so a tenant whose assets read
 // SMA0001 counts its own labels instead of silently counting none. The prefix is
 // our own config and is letters only, so it needs no regex escaping.
-const ASSET_LABEL_RE = new RegExp("^" + ASSET_LABEL_PREFIX + "(\\d+)$", "i");
+const ASSET_TAG_RE = new RegExp("^" + ASSET_LABEL_PREFIX + "(\\d+)$", "i");
 // The numeric part of a generated label, or 0 for anything else (a BCR/BCB
 // label, or a hand-typed non-conforming one) — those consume no number from the
 // counter.
-function assetNumberFromLabel(label) {
-  const m = ASSET_LABEL_RE.exec(String(label || "").trim());
+function assetNumberFromTag(tag) {
+  const m = ASSET_TAG_RE.exec(String(tag || "").trim());
   return m ? parseInt(m[1], 10) : 0;
 }
 
@@ -1645,6 +1683,15 @@ const SANDBOX_DATA_KEY = CLIENT.storageKey("asset-tracker-sandbox-data");
 // since that's the area under active development and the one most worth having
 // good fixture data for. Update this by hand when you want the sandbox to start
 // from a different baseline; it's plain data, safe to edit directly.
+// The stored column config below still names the "label" column key, and that is
+// deliberate: it is what exercises RENAMED_COLUMN_KEYS mapping it to "tag" on
+// load. A fixture already using the new key would skip that path entirely, the
+// same reason it still carries the three RETIRED_COLUMN_KEYS.
+//
+// No asset here carries a `tag` either, so every one of them goes through
+// adoptLegacyTag() -- including the Rooms, Buildings and Campuses, which is what
+// exercises the DECLINE branch (a type whose tag field is excluded gets none).
+//
 // THREE assets here carry a real `id` that is NOT their label, and the rest carry
 // none at all. That mix is deliberate and load-bearing (v31/phase 2): the backend
 // returns an empty `id` for every row written before v31 and a real one after, so
@@ -2698,6 +2745,25 @@ function AssetTracker() {
         // From here on `a.id` is populated on every asset and is the ONLY thing
         // that should be compared for identity. `a.label` is display text.
         .map(a => (a.id ? a : { ...a, id: a.label }))
+        // The tag, adopted from the label the same way (v32) -- with ONE
+        // exception that is the whole of Eric's "clear them for places and
+        // users" decision (2026-09-09): a type whose registry entry excludes the
+        // tag field does not get one, so the BCR/BCB/BCC labels on Rooms,
+        // Buildings and Campuses and the BCA labels on Users simply are not
+        // carried over, and the first save writes the column empty for them.
+        //
+        // Deliberately a load-time READ that declines to adopt, not a load-time
+        // REWRITE -- the same shape as every other adoptLegacy*, with no race
+        // between two browsers and nothing to run by hand.
+        //
+        // `label` is untouched and still written, so this is reversible: tick
+        // the tag field back on for a type and the next load adopts it again.
+        // Phase 4 is what closes that door.
+        .map(a => {
+          if (a.tag !== undefined && a.tag !== null) return a;
+          const carries = fieldAppliesTo("tag", a.type);
+          return { ...a, tag: carries ? (a.label || "") : "" };
+        })
         // The sandbox fixture is hand-written and the backend is not, so normalize
         // here rather than trusting either: personIds must be an ARRAY on every
         // asset from this point on. It arrives as one from doGet and is absent
@@ -3235,7 +3301,7 @@ function AssetTracker() {
       if (maintenanceFrequencyFilter !== "All frequencies" && r.item.frequencyLabel !== maintenanceFrequencyFilter) return false;
       if (maintenanceOwnerFilter !== "All owners" && r.item.owner !== maintenanceOwnerFilter) return false;
       if (!q) return true;
-      return [r.item.task, r.item.owner, r.asset.label, roomNameOf(r.asset, assets), typeNameOf(r.asset.type, typesList)]
+      return [r.item.task, r.item.owner, r.asset.tag, nameOf(r.asset, typesList), roomNameOf(r.asset, assets), typeNameOf(r.asset.type, typesList)]
         .some(v => (v || "").toLowerCase().includes(q));
     });
     if (maintenanceSortConfig) {
@@ -3366,8 +3432,14 @@ function AssetTracker() {
   // migration script, a hand-edited Config row) can still never hand out a
   // number that's already on an asset.
   function peekAssetNumber() {
-    const derived = Math.max(0, ...(assets || []).map(a => assetNumberFromLabel(a.label))) + 1;
-    return Math.max(nextAssetNumber || 0, derived);
+    // The stored counter alone. The old `Math.max(counter, derived-from-assets)`
+    // is DELETED (v32), and deliberately: it existed because a reused label was
+    // also a reused primary key, so the next asset silently inherited a dead
+    // one's audit history. With a real `id` that is impossible -- a recycled tag
+    // is now just a sticker someone printed twice, which decision 4 refuses at
+    // save time anyway. Deriving from the assets also stopped being meaningful
+    // the moment tags became optional: most rows no longer have one.
+    return nextAssetNumber || 1;
   }
   // What to store back after actually creating an asset with `label`. Normally
   // that's just peek+1, but the add form lets the suggested label be edited, so
@@ -3375,25 +3447,37 @@ function AssetTracker() {
   // that isn't a BCA number consumes nothing and leaves the counter alone.
   // Never decrements: a lower hand-typed number (filling a hole) doesn't pull
   // the counter back down over labels it has already issued.
-  function advanceAssetNumber(label) {
-    const used = assetNumberFromLabel(label);
+  function advanceAssetNumber(tag) {
+    const used = assetNumberFromTag(tag);
     const current = peekAssetNumber();
     return used ? Math.max(current, used + 1) : current;
   }
 
-  // An asset's `label` is the app-wide primary key: roomId/buildingId,
-  // panelLabel, feedsPanelLabel and every AuditLog row point at it, and every
-  // lookup that uses it matches ALL rows sharing it — edit does
-  // `assets.map(a => a.id === selectedId ? ...)`, delete does the mirror
-  // `filter`, and the backend groups child rows (comments/changes/breakers/...)
-  // by it. Two assets sharing a label therefore aren't two assets that happen
-  // to collide, they're one merged asset with no way to tell them apart again,
-  // so a collision has to be refused at creation. Case-insensitive and trimmed:
-  // "bca0082 " would be a distinct string but the same ID to a human.
-  function findLabelConflict(label) {
-    const key = String(label || "").trim().toLowerCase();
+  // A duplicate tag is refused at save (Eric's call, 2026-09-09), and the reason
+  // has CHANGED even though the behaviour has not. It used to be a data
+  // question: the label was the primary key, so two assets sharing one were not
+  // two colliding assets but one merged asset with no way back apart. With a
+  // real `id` that is gone -- a duplicate tag is now only two stickers reading
+  // the same thing, which is a trap for whoever is holding them rather than a
+  // corruption. Refused anyway, because that trap is worth refusing.
+  //
+  // EMPTY TAGS ARE SKIPPED, and that is load-bearing rather than tidy: the tag
+  // is optional now, so an unconditional check would have every untagged asset
+  // collide with every other untagged asset and nothing could ever be saved.
+  //
+  // Consequence worth knowing: swapping two assets' tags is a three-step edit
+  // (clear one, set the other, set the first), because the intermediate state is
+  // a duplicate. Accepted deliberately over allowing one.
+  //
+  // `excludeId` lets an EDIT ignore the asset being edited -- without it, saving
+  // an asset without touching its tag would collide with itself. Case-insensitive
+  // and trimmed: "bca0082 " is a distinct string but the same tag to a human.
+  function findTagConflict(tag, excludeId) {
+    const key = String(tag || "").trim().toLowerCase();
     if (!key) return null;
-    return (assets || []).find(a => String(a.label || "").trim().toLowerCase() === key) || null;
+    return (assets || []).find(a =>
+      a.id !== excludeId && String(a.tag || "").trim().toLowerCase() === key
+    ) || null;
   }
 
   function startAdd() {
@@ -3403,7 +3487,17 @@ function AssetTracker() {
     // becomes editable in phase 3 and the id never does. Minted client-side
     // because a uuid needs no counter and no coordination -- unlike a label,
     // which draws from nextAssetNumber behind the revision check.
-    setDraft({ ...emptyDraftFrom(columns), id: crypto.randomUUID(), label: assetLabelForNumber(peekAssetNumber()), type: "Computer", status: "Active", comments: [], changes: [], allocations: [] });
+    // A generated id, plus a suggested tag only when the starting type carries
+    // one. Switching the type in the form does not re-suggest -- the tag is
+    // ordinary editable data now, and silently rewriting something someone typed
+    // would be worse than leaving a tag on a type that will just hide the field.
+    const startType = "Computer";
+    setDraft({
+      ...emptyDraftFrom(columns),
+      id: crypto.randomUUID(),
+      tag: fieldAppliesTo("tag", startType) ? assetTagForNumber(peekAssetNumber()) : "",
+      type: startType, status: "Active", comments: [], changes: [], allocations: [],
+    });
     setShowAdd(true);
   }
 
@@ -3421,43 +3515,48 @@ function AssetTracker() {
     if (savingRef.current) return;
     if (showAdd) {
       // Every failure here sets a visible inline error instead of returning
-      // silently — the label is editable in this form, so "Save did nothing"
+      // silently — the tag is editable in this form, so "Save did nothing"
       // is indistinguishable from "Save worked" to whoever typed the typo.
-      const label = (draft.label || "").trim();
-      if (!label) { setAddError("Asset ID is required."); return; }
+      //
+      // The tag is NOT required as of v32: an asset can exist before anyone
+      // prints a sticker for it, and a Room or a User is never given one at all.
+      // Only the TYPE is required, since every field rule hangs off it.
+      const tag = (draft.tag || "").trim();
       if (!draft.type?.trim()) { setAddError("Type is required."); return; }
-      const conflict = findLabelConflict(label);
+      const conflict = findTagConflict(tag, draft.id);
       if (conflict) {
         // Name the existing asset — and say so when it's archived, since an
         // archived asset isn't in the default list view and "that ID is taken"
         // is otherwise baffling when nothing on screen is using it.
         const what = [typeNameOf(conflict.type, typesList), conflict.status === "Archived" ? "archived" : null].filter(Boolean).join(", ");
-        setAddError(`Asset ID "${conflict.label}" is already in use${what ? ` (${what})` : ""}. Asset IDs must be unique — pick a different one.`);
+        setAddError(`Asset ID "${conflict.tag}" is already in use${what ? ` (${what})` : ""}. Asset IDs must be unique — pick a different one, or clear it.`);
         return;
       }
-      const parentError = validateParentChoice(label, draft.type, draft.parentId, assets, typesList);
+      const parentError = validateParentChoice(draft.id, draft.type, draft.parentId, assets, typesList);
       if (parentError) { setAddError(parentError); return; }
       setAddError("");
       const createdEntry = {
-        at: new Date().toISOString(), by: currentUser || "", assetLabel: label,
+        at: new Date().toISOString(), by: currentUser || "", assetLabel: draft.id,
         assetType: draft.type, action: "created",
         // Where it was created, so the room shows the arrival.
         related: relate({ at: draft.parentId }),
       };
       // Left blank, the Name takes the same suggestion the field shows as its
       // placeholder — so a new asset is named at creation rather than relying on
-      // nameOf()'s Asset ID fallback forever. Typed over, whatever was typed wins.
-      const named = { ...stripDraftUiState(draft), label };
+      // nameOf()'s last-resort fallback forever. Typed over, whatever was typed wins.
+      // This matters more now than it did: with the tag optional, that fallback
+      // is a short uuid rather than a readable asset ID.
+      const named = { ...stripDraftUiState(draft), tag };
       if (!(named.name || "").trim()) named.name = suggestedNameFor(named, assets, typesList);
-      // `label` last, so the asset stores the trimmed value that was validated
-      // above rather than the raw draft string.
+      // `tag` last, so the asset stores the trimmed value validated above rather
+      // than the raw draft string.
       await persist(
         [...assets, { comments: [], changes: [], allocations: [], ...named }],
-        { auditLog: logAudit([createdEntry]), nextAssetNumber: advanceAssetNumber(label) }
+        { auditLog: logAudit([createdEntry]), nextAssetNumber: advanceAssetNumber(tag) }
       );
       cancelAdd();
     } else {
-      if (!draft.label?.trim() || !draft.type?.trim()) return;
+      if (!draft.type?.trim()) return;
       const original = selectedAsset;
       // A type that takes no parent has no Parent field on its form, so a stored
       // parentId is unreachable from the UI — refusing the save over it would be
@@ -3472,6 +3571,21 @@ function AssetTracker() {
       // type with no Parent field renders no ParentField, so without it a refused
       // save would look like a Save button that does nothing at all.
       if (parentError) { setDraft({ ...draftToSave, parentError }); return; }
+      // The tag is EDITABLE here as of v32 (retagging is the whole point of the
+      // refactor), so this form can now introduce a duplicate the way only the
+      // add form used to be able to. Refused the same way, through the same
+      // check, excluding this asset so an untouched tag never collides with
+      // itself. Reported as a form-level error rather than beside the field:
+      // `parentError` already established that channel, and a type whose tag
+      // field is hidden could otherwise refuse a save with nothing on screen
+      // saying why.
+      const editedTag = (draftToSave.tag || "").trim();
+      const tagConflict = findTagConflict(editedTag, original.id);
+      if (tagConflict) {
+        const what = [typeNameOf(tagConflict.type, typesList), tagConflict.status === "Archived" ? "archived" : null].filter(Boolean).join(", ");
+        setDraft({ ...draftToSave, parentError: `Asset ID "${tagConflict.tag}" is already in use${what ? ` (${what})` : ""}. Asset IDs must be unique — pick a different one, or clear it.` });
+        return;
+      }
       const editEntries = [];
       // parentId holds a stable label (id), not the display name — an asset's own
       // name field is edited like any other field (below), and everything that
@@ -3576,13 +3690,13 @@ function AssetTracker() {
     const refs = [];
     assets.forEach(a => {
       if (a.id === asset.id) return;
-      if (a.parentId === asset.id) refs.push(a.label);
+      if (a.parentId === asset.id) refs.push(nameOf(a, typesList));
       // An assignment dangles exactly like a parent does. Archiving a User is the
       // normal way to retire someone -- it keeps their history and every
       // assignment intact -- so this only blocks the permanent delete, which is
       // already the heavily-confirmed path.
-      if (personLabelsOf(a).includes(asset.id)) refs.push(`${a.label} (assigned)`);
-      (a.allocations || []).forEach(al => { if (al.roomId === asset.id) refs.push(`${a.label} (allocation)`); });
+      if (personLabelsOf(a).includes(asset.id)) refs.push(`${nameOf(a, typesList)} (assigned)`);
+      (a.allocations || []).forEach(al => { if (al.roomId === asset.id) refs.push(`${nameOf(a, typesList)} (allocation)`); });
       (a.breakers || []).forEach(b => (b.circuits || []).forEach(c => {
         if ((c.roomsServedIds || []).includes(asset.label)) refs.push(`${a.label} Slot ${slotsLabel_(b)} (circuit "${c.label}")`);
       }));
@@ -3640,7 +3754,7 @@ function AssetTracker() {
     if (savingRef.current) return;
     // Same persisted counter as startAdd() — no separate max-derivation here,
     // or the two would disagree the moment one of them issued a number.
-    const nextLabel = assetLabelForNumber(peekAssetNumber());
+    const nextLabel = assetTagForNumber(peekAssetNumber());
     const copy = {
       ...source,
       // Its own id, or the spread above would hand the copy the SOURCE's key and
@@ -4446,7 +4560,7 @@ function AssetTracker() {
       if (byName.has(name)) return;
       // A label is still issued from the counter (it is what people read), but
       // the id is what the assignment below actually points at.
-      const label = assetLabelForNumber(counter++);
+      const label = assetTagForNumber(counter++);
       const id = crypto.randomUUID();
       byName.set(name, id);
       created.push({
@@ -4691,7 +4805,7 @@ function AssetTracker() {
     const usages = [];
     (assets || []).filter(a => hasModule(a.type, "breakers")).forEach(panel => {
       (panel.breakers || []).filter(b => b.breakerTypeId === typeId).forEach(b => {
-        usages.push({ panelLabel: panel.label, slot: cellsLabel_(b) });
+        usages.push({ panelLabel: panel.tag || nameOf(panel, typesList), slot: cellsLabel_(b) });
       });
     });
     return usages;
@@ -4761,14 +4875,14 @@ function AssetTracker() {
     const commentRows = [];
     assets.forEach(a => {
       (a.comments || []).forEach(cm => {
-        commentRows.push({ "Asset ID": a.label, Type: typeNameOf(a.type, typesList), Room: displayRoom(a), When: formatWhen(cm.at), Comment: cm.text, "Logged by": cm.by || "" });
+        commentRows.push({ "Asset ID": a.tag, Name: nameOf(a, typesList), Type: typeNameOf(a.type, typesList), Room: displayRoom(a), When: formatWhen(cm.at), Comment: cm.text, "Logged by": cm.by || "" });
       });
     });
     const changeRows = [];
     assets.forEach(a => {
       (a.changes || []).forEach(ch => {
         changeRows.push({
-          "Asset ID": a.label, Type: typeNameOf(a.type, typesList), Room: displayRoom(a), When: formatWhen(ch.at),
+          "Asset ID": a.tag, Name: nameOf(a, typesList), Type: typeNameOf(a.type, typesList), Room: displayRoom(a), When: formatWhen(ch.at),
           "Change type": ch.changeType, Vendor: ch.vendor, Cost: parseFloat(ch.cost) || "", Note: ch.note,
           "Logged by": ch.by || "",
         });
@@ -4777,7 +4891,7 @@ function AssetTracker() {
     const allocationRows = [];
     assets.forEach(a => {
       (a.allocations || []).forEach(al => {
-        allocationRows.push({ "Asset ID": a.label, Item: a.type === "Bulk Item" ? (a.notes || a.label) : a.label, Room: roomNameFor(al.roomId, assets), Quantity: al.quantity });
+        allocationRows.push({ "Asset ID": a.tag, Item: nameOf(a, typesList), Room: roomNameFor(al.roomId, assets), Quantity: al.quantity });
       });
     });
 
@@ -4792,7 +4906,7 @@ function AssetTracker() {
       (a.breakers || []).forEach(b => {
         const breakerType = breakerTypes.find(t => t.id === b.breakerTypeId);
         breakerRows.push({
-          Panel: a.label, "Slot(s)": slotsFromCells(b.cells).join("/"), "Amp Rating": b.ampRating || "",
+          Panel: a.tag || nameOf(a, typesList), "Slot(s)": slotsFromCells(b.cells).join("/"), "Amp Rating": b.ampRating || "",
           Poles: polesFromCells(b.cells), Type: breakerType ? breakerType.name : "", Serial: b.serial || "",
           "Installed Date": b.installedDate || "", Notes: b.notes || "", Circuits: (b.circuits || []).length,
         });
@@ -5762,7 +5876,7 @@ function AssetTracker() {
       .map((item, idx) => ({ item, idx, status: maintenanceStatusOf(item), due: nextMaintenanceDue(item) }))
       .sort((a, b) => (a.due ? a.due.getTime() : -Infinity) - (b.due ? b.due.getTime() : -Infinity));
     const overdueMaintenanceCount = maintenanceItems.filter(m => m.status === "overdue").length;
-    // The header prints selectedAsset.label immediately to the left of this, so
+    // The header prints selectedAsset.tag immediately to the left of this, so
     // the name only earns a spot here when it's actually a name — nameOf() falls
     // back to the label, and "BCA0082  BCA0082" helps nobody. Generalizing the
     // Bulk Item parenthetical ("Folding Chair (Bulk Item)") to `name (type)` is
@@ -5770,7 +5884,7 @@ function AssetTracker() {
     // which is all it showed before — the type name it shares with 20 others.
     const detailName = nameOf(selectedAsset);
     const detailTypeName = typeNameOf(selectedAsset.type, typesList);
-    const titleText = detailName !== selectedAsset.label
+    const titleText = detailName !== selectedAsset.tag
       ? `${detailName} (${detailTypeName})`
       : selectedAsset.screenSize ? `${detailTypeName} · ${selectedAsset.screenSize}` : detailTypeName;
     // Room and Building are computed columns now, so they're shown for every
@@ -5787,14 +5901,13 @@ function AssetTracker() {
     ));
     const parentProblem = parentageProblem(selectedAsset, assets, typesList);
     const detailGroups = groupDetailColumns(visibleDetailColumns);
-    // "label" is excluded here (but not from addFormColumns) — it's the one
-    // field the whole app treats as a stable, unique identifier elsewhere
-    // (Breaker.panelLabel, Circuit.feedsPanelLabel, Room/Building roomId/
-    // buildingId references, the global auditLog's assetLabel matching), so
-    // editing it after creation would silently orphan all of those. Picking
-    // it before the asset exists (addFormColumns) is fine — nothing
-    // references it yet.
-    const editFormColumns = formColumnsFor(draft.type).filter(c => c.key !== "label");
+    // No field is held back any more. `label` used to be filtered out here
+    // because it was the primary key and renaming one orphaned its own audit
+    // history; the tag that replaced it is ordinary editable data, and being
+    // able to retag an asset is the point of the whole refactor. A type that
+    // carries no tag simply has no such column (fieldAppliesTo), so nothing
+    // needs excluding by name.
+    const editFormColumns = formColumnsFor(draft.type);
 
     // What's inside this place, at any depth. This used to be two hand-written
     // cases — a Room matched devices by roomId, a Building gathered its Rooms and
@@ -5836,7 +5949,7 @@ function AssetTracker() {
             <ArrowLeft size={20} />
           </button>
           <Icon size={17} style={{ color: C.brand, flexShrink: 0 }} />
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, fontWeight: 600, color: C.accent }}>{selectedAsset.label}</div>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, fontWeight: 600, color: C.accent }}>{selectedAsset.tag}</div>
           <div style={{ fontSize: 15, fontWeight: 600, color: C.brandDark, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{titleText}</div>
           {saveStatusPill && <div style={{ marginLeft: "auto", display: "flex" }}>{saveStatusPill}</div>}
         </div>
@@ -6072,7 +6185,7 @@ function AssetTracker() {
               .filter(a => a.type === "Electrical Panel")
               .flatMap(panel => (panel.breakers || []).map(breaker => ({ panel, breaker })))
               .flatMap(({ panel, breaker }) => (breaker.circuits || [])
-                .filter(c => (c.roomsServedIds || []).includes(selectedAsset.label))
+                .filter(c => (c.roomsServedIds || []).includes(selectedAsset.id))
                 .map(circuit => ({ panel, breaker, circuit })));
             if (feeds.length === 0) return null;
             return (
@@ -6094,7 +6207,7 @@ function AssetTracker() {
                           }}
                           style={{ background: "none", border: "none", padding: 0, font: "inherit", color: C.brandDark, fontWeight: 700, cursor: "pointer", textDecoration: "underline" }}
                         >
-                          Panel {panel.label}, Slot {slotsLabel_(breaker)}
+                          Panel {panel.tag || nameOf(panel, typesList)}, Slot {slotsLabel_(breaker)}
                         </button>
                       </span>
                     </div>
@@ -6156,7 +6269,7 @@ function AssetTracker() {
                     return (
                       <button key={bulk.id} onClick={() => openDetail(bulk)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
                         <BIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
-                        <span style={{ fontSize: 14, color: C.ink, flex: 1 }}>{nameOf(bulk) !== bulk.label ? nameOf(bulk) : typeNameOf(bulk.type, typesList)}</span>
+                        <span style={{ fontSize: 14, color: C.ink, flex: 1 }}>{nameOf(bulk, typesList) !== bulk.tag ? nameOf(bulk, typesList) : typeNameOf(bulk.type, typesList)}</span>
                         <span style={{ fontWeight: 600, color: C.brandDark }}>× {quantity}</span>
                         <ChevronRight size={14} style={{ color: C.placeholder }} />
                       </button>
@@ -7514,7 +7627,7 @@ function AssetTracker() {
                     value={draft[c.key] || ""}
                     // Editing the Asset ID clears a stale duplicate-ID error, so
                     // the message never outlives the value it was complaining about.
-                    onChange={v => { if (c.key === "label" && addError) setAddError(""); setDraft({ ...draft, [c.key]: v }); }}
+                    onChange={v => { if (c.key === "tag" && addError) setAddError(""); setDraft({ ...draft, [c.key]: v }); }}
                     wide={c.key === "notes"}
                     // The Name placeholder previews exactly what saving blank
                     // will store, so the default is visible before it's chosen
@@ -7631,10 +7744,10 @@ function AssetTracker() {
                       key={c.key}
                       style={{
                         padding: "12px 14px",
-                        fontSize: c.key === "label" ? 12 : 13,
-                        fontFamily: c.key === "label" ? "'IBM Plex Mono', monospace" : undefined,
-                        fontWeight: c.key === "label" ? 600 : isTypeCol ? 500 : 400,
-                        color: c.key === "label" ? C.accent : applies ? C.muted : C.border,
+                        fontSize: c.key === "tag" ? 12 : 13,
+                        fontFamily: c.key === "tag" ? "'IBM Plex Mono', monospace" : undefined,
+                        fontWeight: c.key === "tag" ? 600 : isTypeCol ? 500 : 400,
+                        color: c.key === "tag" ? C.accent : applies ? C.muted : C.border,
                         overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                         display: "flex", alignItems: "center", gap: 8,
                         position: i === 0 ? "sticky" : "static",
@@ -9106,7 +9219,7 @@ function BreakersTabContent({
       {feed && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 14px", marginBottom: 14, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, fontSize: 13, color: C.ink }}>
           <Zap size={14} color={C.accent} />
-          Fed from <strong style={{ fontWeight: 700, color: C.brandDark }}>{feed.panel.label}</strong>, Slot {cellsLabel_(feed.breaker)}
+          Fed from <strong style={{ fontWeight: 700, color: C.brandDark }}>{feed.panel.tag || nameOf(feed.panel)}</strong>, Slot {cellsLabel_(feed.breaker)}
         </div>
       )}
 
@@ -9489,7 +9602,7 @@ function PanelLegendCard({ slotCount, breakers, unassignedCircuits, allAssets, p
       <div style={{ minHeight: tiled ? 0 : `${cardHeightIn}in`, padding: tiled ? 0 : `0 ${LEGEND_SIDE_PAD_IN}in`, display: "flex", flexDirection: "column" }}>
         <div style={{ height: tiled ? "auto" : `${LEGEND_BAND_IN}in`, display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: "8pt", paddingBottom: "4pt", marginBottom: "4pt", borderBottom: "1.5pt solid #000" }}>
           <div>
-            <div style={{ fontSize: "13pt", fontWeight: 700, lineHeight: 1.1 }}>{panelAsset.label} — Circuit Directory</div>
+            <div style={{ fontSize: "13pt", fontWeight: 700, lineHeight: 1.1 }}>{panelAsset.tag || nameOf(panelAsset)} — Circuit Directory</div>
             <div style={{ fontSize: "8pt", color: "#333", marginTop: "2pt" }}>
               {place ? `${place} · ` : ""}{slotCount} slots
             </div>
@@ -10174,7 +10287,8 @@ function CircuitTargetFields({ values, setValues, assets, otherPanels }) {
             const p = otherPanels.find(x => x.id === id);
             if (!p) return id;
             const where = pathOf(p, assets);
-            return where ? `${p.label} — ${where}` : p.label;
+            const shown = p.tag || nameOf(p);
+            return where ? `${shown} — ${where}` : shown;
           }}
           title="Select a panel"
         />

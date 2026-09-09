@@ -260,7 +260,21 @@ backend's real response. A fixture that is all-legacy would hide every bug in th
 
 Bump `APP_VERSION`. No backend version change.
 
-### Phase 3 — backend v32 + frontend: `label` becomes `tag`
+### Phase 3 — backend v32 + frontend: `label` becomes `tag` — **BUILT 2026-09-09, not deployed**
+
+Two corrections to the plan as written, both found while building:
+
+- **`label` is NOT mirrored from `tag`.** The plan said the backend should write both,
+  `label` mirroring `tag`, "so the change stays reversible". That is self-defeating
+  once decision 3 clears the tag on places and users: mirroring would clear their
+  labels too, destroying the very thing being kept as the way back. Each column is now
+  written from its own client value, and nothing in the UI writes `label` at all — it
+  rides along untouched until phase 4. The backend change is one name in `ASSET_FIELDS`.
+- **The EDIT form needed a duplicate check the plan never mentioned.** It only ever
+  named the add form, because the label was add-only. Making the tag editable means the
+  edit form can introduce a duplicate too, so it runs the same `findTagConflict` with
+  the asset itself excluded — without that exclusion, saving an asset without touching
+  its tag would collide with itself.
 
 Now the user-visible payoff. This is where the original request actually lands.
 
