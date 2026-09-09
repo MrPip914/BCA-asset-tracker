@@ -1749,6 +1749,43 @@ When you do:
     silent-failure modes fail it: a Room that stops excluding the tag, a `nameOf` that loses
     its last rung, and a conflict check that stops skipping empties.
 
+- **A ONE-TIME id migration exists and is meant to be DELETED after use**:
+  `migrate-asset-ids.mjs` + `migrate-asset-ids-lib.mjs` + `test-migrate-asset-ids.mjs`
+  (Eric's call, 2026-09-09 — explicitly NOT a menu item, since it applies to exactly one
+  situation and would otherwise sit next to "Wipe all data" forever).
+  - **What it is for.** Phase 1 adopted each asset's LABEL as its `id`, which is what made
+    the refactor need no migration — every reference already stored was already a valid id.
+    The cost is a sheet that carried data across v31 ends up with two kinds of id: legacy
+    `BCA0001`-shaped ones, uuids on anything created since. Nothing breaks (an id is opaque
+    everywhere), but once phase 4 drops `label` a legacy id is the only trace of an old
+    label with nothing left to explain it.
+  - **It rewrites 12 key-bearing columns across 8 tabs**, and `AuditLog` is the dangerous
+    one. Every other tab is rebuilt by the app's next save, so a mistake self-corrects;
+    AuditLog is append-only, outlives the assets it describes, and nothing rewrites it — a
+    wrong mapping there is silent, permanent, and indistinguishable from real history.
+    Version history is the only undo.
+  - **Dry run is the DEFAULT**; `--apply` is required. It verifies every reference resolves
+    BEFORE writing anything and refuses the whole migration if any does not.
+  - **A pre-existing dangling reference is carried through unchanged, not "fixed"** — one
+    that pointed nowhere before still points nowhere after, which is honest — but it is
+    reported, since a migration is exactly when someone would want to know.
+  - **An asset whose id is already a uuid is left alone.** Remapping one would churn every
+    reference to it for nothing.
+  - **It bumps the revision counters, and that is not optional**: a browser open through the
+    run holds the old ids and its next save would write them straight back.
+  - **Everyone must be OUT of the app while it runs**, for the same reason.
+  - **Ordering**: it can only run after v31+ is deployed AND one save has written the `id`
+    column — before that there is no column to write into. On `bca` that means after the
+    v32 deploy, and the Sheet must be shared with the service account first (as of
+    2026-09-09 only `dev` is).
+  - `sheet.mjs` gained `export` on six helpers so this reuses its auth, backup, plain-text
+    write and revision bump rather than re-rolling them. The decision logic lives in the
+    `-lib` half with no network in it, because rehearsing an AuditLog rewrite against a live
+    Sheet is precisely what is being avoided; `test-migrate-asset-ids.mjs` drives it against
+    fixtures. Verified by mutation that dropping AuditLog from the column list, losing
+    `related`'s role suffix, treating a comma-joined list as one key, or remapping an
+    existing uuid all fail the suite.
+
 - **v30 is DEPLOYED, confirmed 2026-09-04** by fetching the `/exec` URL and reading
   `scriptVersion` back. It makes the admin import read a **tab in the Sheet** instead of
   Drive. v29 shipped the `DriveApp` version, which failed at runtime — "You do not have

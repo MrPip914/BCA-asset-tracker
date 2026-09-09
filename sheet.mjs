@@ -163,7 +163,7 @@ function tenants() {
   return fs.existsSync(TENANTS_PATH) ? readJson(TENANTS_PATH, "tenant map") : {};
 }
 
-function sheetIdFor(tenant) {
+export function sheetIdFor(tenant) {
   const map = tenants();
   const id = map[tenant];
   if (!id) {
@@ -175,7 +175,7 @@ function sheetIdFor(tenant) {
 }
 
 // ------------------------------------------------------------------ sheet io
-async function sheetMeta(sheetId) {
+export async function sheetMeta(sheetId) {
   const meta = await api(`${API}/${sheetId}?fields=properties.title,sheets.properties`);
   return {
     title: meta.properties.title,
@@ -194,7 +194,7 @@ const quote = (tab) => `'${String(tab).replace(/'/g, "''")}'`;
 // screen, as a string. getValues()/UNFORMATTED_VALUE would hand back a serial
 // number for any cell Sheets managed to interpret as a date, which is the exact
 // corruption the write path takes pains to avoid creating.
-async function readGrid(sheetId, tab) {
+export async function readGrid(sheetId, tab) {
   const res = await api(
     `${API}/${sheetId}/values/${encodeURIComponent(quote(tab))}` +
     `?valueRenderOption=FORMATTED_VALUE&dateTimeRenderOption=FORMATTED_STRING`
@@ -235,7 +235,7 @@ export function rowsToValues(headers, rows) {
   return rows.map((r) => headers.map((h) => (r[h] === undefined || r[h] === null ? "" : String(r[h]))));
 }
 
-async function backup(sheetId, label) {
+export async function backup(sheetId, label) {
   const dir = path.join(os.homedir(), ".bca-asset-tracker-backups",
     `${label}-${new Date().toISOString().replace(/[:.]/g, "-")}`);
   fs.mkdirSync(dir, { recursive: true });
@@ -322,7 +322,7 @@ async function cmdWrite(tenant, tab, file, flags) {
   }
 }
 
-async function writeRows(sheetId, tab, headers, rows) {
+export async function writeRows(sheetId, tab, headers, rows) {
   const meta = await sheetMeta(sheetId);
   const target = meta.tabs.find((t) => t.title === tab);
   if (!target) die(`No tab named "${tab}".`);
@@ -371,7 +371,7 @@ export function colLetter(index) {
 
 // Config is key/value rows, so a counter bump is a single cell edit — found by
 // key, never by row number, since nothing keeps Config's row order stable.
-async function bumpRevisions(sheetId, domains) {
+export async function bumpRevisions(sheetId, domains) {
   const grid = await readGrid(sheetId, "Config");
   const headers = (grid[0] || []).map(String);
   const keyCol = headers.indexOf("key");
