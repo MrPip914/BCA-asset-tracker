@@ -1,6 +1,20 @@
 # Type management: categories, required fields, field data types — plan
 
-Status: **not started.** Written 2026-09-09 from Eric's three asks.
+Status: **decided 2026-09-09, building.** Written from Eric's three asks; the three
+open questions at the bottom were put to him and answered, and this document has been
+updated to match rather than left describing the version he did not pick.
+
+**Eric's decisions, 2026-09-09:**
+
+1. **Required is enforced on every save — add AND edit.** A rule you can dodge by
+   editing something else is not a rule, and this is the only way a new requirement
+   ever reaches the assets already on the sheet.
+2. **Categories get their own Config key**, orderable and renameable, at the cost of a
+   backend version bump and a deploy to every tenant. This is the answer that changes
+   the plan most: categories moves from first to **last** in the sequence, so the other
+   two ship without waiting on a deploy and the whole project costs exactly one.
+3. **"Parent is required" stays out of scope.** Unassigned is a real state and requiring
+   a parent needs its own answer for it.
 
 Three changes to how asset types are managed, in one document because they land in
 the same two places (the type editor and the column record) and because two of them
@@ -12,10 +26,12 @@ share a UI that only makes sense built once.
 3. **Field data types** — a field declares what kind of value it holds, and the form
    only lets you enter that kind.
 
-## The headline: none of this needs an Apps Script deploy
+## Two of the three need no Apps Script deploy
 
-That is unusual enough here to state first, and it is not luck — it falls out of
-where each setting is stored.
+This section originally read "none of this needs a deploy", and that was true of the
+plan as first written. Eric's choice of a real Config key for categories spends that
+for one of the three, deliberately and with the cost known. It stays true of the other
+two, and the reasoning is worth keeping because it is what makes them cheap:
 
 - `AssetTrackerSync.gs` writes the Config tab's `columns` and `typeSettings` and
   `typesList` rows as **whole JSON blobs** (`JSON.stringify(body.columns || [])`), so
@@ -24,12 +40,14 @@ where each setting is stored.
   which reads `c.custom` and `c.key` and ignores everything else.
 - Nothing here adds a Config **key**, an `ASSET_FIELDS` entry, or an Assets column.
 
-So `SCRIPT_VERSION`/`FRONTEND_SCRIPT_VERSION` do not move, no tenant needs deploying,
-and the whole thing ships with the frontend from `main`. **This is a real constraint on
-the design, not just a happy outcome** — the moment any of these three wants its own
-Config key (see "Categories: the alternative" below), the cost jumps from one merge to
-a deploy on every tenant, and the feature works in-session and forgets on reload until
-that deploy lands. Keep them out of new keys unless there is a reason worth that.
+So **data types and required fields** move no version, need no tenant deployed, and
+ship with the frontend from `main`. **Categories does not**, because a new Config
+*key* is the one thing `doPost` cannot absorb: it writes a fixed list of keys and
+silently drops the rest, so until the deploy lands a category would work in-session and
+be forgotten on reload — the same window the pre-v24 `typeSettings` work sat in.
+
+That asymmetry is the whole reason for the sequence below. Keep any *future* per-field
+or per-type setting out of a new key unless it needs what categories needed.
 
 `bumpAppVersion`: `APP_VERSION` should move for each phase, since these are exactly the
 changes where "did my browser get the new build?" gets asked.
@@ -40,8 +58,38 @@ changes where "did my browser get the new build?" gets asked.
 
 ### Where a category lives
 
-**Recommendation: the category is a plain name string on the type's own settings —
-`typeSettings[typeId].category = "Places"` — and there is no separate category list.**
+**DECIDED: categories are their own Config key.** `typeCategories` holds
+`[{ id, name }]` with array order as display order, and `typeSettings[typeId].categoryId`
+points at one. Backend **v33**.
+
+That buys three things the cheap version could not: categories you can **order by hand**
+(rather than inheriting type order), an **empty category** you can create and fill later,
+and a **rename that touches one row** instead of every type in the category.
+
+`categoryId` holds an id, not a name, which puts categories back under the app's ordinary
+reference convention — see "Reference conventions" in CLAUDE.md. Two consequences follow
+from that and are both deliberate:
+
+- **A dangling `categoryId` is not an error, it is Uncategorized.** Deleting a category
+  does not rewrite the types that named it; they simply fall back, the same permissive-
+  storage stance `parentageProblem` and `removeType` already take. So category deletion
+  needs no in-use block, only a confirmation naming how many types will become
+  uncategorized.
+- **Renaming a category is a one-row edit** with nothing to keep in sync, which is the
+  entire point of storing the id.
+
+### The version this replaced, kept for the reasoning
+
+The original recommendation was a plain name string on `typeSettings[typeId].category`,
+with the category list derived from the types naming one. It needed no deploy and it
+broke the "store an id, never a display name" rule — safely, because a category has
+exactly one holder (one JSON blob rewritten in full and atomically on every config save)
+rather than the scattered, independently-written holders that rule exists for.
+
+It is written down because the argument is reusable: **the store-an-id rule is about
+holders in more than one place written at more than one time**, not about names being
+inherently unsafe. What sank it here was not correctness but capability — no explicit
+ordering, and no way to create a category before there is a type to put in it.
 
 The set of categories is *derived* from the types that name one, in the order those
 types appear in `typesList` (first appearance wins). "Uncategorized" is the absence of
@@ -72,21 +120,6 @@ Two consequences to accept up front:
   appear. There is no drag-to-reorder for categories. If that turns out to matter,
   see the alternative below.
 
-### Categories: the alternative, and when to take it
-
-A real `typeCategories` Config key holding `[{ id, name }]` with array order as display
-order, and `typeSettings[typeId].categoryId` pointing at it. That buys explicit
-ordering, empty categories, and a rename that touches one row.
-
-It costs a **backend version bump and a deploy to every tenant**, because `doPost`
-writes a fixed list of config keys and silently drops the rest — so until the deploy
-lands, categories would work in-session and be forgotten on reload. That is the same
-window the pre-v24 `typeSettings` work sat in, and it is a real cost for a school with
-six categories.
-
-Take it if Eric wants categories he can order by hand, or wants to define the category
-scheme before assigning types to it. Otherwise the string is the right size.
-
 ### Where categories show up
 
 - **`TypeManagerModal`'s list** (index.html ~8840). Rows group under a category
@@ -110,16 +143,33 @@ colours.
 
 ### Work
 
-- `typeEntryFor` already merges `TYPE_SETTINGS` over `TYPE_REGISTRY`, so
-  `entry.category` needs no new plumbing. Ship the built-ins with a `category` in
-  `TYPE_REGISTRY` (Places: Room/Building/Campus; People: User; Equipment: everything
-  else) so the grouping is useful on day one without anyone editing anything.
-- `categoriesInOrder(typesList)` — derive the ordered list, used by both the manager
-  and the pickers.
-- `TypeManagerModal`: a Category combobox in the edit form; grouped rows in the list.
-- `saveTypeSettings` writes `category` into the `typeSettings[id]` object it already
-  builds. One line.
-- `SelectionModal` + `ColumnFilterModal`: optional grouping.
+Backend (**v33**, deployed to every tenant before the frontend merges):
+
+- `doGet` returns `typeCategories` alongside the other config blobs.
+- `doPost` adds one `configRows.push({ key: "typeCategories", ... })` line to the
+  fixed key list. Nothing else — no `ASSET_FIELDS` entry, no new tab, no migration.
+- `SCRIPT_VERSION` → `"v33"`, and `FRONTEND_SCRIPT_VERSION` in the same commit.
+
+Frontend:
+
+- Ship built-in categories in `TYPE_REGISTRY` (Places: Room/Building/Campus; People:
+  User; Equipment: the rest) so the grouping is useful before anyone edits anything.
+  A built-in category's id is its own name, the same trick `typesList` and the asset
+  key refactor both used: it needs no migration and no seeding step, and a stored
+  `typeCategories` that predates a new built-in still resolves it.
+- `categoryOf(typeId)` / `groupTypesByCategory(types)` — used by the manager and both
+  pickers, with dangling and absent ids both landing in a trailing "Uncategorized".
+- `TypeManagerModal`: a Category picker in the edit form, grouped rows in the list, and
+  a small category manager (add / rename / reorder / delete-with-count) reached from
+  the same modal.
+- `saveTypeSettings` writes `categoryId`; a new `saveTypeCategories` writes the list.
+  Both are the config domain, so a category edit is one `persist()` like every other.
+- `SelectionModal` + `ColumnFilterModal`: optional `groupForOption`, flat when absent.
+
+**Release order is backend first**, for the reason the phase-2 key refactor documented:
+the frontend ships from `main` to every tenant at once while backends deploy one at a
+time, so merging first would put a category-writing frontend in front of a backend that
+drops the key. `node deploy.mjs --status` is the gate, not a line in a file.
 
 ---
 
@@ -170,12 +220,11 @@ which should be stated to users rather than discovered:
   toolbar's bulk reassign and move-to-room, and the Sheet's own admin import. None of
   these go through the add/edit form and none should start refusing.
 - **Editing an old asset to fix a typo will refuse to save until the required field is
-  filled.** This is the intended behaviour (it is how the rule gets applied to existing
-  data at all) and it is also the one way this feature can be genuinely annoying. Worth
-  a decision from Eric before building: nag-on-every-edit, or only enforce on *add* and
-  on an edit that touches the required field itself. Recommendation: nag on every edit —
-  a rule you can dodge by editing something else is not a rule — but say so plainly in
-  the error, naming the field.
+  filled.** DECIDED (Eric, 2026-09-09): **nag on every edit.** It is the only way a rule
+  reaches data that predates it, and a rule you can dodge by editing something else is
+  not a rule. The cost is real and the mitigation is entirely in the wording: the error
+  names the fields and the type, so it reads as "a Computer needs a Serial" rather than
+  as a Save button that stopped working.
 
 ### The form-error channel needs renaming first
 
@@ -199,7 +248,7 @@ looks identical in both forms.
 
 - **Type editor**: the Fields chip row cannot carry two more per-field settings. It
   becomes a **list, one row per field**: the on/off toggle (what the chip does today),
-  a Required checkbox, and the data-type control from phase 3. Off fields render dimmed
+  a Required checkbox, and the data-type control from phase 1. Off fields render dimmed
   with their extra controls disabled, so the row list is stable as you tick things.
   - One wrinkle to surface in that UI: **Required is per-type, Data type is per-column**
     — the same row carries one setting that affects this type only and one that affects
@@ -211,7 +260,7 @@ looks identical in both forms.
   fields get a red border and the form-level line names them ("Serial and Purchase Date
   are required for a Computer."). `Field` gains an `error` prop; `ParentField`,
   `UserField`, `PeripheralsField` and `BulkTypeField` need the same, which is a good
-  reason to do phase 3's `Field` rework first (see sequencing).
+  reason the `Field` rework lands in phase 1 (see Sequencing).
 - **Detail view**: nothing. A missing required value on an existing asset is not an
   error state to decorate the whole app with; it surfaces when someone edits.
 
@@ -307,7 +356,8 @@ anything.
 
 ### Where the control lives
 
-The per-field row in the type editor (shared with phase 2), **and** the Columns menu,
+The per-field row in the type editor (shared with the required checkbox), **and** the
+Columns menu,
 which is where a custom column is created (`addColumn`, ~4474) and deleted. A column
 created there should be able to declare its type at creation rather than needing a trip
 through the type editor afterwards.
@@ -316,20 +366,23 @@ through the type editor afterwards.
 
 ## Sequencing
 
-Three commits, in this order, each shippable on its own:
+Reordered once Eric chose a real Config key for categories. The original sequence put
+categories first because it was the simplest; it now goes **last**, because it is the
+only one that has to wait on a deploy, and putting it there means the other two are live
+in the meantime and the project costs exactly one deploy instead of gating everything
+behind it.
 
-1. **Categories.** Touches `TYPE_REGISTRY`, `typeSettings`, `TypeManagerModal`,
-   `SelectionModal`, `ColumnFilterModal`. No dependency on the other two.
-2. **Data types.** The `Field` rework (an `error` prop and a `dataType` prop) is the
-   thing phase 3 needs anyway and the thing phase 2's inline errors depend on, so it
-   goes second even though "required" is the simpler feature. Also carries the
-   `parentError` → `formError` rename, since the error channel gets its second and
-   third occupant here.
-3. **Required fields.** Now a small change: a `requiredFields` array, a validation pass
-   in `saveDraft`, and a checkbox in a per-field row that phase 2 already built.
-
-Phases 2 and 3 share the type editor's per-field row list. Build it in phase 2 with the
-data-type control and an empty slot; phase 3 fills the slot.
+1. **Field data types** — frontend only, merges immediately. Carries the `Field` rework
+   (a `dataType` prop and an `error` prop), which is what the required-field
+   inline errors need,
+   and carries the `parentError` → `formError` rename, since the error channel gains its
+   second and third occupant here. Also builds the type editor's **per-field row list**
+   with the data-type control and an empty slot beside it.
+2. **Required fields** — frontend only, merges immediately. Now small: a
+   `requiredFields` array, a validation pass in `saveDraft`, and a checkbox filling the
+   slot phase 1 left.
+3. **Categories** — backend **v33** plus frontend. Deploy to every tenant first,
+   confirm with `node deploy.mjs --status`, then merge.
 
 ## Testing
 
@@ -351,15 +404,19 @@ own and that need deliberate attention, both of which have burned this project b
   ignores, a data type that resets to default on every load, a category that disappears,
   and a stale required entry that springs back.
 
-## Open questions for Eric
+## The questions, and the answers
 
-1. **Required on every edit, or only on add and on edits that touch the field?**
-   Recommendation: every edit. It is the only way the rule reaches existing data, and a
-   rule with a dodge is not a rule.
-2. **Categories as plain strings (no deploy, no explicit ordering) or as their own
-   Config key (a deploy, orderable, empty categories possible)?** Recommendation: plain
-   strings, which is what this plan assumes throughout.
-3. **"Parent is required" — worth pulling into scope?** It is the most valuable single
-   rule available and it is the one this plan explicitly leaves out, because `parent` is
-   a structural field and Unassigned is a deliberate state that a required rule would
-   need an answer for.
+Kept rather than deleted, because two of the three answers went against the
+recommendation and the reasons are what a later reader will want.
+
+1. **Required on every edit, or only on add?** → **Every edit** (as recommended). The
+   only way the rule reaches existing data.
+2. **Categories as plain strings, or their own Config key?** → **Own Config key**,
+   against the recommendation. The recommendation optimised for shipping without a
+   deploy; Eric optimised for the feature being properly manageable — orderable, with
+   empty categories and a one-row rename — and accepted one deploy for it. Resequencing
+   to put categories last recovers most of what the recommendation was protecting: the
+   other two features do not wait on it.
+3. **"Parent is required" in scope?** → **No** (as recommended). Left as a follow-on
+   that needs its own answer for Unassigned, which is a deliberate state — a spare in a
+   drawer, a unit away for repair — and not a gap to be nagged about.
