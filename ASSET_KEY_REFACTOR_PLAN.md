@@ -112,24 +112,24 @@ already done.
 the opposite, at length. It was written from a stale clone and was simply wrong; the work
 had already landed on the `dev` branch. What is actually true, verified 2026-09-09:
 
-- `clients.js` **on the `dev` branch** defines a second tenant: `dev`, its own Sheet, its
-  own Apps Script deployment, `labelPrefix: "DEV"`. `/dev/` falls back to it automatically.
+- `clients.js` **on `main`** defines a second tenant: `dev`, its own Sheet, its own Apps
+  Script deployment, `labelPrefix: "DEV"`. `/dev/` falls back to it automatically.
 - Both backends report **v30** — checked by fetching each `/exec`, not read off a line
   here. They are in sync with the repo and with each other.
 - `deploy.mjs` already takes a tenant: `node deploy.mjs dev`, plus `--all` and `--status`.
   A bare invocation refuses and lists the tenants rather than guessing.
 - `new-tenant.mjs` bootstraps a tenant from nothing; `set-tenant.mjs` records its ids.
+- The `/deploy` block Eric is handed already names a tenant and points branch testing at
+  `dev` rather than at the school's URL (commit `4e3f420`).
 
-So the deploy story is solved. Two things remain.
+So the deploy story is solved, and **`main` and `dev` are now identical** (both at
+`4e3f420` as of 2026-09-09) — the tenant, the tooling and the merge all landed on `main`,
+so this refactor branches from `main` like any other work. An earlier draft asked which
+branch to build on; that question is closed.
 
-**1. Decide which branch this refactor is built on.** The dev tenant entry and the
-multi-tenant `deploy.mjs` live on `dev`, which is 3 commits ahead of `main` and 1 behind
-it. A branch cut from `main` cannot deploy to the dev tenant at all — `main`'s `deploy.mjs`
-still has the single-tenant guard and its `clients.js` has no `dev` entry. Either sync
-`dev` and `main` first, or branch this work from `dev`. **Eric's call; nothing else in this
-plan depends on which.**
+One thing remains.
 
-**2. Get live BCA data into the dev Sheet.** Still a manual step, and still Eric's — a
+**Get live BCA data into the dev Sheet.** Still a manual step, and still Eric's — a
 Claude Code cloud session cannot do it or read the live Sheet, because `/exec` has needed a
 signed-in session since v18 and credential handling is blocked there (the same reason
 `clasp login` cannot run there).
