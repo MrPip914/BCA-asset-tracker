@@ -26,7 +26,23 @@
 // Run: node test-backend-maintenance-link.js   (exits non-zero on failure)
 const fs = require('fs');
 const path = require('path');
-const src = fs.readFileSync(path.join(__dirname, 'AssetTrackerSync.gs'), 'utf8');
+// Normalised to LF on read, so a marker below can be written with a plain \n and be right
+// on every checkout. Git for Windows defaults to core.autocrlf=true and there is no
+// .gitattributes pinning this, so the same .gs is CRLF on Eric's machine and LF in a cloud
+// session, in CI, or on a Mac.
+//
+// The asymmetry is the trap, and it is worth stating because it hid this for weeks: a
+// marker written '\n    const auditLog =' works on BOTH, since that \n matches the LF half
+// of a \r\n pair. A marker written '\r\n    const auditLog =' works only on CRLF and throws
+// "end marker not found" everywhere else, before a single assertion runs. So the broken
+// form passes for whoever writes it on Windows and dies for everyone else — which is
+// exactly what happened in this file's twin, test-backend-maintenance-link.js.
+//
+// Normalising means neither form can be wrong, instead of one of them being accidentally
+// right.
+const src = fs
+  .readFileSync(path.join(__dirname, 'AssetTrackerSync.gs'), 'utf8')
+  .replace(/\r\n/g, '\n');
 
 function between(startMarker, endMarker) {
   const i = src.indexOf(startMarker);
@@ -36,7 +52,7 @@ function between(startMarker, endMarker) {
   return src.slice(i, j);
 }
 
-const readBlock = between('const assets = assetRows.map(a => {', '\r\n    const auditLog =');
+const readBlock = between('const assets = assetRows.map(a => {', '\n    const auditLog =');
 const writeBlock = between('assets.forEach(a => {', 'writeTable_(SHEET_NAMES.comments');
 
 const readSide = new Function(

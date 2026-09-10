@@ -16,33 +16,6 @@ version that fixed them.
 
 ## Open
 
-### Three backend tests slice the .gs with hardcoded `\r\n` markers and fail on any LF checkout
-**Found:** 2026-09-10, while auditing the deploy docs — `node test-backend-maintenance-link.js`
-throws before running a single assertion.
-**Needs a deploy:** no — test files only.
-**Confirmed:** the failure reproduces on a clean checkout with my changes stashed, so it is
-not from that work. `AssetTrackerSync.gs` is LF in the git blob AND in the working copy
-(`grep -c $'\r'` returns 0 for both), while the test looks for `'\r\n    const auditLog ='`.
-
-`test-backend-maintenance-link.js` slices `doGet`/`doPost` out of the .gs as source text
-using markers that embed a **CRLF**. Git for Windows defaults to `core.autocrlf=true`, so
-Eric's checkout has CRLF and the marker matches; every LF checkout — a cloud session, CI, a
-Mac, anyone with `autocrlf=false` — gets `Error: end marker not found` and the whole file
-exits non-zero without testing anything. There is no `.gitattributes` pinning either way.
-
-`test-backend-admin.js` and `test-frontend-export.js` also contain `\r\n` markers and
-currently pass, so they are either tolerant or matching a different site — worth checking
-alongside, since the same trap is sitting in them.
-
-Fix is one line per marker: match `/\r?\n/` rather than a literal `\r\n`. Pinning the
-repo's line endings with a `.gitattributes` would also work and is the broader change.
-
-**Blocks:** the maintenance-link backend contract is currently unverified anywhere except
-Eric's own machine — and this is the suite CLAUDE.md cites as proving all four silent
-failure modes of the `maintenanceId` column. It does not block the app.
-
----
-
 ### A value that doesn't match its field's kind shows as BLANK, then refuses the save
 **Found:** 2026-09-10. **Mostly closed the same day** — see below.
 **Needs a deploy:** no — `index.html` only.
@@ -290,6 +263,39 @@ user is least sure whether their click worked.
 ---
 
 ## Fixed
+
+### `test-backend-maintenance-link.js` never ran on an LF checkout — fixed 2026-09-10
+**Found:** 2026-09-10 while auditing the deploy docs; the whole file exited non-zero on
+`Error: end marker not found` before a single assertion ran.
+**Needed a deploy:** no — test files only.
+
+It sliced `doGet`/`doPost` out of `AssetTrackerSync.gs` using a marker with a hardcoded
+**CRLF**: `'\r\n    const auditLog ='`. Git for Windows defaults to `core.autocrlf=true`
+and nothing in this repo pins line endings, so the `.gs` is CRLF on Eric's machine and LF
+in a cloud session, in CI, or on a Mac.
+
+**The asymmetry is why it hid for weeks, and is the part worth keeping.** Its twin,
+`test-backend-assetid.js`, sliced at the same place with `'\n    const auditLog ='` — and
+that form works on BOTH, because the `\n` matches the LF half of a `\r\n` pair. So an LF
+marker is accidentally universal while a CRLF marker only works on CRLF. The broken form
+therefore passes for whoever writes it on Windows and dies for everyone else, with no
+signal on the machine where it was written.
+
+Fixed by normalising the source on read (`.replace(/\r\n/g, '\n')`) in both files, so
+neither marker form can be wrong rather than one of them being accidentally right.
+Verified by running both suites against a `.gs` converted to CRLF and back to LF.
+
+**The other two files that contain `\r\n` are correct and were left alone** — an earlier
+version of this entry claimed all three were broken, which was wrong.
+`test-frontend-export.js` already detects the line ending (`src.includes('\r\n') ? ... `),
+and `test-backend-admin.js`'s is CSV fixture data, where CRLF is the format and the point
+of the test.
+
+**Still open, and the broader fix:** a `.gitattributes` pinning the repo's line endings
+would remove the whole class. Not done — it would restate every checkout in the repo and
+is a bigger change than the bug warranted.
+
+---
 
 ### Export did nothing at all, on every tab — fixed 2026-09-10
 **Found:** 2026-09-10, reported by Eric ("clicked Export on the Maintenance tab, didn't get
