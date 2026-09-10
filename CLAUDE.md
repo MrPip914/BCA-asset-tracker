@@ -25,35 +25,69 @@ to any session you spawn; they inherit the same tendency.
 **Deploying the backend is Eric's job, done from his phone, and you hand him this
 verbatim — never the Apps Script editor steps.** `AssetTrackerSync.gs` changes are dead
 until deployed, so whenever you change that file (or notice `SCRIPT_VERSION` here is ahead
-of the live `/exec`), end your response with exactly this, filled in:
+of the live `/exec`), end your response with a deploy block.
 
-> **Deploy v<NN>** — open this, then tap the commands in Step 3:
+**ASK WHICH BRANCH THE WORK IS ON FIRST, AND SEND EXACTLY ONE BLOCK.** The two below are
+alternatives, not a sequence. On 2026-09-10 both were pasted, main-first, for work that
+lived on a branch — Eric followed them in order, deployed `main`, and got a downgrade
+refusal. He did nothing wrong; the instructions were wrong. If the change is not in
+`origin/main`, the second block is the only correct one.
+
+**A. The work is merged into `main`:**
+
+> **Deploy v<NN>** — open this, then tap the commands in Step 3a:
 >
 > https://shell.cloud.google.com/cloudshell/open?cloudshell_git_repo=https://github.com/MrPip914/BCA-asset-tracker&cloudshell_tutorial=cloudshell-deploy.md
 >
-> Try it on dev first: `node deploy.mjs dev`. Then the school: `node deploy.mjs bca`
-> (or `node deploy.mjs --all` for every tenant).
+> Try it on dev first:
+> `git checkout -B main origin/main && git pull --ff-only && node deploy.mjs dev`
+>
+> Then the school: `node deploy.mjs bca` (or `node deploy.mjs --all` for every tenant).
 >
 > Look for `✓ <tenant> is now v<NN>. Deploy confirmed.` as the last line. Anything
 > starting with `✗` means it did not deploy, and says why.
+
+**B. The work is on a branch (the normal case for anything just built):**
+
+> **Deploy v<NN> to the dev tenant** — this is a branch deploy, so it does NOT use the
+> Step 3a buttons.
+>
+> https://shell.cloud.google.com/cloudshell/open?cloudshell_git_repo=https://github.com/MrPip914/BCA-asset-tracker&cloudshell_tutorial=cloudshell-deploy.md
+>
+> Then tap the terminal and run:
+>
+> `git fetch origin && git checkout -B <branch> origin/<branch> && node deploy.mjs dev`
+>
+> Check line 2 reads `Deploying v<NN> from branch "<branch>" to "dev"`. If it says an
+> older version or `branch "main"`, stop — the checkout did not take.
+>
+> Success is `✓ dev is now v<NN>. Deploy confirmed.` That is the dev tenant's own Sheet —
+> throwaway data, nothing a school can see. To undo:
+> `git checkout -B main origin/main && ALLOW_DOWNGRADE=1 node deploy.mjs dev`
+
+**Do not put a school command in the same response as an unverified branch deploy.** Wait
+for him to confirm dev, then send `node deploy.mjs bca` on its own.
+
+**Releasing to a school is BACKEND FIRST, MERGE SECOND, and that ordering is not a
+preference.** The frontend ships from `main` to every tenant at once while backends go one
+at a time, so merging first puts a new frontend writing new columns in front of a school
+whose backend still drops them — written, then silently gone. Deploy the branch to dev,
+then to the school, then merge. Between the last two the school shows the "Backend
+outdated" banner, which is correct and which the merge clears.
 
 **Name the tenant. A bare `node deploy.mjs` now REFUSES** and lists them, because there is
 more than one and guessing would deploy to a school instead of to dev. `node deploy.mjs
 --status` says what each tenant is running — use it instead of stating a live version from
 memory or from a line in this file.
 
-**To deploy a BRANCH** (testing a backend change before merging — the normal case for
-unmerged work, since Sandbox cannot cover a write path), send it to **dev**, which exists
-for exactly this:
+**Deploying a BRANCH is block B above** — testing a backend change before merging is the
+normal case for unmerged work, since Sandbox cannot cover a write path. The command is
+written out once, there, deliberately: this section used to carry a second copy, and having
+the main procedure and the branch procedure in two places is what let both get pasted
+together in the wrong order.
 
-> Open the link above, then tap the terminal and run:
->
-> `git fetch origin && git checkout -B <branch> origin/<branch> && node deploy.mjs dev`
->
-> That is the dev tenant's own Sheet — throwaway data, nothing a school can see. To undo:
-> `git checkout -B main origin/main && ALLOW_DOWNGRADE=1 node deploy.mjs dev`.
-
-Only send a branch to a school's tenant if he asks for that specifically, and then say
+Only send a branch to a school's tenant if he asks for that specifically, or as step 2 of
+the backend-first release ordering above, and then say
 plainly that it is their live data behind it. **This used to be the only option** — the
 warning that a branch deploy is testing in production is kept below because it is still
 true of a school's tenant, but it is no longer the default, and telling him to test on

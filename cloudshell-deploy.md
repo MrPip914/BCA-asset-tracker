@@ -53,52 +53,108 @@ This lives in your home directory, which persists — you won't be asked again. 
 config from before there were several tenants is folded in automatically the first time
 this runs, so nothing needs redoing by hand.
 
-## Step 3: Deploy
+## Step 3: Pick what you are deploying
 
-Name the tenant. Try `dev` first — it has its own Sheet with throwaway data, so nothing
-you do there can reach a school:
+**Start here every time, and answer this before running anything.** Getting it wrong is
+the single most common way this goes sideways: opening the link puts you on `main`, so
+running the plain deploy while the work is on a branch ships the OLD backend and the
+downgrade guard stops you with a confusing message.
+
+| What you are deploying | Go to |
+| --- | --- |
+| Work that is merged into `main` | **3a** |
+| Work on a branch, not merged yet | **3b** |
+
+Not sure? `git log --oneline -1 origin/main` and see whether your change is in it.
+
+### Step 3a: Deploy `main`
+
+Try `dev` first — its own Sheet, throwaway data, nothing a school can see:
 
 ```sh
-git pull --ff-only && node deploy.mjs dev
+git checkout -B main origin/main && git pull --ff-only && node deploy.mjs dev
 ```
 
-Then, once it is good, each school:
+Then each school:
 
 ```sh
 node deploy.mjs bca
 ```
 
-Or every tenant in one go, which reports each and tells you if any did not take:
+Or every tenant at once, which reports each one:
 
 ```sh
 node deploy.mjs --all
 ```
 
-The `git pull` matters. Opening the tutorial link CLONES THE PROJECT FRESH each time,
-into a new directory (`~/cloudshell_open/BCA-asset-tracker`, then `-1`, `-2`, and so on),
-so a fresh clone is already current -- but if you come back to a shell you left open, or
-`cd` into an earlier clone, you are on whatever that copy last had. Pulling first costs
-nothing and removes the question.
+### Step 3b: Deploy a branch
 
-Your Script IDs are NOT in the clone. They live in `~/.bca-asset-tracker-deploy.json`,
-which is the one thing Cloud Shell keeps between visits -- which is why a pile of old
-clone directories is untidy but harmless. If a deploy ever says it does not know a
-tenant, the error now prints which file it read, which tenants were in it, and which
-directory it ran from; read that before theorising.
+Sandbox mode never contacts Apps Script, so a backend change cannot be tested any other
+way — it has to be deployed. Send it to `dev`, which exists for exactly this. Replace
+`BRANCH-NAME` with the branch:
 
-This uploads the script, publishes a new version, keeps the same `/exec` URL, and then
-confirms the live backend is reporting the new version.
+```sh
+git fetch origin && git checkout -B BRANCH-NAME origin/BRANCH-NAME && node deploy.mjs dev
+```
 
-**Look for the last line.** A green `✓ <tenant> is now vNN. Deploy confirmed.` means it
-worked. Anything else means it didn't, and the message says why.
+Note `dev` is both a branch name and a tenant name. In that command the FIRST `dev`
+would be the branch and the LAST one is always the tenant — so for the `dev` branch it
+reads `git checkout -B dev origin/dev && node deploy.mjs dev`, which looks like a typo
+and is not.
 
-Two failures it will stop on deliberately:
+**Check the second line of the output before it finishes.** It names the version, the
+branch and the tenant:
 
-* **Version mismatch** — the version numbers in `AssetTrackerSync.gs` and `index.html`
-  disagree. They must be bumped together. Nothing was uploaded.
-* **Backend not reporting the new version** — the upload worked but the deployment didn't
-  take. This is the silent failure the check exists to catch.
+```
+Deploying v34 from branch "dev" to "dev" (Development sandbox)
+```
 
+If the version is older than you expect, or the branch says `main` when you chose a
+branch, stop — the checkout did not take.
+
+## Did it work?
+
+Whichever route you took, the deploy uploads the script, publishes a new version, keeps
+the same `/exec` URL, and then asks the live backend what version it is running.
+
+**Look at the last line.**
+
+* `✓ <tenant> is now vNN. Deploy confirmed.` — done. The live backend confirmed it.
+* Anything starting with `✗` — it did NOT deploy, and the message says why.
+
+Failures it stops on deliberately, all of which upload nothing:
+
+* **Version mismatch** — `AssetTrackerSync.gs` and `index.html` disagree about the version.
+  They must be bumped together.
+* **Refusing to downgrade** — the version you are deploying is OLDER than what is live.
+  Usually you are on the wrong branch: re-read Step 3. An older backend drops columns a
+  newer one added, which is data loss rather than a rollback, so this one is a hard stop.
+* **No Apps Script ID configured** — it prints which config file it read, which tenants
+  were in it, and which directory it ran from. Read those lines before theorising; the
+  answer is usually in them.
+* **Backend not reporting the new version** — the upload worked but the deployment did
+  not take. This is the silent failure the whole check exists to catch.
+
+## Releasing a backend change to a school
+
+**Backend first, merge second. This order is not a preference — the other way round
+loses data.**
+
+The frontend ships from `main` to EVERY tenant at once, through GitHub Pages. Backends
+deploy one tenant at a time. So merging first puts a new frontend, writing new columns,
+in front of a school whose backend still drops them: written, then silently gone.
+
+1. Deploy the branch to `dev` (3b) and check it there.
+2. Deploy the same branch to the school: `node deploy.mjs bca`. Yes, from the unmerged
+   branch — the backend code is identical to what merging will put on `main`, and it is
+   the only ordering that is safe.
+3. Merge the branch into `main` and push. That publishes the frontend.
+4. `node deploy.mjs --status` — every tenant should now say the same version.
+
+Between 2 and 3 the school sees the **"Backend outdated"** banner: their backend is new,
+their frontend is not yet. That is the version check doing its job, and step 3 clears
+it. Nothing breaks in that window — the old frontend simply does not use the new
+columns.
 ## What is running where
 
 Asks every tenant's live backend what version it is on, and compares it to this repo. No
@@ -110,21 +166,6 @@ node deploy.mjs --status
 
 Worth running before and after any release. A written-down "the live backend is vNN" note
 goes stale the moment someone deploys; this cannot.
-
-## Testing a branch before it's merged
-
-Sandbox mode never contacts Apps Script, so a backend change cannot be tested any other
-way — you have to deploy it. **Deploy it to `dev`**, which exists for exactly this:
-
-```sh
-git fetch origin && git checkout -B BRANCH-NAME origin/BRANCH-NAME && node deploy.mjs dev
-```
-
-Replace `BRANCH-NAME` with the branch. The deploy prints which branch and which tenant it
-is shipping, and warns you whenever the target is a school rather than `dev`.
-
-Deploying a branch to a school still works and is sometimes right, but it is that school's
-live data behind it — so it says so rather than letting it pass quietly.
 
 ## Setting up a new tenant
 
@@ -159,4 +200,6 @@ version rather than rolling back.
 
 The backend is live. Close this tab whenever you like — nothing is left running.
 
-Next time, open the same link and go straight to **Step 3**.
+Next time, open the same link and go straight to **Step 3** — and make that choice
+again rather than repeating whatever you ran last time. `main` or a branch is the
+question that decides everything else.
