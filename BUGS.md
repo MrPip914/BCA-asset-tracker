@@ -16,23 +16,6 @@ version that fixed them.
 
 ## Open
 
-### Viewers still see the delete X on comments and change entries
-**Found:** 2026-09-10, while adding the maintenance badge to the Change Log.
-**Needs a deploy:** no — `index.html` only.
-**Confirmed:** by reading the render tree — both delete buttons sit OUTSIDE the
-`{canEdit && (...)}` wrapper that gates each tab's add form.
-
-Every other edit affordance in the app is gated on `canEdit`, by cluster. These two are
-not: the per-entry X on a comment and on a change entry renders for a view-only user. It
-is **cosmetic only** — `persist()` refuses the write and so does `doPost`, which are the
-real control — so this is a rough edge, not a hole. But it offers a viewer a button that
-can only fail.
-
-Deliberately left alone rather than fixed in passing: it is the same gap in two places,
-and fixing only the one I happened to be editing would have made them inconsistent. The
-fix is one `canEdit &&` around each.
-
-
 ### A value that doesn't match its field's kind shows as BLANK, then refuses the save
 **Found:** 2026-09-10. **Mostly closed the same day** — see below.
 **Needs a deploy:** no — `index.html` only.
@@ -268,6 +251,27 @@ user is least sure whether their click worked.
 ---
 
 ## Fixed
+
+### Viewers saw the delete X on comments and change entries — fixed 2026-09-10
+**Found:** 2026-09-10, while adding the maintenance badge to the Change Log.
+**Fixed:** same day, at Eric's request. `index.html` only — no deploy.
+
+The per-entry X on a comment and on a change entry rendered for a view-only user: both
+sat OUTSIDE the `{canEdit && (...)}` wrapper that gates each tab's add form. Cosmetic
+only — `persist()` refuses the write and so does `doPost`, which are the real control —
+but it offered a viewer a button that could only fail, and it was the one place the app
+broke its own convention that edit affordances are hidden by cluster.
+
+One `canEdit &&` around each. Verified both directions in Sandbox by temporarily forcing
+`const canEdit = false` (the technique this file's Access notes describe, since testing
+the viewer role otherwise needs a second Google account): as a viewer, zero delete
+buttons on both tabs and no add forms, with **every entry still readable** — which is the
+point, a viewer reads everything and changes nothing. As an editor, all six change
+buttons back and a freshly added comment carrying its own.
+
+Worth knowing for the next one: the fixture has no comments at all, so the comment case
+reads as "0 buttons" for an editor too and proves nothing by itself. It was confirmed by
+adding a comment, seeing its X appear, then deleting it again.
 
 ### "Today" was computed in UTC, dating evening work a day ahead — fixed 2026-09-10
 **Found:** 2026-09-10, while building the v34 maintenance completion form.
