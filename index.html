@@ -1115,6 +1115,31 @@ function formatDateOnly(dateStr) {
   if (isNaN(d.getTime())) return dateStr;
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
+// A Date -> the "yyyy-MM-dd" string for the day it is IN THE VIEWER'S TIMEZONE.
+//
+// This exists because `new Date().toISOString().slice(0, 10)` — the obvious way
+// to write it, and what every site here used to do — takes the **UTC** date.
+// A date-only field carries no timezone and is displayed verbatim, so nothing
+// downstream can convert it back: whatever UTC said is what the user sees
+// forever. At UTC-7 that means every evening between 5pm and midnight the app
+// stamped TOMORROW's date, and a maintenance item completed on Tuesday night
+// was recorded as Wednesday and fell due a day late from there.
+//
+// The mismatch is invisible in daytime testing, and invisible next to a
+// timestamp: a change entry's `at` is a full ISO value that DOES convert to
+// local time, so the two sit side by side reading differently with only one of
+// them wrong. Don't reach for toISOString() to make a date-only value.
+//
+// Deliberately built from the local getters rather than toLocaleDateString with
+// a locale that happens to emit ISO order — same result, but it cannot be
+// changed by a locale or an Intl implementation detail.
+function localDateString(d) {
+  const dt = d || new Date();
+  if (isNaN(dt.getTime())) return "";
+  return dt.getFullYear() + "-" +
+    String(dt.getMonth() + 1).padStart(2, "0") + "-" +
+    String(dt.getDate()).padStart(2, "0");
+}
 // Next-due date for a maintenance item, or null if it's never been performed
 // (so there's nothing to count forward from) or has no known interval.
 function nextMaintenanceDue(item) {
@@ -1835,7 +1860,7 @@ const FRONTEND_SCRIPT_VERSION = "v34";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-10.3";
+const APP_VERSION = "2026-09-10.4";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -4553,7 +4578,7 @@ function AssetTracker() {
   function openMaintenanceComplete(idx) {
     setMaintenanceCompleteModal({
       idx,
-      date: new Date().toISOString().slice(0, 10),
+      date: localDateString(),
       // Seeded only if the type actually exists -- it ships in
       // DEFAULT_CHANGE_TYPES but the list is user-managed and can be renamed or
       // removed, and seeding a value that isn't an option would render a picker
@@ -7176,7 +7201,7 @@ function AssetTracker() {
                         </div>
                         <div style={{ fontSize: 13, color: C.ink, marginBottom: 8 }}>
                           Last performed: {item.lastPerformed ? formatDateOnly(item.lastPerformed) : "Never"}
-                          {due && <> · Next due: <span style={{ color: statusMeta.color, fontWeight: 600 }}>{formatDateOnly(due.toISOString().slice(0, 10))}</span></>}
+                          {due && <> · Next due: <span style={{ color: statusMeta.color, fontWeight: 600 }}>{formatDateOnly(localDateString(due))}</span></>}
                         </div>
                         {(() => {
                           // The service history for THIS schedule, newest first.
@@ -8697,7 +8722,7 @@ function AssetTracker() {
                     <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted }}>{item.frequencyLabel}</div>
                     <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.owner || "—"}</div>
                     <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted }}>{item.lastPerformed ? formatDateOnly(item.lastPerformed) : "Never"}</div>
-                    <div style={{ padding: "12px 14px", fontSize: 13, fontWeight: 600, color: statusMeta.color }}>{due ? formatDateOnly(due.toISOString().slice(0, 10)) : "—"}</div>
+                    <div style={{ padding: "12px 14px", fontSize: 13, fontWeight: 600, color: statusMeta.color }}>{due ? formatDateOnly(localDateString(due)) : "—"}</div>
                     <div style={{ padding: "12px 14px" }}>
                       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: statusMeta.color }}>
                         {statusMeta.label}

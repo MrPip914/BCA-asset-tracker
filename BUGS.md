@@ -16,28 +16,6 @@ version that fixed them.
 
 ## Open
 
-### "Today" is computed in UTC, so an evening Pacific user dates work a day ahead
-**Found:** 2026-09-10, while building the v34 maintenance completion form.
-**Needs a deploy:** no — `index.html` only.
-**Confirmed:** in a browser against Sandbox at ~22:33 Pacific on Sep 9; the completion
-form's Date performed defaulted to **Sep 10**, and the change entry it wrote rendered as
-**Sep 9, 2026, 10:33 PM** immediately beside it.
-
-`new Date().toISOString().slice(0, 10)` takes the **UTC** date. Pacific is 7–8 hours
-behind, so between roughly 5pm and midnight local the app's idea of "today" is already
-tomorrow. A completion logged on Tuesday evening is dated Wednesday, and its next-due date
-is computed a day late from there.
-
-**Pre-existing and repo-wide, not new in v34** — the old one-click `markMaintenanceDone`
-used the identical expression, so this has been true of every maintenance completion the
-app has ever recorded. v34 only makes it *visible*, by putting the date in a field next to
-a timestamp that renders in local time.
-
-The fix is a local-date helper (`toLocaleDateString("en-CA")`, or assembling the string
-from `getFullYear`/`getMonth`/`getDate`) used everywhere a date-only value is stamped.
-Worth grepping for `toISOString().slice(0, 10)` — the completion form is one of several
-sites, and they should move together or the inconsistency gets worse.
-
 ### Viewers still see the delete X on comments and change entries
 **Found:** 2026-09-10, while adding the maintenance badge to the Change Log.
 **Needs a deploy:** no — `index.html` only.
@@ -290,6 +268,35 @@ user is least sure whether their click worked.
 ---
 
 ## Fixed
+
+### "Today" was computed in UTC, dating evening work a day ahead — fixed 2026-09-10
+**Found:** 2026-09-10, while building the v34 maintenance completion form.
+**Fixed:** same day, at Eric's request. `index.html` only — no deploy.
+
+`new Date().toISOString().slice(0, 10)` takes the **UTC** date. A date-only field carries
+no timezone and is displayed verbatim, so nothing downstream could convert it back: at
+UTC-7, everything stamped between 5pm and midnight local was recorded as TOMORROW, and a
+maintenance item completed Tuesday evening fell due a day late from a Wednesday it was
+never done on. True of every completion the app had ever recorded — the old one-click
+`markMaintenanceDone` used the identical expression.
+
+**Why it survived so long, and why the test matters more than the fix.** Nothing about it
+is visible to ordinary checking. UTC and local agree until 5pm, so any daytime test passes.
+It sits beside a change entry's `at`, which IS timezone-aware and renders correctly in
+local time — so a wrong date sits next to a right time and the pair looks self-consistent.
+Eric hit exactly that: he tested at 08:45, correctly reported the time showing as local,
+and that observation proved nothing about the date.
+
+`localDateString(d)` now builds the string from the local getters, and
+`test-frontend-localdate.js` slices it out of `index.html` and sweeps all 24 hours of a
+day plus the month/year/leap rollovers — the old form turned 23:30 on Dec 31 into the
+next YEAR. It also asserts no call site has gone back to `toISOString()`, since that
+reintroduces the bug while passing every behavioural test. Verified by mutation that all
+four failure modes fail it.
+
+Two sites that formatted a computed due-date the same way were switched too. They were
+correct at UTC-7 (local midnight falls on the same UTC day) and would have been wrong
+east of UTC — fixed while the helper was being added rather than left as a latent trap.
 
 ### Custom column values are never saved — fixed in v26
 **Found:** 2026-08-23. **Fixed:** 2026-08-25, alongside per-type custom fields, which
