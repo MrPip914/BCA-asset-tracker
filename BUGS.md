@@ -252,6 +252,41 @@ user is least sure whether their click worked.
 
 ## Fixed
 
+### Export did nothing at all, on every tab — fixed 2026-09-10
+**Found:** 2026-09-10, reported by Eric ("clicked Export on the Maintenance tab, didn't get
+anything").
+**Broken since:** `b4a7ed1`, *Replace fixed room/building fields with a general parent chain*.
+**Fixed:** same day. `index.html` only — no deploy.
+**Confirmed:** in a browser — `Uncaught ReferenceError: displayRoom is not defined`, thrown
+from the Export click; and by `git log -S`, which puts the deletion of the helper in b4a7ed1
+with two call sites left behind.
+
+`displayRoom` was a local helper (`a.type === "Room" ? a.room : roomNameFor(a.roomId, ...)`).
+The parent-chain change deleted it and replaced its callers everywhere EXCEPT two lines inside
+`exportToExcel` — the Comments sheet and the Changes sheet. Both now use `roomNameOf(a,
+assets)`, which is what the Assets sheet already used.
+
+**Not a Maintenance-tab bug.** Both toolbar Export buttons call the same function, so Export
+was broken everywhere. It is worth being precise about that: the report named one tab, and
+fixing only what was reported would have left the other one broken.
+
+**Why it survived weeks, which is the part worth engineering against:**
+- Babel compiles it fine. A bare identifier is only resolved when the line RUNS, and nothing
+  runs until someone clicks Export.
+- Both dead lines sit inside `(a.comments || []).forEach` and `(a.changes || []).forEach`. On
+  an inventory where nothing has a comment or a change, neither ever executes and Export works
+  perfectly. It breaks only once there is data worth exporting — the opposite of the usual
+  empty-state bug, and invisible to a smoke test.
+- It fails with **no user-visible message**. The click simply does nothing, which is exactly
+  how it was reported.
+
+`test-frontend-export.js` now walks every call inside `exportToExcel` and asserts the callee
+exists — module-level, local, parameter, or a known global. Verified by mutation that it
+catches the original bug reintroduced, any other dead reference, and the Room column being
+quietly dropped instead of fixed. Quoted strings are stripped before scanning or the header
+`"Slot(s)"` reads as a call to `Slot`; template literals are deliberately left in, since their
+`${...}` holes hold real calls.
+
 ### Viewers saw the delete X on comments and change entries — fixed 2026-09-10
 **Found:** 2026-09-10, while adding the maintenance badge to the Change Log.
 **Fixed:** same day, at Eric's request. `index.html` only — no deploy.
