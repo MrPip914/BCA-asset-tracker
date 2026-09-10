@@ -1835,7 +1835,7 @@ const FRONTEND_SCRIPT_VERSION = "v33";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-10.1";
+const APP_VERSION = "2026-09-10.2";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -9282,7 +9282,11 @@ function TypeManagerModal({
   const [editingCategories, setEditingCategories] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState("");
   const [draft, setDraft] = useState(null); // { id, name, iconName, parentTypes, fields, newFields }
-  const [newFieldName, setNewFieldName] = useState("");
+  // The new-field dialog, as ONE object rather than four parallel states —
+  // label, kind, choices and its error open and close together, so grouping
+  // them makes closing it `setNewFieldDraft(null)` and leaves nothing behind to
+  // reset. Same shape as breakerModal and addBreakerDraft.
+  const [newFieldDraft, setNewFieldDraft] = useState(null);
 
   // Seeds the form from the type's EFFECTIVE settings (shipped defaults with any
   // override already applied), so the boxes show what's actually in force rather
@@ -9315,11 +9319,14 @@ function TypeManagerModal({
       fieldChoices: Object.fromEntries(fieldOptions.map(f => [f.key, columnOptions(f).join("\n")])),
       newFields: [],
     });
-    setNewFieldName("");
+    setNewFieldDraft(null);
     setConfirmId(null);
     setEditingCategories(false);
   };
-  const cancelEdit = () => setDraft(null);
+  // Closes the dialog too: a half-typed new field belongs to the edit that was
+  // abandoned, and leaving it open over the type LIST would be a dialog with
+  // nothing behind it to add to.
+  const cancelEdit = () => { setDraft(null); setNewFieldDraft(null); };
 
   // Order is the array's own order, so a move is a swap and there is no sort key
   // that could disagree with it.
@@ -9356,16 +9363,28 @@ function TypeManagerModal({
     return fieldOptions.some(f => f.label.trim().toLowerCase() === wanted)
       || (draft?.newFields || []).some(f => f.label.trim().toLowerCase() === wanted);
   };
+  // Commits the dialog into the draft's pending list. The kind is captured HERE,
+  // at the moment the field is invented, which is the only moment it can be
+  // chosen — so the dialog is not merely a tidier text box, it is where the one
+  // irreversible decision about a field gets made.
   const addPendingField = () => {
-    const label = newFieldName.trim();
-    if (!label || !draft || fieldLabelTaken(label)) return;
+    if (!draft || !newFieldDraft) return;
+    const label = (newFieldDraft.label || "").trim();
+    // Reported rather than silently ignored: this used to `return` on a blank or
+    // duplicate name, so the button did nothing and said nothing.
+    if (!label) { setNewFieldDraft({ ...newFieldDraft, error: "Give the field a name." }); return; }
+    if (fieldLabelTaken(label)) {
+      setNewFieldDraft({ ...newFieldDraft, error: `There is already a field called "${label}".` });
+      return;
+    }
+    const tempId = crypto.randomUUID();
     setDraft({
       ...draft,
-      newFields: [...(draft.newFields || []), { tempId: crypto.randomUUID(), label }],
-      fieldTypes: { ...(draft.fieldTypes || {}) },
-      fieldChoices: { ...(draft.fieldChoices || {}) },
+      newFields: [...(draft.newFields || []), { tempId, label }],
+      fieldTypes: { ...(draft.fieldTypes || {}), [tempId]: newFieldDraft.kind || "text" },
+      fieldChoices: { ...(draft.fieldChoices || {}), [tempId]: newFieldDraft.choices || "" },
     });
-    setNewFieldName("");
+    setNewFieldDraft(null);
   };
 
   // One field: is it on for this type, what kind of value does it hold, and (for
@@ -9382,7 +9401,6 @@ function TypeManagerModal({
     const bespoke = !pending && BESPOKE_FORM_FIELDS.has(key);
     const required = (draft.requiredFields || []).includes(key);
     const kind = (draft.fieldTypes || {})[key] || "text";
-    const setKind = v => setDraft({ ...draft, fieldTypes: { ...(draft.fieldTypes || {}), [key]: v } });
     return (
       <div key={key} style={{ display: "flex", flexDirection: "column", gap: 4, padding: "5px 0", borderBottom: `1px solid ${C.border}` }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -9426,29 +9444,18 @@ function TypeManagerModal({
               A field with its own component (person, peripherals, subType) has
               no kind to choose at all, and says so rather than showing a
               plausible-looking "Text". */}
+          {/* Every row shows its kind and none lets you change it — a pending
+              field chose its kind in the Add field dialog, which is the moment
+              of creation, and an existing one is fixed. Getting a pending one
+              wrong costs a remove and a re-add, and nothing is saved yet. */}
           <div
             title={
               bespoke ? `${label} has its own editor, so it holds one particular kind of value.`
-              : pending ? "Choose the kind now — it is fixed once this field is created."
-              : `${label} holds ${kindLabel(kind)}. A field's kind is fixed when it is created; if you need a different kind, add another field.`
+              : `${label} holds ${kindLabel(kind)}. A field's kind is set when it is created; if you need a different kind, add another field.`
             }
-            style={{ width: 118, flexShrink: 0, opacity: on ? 1 : 0.45 }}
+            style={{ width: 118, flexShrink: 0, opacity: on ? 1 : 0.45, fontSize: 12, textAlign: "center", color: bespoke ? C.empty : C.muted }}
           >
-            {bespoke ? (
-              <div style={{ fontSize: 12, color: C.empty, textAlign: "center" }}>Built in</div>
-            ) : pending ? (
-              <PickerField
-                label={`${label} kind`}
-                hideLabel
-                value={kind}
-                onChange={setKind}
-                options={COLUMN_DATA_TYPES.map(t => t.value)}
-                labelForOption={kindLabel}
-                title={`${label}: kind of value`}
-              />
-            ) : (
-              <div style={{ fontSize: 12, color: C.muted, textAlign: "center" }}>{kindLabel(kind)}</div>
-            )}
+            {bespoke ? "Built in" : kindLabel(kind)}
           </div>
           {/* Required is meaningful for EVERY field, bespoke ones included —
               "every Computer must have a User" is a rule someone would want,
@@ -9487,27 +9494,16 @@ function TypeManagerModal({
             </button>
           )}
         </div>
-        {/* An existing choice list is shown but not editable, for the same
-            reason its kind is: narrowing the list under stored data leaves
-            assets holding a value the field no longer offers. Shown at all
-            because "Choice list" with no choices tells you nothing about what
-            the field actually accepts. */}
-        {kind === "select" && on && !pending && (
+        {/* Shown, never editable — narrowing a list under stored data leaves
+            assets holding a value the field no longer offers, the same hazard
+            as changing the kind. Shown at all because "Choice list" with no
+            choices tells you nothing about what the field accepts. */}
+        {kind === "select" && on && (
           <div style={{ marginLeft: 24, fontSize: 12, color: C.empty }}>
             {(draft.fieldChoices || {})[key]
               ? String(draft.fieldChoices[key]).split("\n").filter(Boolean).join(" · ")
               : "No choices configured."}
           </div>
-        )}
-        {kind === "select" && on && pending && (
-          <textarea
-            value={(draft.fieldChoices || {})[key] || ""}
-            onChange={e => setDraft({ ...draft, fieldChoices: { ...(draft.fieldChoices || {}), [key]: e.target.value } })}
-            placeholder={"One choice per line"}
-            rows={3}
-            style={{ marginLeft: 24, padding: "5px 8px", border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 12, fontFamily: "inherit", background: C.surface, color: C.ink, resize: "vertical" }}
-            aria-label={`${label} choices`}
-          />
         )}
       </div>
     );
@@ -9695,20 +9691,18 @@ function TypeManagerModal({
                 {fieldOptions.map(f => fieldRow(f.key, f.label, false))}
                 {(draft.newFields || []).map(f => fieldRow(f.tempId, f.label, true))}
               </div>
-              <div style={{ display: "flex", gap: 6, marginTop: 2 }}>
-                <input
-                  value={newFieldName}
-                  onChange={e => setNewFieldName(e.target.value)}
-                  onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addPendingField(); } }}
-                  placeholder="New field for this type, e.g. Warranty Contact"
-                  style={{ flex: 1, padding: "5px 8px", border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 12, fontFamily: "inherit", background: C.surface, color: C.ink }}
-                />
+              {/* A button, not a permanently open text box. Creating a field is
+                  an occasional deliberate act, and the box sat under the list on
+                  every visit whether or not anyone wanted one — while the kind,
+                  which is the part that cannot be changed later, had nowhere to
+                  be chosen except a row that did not exist yet. */}
+              <div style={{ display: "flex", marginTop: 2 }}>
                 <button
                   type="button"
-                  onClick={addPendingField}
-                  style={{ padding: "5px 10px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12, color: C.ink, fontWeight: 600 }}
+                  onClick={() => setNewFieldDraft({ label: "", kind: "text", choices: "", error: "" })}
+                  style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 10px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12, color: C.ink, fontWeight: 600 }}
                 >
-                  Add field
+                  <Plus size={13} /> Add field
                 </button>
               </div>
               <div style={{ fontSize: 12, color: C.empty }}>
@@ -9722,6 +9716,96 @@ function TypeManagerModal({
                 A field's kind is set when it is created and can't be changed afterwards. If you need a different kind, add another field.
               </div>
             </div>
+
+            {/* NEW FIELD DIALOG. Rendered inside this modal's own tree rather
+                than as a sibling, which is what makes the z-index work: the
+                type manager establishes a stacking context, so anything nested
+                paints above its content regardless of the number — and the kind
+                picker nested one deeper paints above THIS in turn. A sibling
+                overlay would have had to out-number the modal and would still
+                have lost to its own picker. */}
+            {newFieldDraft && (
+              <div
+                onClick={() => setNewFieldDraft(null)}
+                style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 5 }}
+              >
+                <div
+                  onClick={e => e.stopPropagation()}
+                  style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 18, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 360, display: "flex", flexDirection: "column", gap: 12 }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>New field</div>
+                    <button onClick={() => setNewFieldDraft(null)} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+                  </div>
+
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Name</span>
+                    <input
+                      autoFocus
+                      value={newFieldDraft.label}
+                      onChange={e => setNewFieldDraft({ ...newFieldDraft, label: e.target.value, error: "" })}
+                      onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addPendingField(); } }}
+                      placeholder="e.g. Warranty Contact"
+                      style={{ padding: "7px 9px", border: `1.5px solid ${newFieldDraft.error ? C.danger : C.border}`, borderRadius: 8, fontSize: 14, fontFamily: "inherit", background: C.surface, color: C.ink }}
+                    />
+                  </label>
+
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Kind of value</span>
+                    <PickerField
+                      label="Kind of value"
+                      hideLabel
+                      value={newFieldDraft.kind}
+                      onChange={v => setNewFieldDraft({ ...newFieldDraft, kind: v })}
+                      options={COLUMN_DATA_TYPES.map(t => t.value)}
+                      labelForOption={kindLabel}
+                      title="Kind of value"
+                    />
+                    <span style={{ fontSize: 12, color: C.empty }}>
+                      This can't be changed after the field is created.
+                    </span>
+                  </div>
+
+                  {newFieldDraft.kind === "select" && (
+                    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Choices</span>
+                      <textarea
+                        value={newFieldDraft.choices}
+                        onChange={e => setNewFieldDraft({ ...newFieldDraft, choices: e.target.value })}
+                        placeholder={"One per line\ne.g.\nGood\nFair\nNeeds replacing"}
+                        rows={4}
+                        style={{ padding: "7px 9px", border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 13, fontFamily: "inherit", background: C.surface, color: C.ink, resize: "vertical" }}
+                      />
+                    </label>
+                  )}
+
+                  {newFieldDraft.error && (
+                    <div style={{ fontSize: 12, color: C.danger }}>{newFieldDraft.error}</div>
+                  )}
+
+                  <div style={{ fontSize: 12, color: C.empty }}>
+                    The field is created when you save this type, and is hidden from the main table until you show it from the Columns menu.
+                  </div>
+
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button
+                      type="button"
+                      onClick={addPendingField}
+                      style={{ padding: "6px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 13, fontWeight: 600 }}
+                    >
+                      Add field
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setNewFieldDraft(null)}
+                      style={{ padding: "6px 12px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 13, color: C.ink }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
 
             <div style={{ display: "flex", alignItems: "center", gap: 8, borderTop: `1px solid ${C.border}`, paddingTop: 12 }}>
               <button

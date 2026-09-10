@@ -774,6 +774,20 @@ default" is just deleting it.
   editor stays one commit and a cancelled edit leaves no stray column. They're created hidden —
   a field belonging to one type would otherwise add a mostly-empty column to everyone's table.
   Deleting one stays in the Columns menu, which already owns that destructive action.
+  - **Adding one is a DIALOG, opened by an "Add field" button** (2026-09-10). It was an
+    always-open text box under the field list, which sat there on every visit whether or not
+    anyone wanted a field — and left the field's KIND, the one thing that cannot be changed
+    later, with nowhere to be chosen except a row that did not exist yet. The dialog is where
+    a field is invented, so it holds the name, the kind, and a choice list when the kind is
+    one; the row list then shows every field's kind as plain text and offers no control at all.
+  - **It is rendered INSIDE the type-manager modal's tree, and that is what makes the layering
+    work.** The modal establishes a stacking context, so anything nested paints above its
+    content whatever the z-index, and the kind picker nested one deeper paints above the
+    dialog in turn. A sibling overlay would have had to out-number the modal and would still
+    have lost to its own picker.
+  - **A blank or duplicate name is REPORTED, not silently ignored.** The old inline version
+    `return`ed on both, so the button did nothing and said nothing.
+
 **Three things a type now decides that it didn't before** (backend **v33**, 2026-09-09 —
 see `TYPE_MANAGEMENT_PLAN.md`): which **category** it is filed under, which of its fields are
 **required**, and — a per-column question rather than a per-type one — what **kind of value**
