@@ -16,6 +16,49 @@ version that fixed them.
 
 ## Open
 
+### Changing a field's data type blanks the box while refusing the save
+**Found:** 2026-09-10, Eric asked what happens to existing data when a field's kind changes.
+**Needs a deploy:** no — `index.html` only.
+**Confirmed:** in a browser against Sandbox, switching Computer's Serial from Text to Number
+with `MOCK-CMP-001` already stored.
+
+The data is safe and the change is reversible — that part works as designed. What is wrong
+is what the person sees while it is in that state:
+
+- The stored value is **untouched**, and the detail page still shows it.
+- The EDIT form shows the field **empty**, because `<input type="number">` (or `date`)
+  cannot render a value it does not understand. React still holds the real value; only the
+  browser refuses to display it.
+- Saving is refused with "Serial must be a number." — which is correct, and names a value
+  **that is not on screen**. So the form says a field is wrong while showing it as blank.
+- Switching the kind back restores the display completely. Nothing was lost.
+
+So the failure is legible only if you already know the rule. To anyone else it reads as
+"the app is complaining about an empty field", and the obvious response — type something —
+overwrites real data that was never in danger.
+
+It also scales badly, which is the part worth deciding about. Change a kind on a field that
+forty assets already use incompatibly and all forty become unsaveable until each is
+corrected by hand, with the offending value invisible on every one of them.
+
+Options:
+- **Render an incompatible value as read-only text** with the real value shown and a "this
+  no longer matches this field's kind" note, instead of an empty typed input. Keeps the
+  value visible, keeps the refusal honest.
+- **Warn at the moment the kind changes**, counting the assets whose values would no longer
+  fit ("12 assets have a Serial that is not a number"). Turns a later surprise into a
+  decision, and is the cheaper half.
+- Both. They solve different halves — one the discovery, one the repair.
+
+Deliberately NOT an option: coercing or clearing stored values on a kind change. That is a
+full rewrite of the asset domain triggered by a settings edit, and an unparseable value
+would have nowhere to go but the bin.
+
+**Blocks:** nothing. The feature is safe as shipped; this is about how the state reads.
+
+---
+
+
 ### `deploy.config.json` in a repo clone silently shadows the `$HOME` config
 **Found:** 2026-09-09 while misdiagnosing a deploy failure. **Latent — this did NOT cause
 that failure**, see the correction below.
