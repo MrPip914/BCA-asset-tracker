@@ -68,6 +68,7 @@ const check = (name, ok, detail) => {
 // the day v34 deploys), alongside a linked pair. A fixture of only one kind
 // would pass while the other silently broke -- exactly how the personIds
 // data-loss bug hid in Sandbox.
+const CHANGE_ID = 'c-9999-8888-7777-666655554444';
 const MAINT_ID = 'm-1111-2222-3333-444455556666';
 const ASSET = {
   id: '9f8e7d6c-1111-2222-3333-444455556666', label: 'BCA0900', type: 'Mini Split', personIds: '',
@@ -80,7 +81,7 @@ const ASSET = {
   ],
   changes: [
     // logged against the schedule above
-    { changeType: 'Maintenance', vendor: 'Acme HVAC', cost: '250', note: 'Coils fouled', at: 'T', by: 'E', maintenanceId: MAINT_ID, performedOn: '2026-08-14' },
+    { id: CHANGE_ID, changeType: 'Maintenance', vendor: 'Acme HVAC', cost: '250', note: 'Coils fouled', at: 'T', by: 'E', maintenanceId: MAINT_ID, performedOn: '2026-08-14' },
     // an ordinary unattached change -- what every pre-v34 row is
     { changeType: 'Repair', vendor: '', cost: '', note: 'n', at: 'T', by: 'E' },
     // a DANGLING link: the schedule it named has since been deleted. This must
@@ -165,6 +166,19 @@ check('the written maintenance row carries id',
         rows.every(a => a.maintenanceItems.length === 2 && a.changes.length === 3),
         `got ${JSON.stringify(rows.map(a => ({ m: a.maintenanceItems.length, c: a.changes.length })))}`);
 }
+
+// --- a work entry's own id (v34) -------------------------------------------
+// Added once photos began attaching to a work entry. Until then nothing
+// referenced one, so position was a good enough handle; an attachment makes it
+// a reference, and deleting an earlier entry would re-point every later one.
+check("CHANGE_FIELDS carries id", mod.CHANGE_FIELDS.indexOf("id") !== -1,
+      `got ${JSON.stringify(mod.CHANGE_FIELDS)}`);
+check("a change id survives the round trip", back.changes[0].id === CHANGE_ID,
+      `got ${JSON.stringify(back.changes[0].id)}`);
+check("a pre-id change reads back with id \"\" (not undefined)", back.changes[1].id === "",
+      `got ${JSON.stringify(back.changes[1].id)}`);
+check("the written change row carries id", written.changeRows[0].id === CHANGE_ID,
+      `got ${JSON.stringify(written.changeRows[0])}`);
 
 // --- performedOn (v34) -----------------------------------------------------
 // When the work HAPPENED, as distinct from `at`, when it was logged. The two

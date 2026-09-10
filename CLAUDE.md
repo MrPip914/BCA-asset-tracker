@@ -1589,6 +1589,32 @@ problem `maintenanceId` was added to solve — this finishes it in the navigatio
   (`detailTab === "maintenance" && maintenanceSubTab === "..."`) and a bar rendered above
   them, so the diff is three lines of condition rather than a re-indent of ~400 lines of JSX
   that would have buried any real change inside it.
+**Both record types are addressed by their own id, never by array position (2026-09-10).**
+A maintenance item got its `id` when work entries began referencing it; a work entry got one
+when photos began attaching to it. Same rule, arrived at twice: **an id exists once something
+points at the record, and not before.**
+- **Why position was defensible until it wasn't.** `writeTable_` rewrites a tab in the order
+  the client sent, so position survives a save. What it does not survive is a DELETE: remove
+  an earlier entry and every later one shifts up, taking any attachment pointed at it to the
+  wrong row. Nothing pointed at a work entry until photos did.
+- **`change.id` was deliberately absent before this** — the reasoning is still in
+  `CHANGE_FIELDS` — and adding it was a schema change, so it went into v34 while v34 was
+  still undeployed, exactly as `performedOn` did. That trick expires the moment a version is
+  live: check `node deploy.mjs --status` first.
+- **Every handler now takes an id**: `openChangeEdit`, `deleteChange`, `saveChangeEdit`,
+  `startEditMaintenance`, `saveMaintenanceEdit`, `openMaintenanceComplete`,
+  `submitMaintenanceComplete`, `deleteMaintenanceItem`. The row objects no longer carry an
+  `idx` at all, on either the detail lists or the two site-wide tables — so there is no stale
+  index left to pass by mistake.
+- **`editingMaintenanceIdx` was renamed `editingMaintenanceId`.** It held an id; a name that
+  no longer says what the value is has cost this project real time more than once, and is
+  treated as a bug rather than a tidy-up.
+- **React keys are the ids too**, so deleting a row no longer re-keys every row beneath it.
+- **Both are adopted at load** (`m.id || crypto.randomUUID()`, `c.id || crypto.randomUUID()`)
+  — a read that fills a blank, reaching the Sheet inside whatever save happens next. No
+  migration, and two browsers minting different ids is caught by the revision check.
+- `MOCK_SNAPSHOT` stays MIXED: three work entries carry explicit ids, the rest are adopted,
+  so both paths are exercised by the fixture rather than only by a unit test.
 **A completion is a change-log entry, linked by `change.maintenanceId` (v34).** Marking a
 task done and logging a change used to be two unconnected acts: "Mark done today" stamped
 `lastPerformed` and wrote one audit row, so what a service visit actually cost, who did it

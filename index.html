@@ -1875,7 +1875,7 @@ const FRONTEND_SCRIPT_VERSION = "v34";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-10.13";
+const APP_VERSION = "2026-09-10.14";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -2466,8 +2466,8 @@ const MOCK_SNAPSHOT = {
       { id: "mnt-0086-filter", task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "2026-08-14", owner: "Eric", at: "", by: "" },
       { id: "mnt-0086-coil", task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "2026-03-02", owner: "", at: "", by: "" },
     ], changes: [
-      { changeType: "Maintenance", vendor: "", cost: "", note: "Filter rinsed and dried. Light dust only.", at: "2026-07-15T16:20:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0086-filter", performedOn: "2026-05-28" },
-      { changeType: "Maintenance", vendor: "Central Coast HVAC", cost: "185.00", note: "Coil cleaned, condensate line flushed. Tech noted slight fin damage on the return side — watch it next visit.", at: "2026-03-02T18:05:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0086-coil", performedOn: "2026-03-02" },
+      { id: "chg-0086-filter-may", changeType: "Maintenance", vendor: "", cost: "", note: "Filter rinsed and dried. Light dust only.", at: "2026-07-15T16:20:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0086-filter", performedOn: "2026-05-28" },
+      { id: "chg-0086-coil-mar", changeType: "Maintenance", vendor: "Central Coast HVAC", cost: "185.00", note: "Coil cleaned, condensate line flushed. Tech noted slight fin damage on the return side — watch it next visit.", at: "2026-03-02T18:05:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0086-coil", performedOn: "2026-03-02" },
       { changeType: "Maintenance", vendor: "", cost: "40.00", note: "Logged against a schedule that has since been deleted — should render with no maintenance badge.", at: "2026-01-09T15:00:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0086-retired", performedOn: "2026-01-08" },
       { changeType: "Repair", vendor: "Central Coast HVAC", cost: "220.00", note: "Replaced remote receiver board.", at: "2026-02-11T19:40:00.000Z", by: "Eric Stamand" },
     ] },
@@ -2506,7 +2506,7 @@ const MOCK_SNAPSHOT = {
     { label: "BCA0093", type: "Condenser", name: "Building 100", parentId: "BCB0001", brand: "Mitsubishi", model: "MXZ-4C36NAHZ", serial: "", notes: "Outdoor condenser/compressor, 4-zone multi-split.", status: "Active", maintenanceItems: [
       { id: "mnt-0093-inspect", task: "Inspection / cleaning", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "2026-05-19", owner: "Eric", at: "", by: "" },
     ], changes: [
-      { changeType: "Maintenance", vendor: "Central Coast HVAC", cost: "310.00", note: "Annual service. Coils washed, refrigerant charge checked, all four zones tested.", at: "2026-05-19T17:30:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0093-inspect", performedOn: "2026-05-19" },
+      { id: "chg-0093-may26", changeType: "Maintenance", vendor: "Central Coast HVAC", cost: "310.00", note: "Annual service. Coils washed, refrigerant charge checked, all four zones tested.", at: "2026-05-19T17:30:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0093-inspect", performedOn: "2026-05-19" },
       { changeType: "Maintenance", vendor: "Central Coast HVAC", cost: "295.00", note: "Annual service. No faults found.", at: "2025-05-22T16:15:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0093-inspect" },
     ] },
     { label: "BCA0094", type: "Condenser", parentId: "BCB0002", brand: "Mitsubishi", model: "MUZ-GL15NA", serial: "", notes: "Outdoor condenser/compressor, single-zone.", status: "Active", maintenanceItems: [
@@ -2734,11 +2734,11 @@ function AssetTracker() {
   const [allocationDraft, setAllocationDraft] = useState({ roomId: "", quantity: "", error: "" });
   const [confirmAllocationRemove, setConfirmAllocationRemove] = useState(null);
   const [maintenanceDraft, setMaintenanceDraft] = useState({ task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
-  const [editingMaintenanceIdx, setEditingMaintenanceIdx] = useState(null);
+  const [editingMaintenanceId, setEditingMaintenanceId] = useState(null);
   const [maintenanceEditDraft, setMaintenanceEditDraft] = useState(null);
   const [confirmMaintenanceDelete, setConfirmMaintenanceDelete] = useState(null);
   // v34: null when closed; otherwise the completion form for ONE maintenance
-  // item -- { idx, date, changeType, vendor, cost, note, error }. One object
+  // item -- { itemId, date, changeType, vendor, cost, note, error }. One object
   // rather than seven parallel useStates, for the reason breakerModal is one:
   // openDetail() has to reset it, and resetting seven scattered setters is easy
   // to get one short of.
@@ -2750,7 +2750,7 @@ function AssetTracker() {
   // the link between them invisible.
   const [maintenanceSubTab, setMaintenanceSubTab] = useState("scheduled");
   const [showMaintenanceAdd, setShowMaintenanceAdd] = useState(false);
-  // null when closed; { mode: "add" } or { mode: "edit", idx }. The draft
+  // null when closed; { mode: "add" } or { mode: "edit", changeId }. The draft
   // itself stays in changeDraft, which both modes fill.
   const [changeModal, setChangeModal] = useState(null);
   // Which asset the work dialogs act on. null means "the one that is open",
@@ -3229,6 +3229,17 @@ function AssetTracker() {
           const items = a.maintenanceItems || [];
           if (!items.some(m => !m || !m.id)) return a;
           return { ...a, maintenanceItems: items.map(m => (m && m.id ? m : { ...m, id: crypto.randomUUID() })) };
+        })
+        // Same adoption for work entries, and for the same reason now that
+        // photos attach to one: an entry addressed by array position loses its
+        // attachments to the row above it the moment anything earlier is
+        // deleted. Also a load-time READ that fills a blank -- it reaches the
+        // Sheet only inside whatever save happens next, and a stale browser
+        // that minted different ids is caught by the revision check.
+        .map(a => {
+          const chs = a.changes || [];
+          if (!chs.some(c => !c || !c.id)) return a;
+          return { ...a, changes: chs.map(c => (c && c.id ? c : { ...c, id: crypto.randomUUID() })) };
         });
       // Names are filled in over the already-parented list, because the
       // suggestion for fixed equipment reads the chain above the asset ("Room 102
@@ -3580,7 +3591,7 @@ function AssetTracker() {
           setSwapModal(null);
           setMoveCircuitModal(null);
           setDetailEditing(false);
-          setEditingMaintenanceIdx(null);
+          setEditingMaintenanceId(null);
           setMaintenanceEditDraft(null);
           await loadData();
           return;
@@ -3761,8 +3772,8 @@ function AssetTracker() {
     assets.forEach(a => {
       if ((a.status || "Active") === "Archived") return;
       const assetName = nameOf(a);
-      (a.maintenanceItems || []).forEach((item, idx) => {
-        rows.push({ asset: a, assetName, item, idx, status: maintenanceStatusOf(item), due: nextMaintenanceDue(item) });
+      (a.maintenanceItems || []).forEach(item => {
+        rows.push({ asset: a, assetName, item, status: maintenanceStatusOf(item), due: nextMaintenanceDue(item) });
       });
     });
     return rows;
@@ -3773,18 +3784,18 @@ function AssetTracker() {
   // flattened the same way allMaintenanceRows flattens schedules. Archived
   // assets are excluded to match that list and the default Active view.
   //
-  // `idx` is the entry's position in its OWN asset's changes array, which is
-  // what every handler addresses a change by -- not a position in this
-  // flattened, sorted list, which would point at the wrong entry the moment
-  // anything is re-sorted.
+  // Rows carry the entry's own id. This used to carry its array position, with a
+  // note that it was the position in its OWN asset and not in this flattened,
+  // sorted list -- a real hazard that had to be remembered rather than enforced.
+  // The id removes the question.
   const allWorkRows = useMemo(() => {
     if (!assets) return [];
     const rows = [];
     assets.forEach(a => {
       if ((a.status || "Active") === "Archived") return;
       const assetName = nameOf(a);
-      (a.changes || []).forEach((change, idx) => {
-        rows.push({ asset: a, assetName, change, idx, performedOn: changePerformedOn(change) });
+      (a.changes || []).forEach(change => {
+        rows.push({ asset: a, assetName, change, performedOn: changePerformedOn(change) });
       });
     });
     return rows;
@@ -4016,7 +4027,7 @@ function AssetTracker() {
     setAllocationDraft({ roomId: "", quantity: "", error: "" });
     setConfirmAllocationRemove(null);
     setMaintenanceDraft({ task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
-    setEditingMaintenanceIdx(null);
+    setEditingMaintenanceId(null);
     setMaintenanceEditDraft(null);
     setConfirmMaintenanceDelete(null);
     setMaintenanceCompleteModal(null);
@@ -4549,9 +4560,9 @@ function AssetTracker() {
     setChangeModal({ mode: "add" });
   }
 
-  function openChangeEdit(idx) {
+  function openChangeEdit(changeId) {
     setWorkDialogAssetId(null);
-    const ch = (selectedAsset.changes || [])[idx];
+    const ch = (selectedAsset.changes || []).find(c => c && c.id === changeId);
     if (!ch) return;
     setChangeDraft({
       changeType: ch.changeType || "",
@@ -4567,7 +4578,7 @@ function AssetTracker() {
       // silently re-stamp lastPerformed. The checkbox is hidden in edit mode.
       markPerformed: false,
     });
-    setChangeModal({ mode: "edit", idx });
+    setChangeModal({ mode: "edit", changeId });
   }
 
   // Editing a change REWRITES a record, and unlike adding one there is no other
@@ -4586,9 +4597,8 @@ function AssetTracker() {
     if (savingRef.current) return; // double-submit guard, see savingRef
     if (!changeModal || changeModal.mode !== "edit" || !selectedAsset) return;
     if (!changeDraft.changeType) return;
-    const idx = changeModal.idx;
     const list = selectedAsset.changes || [];
-    const original = list[idx];
+    const original = list.find(c => c && c.id === changeModal.changeId);
     if (!original) { setChangeModal(null); return; }
     const updated = {
       ...original,
@@ -4624,7 +4634,7 @@ function AssetTracker() {
     // breaker unit save.
     if (entries.length === 0) { setChangeModal(null); return; }
     const next = assets.map(a => (
-      a.id === selectedId ? { ...a, changes: list.map((c, i) => (i === idx ? updated : c)) } : a
+      a.id === selectedId ? { ...a, changes: list.map(c => (c && c.id === original.id ? updated : c)) } : a
     ));
     await persist(next, { auditLog: logAudit(entries) });
     setChangeModal(null);
@@ -4634,6 +4644,7 @@ function AssetTracker() {
     if (savingRef.current) return; // double-submit guard, see savingRef
     if (!changeDraft.changeType || !workTarget) return;
     const entry = {
+      id: crypto.randomUUID(),
       changeType: changeDraft.changeType,
       vendor: changeDraft.vendor.trim(),
       cost: changeDraft.cost.trim(),
@@ -4696,11 +4707,11 @@ function AssetTracker() {
     setChangeModal(null);
   }
 
-  async function deleteChange(idx) {
+  async function deleteChange(changeId) {
     if (savingRef.current) return; // double-submit guard, see savingRef
     const next = assets.map(a => {
       if (a.id !== selectedId) return a;
-      const changes = (a.changes || []).filter((_, i) => i !== idx);
+      const changes = (a.changes || []).filter(c => !c || c.id !== changeId);
       return { ...a, changes };
     });
     await persist(next, { columns });
@@ -4793,14 +4804,15 @@ function AssetTracker() {
     setShowMaintenanceAdd(false);
   }
 
-  function startEditMaintenance(idx) {
-    const item = (selectedAsset.maintenanceItems || [])[idx];
+  function startEditMaintenance(itemId) {
+    const item = (selectedAsset.maintenanceItems || []).find(m => m && m.id === itemId);
+    if (!item) return;
     setMaintenanceEditDraft({ task: item.task, frequency: item.frequencyLabel, lastPerformed: dateOnly(item.lastPerformed), owner: item.owner || "" });
-    setEditingMaintenanceIdx(idx);
+    setEditingMaintenanceId(itemId);
   }
 
   function cancelEditMaintenance() {
-    setEditingMaintenanceIdx(null);
+    setEditingMaintenanceId(null);
     setMaintenanceEditDraft(null);
   }
 
@@ -4809,9 +4821,9 @@ function AssetTracker() {
   async function saveMaintenanceEdit() {
     if (savingRef.current) return; // double-submit guard, see savingRef
     if (!maintenanceEditDraft.task.trim() || !selectedAsset) return;
-    const idx = editingMaintenanceIdx;
     const items = selectedAsset.maintenanceItems || [];
-    const original = items[idx];
+    const original = items.find(m => m && m.id === editingMaintenanceId);
+    if (!original) { cancelEditMaintenance(); return; }
     const freq = MAINTENANCE_FREQUENCIES.find(f => f.label === maintenanceEditDraft.frequency) || MAINTENANCE_FREQUENCIES[1];
     const updated = {
       ...original,
@@ -4832,7 +4844,7 @@ function AssetTracker() {
     if ((original.lastPerformed || "") !== (updated.lastPerformed || "")) {
       entries.push(mkEntry("Last performed", formatDateOnly(original.lastPerformed) || "—", formatDateOnly(updated.lastPerformed) || "—"));
     }
-    const nextItems = items.map((it, i) => (i === idx ? updated : it));
+    const nextItems = items.map(it => (it && it.id === original.id ? updated : it));
     const next = assets.map(a => (a.id === selectedId ? { ...a, maintenanceItems: nextItems } : a));
     await persist(next, { auditLog: entries.length ? logAudit(entries) : auditLog });
     cancelEditMaintenance();
@@ -4847,9 +4859,9 @@ function AssetTracker() {
   // The form opens PREFILLED, so a routine filter clean is still one click: the
   // date is today and the work type is Maintenance where that type exists. The
   // fields are simply there for the visit that had something worth recording.
-  function openMaintenanceComplete(idx) {
+  function openMaintenanceComplete(itemId) {
     setMaintenanceCompleteModal({
-      idx,
+      itemId,
       date: localDateString(),
       // Seeded only if the type actually exists -- it ships in
       // DEFAULT_CHANGE_TYPES but the list is user-managed and can be renamed or
@@ -4868,9 +4880,9 @@ function AssetTracker() {
   async function submitMaintenanceComplete() {
     if (savingRef.current) return; // double-submit guard, see savingRef
     if (!maintenanceCompleteModal || !selectedAsset) return;
-    const { idx, date, changeType, vendor, cost, note } = maintenanceCompleteModal;
+    const { itemId, date, changeType, vendor, cost, note } = maintenanceCompleteModal;
     const items = selectedAsset.maintenanceItems || [];
-    const item = items[idx];
+    const item = items.find(m => m && m.id === itemId);
     if (!item) return;
     if (!date) {
       setMaintenanceCompleteModal({ ...maintenanceCompleteModal, error: "Pick the date this was performed." });
@@ -4880,10 +4892,11 @@ function AssetTracker() {
       setMaintenanceCompleteModal({ ...maintenanceCompleteModal, error: "Pick a work type." });
       return;
     }
-    const nextItems = items.map((it, i) => (i === idx ? { ...it, lastPerformed: date } : it));
+    const nextItems = items.map(it => (it && it.id === itemId ? { ...it, lastPerformed: date } : it));
     // The link. The item's id is guaranteed present by the adoption in
     // loadData(), so this never writes an empty reference.
     const change = {
+      id: crypto.randomUUID(),
       changeType,
       vendor: vendor.trim(),
       cost: cost.trim(),
@@ -4916,12 +4929,13 @@ function AssetTracker() {
     setMaintenanceCompleteModal(null);
   }
 
-  async function deleteMaintenanceItem(idx) {
+  async function deleteMaintenanceItem(itemId) {
     if (savingRef.current) return; // double-submit guard, see savingRef
     if (!selectedAsset) return;
     const items = selectedAsset.maintenanceItems || [];
-    const item = items[idx];
-    const nextItems = items.filter((_, i) => i !== idx);
+    const item = items.find(m => m && m.id === itemId);
+    if (!item) { setConfirmMaintenanceDelete(null); return; }
+    const nextItems = items.filter(m => !m || m.id !== itemId);
     const next = assets.map(a => (a.id === selectedId ? { ...a, maintenanceItems: nextItems } : a));
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId,
@@ -7049,7 +7063,7 @@ function AssetTracker() {
     // Never-performed items sort first (need scheduling attention); the rest by
     // ascending next-due date, which naturally puts the most-overdue on top.
     const maintenanceItems = (selectedAsset.maintenanceItems || [])
-      .map((item, idx) => ({ item, idx, status: maintenanceStatusOf(item), due: nextMaintenanceDue(item) }))
+      .map(item => ({ item, status: maintenanceStatusOf(item), due: nextMaintenanceDue(item) }))
       .sort((a, b) => (a.due ? a.due.getTime() : -Infinity) - (b.due ? b.due.getTime() : -Infinity));
     const overdueMaintenanceCount = maintenanceItems.filter(m => m.status === "overdue").length;
     // The header prints selectedAsset.tag immediately to the left of this, so
@@ -7603,16 +7617,16 @@ function AssetTracker() {
                 <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>No maintenance scheduled yet.</div>
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                  {maintenanceItems.map(({ item, idx, status, due }) => {
+                  {maintenanceItems.map(({ item, status, due }) => {
                     const statusMeta = {
                       overdue: { label: "Overdue", color: C.danger },
                       "due-soon": { label: "Due soon", color: C.accent },
                       ok: { label: "On track", color: C.success },
                       never: { label: "Not yet done", color: C.muted },
                     }[status];
-                    if (editingMaintenanceIdx === idx) {
+                    if (editingMaintenanceId === item.id) {
                       return (
-                        <div key={idx} style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)" }}>
+                        <div key={item.id} style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)" }}>
                           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
                             <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
                               <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Task</span>
@@ -7663,7 +7677,7 @@ function AssetTracker() {
                       );
                     }
                     return (
-                      <div key={idx} style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px" }}>
+                      <div key={item.id} style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px" }}>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4, gap: 8 }}>
                           <span style={{ fontWeight: 700, fontSize: 13, color: C.brandDark }}>{item.task}</span>
                           <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
@@ -7672,10 +7686,10 @@ function AssetTracker() {
                             </span>
                             {canEdit && (
                             <>
-                            <button onClick={() => startEditMaintenance(idx)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Edit maintenance item ${item.task}`}>
+                            <button onClick={() => startEditMaintenance(item.id)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Edit maintenance item ${item.task}`}>
                               <Pencil size={14} color={C.muted} />
                             </button>
-                            <button onClick={() => setConfirmMaintenanceDelete(idx)} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4 }} aria-label={`Delete maintenance item ${item.task}`}>
+                            <button onClick={() => setConfirmMaintenanceDelete(item.id)} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4 }} aria-label={`Delete maintenance item ${item.task}`}>
                               <X size={13} color={C.placeholder} />
                             </button>
                             </>
@@ -7703,7 +7717,7 @@ function AssetTracker() {
                               {(canEdit || history.length > 0) && (
                               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                                 {canEdit && (
-                                <button onClick={() => openMaintenanceComplete(idx)} disabled={isSaving} style={{ padding: "6px 12px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 12 }}>
+                                <button onClick={() => openMaintenanceComplete(item.id)} disabled={isSaving} style={{ padding: "6px 12px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 12 }}>
                                   {isSaving ? "Saving…" : "Log completion…"}
                                 </button>
                                 )}
@@ -7775,10 +7789,9 @@ function AssetTracker() {
                 <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>No changes logged yet.</div>
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                  {changeEntries.map((ch, i) => {
-                    const realIdx = changeEntries.length - 1 - i;
+                  {changeEntries.map(ch => {
                     return (
-                      <div key={realIdx} style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px" }}>
+                      <div key={ch.id} style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px" }}>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4, gap: 8 }}>
                           <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", minWidth: 0 }}>
                             <span style={{ fontWeight: 700, fontSize: 13, color: C.brandDark }}>{ch.changeType}</span>
@@ -7807,10 +7820,10 @@ function AssetTracker() {
                               rather than next to the delete it belongs with. */}
                           {canEdit && (
                           <div style={{ display: "flex", alignItems: "center", gap: 2, flexShrink: 0 }}>
-                            <button onClick={() => openChangeEdit(realIdx)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Edit ${ch.changeType} entry`}>
+                            <button onClick={() => openChangeEdit(ch.id)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Edit ${ch.changeType} entry`}>
                               <Pencil size={13} color={C.muted} />
                             </button>
-                            <button onClick={() => setConfirmChangeDelete(realIdx)} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4 }} aria-label="Delete change entry">
+                            <button onClick={() => setConfirmChangeDelete(ch.id)} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4 }} aria-label="Delete change entry">
                               <X size={13} color={C.placeholder} />
                             </button>
                           </div>
@@ -8069,7 +8082,7 @@ function AssetTracker() {
             found) are right here, and what gets written is linked back to the
             schedule rather than floating loose in the work history. */}
         {maintenanceCompleteModal && (() => {
-          const item = (selectedAsset.maintenanceItems || [])[maintenanceCompleteModal.idx];
+          const item = (selectedAsset.maintenanceItems || []).find(m => m && m.id === maintenanceCompleteModal.itemId);
           if (!item) return null;
           const set = patch => setMaintenanceCompleteModal({ ...maintenanceCompleteModal, ...patch, error: "" });
           return (
@@ -9200,7 +9213,7 @@ function AssetTracker() {
                   <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "18px 0" }}>No work logged yet.</div>
                 ) : filteredWorkRows.map((r, i) => (
                   <div
-                    key={`${r.asset.id}-${r.idx}`}
+                    key={`${r.asset.id}-${r.change.id}`}
                     onClick={() => openDetail(r.asset, "changes")}
                     style={{ display: "grid", gridTemplateColumns: "130px 220px 140px 170px 110px 260px", borderTop: `1px solid ${C.border}`, cursor: "pointer", background: i % 2 ? C.bg : C.surface, minWidth: "max-content" }}
                   >
@@ -9258,7 +9271,7 @@ function AssetTracker() {
                 </div>
               )}
 
-              {filteredMaintenanceRows.map(({ asset, assetName, item, idx, status, due }) => {
+              {filteredMaintenanceRows.map(({ asset, assetName, item, status, due }) => {
                 const statusMeta = {
                   overdue: { label: "Overdue", color: C.danger },
                   "due-soon": { label: "Due soon", color: C.accent },
@@ -9268,7 +9281,7 @@ function AssetTracker() {
                 const AssetIcon = iconFor(asset.type);
                 return (
                   <div
-                    key={`${asset.id}-${idx}`}
+                    key={`${asset.id}-${item.id}`}
                     className="row-body"
                     onClick={() => openDetail(asset, "maintenance")}
                     style={{ display: "grid", gridTemplateColumns: "220px 170px 110px 130px 130px 130px 120px", alignItems: "center", cursor: "pointer", background: C.surface, borderTop: `1px solid ${C.border}` }}

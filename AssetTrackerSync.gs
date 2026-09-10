@@ -259,7 +259,15 @@ const BREAKER_TYPE_FIELDS = ["id", "name", "slotSpan", "members"];
 // shape and a second version number would have meant a second deploy for a
 // schema that only ever existed in git. Do NOT repeat that once a version is
 // live anywhere -- check `node deploy.mjs --status` before assuming.
-const CHANGE_FIELDS = ["assetLabel", "changeType", "vendor", "cost", "note", "at", "by", "maintenanceId", "performedOn"];
+// "id" (v34) is the entry's own crypto.randomUUID(). It was deliberately absent
+// when maintenanceId arrived -- nothing referenced a change entry, so an id
+// would have been dead weight, and array position is stable because writeTable_
+// rewrites the tab in the order the client sent.
+//
+// Photos attach to a work entry, so something references one now, and position
+// stops being good enough the moment an entry above it is deleted: every photo
+// on every later entry would silently re-point one row up.
+const CHANGE_FIELDS = ["assetLabel", "id", "changeType", "vendor", "cost", "note", "at", "by", "maintenanceId", "performedOn"];
 // "id" (v34) is a maintenance item's stable key, a crypto.randomUUID() minted by
 // the frontend. Array position cannot serve as identity here: items are edited
 // and deleted by index, so deleting one renumbers every item below it and would
@@ -1133,7 +1141,7 @@ function handleAuthenticatedRead_(body, e) {
         comments: commentRows.filter(c => c.assetLabel === label).map(c => ({ text: c.text, at: c.at, by: c.by })),
         changes: changeRows.filter(c => c.assetLabel === label).map(c => ({
           changeType: c.changeType, vendor: c.vendor, cost: c.cost, note: c.note, at: c.at, by: c.by,
-          maintenanceId: c.maintenanceId || "", performedOn: c.performedOn || "",
+          id: c.id || "", maintenanceId: c.maintenanceId || "", performedOn: c.performedOn || "",
         })),
         allocations: allocationRows.filter(al => al.assetLabel === label).map(al => ({ roomId: al.room, quantity: al.quantity })),
         maintenanceItems: maintenanceRows.filter(m => m.assetLabel === label).map(m => ({
@@ -1404,7 +1412,7 @@ function doPost(e) {
         (a.comments || []).forEach(c => commentRows.push({ assetLabel: key, text: c.text, at: c.at, by: c.by || "" }));
         (a.changes || []).forEach(c => changeRows.push({
           assetLabel: key, changeType: c.changeType, vendor: c.vendor || "", cost: c.cost || "", note: c.note || "", at: c.at, by: c.by || "",
-          maintenanceId: c.maintenanceId || "", performedOn: c.performedOn || "",
+          id: c.id || "", maintenanceId: c.maintenanceId || "", performedOn: c.performedOn || "",
         }));
         (a.allocations || []).forEach(al => allocationRows.push({ assetLabel: key, room: al.roomId, quantity: al.quantity }));
         (a.maintenanceItems || []).forEach(m => maintenanceRows.push({
