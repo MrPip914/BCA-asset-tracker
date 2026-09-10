@@ -257,7 +257,7 @@ is an outage on a school's live system.
 
 1. ~~**Should photos show on the public QR panel page?**~~ **DECIDED — yes, see §7.**
 2. ~~**Cloudinary or R2**~~ **DECIDED — Cloudinary, see §8.**
-3. **Assets only, or work items too** — the second needs stable ids on child rows first (§3).
+3. ~~**Assets only, or work items too**~~ **DECIDED — see §9, which also corrects §3's phasing.**
 
 ---
 
@@ -502,3 +502,106 @@ the project grows a build step, R2 becomes the better answer and §8.4 is the es
 Sources (checked 2026-09-10): Cloudflare R2 public buckets documentation; Cloudinary pricing
 and credits documentation; Cloudinary client-side uploading security notes; DNS lookup of
 `stama.tech` NS and `assets.stama.tech` CNAME.
+
+---
+
+## 9. Decision 3 — assets only, or work items too?
+
+Answered 2026-09-10. **This section corrects the framing in §3 and §6**, which split phase 1
+as "assets only" vs "work items". That was the wrong cut.
+
+### 9.1 The line is "has a stable id", not "is an asset"
+
+Verified against the field lists in `AssetTrackerSync.gs`:
+
+| Entity | Stable id today? |
+|---|---|
+| Asset | **yes** — real `id` since v31/v32 |
+| Breaker | **yes** — `crypto.randomUUID()`, and a `groupId` |
+| Circuit | **yes** — `crypto.randomUUID()` |
+| Comment | no — `["assetLabel", "text", "at", "by"]` |
+| Change | no — `["assetLabel", "changeType", "vendor", "cost", "note", "at", "by"]` |
+| Maintenance item | no — `["assetLabel", "task", "frequencyLabel", "frequencyDays", "lastPerformed", "owner", "at", "by"]` |
+
+The frontend addresses all three of the bottom rows **by array index**:
+`editingMaintenanceIdx`, `startEditMaintenance(idx)`, `markMaintenanceDone(idx)`,
+`deleteMaintenanceItem(idx)`, `deleteComment(idx)`, `deleteChange(idx)`. Comments and Changes
+are add-and-delete only — there is no edit path for either.
+
+### 9.2 "Assets only" would quietly contradict decision 1
+
+§7 committed to publishing photos owned by **a panel, its breakers and its circuits** on the
+QR page. Under an assets-only phase 1, only the Panel asset could hold a photo — so the page
+would publish a picture of the panel as a whole, and there would be no way to photograph
+what circuit 12 actually feeds, which is the single thing an electrician at that panel most
+wants and the reason §7 was worth saying yes to.
+
+**And it would cost nothing to include, because breakers and circuits already have UUIDs.**
+
+**So the real phase 1 is: assets + breakers + circuits.** No schema work at all beyond the
+Photos tab itself. That is strictly better than what §6 proposed and is the main correction
+here.
+
+### 9.3 Giving the other three an id is cheap — and cheapest done NOW
+
+The instinct is to defer it as "a schema change, therefore a deploy". **That reasoning does
+not survive contact with the fact that photos need a deploy anyway.** The Photos tab and
+`rev_photos` are a new backend version regardless. Adding `id` to three more field lists in
+that *same* version is three names in three lists. Deferring it buys nothing and costs a
+whole extra deploy cycle across every tenant later, with all the version-check discipline
+that entails.
+
+Checked, because this codebase has been bitten here before: all three tabs are written with
+`writeTable_`, which clears and rewrites from the field list, so a new column is purely
+additive. **The tab where adding a column silently lost data was `AuditLog`** — it uses
+`appendNewRows_`, whose narrow-stored-header bug was fixed in v27. None of these three is
+that tab.
+
+**How the ids get minted, and why the obvious trick does not work here.** Phase 1 of the key
+refactor could adopt `id = a.id || a.label` because the fallback was already stable, stored
+data. These rows have no natural key — `<assetId>:<index>` looks like one and is a trap: it
+is stable until someone deletes an earlier item, at which point every later photo silently
+re-points to the wrong task. That is precisely the class of silent corruption this file
+keeps writing warnings about.
+
+The workable pattern is **mint a uuid on load, persist it on the next save** — and the
+reason it is safe is specific rather than hopeful:
+
+- Nothing references the ids until a photo is attached, and attaching a photo *is* a save.
+  So the photo row and the ids that give it meaning ride the **same snapshot write**, and
+  land or fail together.
+- The two-browsers-mint-different-uuids race is already handled: the loser's save is refused
+  by the existing revision check, that browser reloads, and it adopts the winner's ids. The
+  optimistic-concurrency machinery from v12 solves this for free.
+
+This is deliberately **not** the `convertUsersToAssets` button pattern. That needed a
+deliberate one-time click because it issued labels from `nextAssetNumber`, a shared counter
+several browsers would race for. A uuid is not contended, so nothing here needs a button.
+
+### 9.4 Side benefit worth noticing, not worth chasing
+
+Once these rows have ids, the index-based add/edit/delete handlers *could* address them by
+id instead. That is not a bug today — the sheet round-trips rows in array order, and the
+revision check already refuses a stale concurrent delete — so this is fragility, not a
+defect, and it is **out of scope**. Noted only so the next person sees why the ids make it
+possible.
+
+### 9.5 Recommendation
+
+**Add the `id` column to Comments, Changes and Maintenance in the same backend version as the
+Photos tab. Wire the photo UI in stages afterwards.**
+
+| Stage | Owners | Schema cost |
+|---|---|---|
+| **1 — ship together** | Asset, Breaker, Circuit | none; all three already have ids |
+| **2 — same deploy, UI later** | Change, Maintenance item | one column each, minted per §9.3 |
+| **3 — only if wanted** | Comment | one column; a comment with a picture is a nice-to-have, not a driver |
+
+Order the UI by value: an asset's own photos first, then the panel/breaker/circuit gallery
+that decision 1 already committed to, then a repair record's before/after and a maintenance
+item's evidence-of-completion. **Changes is the tab that most deserves the name "work item"** —
+it already carries vendor and cost, so a receipt or a before/after belongs there more
+naturally than anywhere else in the app.
+
+**What this does NOT include:** Allocations (a quantity per room — nothing to photograph) and
+AuditLog (append-only, machine-written, and the one tab with no rewrite path).
