@@ -798,6 +798,24 @@ one worth remembering.
   stored ones, so a load-time backfill would bake today's defaults into every sheet forever.
   `applyFieldKind` stores an override only when it DIFFERS from the shipped default and
   removes it when it returns — "same as shipped" is never a stored fact.
+  - **CHOSEN AT CREATION, FIXED AFTERWARDS** (Eric's call, 2026-09-10). The kind is picked
+    where the field is born — the Columns menu's "add column", or a pending row in the type
+    editor — and every existing field then shows its kind as plain text with no control.
+    `saveTypeSettings` writes a kind only for a column it is inventing in that same save, so
+    the rule is structural and not merely a hidden picker.
+    - **This removed a problem rather than managing it.** A kind change could not convert
+      stored values (a full asset rewrite triggered by a settings edit, with nowhere to put
+      anything unparseable), so it left them intact but *undisplayable*: a number input
+      cannot render `MOCK-CMP-001`, so the form showed the field EMPTY and then refused to
+      save, naming a value that was not on screen. Across forty assets that was forty
+      unsaveable records complaining about blank fields. **If a different kind is needed,
+      the answer is a different field.**
+    - A `select` column's CHOICES follow the same rule and for the same reason — narrowing
+      the list under stored data leaves assets holding a value the field no longer offers.
+      They are shown read-only on an existing field, since "Choice list" alone says nothing
+      about what the field accepts.
+    - `validateColumnValue` stays regardless: data can still arrive out of step from the
+      admin import, a direct Sheet edit, or a hand-edited Config blob.
   - **This was not purely additive.** The app's entire data-type awareness was
     `type={c.key === "totalQuantity" ? "number" : undefined}` at two call sites, which is why
     `purchaseDate` and `warrantyUntil` were plain text boxes for the app's whole life. The

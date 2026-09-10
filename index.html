@@ -849,6 +849,11 @@ const COLUMN_DATA_TYPES = [
   { value: "select", label: "Choice list" },
 ];
 const COLUMN_DATA_TYPE_VALUES = new Set(COLUMN_DATA_TYPES.map(t => t.value));
+// What a kind is CALLED. Falls back to the raw value, so a stored kind this
+// build doesn't know still reads as something rather than as blank.
+function kindLabel(value) {
+  return (COLUMN_DATA_TYPES.find(t => t.value === value) || {}).label || value;
+}
 
 // The shipped default for each built-in column. NOT written into a stored column
 // config on load, and that is the whole point: the column migration below only
@@ -1830,7 +1835,7 @@ const FRONTEND_SCRIPT_VERSION = "v33";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-09.5";
+const APP_VERSION = "2026-09-10.1";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -5148,21 +5153,16 @@ function AssetTracker() {
       createdKeys.push(key);
     });
 
-    // The per-field kind is a property of the COLUMN, so it is written for every
-    // field the editor showed — not only the ones this type has ticked. Editing
-    // a Computer and changing what Purchase Date holds changes it for Monitors
-    // too, which is what the note under that section says out loud.
-    nextColumns = nextColumns.map(c => {
-      if (!(c.key in (draft.fieldTypes || {}))) return c;
-      // The editor offers no kind for these, so it must not write one either —
-      // a stale dataType on `person` would be read by columnDataType and by
-      // nothing else, which is exactly the kind of dead setting that later reads
-      // as a bug in whatever does start honouring it.
-      if (BESPOKE_FORM_FIELDS.has(c.key)) return c;
-      const copy = { ...c };
-      applyFieldKind(copy, draft.fieldTypes[c.key], (draft.fieldChoices || {})[c.key]);
-      return copy;
-    });
+    // NOTHING is written back onto an existing column. A field's kind is set by
+    // the loop above, when the column is INVENTED, and is fixed from then on
+    // (Eric's call, 2026-09-10) — so the editor's fieldTypes map is display
+    // state for every row except a pending one.
+    //
+    // This used to rewrite every column the editor showed, which is what made
+    // changing a kind under stored data possible at all. Leaving that in while
+    // the UI merely hid the picker would make the rule cosmetic: the draft still
+    // carries a kind per field, and one stray write path would reintroduce the
+    // whole problem silently.
 
     const fields = typeEditableFields(nextColumns).map(c => c.key);
     const wanted = new Set([...draft.fields, ...createdKeys]);
@@ -9307,6 +9307,11 @@ function TypeManagerModal({
       // One option per line rather than comma-separated: a choice list for a
       // school reads "Good / Fair / Needs replacing", and the day one of those
       // wants a comma in it a separator-based editor has no answer.
+      //
+      // Seeded for every field but only EDITABLE on a pending one, for the same
+      // reason the kind is: the choices are part of what the field is. Narrowing
+      // a list under stored data would leave assets holding a value the field no
+      // longer offers, which is the same shape of problem as changing the kind.
       fieldChoices: Object.fromEntries(fieldOptions.map(f => [f.key, columnOptions(f).join("\n")])),
       newFields: [],
     });
@@ -9403,33 +9408,48 @@ function TypeManagerModal({
             {label}
             {pending && <span style={{ marginLeft: 6, fontSize: 10, fontFamily: "'IBM Plex Mono', monospace", color: C.accent }}>NEW</span>}
           </span>
-          {/* A field with its own component has no kind to choose — offering
-              one would promise a setting that does nothing, which is worse than
-              offering nothing at all. It still gets a slot, so the rows line up
-              and the absence reads as "not applicable" rather than as a bug. */}
-          {bespoke ? (
-            <div
-              title={`${label} has its own editor, so it holds one particular kind of value.`}
-              style={{ width: 118, flexShrink: 0, fontSize: 12, color: C.empty, textAlign: "center" }}
-            >
-              Built in
-            </div>
-          ) : (
-            /* Dimmed rather than hidden when the field is off: the row keeps its
-               shape, and the kind it WOULD have is still visible, so ticking a
-               field back on doesn't reveal a setting that was never on screen. */
-            <div style={{ width: 118, flexShrink: 0, opacity: on ? 1 : 0.45 }}>
+          {/* THE KIND IS CHOSEN ONCE, WHEN THE FIELD IS CREATED, AND IS FIXED
+              AFTER THAT (Eric's call, 2026-09-10). So only a PENDING field —
+              one invented in this editing session and not yet saved — gets a
+              picker; every existing field shows what it is, and nothing else.
+
+              This removes a whole class of problem rather than managing it.
+              Changing a kind under stored data could not convert those values
+              (that would be a full asset rewrite triggered by a settings edit,
+              with nowhere to put anything unparseable), so it left them intact
+              but undisplayable: a number input cannot render "MOCK-CMP-001", so
+              the form showed the field EMPTY and then refused to save, naming a
+              value that was not on screen. Across forty assets that is forty
+              unsaveable records complaining about blank fields. If a different
+              kind is needed, the answer is a different field.
+
+              A field with its own component (person, peripherals, subType) has
+              no kind to choose at all, and says so rather than showing a
+              plausible-looking "Text". */}
+          <div
+            title={
+              bespoke ? `${label} has its own editor, so it holds one particular kind of value.`
+              : pending ? "Choose the kind now — it is fixed once this field is created."
+              : `${label} holds ${kindLabel(kind)}. A field's kind is fixed when it is created; if you need a different kind, add another field.`
+            }
+            style={{ width: 118, flexShrink: 0, opacity: on ? 1 : 0.45 }}
+          >
+            {bespoke ? (
+              <div style={{ fontSize: 12, color: C.empty, textAlign: "center" }}>Built in</div>
+            ) : pending ? (
               <PickerField
                 label={`${label} kind`}
                 hideLabel
                 value={kind}
                 onChange={setKind}
                 options={COLUMN_DATA_TYPES.map(t => t.value)}
-                labelForOption={v => (COLUMN_DATA_TYPES.find(t => t.value === v) || {}).label || v}
+                labelForOption={kindLabel}
                 title={`${label}: kind of value`}
               />
-            </div>
-          )}
+            ) : (
+              <div style={{ fontSize: 12, color: C.muted, textAlign: "center" }}>{kindLabel(kind)}</div>
+            )}
+          </div>
           {/* Required is meaningful for EVERY field, bespoke ones included —
               "every Computer must have a User" is a rule someone would want,
               and it is orthogonal to what kind of value the field holds. A
@@ -9467,7 +9487,19 @@ function TypeManagerModal({
             </button>
           )}
         </div>
-        {kind === "select" && on && (
+        {/* An existing choice list is shown but not editable, for the same
+            reason its kind is: narrowing the list under stored data leaves
+            assets holding a value the field no longer offers. Shown at all
+            because "Choice list" with no choices tells you nothing about what
+            the field actually accepts. */}
+        {kind === "select" && on && !pending && (
+          <div style={{ marginLeft: 24, fontSize: 12, color: C.empty }}>
+            {(draft.fieldChoices || {})[key]
+              ? String(draft.fieldChoices[key]).split("\n").filter(Boolean).join(" · ")
+              : "No choices configured."}
+          </div>
+        )}
+        {kind === "select" && on && pending && (
           <textarea
             value={(draft.fieldChoices || {})[key] || ""}
             onChange={e => setDraft({ ...draft, fieldChoices: { ...(draft.fieldChoices || {}), [key]: e.target.value } })}
@@ -9682,14 +9714,12 @@ function TypeManagerModal({
               <div style={{ fontSize: 12, color: C.empty }}>
                 A new field belongs to the types you tick it for, and is hidden from the main table until you show it from the Columns menu.
               </div>
-              {/* Said once, under the whole section, rather than beside each
-                  row's picker. Whether a type HAS a field is this type's
-                  business; what that field HOLDS is the field's own, shared by
-                  every type using it — and silently changing another type's form
-                  from inside this one is exactly the kind of surprise worth
-                  spending a line of text to prevent. */}
+              {/* This note replaced a warning that changing a kind here would
+                  change it for every other type too. That warning is obsolete
+                  because the thing it warned about is now impossible — which is
+                  the better fix. */}
               <div style={{ fontSize: 12, color: C.empty }}>
-                A field's kind applies everywhere that field is used, not only to this type.
+                A field's kind is set when it is created and can't be changed afterwards. If you need a different kind, add another field.
               </div>
             </div>
 

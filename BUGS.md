@@ -16,48 +16,34 @@ version that fixed them.
 
 ## Open
 
-### Changing a field's data type blanks the box while refusing the save
-**Found:** 2026-09-10, Eric asked what happens to existing data when a field's kind changes.
+### A value that doesn't match its field's kind shows as BLANK, then refuses the save
+**Found:** 2026-09-10. **Mostly closed the same day** — see below.
 **Needs a deploy:** no — `index.html` only.
-**Confirmed:** in a browser against Sandbox, switching Computer's Serial from Text to Number
-with `MOCK-CMP-001` already stored.
+**Confirmed:** in a browser against Sandbox, before the fix.
 
-The data is safe and the change is reversible — that part works as designed. What is wrong
-is what the person sees while it is in that state:
+When a stored value doesn't match its column's data type, the edit form shows that field
+**empty** — `<input type="number">` cannot render `MOCK-CMP-001`, and React still holds the
+real value; only the browser refuses to display it. Saving is then refused with "Serial must
+be a number.", naming a value **that is not on screen**. The data is never touched, and the
+detail page still shows it, but the form reads as "the app is complaining about an empty
+field", and the obvious response — type something — overwrites data that was never at risk.
 
-- The stored value is **untouched**, and the detail page still shows it.
-- The EDIT form shows the field **empty**, because `<input type="number">` (or `date`)
-  cannot render a value it does not understand. React still holds the real value; only the
-  browser refuses to display it.
-- Saving is refused with "Serial must be a number." — which is correct, and names a value
-  **that is not on screen**. So the form says a field is wrong while showing it as blank.
-- Switching the kind back restores the display completely. Nothing was lost.
+**The route that made this common is gone.** A field's kind is now chosen when the field is
+created and is fixed afterwards (Eric's call, 2026-09-10), so no settings change can put
+stored data out of step with its own column. That removed the bad case entirely: changing a
+kind under forty assets used to make all forty unsaveable at once.
 
-So the failure is legible only if you already know the rule. To anyone else it reads as
-"the app is complaining about an empty field", and the obvious response — type something —
-overwrites real data that was never in danger.
+What is left is narrow and arrives from outside the app: the **admin import** writing text
+into a column created as a number, a direct Sheet edit, or a hand-edited Config blob.
+`validateColumnValue` is the backstop for exactly those and should stay.
 
-It also scales badly, which is the part worth deciding about. Change a kind on a field that
-forty assets already use incompatibly and all forty become unsaveable until each is
-corrected by hand, with the offending value invisible on every one of them.
+Worth doing if it ever bites: render a value that doesn't match its kind as **read-only text
+with a note**, rather than as an empty typed input. One change, and the refusal stops
+referring to something invisible.
 
-Options:
-- **Render an incompatible value as read-only text** with the real value shown and a "this
-  no longer matches this field's kind" note, instead of an empty typed input. Keeps the
-  value visible, keeps the refusal honest.
-- **Warn at the moment the kind changes**, counting the assets whose values would no longer
-  fit ("12 assets have a Serial that is not a number"). Turns a later surprise into a
-  decision, and is the cheaper half.
-- Both. They solve different halves — one the discovery, one the repair.
-
-Deliberately NOT an option: coercing or clearing stored values on a kind change. That is a
-full rewrite of the asset domain triggered by a settings edit, and an unparseable value
-would have nowhere to go but the bin.
-
-**Blocks:** nothing. The feature is safe as shipped; this is about how the state reads.
+**Blocks:** nothing.
 
 ---
-
 
 ### `deploy.config.json` in a repo clone silently shadows the `$HOME` config
 **Found:** 2026-09-09 while misdiagnosing a deploy failure. **Latent — this did NOT cause

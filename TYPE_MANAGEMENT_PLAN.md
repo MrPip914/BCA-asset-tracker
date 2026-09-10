@@ -343,6 +343,10 @@ anything.
   that predates the rule (or arrived by import) can violate it, so `saveDraft` validates
   and reports through the same channel as required-field errors. A number must parse; a
   date must be `yyyy-MM-dd`; a select value must be in `options` **or blank**.
+- **A kind is chosen at CREATION and fixed afterwards** (Eric's call, 2026-09-10,
+  after seeing the behaviour below in dev). If a different kind is needed, add another
+  field. What follows is why, and is kept because it is the reasoning that produced the
+  rule rather than a description of current behaviour.
 - **Changing a column's data type when data already exists must NOT coerce stored
   values.** Converting every asset's value would be a full rewrite of the Assets domain
   triggered by a settings change, and an unparseable value would have nowhere to go but
