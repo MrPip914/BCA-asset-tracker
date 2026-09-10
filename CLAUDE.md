@@ -376,18 +376,61 @@ onboard one.
   Both live inside the same `view === "list"` screen; opening an asset (either tab) still
   goes through `openDetail()` into `view === "detail"`, and `openDetail(asset, "maintenance")`
   jumps straight to that asset's Maintenance sub-tab — used by the overview's row click.
-- **Deep links are one-way and on-demand, not continuous URL sync**: the app never pushes
-  `view`/`selectedLabel`/`detailTab` into the address bar as you navigate (no back-button
-  support, that wasn't asked for). Instead, a "Copy link" button (currently only in the
-  panel layout view, `PanelDiagram`) builds a `?asset=<label>&tab=<tab>` URL on demand and
-  copies it (`fallbackCopyToClipboard()` covers browsers/contexts without the async
-  Clipboard API, e.g. a plain `file://` page). On load, a one-time effect gated by
-  `urlDeepLinkAppliedRef` (a `useRef`, not empty-deps — `assets` starts `null` and the
-  effect has to wait for `loadData()` to resolve before there's anything to match against)
-  reads those params and calls `openDetail()` straight to that asset/tab if the label
-  still exists. Extend this same pattern (`?asset=...&tab=...` + a button calling the same
-  URL-building logic) for a "copy link" anywhere else it'd be useful — the restore side
-  already works for any asset/tab combination, only the button is scoped to panels so far.
+- **Navigation IS the address bar now** (2026-09-10). This bullet used to say the opposite —
+  "the app never pushes into the address bar as you navigate (no back-button support, that
+  wasn't asked for)" — and it was asked for: clicking through several assets left no way to
+  trace back, because the in-app arrow always returned to the LIST no matter how deep you
+  were, and the browser's own Back left the app entirely since the tab held exactly one
+  history entry. On a phone, where Back is a system gesture, that second one is the harsher.
+  - **Every navigation writes history, so the browser's stack IS the trail.** Opening an
+    asset PUSHES `?asset=<id>&tab=<tab>`; switching tabs REPLACES. That split is the whole
+    design: pushing on a tab click would bury the previous asset one press deeper per tab
+    looked at, so Back would stop meaning "the thing I was looking at before" almost
+    immediately. A `popstate` listener restores the view.
+  - **No second breadcrumb strip, deliberately.** The app already has two — `HierarchyNav`
+    above the list and the Path field on the detail page — and both answer *where does this
+    live* (containment). A trail of *where have I been* is a different question wearing an
+    identical costume, and a third crumb row would have made all three ambiguous. The back
+    control NAMES its destination instead ("← Room 101"), which is the same information
+    without a new visual language.
+  - **`backTo` is stored in the history entry because the History API deliberately does not
+    expose the previous one.** It holds the id, and the NAME is resolved at render time —
+    the app-wide reference convention (see "Reference conventions"), applied to a reference
+    that happens to live in history state, so a rename can't leave a stale word on a button.
+  - **`navDepth` is what stops Back leaving the site.** It counts entries *this app instance*
+    pushed; the control may only call `history.back()` above zero. At zero the user arrived
+    on a deep link in a fresh tab, and popping would take them off the site — so it clears
+    the detail params in place instead.
+  - **`navUrl()` rebuilds the URL from the CURRENT search string** rather than assembling one,
+    so every param that isn't ours survives. `c`/`client` is the one that matters: dropping it
+    silently re-resolves a dev or second-school session to the default tenant on the next
+    reload, and someone would be reading Brookside's live data believing they were on dev.
+    Naming the tenant here would work and would be wrong — a second copy of the
+    `CLIENT.urlParam()` rule, to go stale the day a third param exists.
+  - **A history entry whose asset is gone lands on the list and REWRITES itself there.**
+    Entries outlive the assets they name (deleted here or in another tab). Closing without
+    `fromHistory` on that path means `replaceState` heals the dead entry — legal during a
+    popstate, disturbs nothing — so the address bar stops naming an asset that isn't there
+    and a later pass doesn't retry the dead id.
+  - **The one-time load-side deep link is unchanged in shape** and still gated by
+    `urlDeepLinkAppliedRef` (a `useRef`, not empty-deps — `assets` starts `null` and the
+    effect has to wait for `loadData()`); it now passes `replaceHistory` so the entry the
+    user is already standing on is replaced rather than stacked on itself. `?asset=` still
+    matches an id OR a label, permanently, and so does a pushed entry — a link pasted in or
+    an entry from an older build can carry either.
+  - **The "Copy link" button (panel layout view only) is now largely redundant** — the address
+    bar holds the same URL for every asset, not just panels. Kept because it copies without
+    the user having to find the address bar on a phone, which is where a panel gets looked at.
+  - **Covered by `test-frontend-nav.js`** for the two failures that are silent (the tenant
+    drop, and a stale `?asset=` surviving a return to the list), verified by mutation. The
+    history walking itself is browser behaviour — push vs replace, Back landing on the
+    previous asset, the depth guard — and was verified by driving the real page in Chromium,
+    which is the only place `popstate` exists. Sandbox mode is where that was done.
+  - **Deliberately NOT handled yet**, all three because they widen the change rather than
+    finish it: Back mid-edit still discards the draft silently (it always did, but a
+    reflexive gesture makes it likelier than a deliberate click did); Back with a modal open
+    navigates instead of closing the modal; and returning to the list still loses scroll
+    position, which is a different bug that reads as the same complaint.
 - **State**: the whole app is one component (`AssetTracker`, ~3700 lines) holding all
   state — assets, managed lists (change types, vendors, peripherals, users), audit log,
   column config. This is a known architectural weak point (see "Component size" below),

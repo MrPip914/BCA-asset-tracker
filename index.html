@@ -1520,7 +1520,47 @@ const FRONTEND_SCRIPT_VERSION = "v32";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-09.2";
+const APP_VERSION = "2026-09-10.1";
+
+// Builds the address-bar URL for a given in-app location: an asset id + detail
+// tab, or the bare list when assetId is null.
+//
+// Rebuilt from the CURRENT search string rather than assembled from scratch, so
+// every param that isn't ours rides along untouched. `c`/`client` is the one
+// that matters today — dropping it would silently re-resolve a dev or
+// second-school session to the default tenant on the next reload, which is the
+// exact class of bug CLIENT.urlParam() exists to prevent — but naming it here
+// would put a second copy of that rule in the file, to go stale the day a third
+// param exists. Preserving everything costs nothing and can't drift.
+function navUrl(assetId, tab) {
+  const params = new URLSearchParams(window.location.search);
+  params.delete("asset");
+  params.delete("tab");
+  if (assetId) {
+    params.set("asset", assetId);
+    if (tab) params.set("tab", tab);
+  }
+  const q = params.toString();
+  return window.location.pathname + (q ? "?" + q : "") + window.location.hash;
+}
+
+// What this app writes into each history entry.
+//
+//   navDepth — how many entries THIS app instance has pushed. The header's back
+//              control may only call history.back() while it is above zero;
+//              at zero the user arrived on a deep link in a fresh tab and
+//              popping would take them off the site entirely.
+//   asset/tab — the location to restore on popstate.
+//   backTo   — the asset id the back control returns to, or null for the list.
+//              Stored because the History API deliberately does NOT expose the
+//              previous entry, and the control names where it goes.
+function historyEntry(navDepth, assetId, tab, backTo) {
+  return { navDepth, asset: assetId || null, tab: tab || null, backTo: backTo || null };
+}
+
+function currentNavDepth() {
+  return (window.history.state && window.history.state.navDepth) || 0;
+}
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -2328,6 +2368,10 @@ function AssetTracker() {
   const [detailEditing, setDetailEditing] = useState(false);
   const [editNote, setEditNote] = useState("");
   const [detailTab, setDetailTab] = useState("details"); // "details" | "comments" | "changes" | "audit" | "allocations"
+  // The asset the header's back control returns to — null means "the list".
+  // Mirrored here from the current history entry's `backTo` because the control
+  // renders that asset's NAME, and writing history.state doesn't re-render.
+  const [backToId, setBackToId] = useState(null);
   const [commentDraft, setCommentDraft] = useState("");
   const [changeDraft, setChangeDraft] = useState({ changeType: "", vendor: "", cost: "", note: "" });
   const [showChangeTypeManager, setShowChangeTypeManager] = useState(false);
@@ -2856,7 +2900,36 @@ function AssetTracker() {
     // a label that happens to collide with another asset's id cannot win.
     const target = assets.find(a => a.id === wanted) || assets.find(a => a.label === wanted);
     if (!target) return;
-    openDetail(target, params.get("tab") || undefined);
+    openDetail(target, params.get("tab") || undefined, { replaceHistory: true });
+  }, [assets]);
+
+  // Restores the view when the browser moves through history — the Back/Forward
+  // buttons, and the back gesture on a phone, which is where this is felt most.
+  //
+  // Re-registered whenever `assets` changes rather than mounted once, because
+  // the handler has to resolve an id against the CURRENT list: an empty-deps
+  // listener would close over the first (null) value and never find anything.
+  // Assets change on load and on each save, so this re-binds rarely.
+  useEffect(() => {
+    function onPopState(e) {
+      const st = e.state || {};
+      if (!st.asset) { closeDetail({ fromHistory: true }); return; }
+      // Id first, then label — same permanent two-way match the deep-link
+      // effect makes, since an entry pushed before this build (or a link pasted
+      // in) can carry either.
+      const target = (assets || []).find(a => a.id === st.asset) || (assets || []).find(a => a.label === st.asset);
+      // Gone since the entry was pushed — deleted here or in another tab. The
+      // list is the honest landing; a blank detail page would just look broken.
+      // Closed WITHOUT fromHistory on purpose, so the dead entry is rewritten
+      // as a list entry in place: replaceState during a popstate disturbs
+      // nothing, and it stops the address bar naming an asset that isn't there
+      // (and stops a later pass over the same entry retrying the dead id).
+      if (!target) { closeDetail(); return; }
+      openDetail(target, st.tab || undefined, { fromHistory: true });
+      setBackToId(st.backTo || null);
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
   }, [assets]);
 
   function toggleSandboxMode() {
@@ -3372,7 +3445,14 @@ function AssetTracker() {
     selectedAsset ? new Set(descendantsOf(selectedAsset, assets).map(a => a.id)) : new Set()
   ), [selectedAsset, assets]);
 
-  function openDetail(asset, initialTab) {
+  // opts.fromHistory  — a popstate restore. The browser has already moved; a
+  //                      history write here would fight it.
+  // opts.replaceHistory — the one-time deep link on load. That entry is the one
+  //                      the user is already standing on, so it is replaced
+  //                      rather than stacked on top of itself.
+  // Neither set (the normal click) PUSHES, which is what gives the browser's
+  // own Back button — and a phone's back gesture — the trail to walk.
+  function openDetail(asset, initialTab, opts = {}) {
     setSelectedId(asset.id);
     setView("detail");
     setDetailEditing(false);
@@ -3391,6 +3471,27 @@ function AssetTracker() {
     // under it. Deep links outlive the asset they were copied from.
     const wanted = initialTab && availableTabsFor(asset.type).includes(initialTab) ? initialTab : defaultTabFor(asset.type);
     setDetailTab(wanted);
+
+    if (!opts.fromHistory) {
+      // Where Back goes from the new entry: the asset we were standing on, or
+      // null when we came from the list. Re-opening the SAME asset and tab
+      // writes nothing at all — an audit link pointing at its own asset is a
+      // no-op navigation, and stacking an entry for it would make Back appear
+      // to do nothing once.
+      const sameSpot = view === "detail" && selectedId === asset.id && detailTab === wanted;
+      if (!sameSpot) {
+        const backTo = view === "detail" && selectedId && selectedId !== asset.id ? selectedId : null;
+        const depth = currentNavDepth();
+        if (opts.replaceHistory) {
+          window.history.replaceState(historyEntry(depth, asset.id, wanted, null), "", navUrl(asset.id, wanted));
+          setBackToId(null);
+        } else {
+          window.history.pushState(historyEntry(depth + 1, asset.id, wanted, backTo), "", navUrl(asset.id, wanted));
+          setBackToId(backTo);
+        }
+      }
+    }
+
     setConfirmCommentDelete(null);
     setConfirmChangeDelete(null);
     setConfirmArchive(null);
@@ -3406,10 +3507,38 @@ function AssetTracker() {
     setAddBreakerDraft(null);
   }
 
-  function closeDetail() {
+  // opts.fromHistory suppresses the URL write, for a popstate that has already
+  // landed on the list. Otherwise the detail params are cleared in place
+  // (replace, not push): the entry being left either pointed at an asset that
+  // is now deleted, or is a deep-link arrival with nothing of ours beneath it —
+  // in both cases stacking a new entry would leave Back pointing at a dead end.
+  function closeDetail(opts = {}) {
     setView("list");
     setSelectedId(null);
     setDetailEditing(false);
+    setBackToId(null);
+    if (!opts.fromHistory) {
+      window.history.replaceState(historyEntry(currentNavDepth(), null, null, null), "", navUrl(null, null));
+    }
+  }
+
+  // A real Back: it pops the browser's own stack whenever this app instance put
+  // something on it, so the in-app control and the phone's back gesture do the
+  // same thing instead of disagreeing. At depth 0 there is nothing of ours to
+  // pop — a deep link opened in a fresh tab — so it clears the detail params in
+  // place rather than calling history.back(), which would leave the site.
+  function goBack() {
+    if (currentNavDepth() > 0) window.history.back();
+    else closeDetail();
+  }
+
+  // Switching tabs REPLACES rather than pushes. Pushing would bury the previous
+  // asset one press deeper per tab looked at, so Back would stop meaning "the
+  // thing I was looking at before" after a couple of clicks.
+  function selectDetailTab(key) {
+    setDetailTab(key);
+    const st = window.history.state || {};
+    window.history.replaceState({ ...st, tab: key }, "", navUrl(selectedId, key));
   }
 
   function startEditSelected() {
@@ -5884,6 +6013,15 @@ function AssetTracker() {
     // which is all it showed before — the type name it shares with 20 others.
     const detailName = nameOf(selectedAsset);
     const detailTypeName = typeNameOf(selectedAsset.type, typesList);
+    // The back control names where it goes ("Room 101") instead of always
+    // reading "back to the list", which is what made a chain of clicks
+    // untraceable: three assets deep, one press dropped you all the way out.
+    // Resolved from the id at RENDER time rather than from a name stored in the
+    // history entry, so a rename can't leave a stale word on the button — the
+    // app-wide reference convention, applied to a reference that happens to live
+    // in history state. An asset deleted since falls back to the bare arrow.
+    const backToAsset = backToId ? (assets || []).find(a => a.id === backToId) : null;
+    const backLabel = backToAsset ? nameOf(backToAsset) : "";
     const titleText = detailName !== selectedAsset.tag
       ? `${detailName} (${detailTypeName})`
       : selectedAsset.screenSize ? `${detailTypeName} · ${selectedAsset.screenSize}` : detailTypeName;
@@ -5945,8 +6083,28 @@ function AssetTracker() {
         {typesManagerModal}
         {breakerTypesManagerModal}
         <div style={{ borderBottom: `2px solid ${C.brand}`, padding: "12px 20px", position: "sticky", top: 0, background: C.bg, zIndex: 10, display: "flex", alignItems: "center", gap: 10 }}>
-          <button onClick={closeDetail} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.brandDark, display: "flex" }} aria-label="Back to list">
-            <ArrowLeft size={20} />
+          <button
+            onClick={goBack}
+            className="icon-btn"
+            style={{
+              background: "none", border: "none", padding: 6, borderRadius: 4, color: C.brandDark,
+              display: "flex", alignItems: "center", gap: 4, flexShrink: 0,
+              maxWidth: backLabel ? 150 : undefined, overflow: "hidden",
+            }}
+            aria-label={backLabel ? `Back to ${backLabel}` : "Back to list"}
+            title={backLabel ? `Back to ${backLabel}` : "Back to list"}
+          >
+            <ArrowLeft size={20} style={{ flexShrink: 0 }} />
+            {/* The name only appears when Back goes somewhere other than the
+                list — on the common one-level-deep case the header stays
+                exactly as narrow as it was. It truncates before the title does
+                (the title has the flexible width), so a long room name can't
+                push the asset's own identity off a phone screen. */}
+            {backLabel && (
+              <span style={{ fontSize: 13, fontWeight: 500, color: C.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {backLabel}
+              </span>
+            )}
           </button>
           <Icon size={17} style={{ color: C.brand, flexShrink: 0 }} />
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, fontWeight: 600, color: C.accent }}>{selectedAsset.tag}</div>
@@ -5974,7 +6132,7 @@ function AssetTracker() {
             return (
               <button
                 key={tab.key}
-                onClick={() => setDetailTab(tab.key)}
+                onClick={() => selectDetailTab(tab.key)}
                 style={{
                   background: "none", border: "none", padding: "10px 12px", whiteSpace: "nowrap",
                   fontSize: 13, fontWeight: active || tab.urgent ? 700 : 500, color: tab.urgent ? C.danger : active ? C.brandDark : C.muted,
