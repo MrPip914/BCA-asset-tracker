@@ -259,3 +259,145 @@ is an outage on a school's live system.
    architecture (§4).
 2. **Cloudinary or R2** — free thumbnails, or owning the bytes (§2).
 3. **Assets only, or work items too** — the second needs stable ids on child rows first (§3).
+
+---
+
+## 7. Decision 1 — should photos appear on the public `?panel=` QR page?
+
+Expanded 2026-09-10, at Eric's request, to answer §6's first open question.
+
+### 7.1 What that page actually is today
+
+Verified by reading `panel.html` and `publicPanelPayload_`, not from memory:
+
+- **Genuinely anonymous.** `panel.html?p=BCA0082` fetches `/exec?panel=BCA0082`. There is
+  **no token in the URL** — not a session, not a signed link, nothing. `doGet`'s panel branch
+  runs before any auth check.
+- **The code is guessable.** Panel codes are sequential-ish asset tags. The one hardening
+  that exists is that a miss returns the same message whether the code names a non-panel
+  asset or nothing at all, so it won't confirm which asset IDs exist — but it does not stop
+  someone walking the range.
+- **The page is `noindex, nofollow`**, so it will not be crawled into a search engine.
+- **The projection is deliberately minimal**, and the file says why: *"A public endpoint
+  should publish the fewest fields that still answer the question."* Four panel fields, six
+  breaker fields, six circuit fields.
+- **The audience is explicit**: *"staff, an electrician, a contractor — gets that one panel's
+  layout with no login. That's intentional, not an oversight."*
+- **The page is deliberately small and hand-rolled.** No React, no Babel, a 20-line `h()` DOM
+  helper, kept separate from `index.html` because that file is *"the wrong thing to hand a
+  phone on school wifi in a mechanical room."* **That sentence is the single most important
+  input to this decision** and §7.4 comes back to it.
+
+### 7.2 The thing to notice first: "public" is not the same question as "on the QR page"
+
+These feel like one decision and are two, and conflating them is the trap.
+
+Keeping photos off the panel page does **not** make them private. If the bucket serves open
+URLs, those URLs are public whether or not the QR page hands them out — the app just hands
+them only to signed-in users. That is security by unguessable URL, and a URL pasted into a
+text message, mailed to a contractor, caught in a screenshot or synced by a browser is
+leaked permanently, with no revocation short of deleting the object.
+
+So there are really two axes:
+
+| | **Bytes are openly served** | **Bytes need a signed, expiring URL** |
+|---|---|---|
+| **Photos on the QR page** | simplest; cacheable; a leaked URL is forever | works — the page already gets its data from `/exec`, so the backend can mint read URLs into that same payload |
+| **Photos app-only** | *feels* private, isn't | actually private |
+
+**The row that surprises people is the top right.** Signed reads are perfectly compatible
+with an anonymous page, because in both cases the URL comes from the backend, which is the
+thing deciding. Anonymity is not the obstacle to privacy here; it never was.
+
+### 7.3 If yes — the scoping falls out of the data model for free
+
+This is the part that makes the answer cheaper than it looks.
+
+`publicPanelPayload_` assembles exactly one panel, its breakers, and its circuits. Under the
+§3 model a photo carries `ownerType` + `ownerId`. So publishing photos on that page means
+publishing photos whose owner is *one of the things already on that page* — and **a photo of
+a laptop, a person, or a classroom is structurally unreachable**, not filtered out by a rule
+someone has to maintain. The blast radius is bounded by the payload that already exists.
+
+That reframes the question from "should photos be public" to the much narrower:
+
+> Is a photo of **this panel, its breakers and its circuits** something we are willing to
+> serve to whoever guesses a panel code?
+
+And against that, weigh what the page **already** serves to that same person: the panel's
+full slot layout, every breaker's amp rating, and every circuit's free-text notes describing
+what it feeds and which rooms it serves. Someone who guesses a code already learns more
+about the electrical system from the text than a photo would add.
+
+### 7.4 The real risk is an accident, not an adversary
+
+The threat model — someone enumerates panel codes *and* cares about a photo of a breaker box
+— is thin, and the existing text projection already doesn't defend against it.
+
+The realistic risk is different and worth naming: **a photo catches something that was never
+the subject.** A student walking past. A whiteboard. A screen with a roster on it. A
+contractor's paperwork on a table. Phone cameras have wide lenses and mechanical rooms are
+not always empty.
+
+Cryptography does not fix that — a signed URL to a photo of a student is still a photo of a
+student, just with an expiry. What fixes it is:
+
+1. **A per-photo "hide from public page" flag**, defaulted to visible for panel-owned photos.
+   One boolean column, one checkbox, and an escape hatch for the odd photo that caught
+   something.
+2. **A stated norm** that photos are of *things*, not of people or screens. Cheap, and it is
+   the control that actually matches the risk.
+3. **The canvas re-encode from §4**, which strips GPS EXIF before anything leaves the phone.
+
+### 7.5 Bandwidth is the constraint everyone forgets
+
+`panel.html` exists as a separate file *because* a heavy page is wrong for a phone on school
+wifi in a mechanical room. Dropping six full-size photos into it would undo the reason it
+was split out in the first place.
+
+So if photos go on this page, it is **thumbnails only, full size on tap** — non-negotiable,
+and a point in favour of Cloudinary (§2), where a thumbnail is a URL parameter rather than a
+second stored object and a second upload.
+
+It is also a small amount of real work in a file that has no framework: a gallery is
+hand-rolled `h()` calls, plus a lightbox, plus the `?sandbox=1` path that page already
+supports.
+
+### 7.6 The asymmetry — and why it does not settle this one
+
+The usual tiebreaker is reversibility, and it points at "no": you can add photos to the
+public page later cheaply, whereas un-publishing a URL that is already in the wild is not
+possible.
+
+**But deferring is not free here, and it is worth being honest about that.** An electrician
+standing at a panel with a phone is the single highest-value place a photo could appear in
+this entire application. Text says *"north wall outlets"*; a photo shows which wall. The QR
+sticker exists precisely to serve someone who is physically present and does not know the
+building. Deferring photos on that page defers most of the value of panel photos.
+
+The asymmetry is real but it is answered by the flag in §7.4, not by blanket deferral: a
+photo is published only if someone attached it to a panel, and any single photo can be
+pulled back out of the public projection without touching the others.
+
+### 7.7 Recommendation
+
+**Yes — publish panel-owned photos on the QR page.** Specifically:
+
+| Decision | Choice | Why |
+|---|---|---|
+| Scope | photos owned by the panel, its breakers, its circuits | falls out of the existing payload; nothing else is reachable |
+| Default | visible on the public page | this is the page where a panel photo is worth the most |
+| Escape hatch | per-photo "hide from public page" flag | matches the actual risk, which is an accidental subject |
+| Bytes | open, unguessable (UUID) object keys — **not** signed reads | signed URLs cost caching and bookmarking on a page built for bad wifi, to defend a threat the existing text projection already doesn't |
+| Size | thumbnails inline, full size on tap | the page was split out to stay light; do not undo that |
+| Projection | a `PUBLIC_PHOTO_FIELDS` whitelist, same pattern as the other four | the file's own rule: publish the fewest fields that answer the question |
+
+**What would change this recommendation:** if photos are ever wanted on a public page for
+*rooms, people or general assets*, the scoping argument in §7.3 disappears — that projection
+would not be bounded by a single panel — and signed reads become worth their cost. That is a
+different decision, and this one does not prejudge it.
+
+**One consequence to accept deliberately:** an open bucket means every photo in the system,
+public-page or not, is protected by URL unguessability rather than by access control. That is
+the right trade for photos of equipment. It would be the wrong trade for photos of documents
+or people, which is why §7.4's norm is part of the recommendation rather than an aside.
