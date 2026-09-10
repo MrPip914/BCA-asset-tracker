@@ -1534,6 +1534,40 @@ visit, including the many where nothing was being added. They are now an **Add t
   a pre-v34 entry has no such field and seeding blank would blank a real date on save.
 - **The maintenance ADD is a dialog; its inline edit was left alone.** Not an oversight —
   only add was asked for, and the two are different flows. Worth revisiting together.
+**The site-wide Maintenance tab mirrors an asset's (2026-09-10):** a `HierarchyNav` scope
+filter, then **Scheduled** / **History** sub-tabs, then Add task / Log work.
+- **It shares `scopeId` with the Assets tab, deliberately.** Narrowing to a building and
+  switching tabs keeps you where you were; a second scope would silently widen the view and
+  there would be no way to tell which one was in force. The scope now filters Scheduled too,
+  which it did not before.
+- **History is `allWorkRows`** — every change entry on every active asset, flattened the way
+  `allMaintenanceRows` flattens schedules, defaulting to most-recently-performed first (the
+  mirror of Scheduled's due-soonest). Its row `idx` is the entry's position in ITS OWN
+  asset's `changes` array, never a position in the flattened sorted list — that would address
+  the wrong entry the moment anything is re-sorted.
+- **A History row opens that asset's History**, via `openDetail(asset, "changes")` — the
+  legacy alias, which is exactly what it is for.
+- **The two dialogs moved into `renderWorkDialogs()`, called from BOTH views.** They lived
+  inside the detail-view return, which is why the site-wide tab could not offer them at all.
+  A plain render helper, not a component: it closes over state and setters, so nothing has to
+  be threaded. **It must be CALLED, not used as `<renderWorkDialogs/>`** — as a component it
+  would remount every render and drop focus out of whatever field was being typed in.
+- **`workDialogAssetId` says which asset a dialog writes to, and its THREE states matter.**
+  `null` = the open asset (every detail-view case). A string = opened from the main page,
+  where `""` means "nothing picked yet" and is what makes the Asset field appear. It is
+  deliberately not `selectedId`: setting that would navigate the whole app behind a modal,
+  and cancelling would leave you somewhere you never asked to be.
+  - The openers use `assetId === undefined ? null : assetId`, NOT `assetId || null`. The
+    obvious form collapses `""` to `null`, the dialog reads that as the detail-view case, and
+    the Asset picker never appears — which is exactly what happened first time.
+- **`AssetPickerField` is `HierarchyBrowserModal` with the predicate opened up** from "Rooms
+  only" to "anything not archived". Everything being selectable means you drill with the
+  chevron and select with the row body — the two-affordance design that component was built
+  around, working as intended rather than by accident.
+- **Nothing is pre-selected from the scope.** The scope is always a PLACE, and pre-filling a
+  Room when most work is on a device inside it would be wrong more often than right.
+- Save is disabled until an asset is chosen, in both dialogs — `workTarget` is the guard, so
+  a main-page dialog cannot write to whatever happened to be open last.
 **The Change Log is no longer a top-level tab — it is Maintenance › History (2026-09-10).**
 The detail tabs are now Details / Maintenance / Comments / Audit, and Maintenance has two
 sub-tabs: **Scheduled** (the recurring items) and **History** (what was actually done, i.e.

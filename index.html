@@ -1875,7 +1875,7 @@ const FRONTEND_SCRIPT_VERSION = "v34";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-10.12";
+const APP_VERSION = "2026-09-10.13";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -2753,6 +2753,14 @@ function AssetTracker() {
   // null when closed; { mode: "add" } or { mode: "edit", idx }. The draft
   // itself stays in changeDraft, which both modes fill.
   const [changeModal, setChangeModal] = useState(null);
+  // Which asset the work dialogs act on. null means "the one that is open",
+  // which is every case on the detail view. The site-wide Maintenance tab has
+  // no open asset, so it sets this from a picker before opening a dialog.
+  //
+  // Deliberately NOT selectedId: setting that would navigate the whole app to
+  // that asset behind a modal, and cancelling would leave you somewhere you
+  // never asked to be.
+  const [workDialogAssetId, setWorkDialogAssetId] = useState(null);
   // null when closed; otherwise { breaker, draft: { serial, ampRating, installedDate }, error }
   const [swapModal, setSwapModal] = useState(null);
   // null when closed; otherwise { breakerId, circuit, target, error }
@@ -2841,6 +2849,15 @@ function AssetTracker() {
   const [maintenanceOwnerFilter, setMaintenanceOwnerFilter] = useState("All owners");
   const [maintenanceSortConfig, setMaintenanceSortConfig] = useState(null); // { key, dir: "asc" | "desc" } | null — null means the default due-date-ascending order
   const [activeMaintenanceFilterCol, setActiveMaintenanceFilterCol] = useState(null);
+  // The site-wide Maintenance tab mirrors an asset's: Scheduled (what is due)
+  // and History (what was done). Separate state from the per-asset sub-tab --
+  // they are different screens, and carrying one's choice into the other would
+  // surprise.
+  const [mainMaintenanceSubTab, setMainMaintenanceSubTab] = useState("scheduled");
+  const [workTypeFilter, setWorkTypeFilter] = useState("All work types");
+  const [workVendorFilter, setWorkVendorFilter] = useState("All vendors");
+  const [workSortConfig, setWorkSortConfig] = useState(null); // null = newest performed first
+  const [activeWorkFilterCol, setActiveWorkFilterCol] = useState(null);
   const [reassignTarget, setReassignTarget] = useState("");
   const [moveTarget, setMoveTarget] = useState("");
   const [activeFilterCol, setActiveFilterCol] = useState(null);
@@ -3751,6 +3768,73 @@ function AssetTracker() {
     return rows;
   }, [assets]);
   const maintenanceOverdueTotal = allMaintenanceRows.filter(r => r.status === "overdue").length;
+
+  // The History table's rows: every change entry on every active asset,
+  // flattened the same way allMaintenanceRows flattens schedules. Archived
+  // assets are excluded to match that list and the default Active view.
+  //
+  // `idx` is the entry's position in its OWN asset's changes array, which is
+  // what every handler addresses a change by -- not a position in this
+  // flattened, sorted list, which would point at the wrong entry the moment
+  // anything is re-sorted.
+  const allWorkRows = useMemo(() => {
+    if (!assets) return [];
+    const rows = [];
+    assets.forEach(a => {
+      if ((a.status || "Active") === "Archived") return;
+      const assetName = nameOf(a);
+      (a.changes || []).forEach((change, idx) => {
+        rows.push({ asset: a, assetName, change, idx, performedOn: changePerformedOn(change) });
+      });
+    });
+    return rows;
+  }, [assets]);
+  const workTypeOptions = useMemo(() => (
+    ["All work types", ...Array.from(new Set(allWorkRows.map(r => r.change.changeType).filter(Boolean))).sort()]
+  ), [allWorkRows]);
+  const workVendorOptions = useMemo(() => (
+    ["All vendors", ...Array.from(new Set(allWorkRows.map(r => r.change.vendor).filter(Boolean))).sort()]
+  ), [allWorkRows]);
+  const workFilterConfigs = {
+    changeType: { label: "Work type", value: workTypeFilter, setValue: setWorkTypeFilter, options: workTypeOptions },
+    vendor: { label: "Vendor", value: workVendorFilter, setValue: setWorkVendorFilter, options: workVendorOptions },
+  };
+  function workSortValue(row, key) {
+    if (key === "performedOn") return row.performedOn || "";
+    if (key === "asset") return (row.assetName || "").toLowerCase();
+    if (key === "changeType") return (row.change.changeType || "").toLowerCase();
+    if (key === "vendor") return (row.change.vendor || "").toLowerCase();
+    if (key === "cost") return parseFloat(row.change.cost) || 0;
+    if (key === "note") return (row.change.note || "").toLowerCase();
+    return "";
+  }
+  const filteredWorkRows = useMemo(() => {
+    const q = maintenanceQuery.trim().toLowerCase();
+    const list = allWorkRows.filter(r => {
+      // Same scope rule the Assets list uses: anything BENEATH where you are.
+      if (scopeId && !ancestorsOf(r.asset, assets).some(pa => pa.id === scopeId)) return false;
+      if (workTypeFilter !== "All work types" && r.change.changeType !== workTypeFilter) return false;
+      if (workVendorFilter !== "All vendors" && r.change.vendor !== workVendorFilter) return false;
+      if (!q) return true;
+      return [r.assetName, r.asset.tag, r.change.changeType, r.change.vendor, r.change.note]
+        .some(v => String(v || "").toLowerCase().includes(q));
+    });
+    if (workSortConfig) {
+      const { key, dir } = workSortConfig;
+      list.sort((a, b) => {
+        const av = workSortValue(a, key), bv = workSortValue(b, key);
+        if (av < bv) return dir === "asc" ? -1 : 1;
+        if (av > bv) return dir === "asc" ? 1 : -1;
+        return 0;
+      });
+    } else {
+      // Default: most recently performed first. That is what "history" means,
+      // and it is the mirror of Scheduled defaulting to due-soonest.
+      list.sort((a, b) => String(b.performedOn || "").localeCompare(String(a.performedOn || "")));
+    }
+    return list;
+  }, [allWorkRows, assets, scopeId, maintenanceQuery, workTypeFilter, workVendorFilter, workSortConfig]);
+  const workTotalCost = filteredWorkRows.reduce((sum, r) => sum + (parseFloat(r.change.cost) || 0), 0);
   const maintenanceFrequencyOptions = useMemo(() => (
     ["All frequencies", ...Array.from(new Set(allMaintenanceRows.map(r => r.item.frequencyLabel).filter(Boolean))).sort()]
   ), [allMaintenanceRows]);
@@ -3784,6 +3868,9 @@ function AssetTracker() {
   const filteredMaintenanceRows = useMemo(() => {
     const q = maintenanceQuery.trim().toLowerCase();
     const list = allMaintenanceRows.filter(r => {
+      // Scope applies here exactly as it does on the Assets tab and to History:
+      // narrowing to a building should narrow every view, not just one.
+      if (scopeId && !ancestorsOf(r.asset, assets).some(pa => pa.id === scopeId)) return false;
       if (maintenanceStatusFilter !== "All statuses" && r.status !== maintenanceStatusFilter) return false;
       if (maintenanceFrequencyFilter !== "All frequencies" && r.item.frequencyLabel !== maintenanceFrequencyFilter) return false;
       if (maintenanceOwnerFilter !== "All owners" && r.item.owner !== maintenanceOwnerFilter) return false;
@@ -3806,7 +3893,7 @@ function AssetTracker() {
       list.sort((a, b) => (a.due ? a.due.getTime() : -Infinity) - (b.due ? b.due.getTime() : -Infinity));
     }
     return list;
-  }, [allMaintenanceRows, maintenanceQuery, maintenanceStatusFilter, maintenanceFrequencyFilter, maintenanceOwnerFilter, maintenanceSortConfig]);
+  }, [allMaintenanceRows, assets, scopeId, maintenanceQuery, maintenanceStatusFilter, maintenanceFrequencyFilter, maintenanceOwnerFilter, maintenanceSortConfig]);
 
   // Per-device override wins when set; otherwise falls back to the column's
   // server-defined default (e.g. true for a newly added custom column this
@@ -3829,6 +3916,9 @@ function AssetTracker() {
   };
 
   const selectedAsset = assets ? assets.find(a => a.id === selectedId) : null;
+  // The asset a work dialog writes to: the one picked for it, else the open one.
+  const workTargetId = workDialogAssetId || selectedId;
+  const workTarget = assets ? assets.find(a => a.id === workTargetId) : null;
 
   // label -> positions in auditLog, built once per change to the log rather than
   // by scanning it per asset per render.
@@ -4453,12 +4543,14 @@ function AssetTracker() {
   // Both dialogs seed changeDraft and then open. Seeding on OPEN rather than
   // only on close is what stops a cancelled edit leaving its values waiting in
   // the next dialog -- the same reason entering breaker edit mode reseeds.
-  function openChangeAdd() {
+  function openChangeAdd(assetId) {
+    setWorkDialogAssetId(assetId === undefined ? null : assetId);
     setChangeDraft({ changeType: "", vendor: "", cost: "", note: "", maintenanceId: "", markPerformed: false, performedOn: localDateString() });
     setChangeModal({ mode: "add" });
   }
 
   function openChangeEdit(idx) {
+    setWorkDialogAssetId(null);
     const ch = (selectedAsset.changes || [])[idx];
     if (!ch) return;
     setChangeDraft({
@@ -4540,7 +4632,7 @@ function AssetTracker() {
 
   async function addChange() {
     if (savingRef.current) return; // double-submit guard, see savingRef
-    if (!changeDraft.changeType || !selectedAsset) return;
+    if (!changeDraft.changeType || !workTarget) return;
     const entry = {
       changeType: changeDraft.changeType,
       vendor: changeDraft.vendor.trim(),
@@ -4576,11 +4668,11 @@ function AssetTracker() {
     // a repair the tech found DURING that service. Two entries, one schedule,
     // one of them the completion.
     const item = changeDraft.maintenanceId
-      ? (selectedAsset.maintenanceItems || []).find(m => m && m.id === changeDraft.maintenanceId)
+      ? (workTarget.maintenanceItems || []).find(m => m && m.id === changeDraft.maintenanceId)
       : null;
     const completing = !!(item && changeDraft.markPerformed && changeDraft.performedOn);
     const nextAssets = assets.map(a => {
-      if (a.id !== selectedId) return a;
+      if (a.id !== workTargetId) return a;
       const withChange = { ...a, changes: [...(a.changes || []), entry] };
       if (!completing) return withChange;
       return {
@@ -4594,7 +4686,7 @@ function AssetTracker() {
     // identically in the history whichever door it came through -- and one
     // persist() either way, since both halves are the asset domain.
     const entries = completing ? [{
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId, assetType: selectedAsset.type,
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: workTargetId, assetType: workTarget.type,
       action: "maintenance_completed", field: item.task,
       from: item.lastPerformed ? formatDateOnly(item.lastPerformed) : "never",
       to: formatDateOnly(changeDraft.performedOn),
@@ -4674,14 +4766,17 @@ function AssetTracker() {
   // Opens the add dialog on a CLEAN draft. Reseeding here rather than only on
   // close means a cancelled edit can never leave half-typed values waiting in
   // the next dialog -- the same reason entering breaker edit mode reseeds.
-  function openMaintenanceAdd() {
+  // Both openers take an explicit asset id. The detail view passes none and
+  // gets the open asset; the site-wide tab passes the one just picked.
+  function openMaintenanceAdd(assetId) {
+    setWorkDialogAssetId(assetId === undefined ? null : assetId);
     setMaintenanceDraft({ task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
     setShowMaintenanceAdd(true);
   }
 
   async function addMaintenanceItem() {
     if (savingRef.current) return; // double-submit guard, see savingRef
-    if (!maintenanceDraft.task.trim() || !selectedAsset) return;
+    if (!maintenanceDraft.task.trim() || !workTarget) return;
     const freq = MAINTENANCE_FREQUENCIES.find(f => f.label === maintenanceDraft.frequency) || MAINTENANCE_FREQUENCIES[1];
     const item = {
       task: maintenanceDraft.task.trim(),
@@ -4692,7 +4787,7 @@ function AssetTracker() {
       at: new Date().toISOString(),
       by: currentUser || "",
     };
-    const next = assets.map(a => (a.id === selectedId ? { ...a, maintenanceItems: [...(a.maintenanceItems || []), item] } : a));
+    const next = assets.map(a => (a.id === workTargetId ? { ...a, maintenanceItems: [...(a.maintenanceItems || []), item] } : a));
     await persist(next, { columns });
     setMaintenanceDraft({ task: "", frequency: freq.label, lastPerformed: "", owner: "" });
     setShowMaintenanceAdd(false);
@@ -6702,6 +6797,221 @@ function AssetTracker() {
     return columns.filter(c => fieldAppliesTo(c.key, type) && c.key !== "status");
   }
 
+  // The two work dialogs, rendered on BOTH the detail view and the list view.
+  // They used to sit inside the detail return, which is why the site-wide
+  // Maintenance tab could not offer Add task / Log work at all.
+  //
+  // A plain render helper rather than a component: it closes over state and
+  // setters, so there is nothing to thread. Note it must be CALLED, not used as
+  // <renderWorkDialogs/> -- as a component it would remount on every render and
+  // drop focus out of whatever field was being typed in.
+  function renderWorkDialogs() {
+    return (
+      <>
+          {/* Log or edit a change. ONE dialog for both, because they are the same
+              form over the same fields -- a separate edit form would be a second
+              copy to keep in step, and this file has been bitten by that before. */}
+          {changeModal && (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20, padding: 16 }}>
+              <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 560, maxHeight: "90vh", overflowY: "auto" }}>
+                <div style={{ fontWeight: 700, marginBottom: 16, color: C.brandDark }}>
+                  {changeModal.mode === "edit" ? "Edit work entry" : "Log work"}
+                </div>
+                {workDialogAssetId !== null && changeModal.mode === "add" && (
+                <div style={{ marginBottom: 12 }}>
+                  <AssetPickerField
+                    label="Asset"
+                    assets={assets}
+                    value={workDialogAssetId}
+                    onChange={id => setWorkDialogAssetId(id)}
+                    hint="Which asset was this work done on?"
+                />
+                </div>
+                )}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
+                  <PickerField
+                    label="Work type"
+                    value={changeDraft.changeType}
+                    onChange={v => setChangeDraft({ ...changeDraft, changeType: v })}
+                    options={["", ...changeTypes]}
+                    labelForOption={t => t || "Select…"}
+                    onManage={() => setShowChangeTypeManager(true)}
+                    manageLabel="Manage work types"
+                    title="Select work type"
+                  />
+                  {/* Applies to EVERY change, not just one linked to a schedule:
+                      the point is that work written up days later can still be dated
+                      honestly. `at` still records when it was typed. */}
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Performed on</span>
+                    <input
+                      type="date"
+                      value={changeDraft.performedOn}
+                      onChange={e => setChangeDraft({ ...changeDraft, performedOn: e.target.value })}
+                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                    />
+                  </label>
+                  <PickerField
+                    label="Vendor"
+                    value={changeDraft.vendor}
+                    onChange={v => setChangeDraft({ ...changeDraft, vendor: v })}
+                    options={["", ...(changeDraft.vendor && !vendors.includes(changeDraft.vendor) ? [changeDraft.vendor, ...vendors] : vendors)]}
+                    labelForOption={v => v || (vendors.length ? "Select…" : "No vendors yet")}
+                    onManage={() => setShowVendorManager(true)}
+                    manageLabel="Manage vendors"
+                    title="Select vendor"
+                  />
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Cost</span>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      value={changeDraft.cost}
+                      onChange={e => setChangeDraft({ ...changeDraft, cost: e.target.value })}
+                      placeholder="0.00"
+                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                    />
+                  </label>
+                  {/* v34, optional: attach this change to one of the asset's
+                      maintenance schedules. LINK ONLY -- it does not mark the
+                      task performed; that stays a Maintenance-tab action.
+                      Hidden entirely when the asset has no schedules, so it
+                      costs a Computer's change form nothing. */}
+                  {(workTarget?.maintenanceItems || []).length > 0 && (
+                  <PickerField
+                    label="Maintenance task"
+                    value={changeDraft.maintenanceId}
+                    onChange={v => setChangeDraft({ ...changeDraft, maintenanceId: v })}
+                    options={["", ...(workTarget?.maintenanceItems || []).map(m => m.id)]}
+                    labelForOption={id => {
+                      if (!id) return "Not linked";
+                      const m = (workTarget?.maintenanceItems || []).find(x => x && x.id === id);
+                      return m ? m.task : "(deleted schedule)";
+                    }}
+                    title="Link to a maintenance task"
+                  />
+                  )}
+                </div>
+                {/* Only once a schedule is actually linked: there is nothing to
+                    complete otherwise, and a checkbox that does nothing until
+                    another field is set reads as broken. Defaults OFF -- the
+                    picker's main use is attaching a change that ISN'T a
+                    completion (parts ordered, a repair found during the service),
+                    and a stamp is much harder to notice than a missing one.
+
+                    It carries no date of its own any more: the form has one, it is
+                    the date this work happened, and that is exactly the date the
+                    schedule should record. Two date fields could disagree, and a
+                    user would have no way to know which one won. */}
+                {changeDraft.maintenanceId && changeModal && changeModal.mode === "add" && (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10, padding: "8px 10px", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10 }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: C.ink, cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={!!changeDraft.markPerformed}
+                      onChange={e => setChangeDraft({ ...changeDraft, markPerformed: e.target.checked })}
+                      style={{ width: 16, height: 16, cursor: "pointer" }}
+                    />
+                    Mark this task performed
+                  </label>
+                  {changeDraft.markPerformed && changeDraft.performedOn && (
+                    <span style={{ fontSize: 13, color: C.muted }}>on {formatDateOnly(changeDraft.performedOn)}</span>
+                  )}
+                </div>
+                )}
+                <textarea
+                  value={changeDraft.note}
+                  onChange={e => setChangeDraft({ ...changeDraft, note: e.target.value })}
+                  placeholder="Details — what happened, why…"
+                  rows={2}
+                  style={{ width: "100%", padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, resize: "vertical", color: C.ink }}
+                />
+                {changeDraft.markPerformed && !changeDraft.performedOn && (
+                  <div style={{ fontSize: 12, color: C.danger, marginTop: 8 }}>Pick the date it was performed.</div>
+                )}
+                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
+                  <button onClick={() => setChangeModal(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                  <button
+                    onClick={changeModal.mode === "edit" ? saveChangeEdit : addChange}
+                    disabled={isSaving || !changeDraft.changeType || !workTarget || (changeDraft.markPerformed && !changeDraft.performedOn)}
+                    style={{ padding: "8px 14px", background: (!isSaving && changeDraft.changeType && workTarget && !(changeDraft.markPerformed && !changeDraft.performedOn)) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  >
+                    {isSaving ? "Saving…" : (changeModal.mode === "edit" ? "Save changes" : "Log work")}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+          {/* Add a maintenance schedule -- the same fields as the form this
+              replaced, moved into a dialog. */}
+          {showMaintenanceAdd && (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20, padding: 16 }}>
+              <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 520, maxHeight: "90vh", overflowY: "auto" }}>
+                <div style={{ fontWeight: 700, marginBottom: 16, color: C.brandDark }}>Add maintenance task</div>
+                  {workDialogAssetId !== null && (
+                  <div style={{ marginBottom: 12 }}>
+                    <AssetPickerField
+                      label="Asset"
+                      assets={assets}
+                      value={workDialogAssetId}
+                      onChange={id => setWorkDialogAssetId(id)}
+                      hint="Which asset is this task for?"
+                  />
+                  </div>
+                  )}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Task</span>
+                    <input
+                      value={maintenanceDraft.task}
+                      onChange={e => setMaintenanceDraft({ ...maintenanceDraft, task: e.target.value })}
+                      placeholder="e.g. Replace HVAC filter"
+                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                    />
+                  </label>
+                  <PickerField
+                    label="Frequency"
+                    value={maintenanceDraft.frequency}
+                    onChange={v => setMaintenanceDraft({ ...maintenanceDraft, frequency: v })}
+                    options={MAINTENANCE_FREQUENCIES.map(f => f.label)}
+                    title="Select frequency"
+                  />
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Last performed</span>
+                    <input
+                      type="date"
+                      value={maintenanceDraft.lastPerformed}
+                      onChange={e => setMaintenanceDraft({ ...maintenanceDraft, lastPerformed: e.target.value })}
+                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                    />
+                  </label>
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Owner</span>
+                    <input
+                      value={maintenanceDraft.owner}
+                      onChange={e => setMaintenanceDraft({ ...maintenanceDraft, owner: e.target.value })}
+                      placeholder="Who's responsible?"
+                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                    />
+                  </label>
+                </div>
+                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
+                  <button onClick={() => setShowMaintenanceAdd(false)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                  <button
+                    onClick={addMaintenanceItem}
+                    disabled={isSaving || !maintenanceDraft.task.trim() || !workTarget}
+                    style={{ padding: "8px 14px", background: (!isSaving && maintenanceDraft.task.trim() && workTarget) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  >
+                    {isSaving ? "Saving…" : "Schedule"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+      </>
+    );
+  }
   // ---------- DETAIL VIEW ----------
   if (view === "detail" && selectedAsset) {
     const Icon = iconFor(selectedAsset.type);
@@ -7280,7 +7590,7 @@ function AssetTracker() {
               {canEdit && (
               <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
                 <button
-                  onClick={openMaintenanceAdd}
+                  onClick={() => openMaintenanceAdd()}
                   disabled={isSaving}
                   style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                 >
@@ -7452,7 +7762,7 @@ function AssetTracker() {
               {canEdit && (
               <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
                 <button
-                  onClick={openChangeAdd}
+                  onClick={() => openChangeAdd()}
                   disabled={isSaving}
                   style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                 >
@@ -7753,184 +8063,6 @@ function AssetTracker() {
           </div>
         )}
 
-        {/* Log or edit a change. ONE dialog for both, because they are the same
-            form over the same fields -- a separate edit form would be a second
-            copy to keep in step, and this file has been bitten by that before. */}
-        {changeModal && (
-          <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20, padding: 16 }}>
-            <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 560, maxHeight: "90vh", overflowY: "auto" }}>
-              <div style={{ fontWeight: 700, marginBottom: 16, color: C.brandDark }}>
-                {changeModal.mode === "edit" ? "Edit work entry" : "Log work"}
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
-                <PickerField
-                  label="Work type"
-                  value={changeDraft.changeType}
-                  onChange={v => setChangeDraft({ ...changeDraft, changeType: v })}
-                  options={["", ...changeTypes]}
-                  labelForOption={t => t || "Select…"}
-                  onManage={() => setShowChangeTypeManager(true)}
-                  manageLabel="Manage work types"
-                  title="Select work type"
-                />
-                {/* Applies to EVERY change, not just one linked to a schedule:
-                    the point is that work written up days later can still be dated
-                    honestly. `at` still records when it was typed. */}
-                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Performed on</span>
-                  <input
-                    type="date"
-                    value={changeDraft.performedOn}
-                    onChange={e => setChangeDraft({ ...changeDraft, performedOn: e.target.value })}
-                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                  />
-                </label>
-                <PickerField
-                  label="Vendor"
-                  value={changeDraft.vendor}
-                  onChange={v => setChangeDraft({ ...changeDraft, vendor: v })}
-                  options={["", ...(changeDraft.vendor && !vendors.includes(changeDraft.vendor) ? [changeDraft.vendor, ...vendors] : vendors)]}
-                  labelForOption={v => v || (vendors.length ? "Select…" : "No vendors yet")}
-                  onManage={() => setShowVendorManager(true)}
-                  manageLabel="Manage vendors"
-                  title="Select vendor"
-                />
-                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Cost</span>
-                  <input
-                    type="number"
-                    inputMode="decimal"
-                    value={changeDraft.cost}
-                    onChange={e => setChangeDraft({ ...changeDraft, cost: e.target.value })}
-                    placeholder="0.00"
-                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                  />
-                </label>
-                {/* v34, optional: attach this change to one of the asset's
-                    maintenance schedules. LINK ONLY -- it does not mark the
-                    task performed; that stays a Maintenance-tab action.
-                    Hidden entirely when the asset has no schedules, so it
-                    costs a Computer's change form nothing. */}
-                {(selectedAsset.maintenanceItems || []).length > 0 && (
-                <PickerField
-                  label="Maintenance task"
-                  value={changeDraft.maintenanceId}
-                  onChange={v => setChangeDraft({ ...changeDraft, maintenanceId: v })}
-                  options={["", ...(selectedAsset.maintenanceItems || []).map(m => m.id)]}
-                  labelForOption={id => {
-                    if (!id) return "Not linked";
-                    const m = (selectedAsset.maintenanceItems || []).find(x => x && x.id === id);
-                    return m ? m.task : "(deleted schedule)";
-                  }}
-                  title="Link to a maintenance task"
-                />
-                )}
-              </div>
-              {/* Only once a schedule is actually linked: there is nothing to
-                  complete otherwise, and a checkbox that does nothing until
-                  another field is set reads as broken. Defaults OFF -- the
-                  picker's main use is attaching a change that ISN'T a
-                  completion (parts ordered, a repair found during the service),
-                  and a stamp is much harder to notice than a missing one.
-
-                  It carries no date of its own any more: the form has one, it is
-                  the date this work happened, and that is exactly the date the
-                  schedule should record. Two date fields could disagree, and a
-                  user would have no way to know which one won. */}
-              {changeDraft.maintenanceId && changeModal && changeModal.mode === "add" && (
-              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10, padding: "8px 10px", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10 }}>
-                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: C.ink, cursor: "pointer" }}>
-                  <input
-                    type="checkbox"
-                    checked={!!changeDraft.markPerformed}
-                    onChange={e => setChangeDraft({ ...changeDraft, markPerformed: e.target.checked })}
-                    style={{ width: 16, height: 16, cursor: "pointer" }}
-                  />
-                  Mark this task performed
-                </label>
-                {changeDraft.markPerformed && changeDraft.performedOn && (
-                  <span style={{ fontSize: 13, color: C.muted }}>on {formatDateOnly(changeDraft.performedOn)}</span>
-                )}
-              </div>
-              )}
-              <textarea
-                value={changeDraft.note}
-                onChange={e => setChangeDraft({ ...changeDraft, note: e.target.value })}
-                placeholder="Details — what happened, why…"
-                rows={2}
-                style={{ width: "100%", padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, resize: "vertical", color: C.ink }}
-              />
-              {changeDraft.markPerformed && !changeDraft.performedOn && (
-                <div style={{ fontSize: 12, color: C.danger, marginTop: 8 }}>Pick the date it was performed.</div>
-              )}
-              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
-                <button onClick={() => setChangeModal(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
-                <button
-                  onClick={changeModal.mode === "edit" ? saveChangeEdit : addChange}
-                  disabled={isSaving || !changeDraft.changeType || (changeDraft.markPerformed && !changeDraft.performedOn)}
-                  style={{ padding: "8px 14px", background: (!isSaving && changeDraft.changeType && !(changeDraft.markPerformed && !changeDraft.performedOn)) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
-                >
-                  {isSaving ? "Saving…" : (changeModal.mode === "edit" ? "Save changes" : "Log work")}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-        {/* Add a maintenance schedule -- the same fields as the form this
-            replaced, moved into a dialog. */}
-        {showMaintenanceAdd && (
-          <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20, padding: 16 }}>
-            <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 520, maxHeight: "90vh", overflowY: "auto" }}>
-              <div style={{ fontWeight: 700, marginBottom: 16, color: C.brandDark }}>Add maintenance task</div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
-                <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
-                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Task</span>
-                  <input
-                    value={maintenanceDraft.task}
-                    onChange={e => setMaintenanceDraft({ ...maintenanceDraft, task: e.target.value })}
-                    placeholder="e.g. Replace HVAC filter"
-                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                  />
-                </label>
-                <PickerField
-                  label="Frequency"
-                  value={maintenanceDraft.frequency}
-                  onChange={v => setMaintenanceDraft({ ...maintenanceDraft, frequency: v })}
-                  options={MAINTENANCE_FREQUENCIES.map(f => f.label)}
-                  title="Select frequency"
-                />
-                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Last performed</span>
-                  <input
-                    type="date"
-                    value={maintenanceDraft.lastPerformed}
-                    onChange={e => setMaintenanceDraft({ ...maintenanceDraft, lastPerformed: e.target.value })}
-                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                  />
-                </label>
-                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Owner</span>
-                  <input
-                    value={maintenanceDraft.owner}
-                    onChange={e => setMaintenanceDraft({ ...maintenanceDraft, owner: e.target.value })}
-                    placeholder="Who's responsible?"
-                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                  />
-                </label>
-              </div>
-              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
-                <button onClick={() => setShowMaintenanceAdd(false)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
-                <button
-                  onClick={addMaintenanceItem}
-                  disabled={isSaving || !maintenanceDraft.task.trim()}
-                  style={{ padding: "8px 14px", background: (!isSaving && maintenanceDraft.task.trim()) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
-                >
-                  {isSaving ? "Saving…" : "Schedule"}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
         {/* v34: the maintenance completion form. Opens prefilled, so a routine
             filter clean is still effectively one click -- but the fields that
             used to have nowhere to go (what it cost, who did it, what they
@@ -8462,6 +8594,7 @@ function AssetTracker() {
             isSaving={isSaving}
           />
         )}
+        {renderWorkDialogs()}
       </div>
     );
   }
@@ -8978,14 +9111,123 @@ function AssetTracker() {
 
         {mainTab === "maintenance" && (
         <>
-          {maintenanceOverdueTotal > 0 && (
-            <div style={{ marginBottom: 18 }}>
-              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, fontWeight: 700, color: C.danger }}>
+          {/* The same drill-down the Assets tab uses, on the same scopeId --
+              deliberately shared, so narrowing to a building and switching tabs
+              keeps you where you were rather than silently widening. It sits
+              ABOVE the sub-tabs because it scopes both of them. */}
+          <HierarchyNav assets={assets} scopeId={scopeId} setScopeId={setScopeId} />
+
+          <div style={{ display: "flex", gap: 6, marginBottom: 16, alignItems: "center", flexWrap: "wrap" }}>
+            {[
+              { key: "scheduled", label: "Scheduled", count: filteredMaintenanceRows.length, urgent: maintenanceOverdueTotal > 0 },
+              { key: "history", label: "History", count: filteredWorkRows.length },
+            ].map(st => {
+              const active = mainMaintenanceSubTab === st.key;
+              return (
+                <button
+                  key={st.key}
+                  onClick={() => setMainMaintenanceSubTab(st.key)}
+                  style={{
+                    padding: "5px 12px", borderRadius: 999, fontSize: 13,
+                    fontWeight: active ? 700 : 500,
+                    background: active ? C.brand : "transparent",
+                    color: active ? "#fff" : (st.urgent ? C.danger : C.muted),
+                    border: `1px solid ${active ? C.brand : C.border}`,
+                  }}
+                >
+                  {st.label}{st.count > 0 ? ` (${st.count})` : ""}
+                </button>
+              );
+            })}
+            {maintenanceOverdueTotal > 0 && (
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, fontWeight: 700, color: C.danger, marginLeft: 4 }}>
                 {maintenanceOverdueTotal} overdue
               </span>
+            )}
+            {/* Both dialogs need to be told which asset they are for, since
+                nothing is open here -- hence the null-but-not-undefined seed,
+                which is what makes the Asset picker appear inside them. */}
+            {canEdit && (
+            <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+              <button
+                onClick={() => openMaintenanceAdd("")}
+                disabled={isSaving}
+                style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", background: "transparent", color: C.brandDark, border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+              >
+                <Plus size={14} /> Add task
+              </button>
+              <button
+                onClick={() => openChangeAdd("")}
+                disabled={isSaving}
+                style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+              >
+                <Plus size={14} /> Log work
+              </button>
             </div>
+            )}
+          </div>
+
+          {mainMaintenanceSubTab === "history" && (
+          <>
+            {workTotalCost > 0 && (
+              <div style={{ textAlign: "right", fontSize: 12, color: C.muted, marginBottom: 8 }}>
+                Total logged: ${workTotalCost.toFixed(2)}
+              </div>
+            )}
+            <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden", background: C.surface, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)" }}>
+              <div className="scroller" style={{ overflowX: "auto" }}>
+                <div style={{ display: "grid", gridTemplateColumns: "130px 220px 140px 170px 110px 260px", background: C.brandDark, color: "#F4F0E6", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", minWidth: "max-content" }}>
+                  {[
+                    { key: "performedOn", label: "Performed" },
+                    { key: "asset", label: "Asset" },
+                    { key: "changeType", label: "Work Type" },
+                    { key: "vendor", label: "Vendor" },
+                    { key: "cost", label: "Cost" },
+                    { key: "note", label: "Details" },
+                  ].map(c => (
+                    <ColumnHeaderCell
+                      key={c.key}
+                      label={c.label}
+                      colKey={c.key}
+                      filterConfigs={workFilterConfigs}
+                      sortConfig={workSortConfig}
+                      setSortConfig={setWorkSortConfig}
+                      onOpenFilter={setActiveWorkFilterCol}
+                    />
+                  ))}
+                </div>
+                {filteredWorkRows.length === 0 ? (
+                  <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "18px 0" }}>No work logged yet.</div>
+                ) : filteredWorkRows.map((r, i) => (
+                  <div
+                    key={`${r.asset.id}-${r.idx}`}
+                    onClick={() => openDetail(r.asset, "changes")}
+                    style={{ display: "grid", gridTemplateColumns: "130px 220px 140px 170px 110px 260px", borderTop: `1px solid ${C.border}`, cursor: "pointer", background: i % 2 ? C.bg : C.surface, minWidth: "max-content" }}
+                  >
+                    <div style={{ padding: "12px 14px", fontSize: 13, color: C.ink }}>{formatDateOnly(r.performedOn) || "—"}</div>
+                    <div style={{ padding: "12px 14px", fontSize: 13, color: C.brandDark, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.assetName}</div>
+                    <div style={{ padding: "12px 14px", fontSize: 13, color: C.ink }}>{r.change.changeType || "—"}</div>
+                    <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.change.vendor || "—"}</div>
+                    <div style={{ padding: "12px 14px", fontSize: 13, color: C.ink }}>{r.change.cost ? `$${parseFloat(r.change.cost).toFixed(2)}` : "—"}</div>
+                    <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.change.note || "—"}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            {activeWorkFilterCol && (
+              <ColumnFilterModal
+                colKey={activeWorkFilterCol}
+                filterConfigs={workFilterConfigs}
+                sortConfig={workSortConfig}
+                setSortConfig={setWorkSortConfig}
+                onClose={() => setActiveWorkFilterCol(null)}
+              />
+            )}
+          </>
           )}
 
+          {mainMaintenanceSubTab === "scheduled" && (
+          <>
           <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden", background: C.surface, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)" }}>
             <div className="scroller" style={{ overflowX: "auto" }}>
               <div style={{ display: "grid", gridTemplateColumns: "220px 170px 110px 130px 130px 130px 120px", background: C.brandDark, color: "#F4F0E6", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", minWidth: "max-content" }}>
@@ -9050,6 +9292,8 @@ function AssetTracker() {
               })}
             </div>
           </div>
+          </>
+          )}
         </>
         )}
       </div>
@@ -9142,6 +9386,7 @@ function AssetTracker() {
           </div>
         </div>
       )}
+      {renderWorkDialogs()}
     </div>
   );
 }
@@ -9352,6 +9597,48 @@ function RoomField({ value, onChange, assets, label = "Room", hideLabel, exclude
   );
 }
 
+// Picks ANY asset, by drilling the hierarchy -- the same browser used to place
+// an asset, with the selectable predicate opened up instead of restricted to
+// Rooms. Used by the site-wide Maintenance tab, where a work dialog has no open
+// asset to write to and has to be told which one it means.
+//
+// Everything is selectable here, so no row is a dead end and the modal's
+// hide-what-you-cannot-pick rule never fires. Navigating INTO a room still
+// works: a row's chevron opens it while its body selects it, which is exactly
+// the two-affordance design that component was built around.
+//
+// Archived assets are excluded. They are out of service, so scheduling
+// maintenance on one is almost certainly a mis-click, and the site-wide lists
+// already exclude them.
+function AssetPickerField({ label, assets, value, onChange, hint }) {
+  const [open, setOpen] = useState(false);
+  const all = assets || [];
+  const chosen = all.find(a => a.id === value);
+  // The full path, for the same reason ParentField shows one: two rooms can
+  // share a name and the breadcrumb is gone once the modal closes.
+  const triggerText = chosen
+    ? [pathOf(chosen, all), nameOf(chosen)].filter(Boolean).join(" › ")
+    : "";
+  const archived = new Set(all.filter(a => (a.status || "Active") === "Archived").map(a => a.id));
+  return (
+    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>{label}</span>
+      <PickerTrigger value={triggerText} placeholder="Choose an asset…" onClick={() => setOpen(true)} ariaLabel="Select asset" />
+      {open && (
+        <HierarchyBrowserModal
+          title="Select asset"
+          hint={hint || "Drill in and pick the asset this is for"}
+          assets={all}
+          isSelectable={a => !archived.has(a.id)}
+          excluded={archived}
+          value={value || ""}
+          onChange={onChange}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </label>
+  );
+}
 // The hierarchy navigator that sits above the asset list — drill into a campus,
 // then a building, then a room, and the list below narrows to everything inside
 // wherever you are. Inline rather than a modal, because it's not answering a
