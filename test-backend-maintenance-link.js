@@ -80,7 +80,7 @@ const ASSET = {
   ],
   changes: [
     // logged against the schedule above
-    { changeType: 'Maintenance', vendor: 'Acme HVAC', cost: '250', note: 'Coils fouled', at: 'T', by: 'E', maintenanceId: MAINT_ID },
+    { changeType: 'Maintenance', vendor: 'Acme HVAC', cost: '250', note: 'Coils fouled', at: 'T', by: 'E', maintenanceId: MAINT_ID, performedOn: '2026-08-14' },
     // an ordinary unattached change -- what every pre-v34 row is
     { changeType: 'Repair', vendor: '', cost: '', note: 'n', at: 'T', by: 'E' },
     // a DANGLING link: the schedule it named has since been deleted. This must
@@ -165,6 +165,28 @@ check('the written maintenance row carries id',
         rows.every(a => a.maintenanceItems.length === 2 && a.changes.length === 3),
         `got ${JSON.stringify(rows.map(a => ({ m: a.maintenanceItems.length, c: a.changes.length })))}`);
 }
+
+// --- performedOn (v34) -----------------------------------------------------
+// When the work HAPPENED, as distinct from `at`, when it was logged. The two
+// are separate columns on purpose: overwriting `at` to record a back-dated job
+// would destroy the provenance it exists to hold.
+check('CHANGE_FIELDS carries performedOn', mod.CHANGE_FIELDS.indexOf('performedOn') !== -1,
+      `got ${JSON.stringify(mod.CHANGE_FIELDS)}`);
+
+check('performedOn survives the round trip and does NOT collapse into at',
+      back.changes[0].performedOn === '2026-08-14' && back.changes[0].at === 'T',
+      `got performedOn=${JSON.stringify(back.changes[0].performedOn)}, at=${JSON.stringify(back.changes[0].at)}`);
+
+check('the written change row carries performedOn',
+      written.changeRows[0].performedOn === '2026-08-14',
+      `got ${JSON.stringify(written.changeRows[0].performedOn)}`);
+
+// A pre-v34 row has no performedOn. It must read back as "" so the frontend's
+// fall-back-to-`at` fires; `undefined` would be written to the Sheet as the
+// literal string "undefined" on the next save.
+check('a pre-v34 change reads back with performedOn "" (not undefined)',
+      back.changes[1].performedOn === '',
+      `got ${JSON.stringify(back.changes[1].performedOn)}`);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

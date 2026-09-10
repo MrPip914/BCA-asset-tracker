@@ -1133,6 +1133,21 @@ function formatDateOnly(dateStr) {
 // Deliberately built from the local getters rather than toLocaleDateString with
 // a locale that happens to emit ISO order — same result, but it cannot be
 // changed by a locale or an Intl implementation detail.
+// When a change entry's work actually happened, as "yyyy-MM-dd".
+//
+// `at` and `performedOn` answer different questions and both are kept: `at` is
+// when the entry was TYPED (provenance, never edited, pairs with `by`), while
+// `performedOn` is when the work was DONE. A job finished in August and written
+// up in September records both instead of overwriting one with the other.
+//
+// An entry written before performedOn existed has only `at`, and the date part
+// of it is what such a row always implicitly meant -- so that is the fallback,
+// and it needs no backfill. Nothing outside this function should read either
+// field to answer "when was this done".
+function changePerformedOn(ch) {
+  if (!ch) return "";
+  return dateOnly(ch.performedOn) || dateOnly(ch.at);
+}
 function localDateString(d) {
   const dt = d || new Date();
   if (isNaN(dt.getTime())) return "";
@@ -1860,7 +1875,7 @@ const FRONTEND_SCRIPT_VERSION = "v34";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-10.6";
+const APP_VERSION = "2026-09-10.7";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -2451,9 +2466,9 @@ const MOCK_SNAPSHOT = {
       { id: "mnt-0086-filter", task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "2026-08-14", owner: "Eric", at: "", by: "" },
       { id: "mnt-0086-coil", task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "2026-03-02", owner: "", at: "", by: "" },
     ], changes: [
-      { changeType: "Maintenance", vendor: "", cost: "", note: "Filter rinsed and dried. Light dust only.", at: "2026-07-15T16:20:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0086-filter" },
-      { changeType: "Maintenance", vendor: "Central Coast HVAC", cost: "185.00", note: "Coil cleaned, condensate line flushed. Tech noted slight fin damage on the return side — watch it next visit.", at: "2026-03-02T18:05:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0086-coil" },
-      { changeType: "Maintenance", vendor: "", cost: "40.00", note: "Logged against a schedule that has since been deleted — should render with no maintenance badge.", at: "2026-01-09T15:00:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0086-retired" },
+      { changeType: "Maintenance", vendor: "", cost: "", note: "Filter rinsed and dried. Light dust only.", at: "2026-07-15T16:20:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0086-filter", performedOn: "2026-05-28" },
+      { changeType: "Maintenance", vendor: "Central Coast HVAC", cost: "185.00", note: "Coil cleaned, condensate line flushed. Tech noted slight fin damage on the return side — watch it next visit.", at: "2026-03-02T18:05:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0086-coil", performedOn: "2026-03-02" },
+      { changeType: "Maintenance", vendor: "", cost: "40.00", note: "Logged against a schedule that has since been deleted — should render with no maintenance badge.", at: "2026-01-09T15:00:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0086-retired", performedOn: "2026-01-08" },
       { changeType: "Repair", vendor: "Central Coast HVAC", cost: "220.00", note: "Replaced remote receiver board.", at: "2026-02-11T19:40:00.000Z", by: "Eric Stamand" },
     ] },
     { label: "BCA0087", type: "Mini Split", parentId: "BCR0008", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
@@ -2491,7 +2506,7 @@ const MOCK_SNAPSHOT = {
     { label: "BCA0093", type: "Condenser", name: "Building 100", parentId: "BCB0001", brand: "Mitsubishi", model: "MXZ-4C36NAHZ", serial: "", notes: "Outdoor condenser/compressor, 4-zone multi-split.", status: "Active", maintenanceItems: [
       { id: "mnt-0093-inspect", task: "Inspection / cleaning", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "2026-05-19", owner: "Eric", at: "", by: "" },
     ], changes: [
-      { changeType: "Maintenance", vendor: "Central Coast HVAC", cost: "310.00", note: "Annual service. Coils washed, refrigerant charge checked, all four zones tested.", at: "2026-05-19T17:30:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0093-inspect" },
+      { changeType: "Maintenance", vendor: "Central Coast HVAC", cost: "310.00", note: "Annual service. Coils washed, refrigerant charge checked, all four zones tested.", at: "2026-05-19T17:30:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0093-inspect", performedOn: "2026-05-19" },
       { changeType: "Maintenance", vendor: "Central Coast HVAC", cost: "295.00", note: "Annual service. No faults found.", at: "2025-05-22T16:15:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0093-inspect" },
     ] },
     { label: "BCA0094", type: "Condenser", parentId: "BCB0002", brand: "Mitsubishi", model: "MUZ-GL15NA", serial: "", notes: "Outdoor condenser/compressor, single-zone.", status: "Active", maintenanceItems: [
@@ -4422,8 +4437,13 @@ function AssetTracker() {
       vendor: changeDraft.vendor.trim(),
       cost: changeDraft.cost.trim(),
       note: changeDraft.note.trim(),
+      // When this was TYPED. Never edited, pairs with `by`, and deliberately
+      // not the same question as performedOn below.
       at: new Date().toISOString(),
       by: currentUser || "",
+      // When the work actually HAPPENED. Defaults to today and is editable, so
+      // a job can be written up days later and still be dated honestly.
+      performedOn: changeDraft.performedOn || localDateString(),
       // v34, optional: the maintenance schedule this change was performed
       // against, picked in the form.
       maintenanceId: changeDraft.maintenanceId || "",
@@ -4656,6 +4676,10 @@ function AssetTracker() {
       note: note.trim(),
       at: new Date().toISOString(),
       by: currentUser || "",
+      // The same date that stamps lastPerformed below. The modal's date field
+      // and the change's performedOn are the same fact, so they must not be
+      // allowed to disagree -- one value feeds both.
+      performedOn: date,
       maintenanceId: item.id || "",
     };
     const entry = {
@@ -5593,7 +5617,8 @@ function AssetTracker() {
     assets.forEach(a => {
       (a.changes || []).forEach(ch => {
         changeRows.push({
-          "Asset ID": a.tag, Name: nameOf(a, typesList), Type: typeNameOf(a.type, typesList), Room: displayRoom(a), When: formatWhen(ch.at),
+          "Asset ID": a.tag, Name: nameOf(a, typesList), Type: typeNameOf(a.type, typesList), Room: displayRoom(a),
+          When: formatDateOnly(changePerformedOn(ch)), "Logged at": formatWhen(ch.at),
           "Change type": ch.changeType, Vendor: ch.vendor, Cost: parseFloat(ch.cost) || "", Note: ch.note,
           "Logged by": ch.by || "",
           // v34: resolved here rather than left as a raw id, since a
@@ -5654,7 +5679,7 @@ function AssetTracker() {
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(assetRows), "Assets");
     XLSX.utils.book_append_sheet(
       wb,
-      XLSX.utils.json_to_sheet(changeRows.length ? changeRows : [{ "Asset ID": "", Type: "", Room: "", When: "", "Change type": "", Vendor: "", Cost: "", Note: "", "Logged by": "", "Maintenance task": "" }]),
+      XLSX.utils.json_to_sheet(changeRows.length ? changeRows : [{ "Asset ID": "", Type: "", Room: "", When: "", "Logged at": "", "Change type": "", Vendor: "", Cost: "", Note: "", "Logged by": "", "Maintenance task": "" }]),
       "Changes"
     );
     XLSX.utils.book_append_sheet(
@@ -7279,7 +7304,7 @@ function AssetTracker() {
                                   <div key={hi}>
                                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
                                       <span style={{ fontWeight: 600, fontSize: 12, color: C.brandDark }}>{ch.changeType}</span>
-                                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: C.placeholder, flexShrink: 0 }}>{formatWhen(ch.at)}</span>
+                                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: C.placeholder, flexShrink: 0 }}>{formatDateOnly(changePerformedOn(ch))}</span>
                                     </div>
                                     <div style={{ fontSize: 12, color: C.muted }}>
                                       {[ch.vendor, ch.cost && `$${parseFloat(ch.cost).toFixed(2)}`, ch.by].filter(Boolean).join(" · ") || "—"}
@@ -7320,6 +7345,18 @@ function AssetTracker() {
                     manageLabel="Manage change types"
                     title="Select change type"
                   />
+                  {/* Applies to EVERY change, not just one linked to a schedule:
+                      the point is that work written up days later can still be dated
+                      honestly. `at` still records when it was typed. */}
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Performed on</span>
+                    <input
+                      type="date"
+                      value={changeDraft.performedOn}
+                      onChange={e => setChangeDraft({ ...changeDraft, performedOn: e.target.value })}
+                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                    />
+                  </label>
                   <PickerField
                     label="Vendor"
                     value={changeDraft.vendor}
@@ -7366,7 +7403,12 @@ function AssetTracker() {
                     another field is set reads as broken. Defaults OFF -- the
                     picker's main use is attaching a change that ISN'T a
                     completion (parts ordered, a repair found during the service),
-                    and a stamp is much harder to notice than a missing one. */}
+                    and a stamp is much harder to notice than a missing one.
+
+                    It carries no date of its own any more: the form has one, it is
+                    the date this work happened, and that is exactly the date the
+                    schedule should record. Two date fields could disagree, and a
+                    user would have no way to know which one won. */}
                 {changeDraft.maintenanceId && (
                 <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10, padding: "8px 10px", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10 }}>
                   <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: C.ink, cursor: "pointer" }}>
@@ -7378,16 +7420,8 @@ function AssetTracker() {
                     />
                     Mark this task performed
                   </label>
-                  {changeDraft.markPerformed && (
-                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: C.muted }}>
-                    on
-                    <input
-                      type="date"
-                      value={changeDraft.performedOn}
-                      onChange={e => setChangeDraft({ ...changeDraft, performedOn: e.target.value })}
-                      style={{ padding: "6px 8px", border: `1.5px solid ${C.border}`, fontSize: 13, borderRadius: 8, color: C.ink }}
-                    />
-                  </label>
+                  {changeDraft.markPerformed && changeDraft.performedOn && (
+                    <span style={{ fontSize: 13, color: C.muted }}>on {formatDateOnly(changeDraft.performedOn)}</span>
                   )}
                 </div>
                 )}
@@ -7456,7 +7490,12 @@ function AssetTracker() {
                         </div>
                         {ch.note && <div style={{ fontSize: 14, color: C.ink, whiteSpace: "pre-wrap", marginBottom: 6 }}>{ch.note}</div>}
                         <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.placeholder }}>
-                          {formatWhen(ch.at)}{ch.by ? ` · ${ch.by}` : ""}
+                          {formatDateOnly(changePerformedOn(ch))}{ch.by ? ` · ${ch.by}` : ""}
+                          {/* Only when it was written up on a different day than it
+                              happened -- otherwise this is the same date twice. */}
+                          {dateOnly(ch.at) !== changePerformedOn(ch) && (
+                            <span style={{ color: C.empty }}> · logged {formatWhen(ch.at)}</span>
+                          )}
                         </div>
                       </div>
                     );

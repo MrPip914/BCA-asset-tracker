@@ -242,7 +242,24 @@ const BREAKER_TYPE_FIELDS = ["id", "name", "slotSpan", "members"];
 // against, or is empty for an ordinary unattached change -- which is what every
 // row written before v34 is. Purely additive, so no migration: an empty value
 // already means exactly the right thing.
-const CHANGE_FIELDS = ["assetLabel", "changeType", "vendor", "cost", "note", "at", "by", "maintenanceId"];
+//
+// "performedOn" (v34) is WHEN THE WORK HAPPENED, as a plain "yyyy-MM-dd" date.
+// Distinct from "at", which is when the entry was LOGGED and stays an untouched
+// record of that -- so a job done in August and typed up in September records
+// both facts instead of overwriting one with the other. That separation is what
+// lets a change entry mark a maintenance task performed: an editable date is
+// the one thing an automatic stamp could never get right.
+//
+// Empty on every row written before this, and the frontend falls back to the
+// date part of "at" for those -- which is what such a row always implicitly
+// meant. So no migration and no backfill.
+//
+// NOTE this column was added to v34 rather than cut as v35: v34 had not been
+// deployed to any tenant when it landed, so no Sheet had ever seen the earlier
+// shape and a second version number would have meant a second deploy for a
+// schema that only ever existed in git. Do NOT repeat that once a version is
+// live anywhere -- check `node deploy.mjs --status` before assuming.
+const CHANGE_FIELDS = ["assetLabel", "changeType", "vendor", "cost", "note", "at", "by", "maintenanceId", "performedOn"];
 // "id" (v34) is a maintenance item's stable key, a crypto.randomUUID() minted by
 // the frontend. Array position cannot serve as identity here: items are edited
 // and deleted by index, so deleting one renumbers every item below it and would
@@ -1116,7 +1133,7 @@ function handleAuthenticatedRead_(body, e) {
         comments: commentRows.filter(c => c.assetLabel === label).map(c => ({ text: c.text, at: c.at, by: c.by })),
         changes: changeRows.filter(c => c.assetLabel === label).map(c => ({
           changeType: c.changeType, vendor: c.vendor, cost: c.cost, note: c.note, at: c.at, by: c.by,
-          maintenanceId: c.maintenanceId || "",
+          maintenanceId: c.maintenanceId || "", performedOn: c.performedOn || "",
         })),
         allocations: allocationRows.filter(al => al.assetLabel === label).map(al => ({ roomId: al.room, quantity: al.quantity })),
         maintenanceItems: maintenanceRows.filter(m => m.assetLabel === label).map(m => ({
@@ -1387,7 +1404,7 @@ function doPost(e) {
         (a.comments || []).forEach(c => commentRows.push({ assetLabel: key, text: c.text, at: c.at, by: c.by || "" }));
         (a.changes || []).forEach(c => changeRows.push({
           assetLabel: key, changeType: c.changeType, vendor: c.vendor || "", cost: c.cost || "", note: c.note || "", at: c.at, by: c.by || "",
-          maintenanceId: c.maintenanceId || "",
+          maintenanceId: c.maintenanceId || "", performedOn: c.performedOn || "",
         }));
         (a.allocations || []).forEach(al => allocationRows.push({ assetLabel: key, room: al.roomId, quantity: al.quantity }));
         (a.maintenanceItems || []).forEach(m => maintenanceRows.push({

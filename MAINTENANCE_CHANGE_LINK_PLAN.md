@@ -1,6 +1,17 @@
 # Linking maintenance completions to the change log
 
-**Status: BUILT on `dev` 2026-09-10, NOT DEPLOYED.** Backend is **v34**. Steps 1-4 of
+**Status: BUILT on `dev` 2026-09-10, NOT DEPLOYED.** Backend is **v34**, which now also
+carries a `performedOn` date on every change entry — folded into v34 rather than cut as
+v35, since v34 had never been deployed to any tenant (see CLAUDE.md; do not repeat that
+once a version is live).
+
+Two things grew past the plan below, both at Eric's request and in this order, because the
+second is what makes the first honest:
+1. A linked change can COMPLETE its schedule, via a checkbox that defaults off.
+2. Every change carries an editable performed-on date, so work can be written up after the
+   fact and still dated correctly. The plan's original "link only" rule was right for the
+   data model as it stood — a change had no date but `at`, when it was typed — and stopped
+   being right once it had one. Steps 1-4 of
 the Sequence below are done and Sandbox-verified end to end; steps 5-6 (the deploys) are
 outstanding, and until v34 is live the two new columns are dropped on write — so the link
 works in-session and forgets on reload against a real backend. Sandbox is unaffected, as
