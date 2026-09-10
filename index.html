@@ -526,7 +526,7 @@ function availableTabsFor(type) {
     "details",
     ...(isPlaceType(type) ? ["contents"] : []),
     ...modulesFor(type),
-    "maintenance", "comments", "changes", "audit",
+    "maintenance", "comments", "audit",
   ];
 }
 // What this asset is *called*. ONE optional field on every asset, falling back
@@ -1875,7 +1875,7 @@ const FRONTEND_SCRIPT_VERSION = "v34";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-10.7";
+const APP_VERSION = "2026-09-10.8";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -2724,7 +2724,7 @@ function AssetTracker() {
   const [selectedId, setSelectedId] = useState(null);
   const [detailEditing, setDetailEditing] = useState(false);
   const [editNote, setEditNote] = useState("");
-  const [detailTab, setDetailTab] = useState("details"); // "details" | "comments" | "changes" | "audit" | "allocations"
+  const [detailTab, setDetailTab] = useState("details"); // "details" | "contents" | "maintenance" | "comments" | "audit" | a module key ("allocations", "breakers", ...). NOT "changes" any more -- the Change Log is the maintenance tab's History sub-tab; openDetail still ACCEPTS it as a request, for links already in circulation.
   const [commentDraft, setCommentDraft] = useState("");
   const [changeDraft, setChangeDraft] = useState({ changeType: "", vendor: "", cost: "", note: "", maintenanceId: "", markPerformed: false, performedOn: localDateString() });
   const [showChangeTypeManager, setShowChangeTypeManager] = useState(false);
@@ -2743,6 +2743,12 @@ function AssetTracker() {
   // openDetail() has to reset it, and resetting seven scattered setters is easy
   // to get one short of.
   const [maintenanceCompleteModal, setMaintenanceCompleteModal] = useState(null);
+  // Which half of the Maintenance tab is showing: "scheduled" (the recurring
+  // items) or "history" (what was actually done -- the old Change Log).
+  // They were two top-level tabs until they were merged, since answering "when
+  // is this due" and "what has been done to it" from two different places made
+  // the link between them invisible.
+  const [maintenanceSubTab, setMaintenanceSubTab] = useState("scheduled");
   // null when closed; otherwise { breaker, draft: { serial, ampRating, installedDate }, error }
   const [swapModal, setSwapModal] = useState(null);
   // null when closed; otherwise { breakerId, circuit, target, error }
@@ -3900,7 +3906,15 @@ function AssetTracker() {
     // than being honoured — a ?tab=breakers link pasted onto a Computer used to
     // select a tab the bar didn't offer, leaving the tab strip with nothing
     // under it. Deep links outlive the asset they were copied from.
-    const wanted = initialTab && availableTabsFor(asset.type).includes(initialTab) ? initialTab : defaultTabFor(asset.type);
+    // "changes" was a top-level tab until the Change Log became the Maintenance
+    // tab's History sub-tab. It stays a valid REQUEST forever: ?tab=changes
+    // links are already in circulation and a deep link outlives the layout that
+    // produced it -- the same reason the panel tab kept its "breakers" key when
+    // its label became "Layout". It resolves to the sub-tab it moved into
+    // rather than being dropped, which would silently land on Details.
+    const requested = initialTab === "changes" ? "maintenance" : initialTab;
+    const wantedSub = initialTab === "changes" ? "history" : "scheduled";
+    const wanted = requested && availableTabsFor(asset.type).includes(requested) ? requested : defaultTabFor(asset.type);
     setDetailTab(wanted);
     setConfirmCommentDelete(null);
     setConfirmChangeDelete(null);
@@ -3913,6 +3927,7 @@ function AssetTracker() {
     setConfirmMaintenanceDelete(null);
     setMaintenanceCompleteModal(null);
     setOpenMaintenanceHistory(null);
+    setMaintenanceSubTab(wantedSub);
     setSwapModal(null);
     setMoveCircuitModal(null);
     setBreakerModal(null);
@@ -6712,7 +6727,6 @@ function AssetTracker() {
               contents: { label: "Contents", count: contentsCount },
               maintenance: { label: "Maintenance", count: maintenanceItems.length, urgent: overdueMaintenanceCount > 0 },
               comments: { label: "Comments", count: comments.length },
-              changes: { label: "Change Log", count: changeEntries.length },
               audit: { label: "Audit", count: assetAuditEntries.length },
             }[key] || { label: ASSET_MODULES[key].label, count: ASSET_MODULES[key].count(selectedAsset) };
             return { key, ...meta };
@@ -7124,7 +7138,36 @@ function AssetTracker() {
             />
           )}
 
+          {/* Sub-tabs. Deliberately styled lighter than the main tab bar --
+              they are a division WITHIN one tab, and matching the bar above
+              would read as two competing rows of navigation. */}
           {detailTab === "maintenance" && (
+            <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+              {[
+                { key: "scheduled", label: "Scheduled", count: maintenanceItems.length, urgent: overdueMaintenanceCount > 0 },
+                { key: "history", label: "History", count: changeEntries.length },
+              ].map(st => {
+                const active = maintenanceSubTab === st.key;
+                return (
+                  <button
+                    key={st.key}
+                    onClick={() => setMaintenanceSubTab(st.key)}
+                    style={{
+                      padding: "5px 12px", borderRadius: 999, fontSize: 13,
+                      fontWeight: active ? 700 : 500,
+                      background: active ? C.brand : "transparent",
+                      color: active ? "#fff" : (st.urgent ? C.danger : C.muted),
+                      border: `1px solid ${active ? C.brand : C.border}`,
+                    }}
+                  >
+                    {st.label}{st.count > 0 ? ` (${st.count})` : ""}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {detailTab === "maintenance" && maintenanceSubTab === "scheduled" && (
             <>
               {canEdit && (
               <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)", marginBottom: 20 }}>
@@ -7325,7 +7368,7 @@ function AssetTracker() {
             </>
           )}
 
-          {detailTab === "changes" && (
+          {detailTab === "maintenance" && maintenanceSubTab === "history" && (
             <>
               {totalLoggedCost > 0 && (
                 <div style={{ textAlign: "right", fontSize: 12, color: C.muted, marginBottom: 8 }}>

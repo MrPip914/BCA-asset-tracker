@@ -1496,6 +1496,27 @@ tab itself in red when anything's overdue. Adding an item isn't separately audit
 own `at`/`by` is enough); marking done, editing, or deleting one is, since those mutate
 or remove data with no other history trail.
 
+**The Change Log is no longer a top-level tab — it is Maintenance › History (2026-09-10).**
+The detail tabs are now Details / Maintenance / Comments / Audit, and Maintenance has two
+sub-tabs: **Scheduled** (the recurring items) and **History** (what was actually done, i.e.
+the entire former Change Log, unchanged). Answering "when is this due" and "what has been
+done to it" from two different tabs made the link between them invisible, which is the same
+problem `maintenanceId` was added to solve — this finishes it in the navigation.
+- **`?tab=changes` still works and must keep working.** `openDetail()` translates it to
+  Maintenance + the History sub-tab rather than dropping it, which would silently land on
+  Details. Deep links outlive the layout that produced them — the same reason the panel tab
+  kept its `"breakers"` key when its label became "Layout". `"changes"` is therefore a valid
+  REQUEST forever while no longer being a valid `detailTab` VALUE; those are different things
+  and the state's own comment says so.
+- **The Maintenance tab's badge counts SCHEDULES, not history**, and keeps its overdue red.
+  The badge answers "is there anything I have to do", and a growing count of completed work
+  would drown that. Each sub-tab carries its own count.
+- **The sub-tabs are styled as pills, deliberately unlike the tab bar above them.** They are a
+  division within one tab; matching the bar would read as two competing rows of navigation.
+- Implementation note: the two content blocks were NOT moved. Their conditions were narrowed
+  (`detailTab === "maintenance" && maintenanceSubTab === "..."`) and a bar rendered above
+  them, so the diff is three lines of condition rather than a re-indent of ~400 lines of JSX
+  that would have buried any real change inside it.
 **A completion is a change-log entry, linked by `change.maintenanceId` (v34).** Marking a
 task done and logging a change used to be two unconnected acts: "Mark done today" stamped
 `lastPerformed` and wrote one audit row, so what a service visit actually cost, who did it
