@@ -16,47 +16,47 @@ version that fixed them.
 
 ## Open
 
-### The deploy config can silently land in a DISPOSABLE directory
-**Found:** 2026-09-09, when `node deploy.mjs dev` in Cloud Shell reported "No Apps Script
-ID configured for tenant dev" — on a machine that had deployed to `dev` earlier the same
-day, with no change to `deploy.mjs`, `set-tenant.mjs` or `clients.js` since 09-08.
-**Needs a deploy:** no — Node tooling only, nothing in `AssetTrackerSync.gs`.
-**Confirmed:** by reading the two halves against each other, not reproduced on the affected
-machine (it is Eric's Cloud Shell `$HOME`, which no session here can see).
+### `deploy.config.json` in a repo clone silently shadows the `$HOME` config
+**Found:** 2026-09-09 while misdiagnosing a deploy failure. **Latent — this did NOT cause
+that failure**, see the correction below.
+**Needs a deploy:** no — Node tooling only.
+**Confirmed:** by reading the code, not by reproducing it.
 
-`deploy.mjs`'s `loadConfig()` reads **`<repo>/deploy.config.json` FIRST**, and only falls
-back to `~/.bca-asset-tracker-deploy.json`. First hit wins — the two are never merged.
-`set-tenant.mjs` mirrors that: `const target = fs.existsSync(REPO_CONFIG) ? REPO_CONFIG :
-HOME_CONFIG`, and `new-tenant.mjs` records a brand-new tenant by shelling out to it.
+`deploy.mjs`'s `loadConfig()` reads **`<repo>/deploy.config.json` FIRST** and only falls
+back to `~/.bca-asset-tracker-deploy.json`. First hit wins; the two are never merged.
+`set-tenant.mjs` mirrors that (`fs.existsSync(REPO_CONFIG) ? REPO_CONFIG : HOME_CONFIG`),
+and `new-tenant.mjs` records a new tenant by shelling out to it.
 
-So if a `deploy.config.json` ever exists in the Cloud Shell clone, **every tenant id
-recorded from then on is written into the repo directory** — which is gitignored, is not the
-`$HOME` that Cloud Shell persists, and does not survive a fresh clone. The tutorial link
-clones the repo, so re-opening it is enough to lose it.
+So if a `deploy.config.json` ever exists in a Cloud Shell clone, every tenant id recorded
+from then on is written into the repo directory — gitignored, disposable, and not the
+`$HOME` that Cloud Shell persists. The tutorial link creates a NEW clone each time
+(`~/cloudshell_open/BCA-asset-tracker-1`, `-2`, … — eleven of them as of 2026-09-09), so
+that copy would be left behind on the next open.
 
-The comment on that line says the repo-first order exists so `set-tenant` "never creates a
-second one that silently shadows the first", which is a real hazard and correctly handled —
-but it solves the shadowing problem by preferring the copy that is **less** durable, which
-is the wrong way round for a file whose entire purpose is to persist in `$HOME` so a
-redeploy is one tap from a phone.
+The repo-first order is deliberate and its stated reason is sound: it stops `set-tenant`
+creating a second config that shadows the first. But it resolves the shadowing by
+preferring the **less durable** copy, which is backwards for a file whose whole purpose is
+to persist in `$HOME` so a redeploy stays one tap from a phone.
 
-Worth deciding rather than fixing blind:
-- **Always write `$HOME`**, and have `deploy.mjs` warn (not die) when a repo-level config is
-  also present and shadowing it. Keeps one durable home; makes the shadow visible.
-- **Merge the two**, repo over home, per tenant. Most forgiving, but two places a tenant id
-  can hide is exactly what the current comment is trying to avoid.
-- **Refuse to start when both exist**, naming both paths. Safest, most annoying on a phone.
+Options, none obviously right: always write `$HOME` and warn when a repo copy shadows it;
+merge the two per tenant; or refuse to start when both exist.
 
-The error message is already good — it prints the path it actually looked at, which is what
-made this diagnosable at all. What it cannot say is that the ids used to be somewhere else.
+**CORRECTION, same day.** This was written as the *cause* of "No Apps Script ID configured
+for tenant dev" and that was wrong. `cat ~/.bca-asset-tracker-deploy.json` showed a correct,
+complete config with both tenants, and no `deploy.config.json` existed in any of the eleven
+clones. The actual cause was never established — the most likely explanation is that the
+`dev` entry was simply absent when the deploy ran and was added before the file was read
+back. **The eleven clones were a red herring**, and the confident-sounding story built
+around them cost real time.
 
-**Blocks:** nothing permanently. Recovery is `find ~ -name deploy.config.json` to look for
-an older clone still holding the ids, then re-recording them with `set-tenant.mjs` (which
-now writes `$HOME`, since the repo copy is gone). Worst case it is one trip to the Apps
-Script editor per tenant.
+The lesson is the one this file keeps recording from the other direction: *check, don't
+infer*. `cat` on the config was one command and would have settled it before any theory was
+built. It was the fourth thing tried, not the first, because the code-reading suggested a
+tidier answer.
+
+**Blocks:** nothing.
 
 ---
-
 
 ### Add asset suggests a colliding Asset ID when `nextAssetNumber` is unset
 **Found:** 2026-09-09, in browser testing of the required-fields work — the add form
