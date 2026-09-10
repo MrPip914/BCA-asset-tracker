@@ -16,34 +16,6 @@ version that fixed them.
 
 ## Open
 
-### `/deploy` still prints the pre-2026-09-10 deploy instructions
-**Found:** 2026-09-10, immediately after the deploy block it produces was pasted wrongly.
-**Needs a deploy:** no — `.claude/commands/deploy.md` only.
-**Confirmed:** `git log -- .claude/commands/deploy.md` — last touched by `78646b9`, well
-before `8cc1603` ("Rewrite the deploy walkthrough around the choice that actually
-matters"), which changed only `CLAUDE.md` and `cloudshell-deploy.md`.
-
-`CLAUDE.md` says *"`/deploy` prints this same block if you would rather not retype it"* —
-so the command is presented as the safe alternative to reproducing the block from memory.
-It is no longer the same block. `8cc1603` added the rule that matters most (**ask which
-branch the work is on first, and send EXACTLY ONE block**, because pasting both main-first
-is what caused the failed v34 deploy) and split the walkthrough into Step 3a/3b. The
-command file has none of that. It does handle a branch argument, so it is not simply
-wrong — it is missing the guard against the specific failure the rewrite exists to prevent.
-
-**Why this is worth fixing rather than noting:** the escape hatch and the instruction went
-out of step silently, and the escape hatch is what someone reaches for precisely when they
-do not trust their memory of the instruction. Both copies say roughly the right thing,
-which is what makes the drift hard to notice — the same shape as the v18 `SCRIPT_VERSION`
-drift, where two copies of one string differed by one word.
-
-**The narrower question this raises:** whether the block should live in two places at all.
-`CLAUDE.md` already records that having the main procedure and the branch procedure in two
-places is what let both get pasted together in the wrong order. A command file holding a
-third copy is the same hazard one level up. Options: have `/deploy` quote `CLAUDE.md`'s
-section rather than restating it, or delete the command and let the section be the one
-source.
-
 ### A value that doesn't match its field's kind shows as BLANK, then refuses the save
 **Found:** 2026-09-10. **Mostly closed the same day** — see below.
 **Needs a deploy:** no — `index.html` only.
@@ -291,6 +263,31 @@ user is least sure whether their click worked.
 ---
 
 ## Fixed
+
+### `/deploy` printed the pre-2026-09-10 deploy instructions — fixed 2026-09-10
+**Found:** 2026-09-10, right after the block it produced was pasted in the wrong shape.
+**Needed a deploy:** no — `.claude/commands/deploy.md` only.
+**Fixed by** `b29cdf5` ("Give the deploy procedure one home, and a test that keeps it
+there"), on `main`, in a separate session — not by the session that logged it.
+
+`CLAUDE.md` advertised `/deploy` as the safe alternative to retyping the deploy block from
+memory, while `8cc1603` had rewritten the instructions in `CLAUDE.md` and
+`cloudshell-deploy.md` without touching the command file. So the escape hatch someone
+reaches for *because* they do not trust their memory would have handed back the superseded
+procedure — missing the ask-which-branch/send-one-block rule that the rewrite existed to
+add. Both copies still said roughly the right thing, which is what made the drift invisible:
+the same shape as the v18 `SCRIPT_VERSION` drift, where two copies of one string differed by
+one word.
+
+**The fix went further than the entry asked for, and the extra part is the durable bit.**
+The entry proposed either quoting `CLAUDE.md` or deleting the command. The actual fix did
+the first — `/deploy` now carries no deploy text of its own and quotes the three sources
+that own it — and then added `test-deploy-docs.js`, which fails if a fifth copy of the
+procedure appears, if a doc names a tenant `clients.js` does not have, if a doc tells you
+to watch for a success line `deploy.mjs` never prints, or if a live-version claim
+reappears in prose. **A convention nothing checks is a convention that drifts**, which is
+the whole lesson: the earlier rewrite was correct and still could not stop the next copy
+going stale.
 
 ### `test-backend-maintenance-link.js` never ran on an LF checkout — fixed 2026-09-10
 **Found:** 2026-09-10 while auditing the deploy docs; the whole file exited non-zero on
