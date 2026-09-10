@@ -1496,6 +1496,17 @@ tab itself in red when anything's overdue. Adding an item isn't separately audit
 own `at`/`by` is enough); marking done, editing, or deleting one is, since those mutate
 or remove data with no other history trail.
 
+**"Change type" reads "Work type", and the button is "Log work" (2026-09-10).** LABELS ONLY.
+The stored field is still `changeType`, the managed list is still `changeTypes`, and the sheet
+column is unchanged -- renaming any of those is a schema change that would drop every existing
+value on the next write, and it would buy nothing, since the label people read is the whole
+point of the rename. Anything user-visible moved: the field, its picker title, its gear
+("Manage work types"), the manager modal and its placeholder, the completion modal's copy of
+the same field, the delete confirmation, and the Excel export's column header.
+- Sentence case ("Log work", not "Log Work") to match every other button in the app -- "Add
+  task", "Log completion", "Add comment".
+- The edit dialog reads "Edit work entry" rather than "Edit work", which would read as a verb.
+
 **Add and Log change are DIALOGS, and a history entry is editable (2026-09-10).** Both
 sub-tabs used to open with a permanently expanded form pinned above their list, which pushed
 the schedules and the history — the things the tab exists to show — below the fold on every
