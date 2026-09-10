@@ -16,6 +16,45 @@ version that fixed them.
 
 ## Open
 
+### "Today" is computed in UTC, so an evening Pacific user dates work a day ahead
+**Found:** 2026-09-10, while building the v34 maintenance completion form.
+**Needs a deploy:** no — `index.html` only.
+**Confirmed:** in a browser against Sandbox at ~22:33 Pacific on Sep 9; the completion
+form's Date performed defaulted to **Sep 10**, and the change entry it wrote rendered as
+**Sep 9, 2026, 10:33 PM** immediately beside it.
+
+`new Date().toISOString().slice(0, 10)` takes the **UTC** date. Pacific is 7–8 hours
+behind, so between roughly 5pm and midnight local the app's idea of "today" is already
+tomorrow. A completion logged on Tuesday evening is dated Wednesday, and its next-due date
+is computed a day late from there.
+
+**Pre-existing and repo-wide, not new in v34** — the old one-click `markMaintenanceDone`
+used the identical expression, so this has been true of every maintenance completion the
+app has ever recorded. v34 only makes it *visible*, by putting the date in a field next to
+a timestamp that renders in local time.
+
+The fix is a local-date helper (`toLocaleDateString("en-CA")`, or assembling the string
+from `getFullYear`/`getMonth`/`getDate`) used everywhere a date-only value is stamped.
+Worth grepping for `toISOString().slice(0, 10)` — the completion form is one of several
+sites, and they should move together or the inconsistency gets worse.
+
+### Viewers still see the delete X on comments and change entries
+**Found:** 2026-09-10, while adding the maintenance badge to the Change Log.
+**Needs a deploy:** no — `index.html` only.
+**Confirmed:** by reading the render tree — both delete buttons sit OUTSIDE the
+`{canEdit && (...)}` wrapper that gates each tab's add form.
+
+Every other edit affordance in the app is gated on `canEdit`, by cluster. These two are
+not: the per-entry X on a comment and on a change entry renders for a view-only user. It
+is **cosmetic only** — `persist()` refuses the write and so does `doPost`, which are the
+real control — so this is a rough edge, not a hole. But it offers a viewer a button that
+can only fail.
+
+Deliberately left alone rather than fixed in passing: it is the same gap in two places,
+and fixing only the one I happened to be editing would have made them inconsistent. The
+fix is one `canEdit &&` around each.
+
+
 ### A value that doesn't match its field's kind shows as BLANK, then refuses the save
 **Found:** 2026-09-10. **Mostly closed the same day** — see below.
 **Needs a deploy:** no — `index.html` only.

@@ -1817,7 +1817,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v33";
+const FRONTEND_SCRIPT_VERSION = "v34";
 // The version of THIS file — shown in About (the account menu), so "is my browser
 // actually running the build I just deployed, or a cached one?" is answerable in
 // two clicks instead of by reading view-source.
@@ -1835,7 +1835,7 @@ const FRONTEND_SCRIPT_VERSION = "v33";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-10.2";
+const APP_VERSION = "2026-09-10.3";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -2411,9 +2411,25 @@ const MOCK_SNAPSHOT = {
     // Mitsubishi mini-split indoor units — one per Room, linked via roomId like any
     // other device. Maintenance items mirror the real-world service schedule: filter
     // cleaning is a monthly DIY task, coil cleaning is an annual pro-service task.
+    // The one asset carrying the v34 maintenance<->change link in its stored
+    // shape: both items already have an `id`, and `changes` holds entries
+    // pointing back at them. Deliberately MIXED with the legacy-shaped rows
+    // below (no item ids, no changes at all) -- a fixture that is uniformly one
+    // shape exercises half the code, which is exactly how the personIds bug hid
+    // in Sandbox and then wiped assignments on the live sheet.
+    //
+    // The third change is a DANGLING link: it names a schedule that no longer
+    // exists on this asset. That is a normal state, not corruption -- a change
+    // outlives the schedule that prompted it -- and it is here so the "resolves
+    // to nothing, render no badge" path is exercised without anyone staging it.
     { label: "BCA0086", type: "Mini Split", parentId: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
-      { task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "", owner: "", at: "", by: "" },
-      { task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
+      { id: "mnt-0086-filter", task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "2026-08-14", owner: "Eric", at: "", by: "" },
+      { id: "mnt-0086-coil", task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "2026-03-02", owner: "", at: "", by: "" },
+    ], changes: [
+      { changeType: "Maintenance", vendor: "", cost: "", note: "Filter rinsed and dried. Light dust only.", at: "2026-07-15T16:20:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0086-filter" },
+      { changeType: "Maintenance", vendor: "Central Coast HVAC", cost: "185.00", note: "Coil cleaned, condensate line flushed. Tech noted slight fin damage on the return side — watch it next visit.", at: "2026-03-02T18:05:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0086-coil" },
+      { changeType: "Maintenance", vendor: "", cost: "40.00", note: "Logged against a schedule that has since been deleted — should render with no maintenance badge.", at: "2026-01-09T15:00:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0086-retired" },
+      { changeType: "Repair", vendor: "Central Coast HVAC", cost: "220.00", note: "Replaced remote receiver board.", at: "2026-02-11T19:40:00.000Z", by: "Eric Stamand" },
     ] },
     { label: "BCA0087", type: "Mini Split", parentId: "BCR0008", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
       { task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "", owner: "", at: "", by: "" },
@@ -2444,8 +2460,14 @@ const MOCK_SNAPSHOT = {
     // an outdoor unit sits outside any one Room. Building 100 has 4 indoor zones
     // (Room 102, Kitchen, Storage Room, Room 101), so it gets a 4-zone outdoor
     // unit; the others each have a single zone.
+    // A second linked asset, with several completions against ONE schedule --
+    // which is the shape the service-history section exists to show, and the
+    // one a single-completion fixture would not reach.
     { label: "BCA0093", type: "Condenser", name: "Building 100", parentId: "BCB0001", brand: "Mitsubishi", model: "MXZ-4C36NAHZ", serial: "", notes: "Outdoor condenser/compressor, 4-zone multi-split.", status: "Active", maintenanceItems: [
-      { task: "Inspection / cleaning", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
+      { id: "mnt-0093-inspect", task: "Inspection / cleaning", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "2026-05-19", owner: "Eric", at: "", by: "" },
+    ], changes: [
+      { changeType: "Maintenance", vendor: "Central Coast HVAC", cost: "310.00", note: "Annual service. Coils washed, refrigerant charge checked, all four zones tested.", at: "2026-05-19T17:30:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0093-inspect" },
+      { changeType: "Maintenance", vendor: "Central Coast HVAC", cost: "295.00", note: "Annual service. No faults found.", at: "2025-05-22T16:15:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0093-inspect" },
     ] },
     { label: "BCA0094", type: "Condenser", parentId: "BCB0002", brand: "Mitsubishi", model: "MUZ-GL15NA", serial: "", notes: "Outdoor condenser/compressor, single-zone.", status: "Active", maintenanceItems: [
       { task: "Inspection / cleaning", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
@@ -2664,7 +2686,7 @@ function AssetTracker() {
   const [editNote, setEditNote] = useState("");
   const [detailTab, setDetailTab] = useState("details"); // "details" | "comments" | "changes" | "audit" | "allocations"
   const [commentDraft, setCommentDraft] = useState("");
-  const [changeDraft, setChangeDraft] = useState({ changeType: "", vendor: "", cost: "", note: "" });
+  const [changeDraft, setChangeDraft] = useState({ changeType: "", vendor: "", cost: "", note: "", maintenanceId: "" });
   const [showChangeTypeManager, setShowChangeTypeManager] = useState(false);
   const [showVendorManager, setShowVendorManager] = useState(false);
   const [newChangeTypeName, setNewChangeTypeName] = useState("");
@@ -2675,6 +2697,12 @@ function AssetTracker() {
   const [editingMaintenanceIdx, setEditingMaintenanceIdx] = useState(null);
   const [maintenanceEditDraft, setMaintenanceEditDraft] = useState(null);
   const [confirmMaintenanceDelete, setConfirmMaintenanceDelete] = useState(null);
+  // v34: null when closed; otherwise the completion form for ONE maintenance
+  // item -- { idx, date, changeType, vendor, cost, note, error }. One object
+  // rather than seven parallel useStates, for the reason breakerModal is one:
+  // openDetail() has to reset it, and resetting seven scattered setters is easy
+  // to get one short of.
+  const [maintenanceCompleteModal, setMaintenanceCompleteModal] = useState(null);
   // null when closed; otherwise { breaker, draft: { serial, ampRating, installedDate }, error }
   const [swapModal, setSwapModal] = useState(null);
   // null when closed; otherwise { breakerId, circuit, target, error }
@@ -2770,6 +2798,12 @@ function AssetTracker() {
   // Collapsed by default: contents activity is context, not the asset's own
   // history, and on a building it can be far longer than the history above it.
   const [showContentsAudit, setShowContentsAudit] = useState(false);
+  // v34: which maintenance item has its service history expanded, by item ID
+  // (not index -- an index would follow the wrong item the moment one above
+  // it is deleted). One at a time, collapsed by default: the schedule and its
+  // next-due date are what the tab is for, the history is what you open when
+  // you have a question.
+  const [openMaintenanceHistory, setOpenMaintenanceHistory] = useState(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [draft, setDraft] = useState({});
   const [showAdd, setShowAdd] = useState(false);
@@ -3103,7 +3137,32 @@ function AssetTracker() {
         // here rather than trusting either: personIds must be an ARRAY on every
         // asset from this point on. It arrives as one from doGet and is absent
         // from older fixture rows, and code downstream branches on isArray.
-        .map(a => (Array.isArray(a.personIds) ? a : { ...a, personIds: [] }));
+        .map(a => (Array.isArray(a.personIds) ? a : { ...a, personIds: [] }))
+        // v34: every maintenance item gets a stable id, so a change entry can
+        // name the schedule it was performed against (change.maintenanceId).
+        // Array position cannot serve -- items are deleted by index, so removing
+        // one renumbers every item below it and would re-point every change
+        // referencing them. Same reasoning that gave Breakers and Circuits a UUID.
+        //
+        // A load-time READ that fills a blank, NOT a load-time rewrite:
+        // loadData never persists, so a freshly minted id reaches the Sheet only
+        // when some save happens for other reasons, inside that same snapshot.
+        // No migration, no script, no window where one browser has written an id
+        // nobody else can see.
+        //
+        // Two browsers CAN mint different ids for the same item, and the
+        // per-domain revision counters are what make that safe: whichever saves
+        // second posts a stale rev_assets, doPost refuses it as a conflict, and
+        // that browser reloads onto the id the first one wrote. Without the
+        // optimistic-concurrency check this pattern would not be safe.
+        //
+        // Changes deliberately get no id of their own -- nothing references a
+        // change, so a stable handle would be dead weight.
+        .map(a => {
+          const items = a.maintenanceItems || [];
+          if (!items.some(m => !m || !m.id)) return a;
+          return { ...a, maintenanceItems: items.map(m => (m && m.id ? m : { ...m, id: crypto.randomUUID() })) };
+        });
       // Names are filled in over the already-parented list, because the
       // suggestion for fixed equipment reads the chain above the asset ("Room 102
       // Mini Split") — running it inside the first map would walk a list whose
@@ -3751,6 +3810,33 @@ function AssetTracker() {
     return { bySubject, byRelated };
   }, [auditLog]);
 
+  // v34: the selected asset's changes grouped by the maintenance item they were
+  // performed against, so each schedule can show its own service history.
+  //
+  // Derived, never stored: a maintenance item keeps no list of its changes. The
+  // reference lives on ONE side (change.maintenanceId) and this reads it the
+  // other way -- storing both would be a second copy to keep in sync, and it is
+  // the one that goes stale. Same rule that keeps a panel's "fed from" computed.
+  //
+  // Memoized and lifted OUT of the detail render body, like auditIndex above it:
+  // the Maintenance tab renders inside that body, so a per-item filter would
+  // re-scan the whole changes array once per item on every keystroke in any open
+  // form. The volume here is small, so this is cheap insurance rather than a
+  // measured fix -- but the render body is exactly where auditIndex's cost hid.
+  //
+  // A dangling maintenanceId lands in a bucket no item matches, which is
+  // correct: the change stays in the Change Log and simply belongs to no
+  // schedule. It is not dropped, repaired, or counted against anything.
+  const changesByMaintenance = useMemo(() => {
+    const map = new Map();
+    (selectedAsset && selectedAsset.changes ? selectedAsset.changes : []).forEach(c => {
+      if (!c || !c.maintenanceId) return;
+      const arr = map.get(c.maintenanceId);
+      if (arr) arr.push(c); else map.set(c.maintenanceId, [c]);
+    });
+    return map;
+  }, [selectedAsset]);
+
   // Also memoized because it walks every asset's parent chain, and it likewise
   // sat in the render body.
   const selectedDescendantLabels = useMemo(() => (
@@ -3763,7 +3849,7 @@ function AssetTracker() {
     setDetailEditing(false);
     setEditNote("");
     setCommentDraft("");
-    setChangeDraft({ changeType: "", vendor: "", cost: "", note: "" });
+    setChangeDraft({ changeType: "", vendor: "", cost: "", note: "", maintenanceId: "" });
     // Collapse the contents-activity section again. Navigating to a different
     // asset should not carry over a section the user expanded on the last one --
     // same reasoning as the breaker-modal reset below it.
@@ -3785,6 +3871,8 @@ function AssetTracker() {
     setEditingMaintenanceIdx(null);
     setMaintenanceEditDraft(null);
     setConfirmMaintenanceDelete(null);
+    setMaintenanceCompleteModal(null);
+    setOpenMaintenanceHistory(null);
     setSwapModal(null);
     setMoveCircuitModal(null);
     setBreakerModal(null);
@@ -4311,10 +4399,16 @@ function AssetTracker() {
       note: changeDraft.note.trim(),
       at: new Date().toISOString(),
       by: currentUser || "",
+      // v34, optional: the maintenance schedule this change was performed
+      // against, picked in the form. LINK ONLY -- it deliberately does not stamp
+      // lastPerformed. Marking a task performed stays a Maintenance-tab action,
+      // because that is where the schedule and its due date live and where the
+      // consequence is visible.
+      maintenanceId: changeDraft.maintenanceId || "",
     };
     const next = assets.map(a => (a.id === selectedId ? { ...a, changes: [...(a.changes || []), entry] } : a));
     await persist(next, { columns });
-    setChangeDraft({ changeType: "", vendor: "", cost: "", note: "" });
+    setChangeDraft({ changeType: "", vendor: "", cost: "", note: "", maintenanceId: "" });
   }
 
   async function deleteChange(idx) {
@@ -4447,20 +4541,78 @@ function AssetTracker() {
     cancelEditMaintenance();
   }
 
-  async function markMaintenanceDone(idx) {
+  // Completing a maintenance item (v34). This replaced a one-click "Mark done
+  // today" that stamped lastPerformed and wrote an audit row and nothing else --
+  // so the useful detail about a service visit (what it cost, who did it, what
+  // they found) had nowhere to go unless someone separately remembered to log a
+  // change, and nothing then tied the two together.
+  //
+  // The form opens PREFILLED, so a routine filter clean is still one click: the
+  // date is today and the change type is Maintenance where that type exists. The
+  // fields are simply there for the visit that had something worth recording.
+  function openMaintenanceComplete(idx) {
+    setMaintenanceCompleteModal({
+      idx,
+      date: new Date().toISOString().slice(0, 10),
+      // Seeded only if the type actually exists -- it ships in
+      // DEFAULT_CHANGE_TYPES but the list is user-managed and can be renamed or
+      // removed, and seeding a value that isn't an option would render a picker
+      // showing something it cannot re-select.
+      changeType: changeTypes.includes("Maintenance") ? "Maintenance" : "",
+      vendor: "", cost: "", note: "", error: "",
+    });
+  }
+
+  // Writes the completion, the change entry and the audit row in ONE persist().
+  // Not three, and not even two: every save posts the whole state snapshot, so
+  // splitting this would mean several round trips for one logical act and a real
+  // chance of the second being rejected as a conflict with the first. Same
+  // reasoning as saveBreakerUnit and the type editor's name+settings.
+  async function submitMaintenanceComplete() {
     if (savingRef.current) return; // double-submit guard, see savingRef
-    if (!selectedAsset) return;
+    if (!maintenanceCompleteModal || !selectedAsset) return;
+    const { idx, date, changeType, vendor, cost, note } = maintenanceCompleteModal;
     const items = selectedAsset.maintenanceItems || [];
     const item = items[idx];
-    const today = new Date().toISOString().slice(0, 10);
-    const nextItems = items.map((it, i) => (i === idx ? { ...it, lastPerformed: today } : it));
-    const next = assets.map(a => (a.id === selectedId ? { ...a, maintenanceItems: nextItems } : a));
+    if (!item) return;
+    if (!date) {
+      setMaintenanceCompleteModal({ ...maintenanceCompleteModal, error: "Pick the date this was performed." });
+      return;
+    }
+    if (!changeType) {
+      setMaintenanceCompleteModal({ ...maintenanceCompleteModal, error: "Pick a change type." });
+      return;
+    }
+    const nextItems = items.map((it, i) => (i === idx ? { ...it, lastPerformed: date } : it));
+    // The link. The item's id is guaranteed present by the adoption in
+    // loadData(), so this never writes an empty reference.
+    const change = {
+      changeType,
+      vendor: vendor.trim(),
+      cost: cost.trim(),
+      note: note.trim(),
+      at: new Date().toISOString(),
+      by: currentUser || "",
+      maintenanceId: item.id || "",
+    };
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId, assetType: selectedAsset.type,
       action: "maintenance_completed", field: item.task,
-      from: item.lastPerformed ? formatDateOnly(item.lastPerformed) : "never", to: formatDateOnly(today),
+      // `to` is the chosen date, not always today -- back-dating a completion is
+      // the point of the date field, and an audit row claiming today would be a
+      // lie about when the work happened.
+      from: item.lastPerformed ? formatDateOnly(item.lastPerformed) : "never", to: formatDateOnly(date),
     };
+    const next = assets.map(a => (
+      a.id === selectedId
+        ? { ...a, maintenanceItems: nextItems, changes: [...(a.changes || []), change] }
+        : a
+    ));
+    // The change entry itself is NOT separately audited -- it carries its own
+    // at/by and its presence in the Change Log is the record, same as an ordinary
+    // change or a comment. An audit row on top would say the same thing twice.
     await persist(next, { auditLog: logAudit([entry]) });
+    setMaintenanceCompleteModal(null);
   }
 
   async function deleteMaintenanceItem(idx) {
@@ -5381,6 +5533,15 @@ function AssetTracker() {
           "Asset ID": a.tag, Name: nameOf(a, typesList), Type: typeNameOf(a.type, typesList), Room: displayRoom(a), When: formatWhen(ch.at),
           "Change type": ch.changeType, Vendor: ch.vendor, Cost: parseFloat(ch.cost) || "", Note: ch.note,
           "Logged by": ch.by || "",
+          // v34: resolved here rather than left as a raw id, since a
+          // spreadsheet is where anyone would total maintenance spend by
+          // schedule. Blank when unattached OR dangling -- the id of a
+          // deleted schedule names nothing a reader could act on.
+          "Maintenance task": (() => {
+            if (!ch.maintenanceId) return "";
+            const m = (a.maintenanceItems || []).find(x => x && x.id === ch.maintenanceId);
+            return m ? m.task : "";
+          })(),
         });
       });
     });
@@ -5430,7 +5591,7 @@ function AssetTracker() {
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(assetRows), "Assets");
     XLSX.utils.book_append_sheet(
       wb,
-      XLSX.utils.json_to_sheet(changeRows.length ? changeRows : [{ "Asset ID": "", Type: "", Room: "", When: "", "Change type": "", Vendor: "", Cost: "", Note: "", "Logged by": "" }]),
+      XLSX.utils.json_to_sheet(changeRows.length ? changeRows : [{ "Asset ID": "", Type: "", Room: "", When: "", "Change type": "", Vendor: "", Cost: "", Note: "", "Logged by": "", "Maintenance task": "" }]),
       "Changes"
     );
     XLSX.utils.book_append_sheet(
@@ -7017,13 +7178,57 @@ function AssetTracker() {
                           Last performed: {item.lastPerformed ? formatDateOnly(item.lastPerformed) : "Never"}
                           {due && <> · Next due: <span style={{ color: statusMeta.color, fontWeight: 600 }}>{formatDateOnly(due.toISOString().slice(0, 10))}</span></>}
                         </div>
-                        {canEdit && (
-                        <div style={{ display: "flex", gap: 8 }}>
-                          <button onClick={() => markMaintenanceDone(idx)} disabled={isSaving} style={{ padding: "6px 12px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 12 }}>
-                            {isSaving ? "Saving…" : "Mark done today"}
-                          </button>
-                        </div>
-                        )}
+                        {(() => {
+                          // The service history for THIS schedule, newest first.
+                          // Read from the derived map -- the item holds no list
+                          // of its own. Viewers get this too: it is a record, and
+                          // only logging a completion is an edit.
+                          const history = [...(changesByMaintenance.get(item.id) || [])]
+                            .sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
+                          const historyCost = history.reduce((sum, c) => sum + (parseFloat(c.cost) || 0), 0);
+                          const open = openMaintenanceHistory === item.id;
+                          return (
+                            <>
+                              {(canEdit || history.length > 0) && (
+                              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                                {canEdit && (
+                                <button onClick={() => openMaintenanceComplete(idx)} disabled={isSaving} style={{ padding: "6px 12px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 12 }}>
+                                  {isSaving ? "Saving…" : "Log completion…"}
+                                </button>
+                                )}
+                                {history.length > 0 && (
+                                <button
+                                  onClick={() => setOpenMaintenanceHistory(open ? null : item.id)}
+                                  style={{ display: "flex", alignItems: "center", gap: 4, padding: "6px 8px", background: "none", border: "none", borderRadius: 8, color: C.muted, fontWeight: 600, fontSize: 12, cursor: "pointer" }}
+                                  aria-expanded={open}
+                                  aria-label={`${open ? "Hide" : "Show"} service history for ${item.task}`}
+                                >
+                                  {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                                  Service history ({history.length})
+                                  {historyCost > 0 && <span style={{ color: C.placeholder, fontWeight: 500 }}>· ${historyCost.toFixed(2)}</span>}
+                                </button>
+                                )}
+                              </div>
+                              )}
+                              {open && history.length > 0 && (
+                              <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8, borderLeft: `2px solid ${C.border}`, paddingLeft: 12 }}>
+                                {history.map((ch, hi) => (
+                                  <div key={hi}>
+                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+                                      <span style={{ fontWeight: 600, fontSize: 12, color: C.brandDark }}>{ch.changeType}</span>
+                                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: C.placeholder, flexShrink: 0 }}>{formatWhen(ch.at)}</span>
+                                    </div>
+                                    <div style={{ fontSize: 12, color: C.muted }}>
+                                      {[ch.vendor, ch.cost && `$${parseFloat(ch.cost).toFixed(2)}`, ch.by].filter(Boolean).join(" · ") || "—"}
+                                    </div>
+                                    {ch.note && <div style={{ fontSize: 13, color: C.ink, whiteSpace: "pre-wrap", marginTop: 2 }}>{ch.note}</div>}
+                                  </div>
+                                ))}
+                              </div>
+                              )}
+                            </>
+                          );
+                        })()}
                       </div>
                     );
                   })}
@@ -7073,6 +7278,25 @@ function AssetTracker() {
                       style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
                     />
                   </label>
+                  {/* v34, optional: attach this change to one of the asset's
+                      maintenance schedules. LINK ONLY -- it does not mark the
+                      task performed; that stays a Maintenance-tab action.
+                      Hidden entirely when the asset has no schedules, so it
+                      costs a Computer's change form nothing. */}
+                  {(selectedAsset.maintenanceItems || []).length > 0 && (
+                  <PickerField
+                    label="Maintenance task"
+                    value={changeDraft.maintenanceId}
+                    onChange={v => setChangeDraft({ ...changeDraft, maintenanceId: v })}
+                    options={["", ...(selectedAsset.maintenanceItems || []).map(m => m.id)]}
+                    labelForOption={id => {
+                      if (!id) return "Not linked";
+                      const m = (selectedAsset.maintenanceItems || []).find(x => x && x.id === id);
+                      return m ? m.task : "(deleted schedule)";
+                    }}
+                    title="Link to a maintenance task"
+                  />
+                  )}
                 </div>
                 <textarea
                   value={changeDraft.note}
@@ -7101,9 +7325,27 @@ function AssetTracker() {
                     const realIdx = changeEntries.length - 1 - i;
                     return (
                       <div key={realIdx} style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px" }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
-                          <span style={{ fontWeight: 700, fontSize: 13, color: C.brandDark }}>{ch.changeType}</span>
-                          <button onClick={() => setConfirmChangeDelete(realIdx)} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4 }} aria-label="Delete change entry">
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4, gap: 8 }}>
+                          <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", minWidth: 0 }}>
+                            <span style={{ fontWeight: 700, fontSize: 13, color: C.brandDark }}>{ch.changeType}</span>
+                            {(() => {
+                              // v34: the maintenance schedule this change was
+                              // performed against, if it still exists on this
+                              // asset. A dangling id renders NOTHING -- a change
+                              // outlives the schedule that prompted it, exactly
+                              // as an audit entry outlives its asset, so there is
+                              // nothing wrong to report and nothing to link to.
+                              if (!ch.maintenanceId) return null;
+                              const item = (selectedAsset.maintenanceItems || []).find(m => m && m.id === ch.maintenanceId);
+                              if (!item) return null;
+                              return (
+                                <span style={{ fontSize: 11, fontWeight: 600, color: C.accent, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, padding: "1px 7px" }}>
+                                  Maintenance: {item.task}
+                                </span>
+                              );
+                            })()}
+                          </div>
+                          <button onClick={() => setConfirmChangeDelete(realIdx)} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4, flexShrink: 0 }} aria-label="Delete change entry">
                             <X size={13} color={C.placeholder} />
                           </button>
                         </div>
@@ -7346,6 +7588,90 @@ function AssetTracker() {
             </div>
           </div>
         )}
+
+        {/* v34: the maintenance completion form. Opens prefilled, so a routine
+            filter clean is still effectively one click -- but the fields that
+            used to have nowhere to go (what it cost, who did it, what they
+            found) are right here, and what gets written is linked back to the
+            schedule rather than floating loose in the Change Log. */}
+        {maintenanceCompleteModal && (() => {
+          const item = (selectedAsset.maintenanceItems || [])[maintenanceCompleteModal.idx];
+          if (!item) return null;
+          const set = patch => setMaintenanceCompleteModal({ ...maintenanceCompleteModal, ...patch, error: "" });
+          return (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20, padding: 16 }}>
+            <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 520, maxHeight: "90vh", overflowY: "auto" }}>
+              <div style={{ fontWeight: 700, marginBottom: 4, color: C.brandDark }}>Log completion</div>
+              <div style={{ fontSize: 13, color: C.muted, marginBottom: 16 }}>
+                {item.task}
+                {item.lastPerformed ? ` · last done ${formatDateOnly(item.lastPerformed)}` : " · never performed"}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
+                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Date performed</span>
+                  <input
+                    type="date"
+                    value={maintenanceCompleteModal.date}
+                    onChange={e => set({ date: e.target.value })}
+                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                  />
+                </label>
+                <PickerField
+                  label="Change type"
+                  value={maintenanceCompleteModal.changeType}
+                  onChange={v => set({ changeType: v })}
+                  options={["", ...changeTypes]}
+                  labelForOption={t => t || "Select…"}
+                  onManage={() => setShowChangeTypeManager(true)}
+                  manageLabel="Manage change types"
+                  title="Select change type"
+                />
+                <PickerField
+                  label="Vendor"
+                  value={maintenanceCompleteModal.vendor}
+                  onChange={v => set({ vendor: v })}
+                  options={["", ...(maintenanceCompleteModal.vendor && !vendors.includes(maintenanceCompleteModal.vendor) ? [maintenanceCompleteModal.vendor, ...vendors] : vendors)]}
+                  labelForOption={v => v || (vendors.length ? "Select…" : "No vendors yet")}
+                  onManage={() => setShowVendorManager(true)}
+                  manageLabel="Manage vendors"
+                  title="Select vendor"
+                />
+                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Cost</span>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    value={maintenanceCompleteModal.cost}
+                    onChange={e => set({ cost: e.target.value })}
+                    placeholder="0.00"
+                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                  />
+                </label>
+              </div>
+              <textarea
+                value={maintenanceCompleteModal.note}
+                onChange={e => set({ note: e.target.value })}
+                placeholder="What was done, what was found…"
+                rows={3}
+                style={{ width: "100%", padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, resize: "vertical", color: C.ink }}
+              />
+              {maintenanceCompleteModal.error && (
+                <div style={{ color: C.danger, fontSize: 13, marginTop: 8 }}>{maintenanceCompleteModal.error}</div>
+              )}
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
+                <button onClick={() => setMaintenanceCompleteModal(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                <button
+                  onClick={submitMaintenanceComplete}
+                  disabled={isSaving}
+                  style={{ padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                >
+                  {isSaving ? "Saving…" : "Log completion"}
+                </button>
+              </div>
+            </div>
+          </div>
+          );
+        })()}
 
         {breakerModal && (() => {
           const allBreakers = selectedAsset.breakers || [];

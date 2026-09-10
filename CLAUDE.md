@@ -1496,6 +1496,59 @@ tab itself in red when anything's overdue. Adding an item isn't separately audit
 own `at`/`by` is enough); marking done, editing, or deleting one is, since those mutate
 or remove data with no other history trail.
 
+**A completion is a change-log entry, linked by `change.maintenanceId` (v34).** Marking a
+task done and logging a change used to be two unconnected acts: "Mark done today" stamped
+`lastPerformed` and wrote one audit row, so what a service visit actually cost, who did it
+and what they found had nowhere to go — and a change logged separately had no idea a
+schedule existed. The button is now **"Log completion…"**, opening a prefilled form
+(`maintenanceCompleteModal`).
+- **A maintenance item has a real `id`** — a `crypto.randomUUID()`, like a Breaker or a
+  Circuit. Array position cannot serve: items are deleted by index, so removing one
+  renumbers every item below it and would re-point every change referencing them.
+- **The reference lives on ONE side.** A change names its schedule; a schedule keeps no
+  list of its changes. Its history is derived (`changesByMaintenance`, a `useMemo` lifted
+  out of the detail render body for the reason `auditIndex` was). Storing both would be a
+  second copy to keep in sync, and it is the one that goes stale.
+- **A dangling `maintenanceId` is a normal state, not corruption.** Deleting a schedule
+  leaves its changes alone — a change records something that actually happened and outlives
+  the schedule that prompted it, exactly as audit entries outlive their assets. It renders
+  with no badge. No cascade, no cleanup, no repair pass.
+- **The prefill is what keeps it one click.** Date is today, change type is `Maintenance`
+  where that type still exists (seeded only if it does — the list is user-managed, and
+  seeding a value that isn't an option renders a picker showing something it cannot
+  re-select). A routine filter clean is still Save and go.
+- **The date field is new capability, not just plumbing.** Back-dating a completion was
+  previously impossible without hand-editing the schedule, and the audit row's `to` is the
+  chosen date rather than always today — a row claiming today would be a lie about when the
+  work happened.
+- **One `persist()` writes the completion, the change and the audit row.** Every save posts
+  the whole snapshot, so splitting it would mean several round trips for one logical act and
+  a real chance of the second being rejected as a conflict with the first. Same reasoning as
+  `saveBreakerUnit`.
+- **The change entry is not separately audited**, consistent with comments and changes: it
+  carries its own `at`/`by` and its presence in the Change Log is the record.
+- **The Change Log's add form can attach a change to a schedule too** — an optional picker,
+  hidden when the asset has no schedules. **Link only: it deliberately does not stamp
+  `lastPerformed`.** Marking a task performed stays a Maintenance-tab action, because that is
+  where the schedule and its due date live and where the consequence is visible.
+- **`adoptLegacyMaintenanceIds` is a load-time READ that fills a blank**, last in
+  `loadData()`'s map chain — not a load-time rewrite. A minted id reaches the Sheet only when
+  some save happens for other reasons, inside that same snapshot: no migration, no script.
+  **Two browsers can mint different ids for one item, and the revision counters are what make
+  that safe** — whichever saves second is refused as a conflict and reloads onto the id the
+  first wrote. Without optimistic concurrency this pattern would not be safe.
+- The site-wide Maintenance overview gains **no column**: it is for triage, and clicking a
+  row already lands on the asset's Maintenance tab where the history is. The Excel export's
+  Changes sheet does gain a resolved **Maintenance task** column, since a spreadsheet is
+  where anyone would total spend by schedule.
+- Covered by `test-backend-maintenance-link.js`, which slices both `doGet` and `doPost` out
+  of the .gs as source text. Verified by mutation that all four silent failure modes fail it:
+  dropping the column from either header constant, from either per-row projection, or
+  re-inlining a header literal at a call site. `MOCK_SNAPSHOT` is deliberately **mixed** —
+  two assets carry item ids and linked changes (one with a dangling link), the rest are
+  legacy-shaped with neither. A uniform fixture exercises half the code; that is the
+  `personIds` lesson.
+
 **Electrical Panel** assets (`type: "Electrical Panel"`) are otherwise device-like — real
 brand/model/serial, purchase date, warranty, room placement via its `parentId` like any
 other device — they just don't have `peripherals` (their registry entry's `excludedFields`). Each

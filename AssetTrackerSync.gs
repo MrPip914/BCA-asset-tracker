@@ -49,7 +49,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v33";
+const SCRIPT_VERSION = "v34";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -220,6 +220,38 @@ const CIRCUIT_FIELDS = ["id", "breakerId", "panelLabel", "label", "roomsServed",
 // cells at placement time in the frontend. Global/shared across all panels,
 // not scoped to any one asset — its own flat tab, like Breakers/Circuits.
 const BREAKER_TYPE_FIELDS = ["id", "name", "slotSpan", "members"];
+
+// The Changes and Maintenance tabs' columns. Both lists were written out as
+// literal arrays at THREE sites each until v34 -- the doGet read, the doPost
+// write, and adminDataTabs_ -- and the three are not equal halves of one
+// contract, which is what made them a trap:
+//
+//   - the doGet read passes its list to readTable_, which IGNORES the argument
+//     entirely and keys off the sheet's own header row. That copy did nothing.
+//     Adding a column there and nowhere else is a silent no-op -- and it is the
+//     first site you find when grepping, and the one that reads authoritative.
+//   - the doPost write passes it to writeTable_, which clears the tab, writes
+//     exactly these headers and projects every row through them. THIS is the
+//     schema: whatever is in this list is what the tab becomes.
+//   - adminDataTabs_ is what Wipe/Import leave an emptied tab's header row as.
+//     Forgetting it is invisible day to day, then an import drops the column.
+//
+// One constant per tab removes the question.
+//
+// "maintenanceId" (v34) names the Maintenance row a change was performed
+// against, or is empty for an ordinary unattached change -- which is what every
+// row written before v34 is. Purely additive, so no migration: an empty value
+// already means exactly the right thing.
+const CHANGE_FIELDS = ["assetLabel", "changeType", "vendor", "cost", "note", "at", "by", "maintenanceId"];
+// "id" (v34) is a maintenance item's stable key, a crypto.randomUUID() minted by
+// the frontend. Array position cannot serve as identity here: items are edited
+// and deleted by index, so deleting one renumbers every item below it and would
+// re-point every change entry referencing them. Same reasoning that gave
+// Breakers and Circuits a UUID. Blank on every row written before v34; the
+// frontend adopts one at load and it lands on the next save.
+const MAINTENANCE_FIELDS = [
+  "assetLabel", "id", "task", "frequencyLabel", "frequencyDays", "lastPerformed", "owner", "at", "by",
+];
 
 // AuditLog's columns. `related` is LAST and any future column must be too: this
 // is the one tab written by appendNewRows_ rather than writeTable_, so its header
@@ -1055,11 +1087,9 @@ function handleAuthenticatedRead_(body, e) {
 
     const assetRows = readTable_(SHEET_NAMES.assets, ASSET_FIELDS);
     const commentRows = readTable_(SHEET_NAMES.comments, ["assetLabel", "text", "at", "by"]);
-    const changeRows = readTable_(SHEET_NAMES.changes, ["assetLabel", "changeType", "vendor", "cost", "note", "at", "by"]);
+    const changeRows = readTable_(SHEET_NAMES.changes, CHANGE_FIELDS);
     const allocationRows = readTable_(SHEET_NAMES.allocations, ["assetLabel", "room", "quantity"]);
-    const maintenanceRows = readTable_(SHEET_NAMES.maintenance, [
-      "assetLabel", "task", "frequencyLabel", "frequencyDays", "lastPerformed", "owner", "at", "by",
-    ]);
+    const maintenanceRows = readTable_(SHEET_NAMES.maintenance, MAINTENANCE_FIELDS);
     const breakerRows = readTable_(SHEET_NAMES.breakers, BREAKER_FIELDS);
     const circuitRows = readTable_(SHEET_NAMES.circuits, CIRCUIT_FIELDS);
     const breakerTypeRows = readTable_(SHEET_NAMES.breakerTypes, BREAKER_TYPE_FIELDS);
@@ -1086,10 +1116,11 @@ function handleAuthenticatedRead_(body, e) {
         comments: commentRows.filter(c => c.assetLabel === label).map(c => ({ text: c.text, at: c.at, by: c.by })),
         changes: changeRows.filter(c => c.assetLabel === label).map(c => ({
           changeType: c.changeType, vendor: c.vendor, cost: c.cost, note: c.note, at: c.at, by: c.by,
+          maintenanceId: c.maintenanceId || "",
         })),
         allocations: allocationRows.filter(al => al.assetLabel === label).map(al => ({ roomId: al.room, quantity: al.quantity })),
         maintenanceItems: maintenanceRows.filter(m => m.assetLabel === label).map(m => ({
-          task: m.task, frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
+          id: m.id || "", task: m.task, frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
           lastPerformed: m.lastPerformed, owner: m.owner, at: m.at, by: m.by,
         })),
         // Only meaningful for Electrical Panel assets, but attached unconditionally
@@ -1356,10 +1387,11 @@ function doPost(e) {
         (a.comments || []).forEach(c => commentRows.push({ assetLabel: key, text: c.text, at: c.at, by: c.by || "" }));
         (a.changes || []).forEach(c => changeRows.push({
           assetLabel: key, changeType: c.changeType, vendor: c.vendor || "", cost: c.cost || "", note: c.note || "", at: c.at, by: c.by || "",
+          maintenanceId: c.maintenanceId || "",
         }));
         (a.allocations || []).forEach(al => allocationRows.push({ assetLabel: key, room: al.roomId, quantity: al.quantity }));
         (a.maintenanceItems || []).forEach(m => maintenanceRows.push({
-          assetLabel: key, task: m.task, frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
+          assetLabel: key, id: m.id || "", task: m.task, frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
           lastPerformed: m.lastPerformed || "", owner: m.owner || "", at: m.at, by: m.by || "",
         }));
         // panelLabel is derived from the parent asset here (not trusted from the
@@ -1392,13 +1424,9 @@ function doPost(e) {
         }));
       });
       writeTable_(SHEET_NAMES.comments, ["assetLabel", "text", "at", "by"], commentRows);
-      writeTable_(SHEET_NAMES.changes, ["assetLabel", "changeType", "vendor", "cost", "note", "at", "by"], changeRows);
+      writeTable_(SHEET_NAMES.changes, CHANGE_FIELDS, changeRows);
       writeTable_(SHEET_NAMES.allocations, ["assetLabel", "room", "quantity"], allocationRows);
-      writeTable_(
-        SHEET_NAMES.maintenance,
-        ["assetLabel", "task", "frequencyLabel", "frequencyDays", "lastPerformed", "owner", "at", "by"],
-        maintenanceRows
-      );
+      writeTable_(SHEET_NAMES.maintenance, MAINTENANCE_FIELDS, maintenanceRows);
       writeTable_(SHEET_NAMES.breakers, BREAKER_FIELDS, breakerRows);
       writeTable_(SHEET_NAMES.circuits, CIRCUIT_FIELDS, circuitRows);
     }
@@ -1668,9 +1696,9 @@ function adminDataTabs_() {
   return [
     { name: SHEET_NAMES.assets, headers: ASSET_FIELDS },
     { name: SHEET_NAMES.comments, headers: ["assetLabel", "text", "at", "by"] },
-    { name: SHEET_NAMES.changes, headers: ["assetLabel", "changeType", "vendor", "cost", "note", "at", "by"] },
+    { name: SHEET_NAMES.changes, headers: CHANGE_FIELDS },
     { name: SHEET_NAMES.allocations, headers: ["assetLabel", "room", "quantity"] },
-    { name: SHEET_NAMES.maintenance, headers: ["assetLabel", "task", "frequencyLabel", "frequencyDays", "lastPerformed", "owner", "at", "by"] },
+    { name: SHEET_NAMES.maintenance, headers: MAINTENANCE_FIELDS },
     { name: SHEET_NAMES.breakers, headers: BREAKER_FIELDS },
     { name: SHEET_NAMES.circuits, headers: CIRCUIT_FIELDS },
     { name: SHEET_NAMES.breakerTypes, headers: BREAKER_TYPE_FIELDS },
