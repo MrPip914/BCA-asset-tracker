@@ -1528,9 +1528,27 @@ schedule existed. The button is now **"Log completion…"**, opening a prefilled
 - **The change entry is not separately audited**, consistent with comments and changes: it
   carries its own `at`/`by` and its presence in the Change Log is the record.
 - **The Change Log's add form can attach a change to a schedule too** — an optional picker,
-  hidden when the asset has no schedules. **Link only: it deliberately does not stamp
-  `lastPerformed`.** Marking a task performed stays a Maintenance-tab action, because that is
-  where the schedule and its due date live and where the consequence is visible.
+  hidden when the asset has no schedules — **and can complete it**, via a *Mark this task
+  performed* checkbox with its own date, revealed only once a task is linked.
+  - **The checkbox defaults OFF** (Eric's call, 2026-09-10), because the picker's main use is
+    attaching a change that ISN'T a completion: parts ordered for next service, or a repair
+    the tech found *during* it. Two entries against one schedule, one of them the completion.
+    An unwanted stamp is also much harder to notice than a missing one.
+  - **Completing is a deliberate tick, not a consequence of linking, and the date is why.**
+    A change entry's only date is `at` — when it was *logged*, not when the work happened — so
+    an automatic stamp could only ever say "today". Logging a visit from three months ago
+    would then push the next due date three months out, which is worse than no link at all:
+    it makes an overdue item read healthy. The checkbox carries its own date field for exactly
+    the reason the completion modal has one.
+  - It can move `lastPerformed` **backwards**, since `nextMaintenanceDue` reads it and nothing
+    else. That is correct — recording a visit you hadn't logged yet is the point — and is why
+    the date is editable rather than pinned to today.
+  - **Ticked with an empty date is refused**, by the disabled-until-valid pattern the form
+    already uses. Otherwise the change would log and the schedule would silently not move.
+  - It writes the same `maintenance_completed` audit row as the modal, in the same single
+    `persist()`, so a completion reads identically in the history whichever door it came
+    through. The two paths are now the same operation reached from the schedule or from the
+    log; they are kept as separate forms because the entry points differ, not the semantics.
 - **`adoptLegacyMaintenanceIds` is a load-time READ that fills a blank**, last in
   `loadData()`'s map chain — not a load-time rewrite. A minted id reaches the Sheet only when
   some save happens for other reasons, inside that same snapshot: no migration, no script.
