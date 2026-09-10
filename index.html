@@ -1259,7 +1259,7 @@ function describeAudit(entry) {
   if (entry.action === "circuit_removed") {
     return entry.from ? `Removed circuit "${entry.field}" from ${entry.from}` : `Removed circuit "${entry.field}"`;
   }
-  // breaker_edited / circuit_edited fall through to the generic case below —
+  // breaker_edited / circuit_edited / change_edited fall through to the generic case below —
   // their field/from/to are already in the "X changed from A to B" shape.
   return `${entry.field} changed from "${entry.from || "—"}" to "${entry.to || "—"}"`;
 }
@@ -1875,7 +1875,7 @@ const FRONTEND_SCRIPT_VERSION = "v34";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-10.8";
+const APP_VERSION = "2026-09-10.10";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -2749,6 +2749,10 @@ function AssetTracker() {
   // is this due" and "what has been done to it" from two different places made
   // the link between them invisible.
   const [maintenanceSubTab, setMaintenanceSubTab] = useState("scheduled");
+  const [showMaintenanceAdd, setShowMaintenanceAdd] = useState(false);
+  // null when closed; { mode: "add" } or { mode: "edit", idx }. The draft
+  // itself stays in changeDraft, which both modes fill.
+  const [changeModal, setChangeModal] = useState(null);
   // null when closed; otherwise { breaker, draft: { serial, ampRating, installedDate }, error }
   const [swapModal, setSwapModal] = useState(null);
   // null when closed; otherwise { breakerId, circuit, target, error }
@@ -3928,6 +3932,8 @@ function AssetTracker() {
     setMaintenanceCompleteModal(null);
     setOpenMaintenanceHistory(null);
     setMaintenanceSubTab(wantedSub);
+    setShowMaintenanceAdd(false);
+    setChangeModal(null);
     setSwapModal(null);
     setMoveCircuitModal(null);
     setBreakerModal(null);
@@ -4444,6 +4450,94 @@ function AssetTracker() {
     await persist(next, { columns });
   }
 
+  // Both dialogs seed changeDraft and then open. Seeding on OPEN rather than
+  // only on close is what stops a cancelled edit leaving its values waiting in
+  // the next dialog -- the same reason entering breaker edit mode reseeds.
+  function openChangeAdd() {
+    setChangeDraft({ changeType: "", vendor: "", cost: "", note: "", maintenanceId: "", markPerformed: false, performedOn: localDateString() });
+    setChangeModal({ mode: "add" });
+  }
+
+  function openChangeEdit(idx) {
+    const ch = (selectedAsset.changes || [])[idx];
+    if (!ch) return;
+    setChangeDraft({
+      changeType: ch.changeType || "",
+      vendor: ch.vendor || "",
+      cost: ch.cost || "",
+      note: ch.note || "",
+      maintenanceId: ch.maintenanceId || "",
+      // Resolved, not read raw: a pre-v34 entry has no performedOn and its
+      // date lives in `at`. Seeding blank would blank a real date on save.
+      performedOn: changePerformedOn(ch),
+      // Never pre-ticked. Completing a schedule is an act, not an attribute of
+      // the entry -- re-applying it every time someone fixes a typo would
+      // silently re-stamp lastPerformed. The checkbox is hidden in edit mode.
+      markPerformed: false,
+    });
+    setChangeModal({ mode: "edit", idx });
+  }
+
+  // Editing a change REWRITES a record, and unlike adding one there is no other
+  // trail of what it used to say -- so it is audited field by field, exactly as
+  // editing a maintenance item is, and for the same stated reason.
+  //
+  // `at` and `by` are deliberately NOT touched. They record who first entered
+  // this and when, which stays true after a correction; the audit row is what
+  // records who changed it.
+  //
+  // It also does NOT restamp a linked schedule's lastPerformed, even when the
+  // performed date is edited. Completing is a separate act with its own opt-in;
+  // making a typo fix move a due date would be a surprise. Recording a
+  // completion is still done from Scheduled, or by logging a new change.
+  async function saveChangeEdit() {
+    if (savingRef.current) return; // double-submit guard, see savingRef
+    if (!changeModal || changeModal.mode !== "edit" || !selectedAsset) return;
+    if (!changeDraft.changeType) return;
+    const idx = changeModal.idx;
+    const list = selectedAsset.changes || [];
+    const original = list[idx];
+    if (!original) { setChangeModal(null); return; }
+    const updated = {
+      ...original,
+      changeType: changeDraft.changeType,
+      vendor: changeDraft.vendor.trim(),
+      cost: changeDraft.cost.trim(),
+      note: changeDraft.note.trim(),
+      performedOn: changeDraft.performedOn || changePerformedOn(original),
+      maintenanceId: changeDraft.maintenanceId || "",
+    };
+    const mkEntry = (field, from, to) => ({
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId,
+      assetType: selectedAsset.type, action: "change_edited",
+      field: `${original.changeType || "Change"} — ${field}`, from, to,
+    });
+    const entries = [];
+    if ((original.changeType || "") !== updated.changeType) entries.push(mkEntry("Type", original.changeType || "—", updated.changeType));
+    if ((original.vendor || "") !== updated.vendor) entries.push(mkEntry("Vendor", original.vendor || "—", updated.vendor || "—"));
+    if ((original.cost || "") !== updated.cost) entries.push(mkEntry("Cost", original.cost || "—", updated.cost || "—"));
+    if ((original.note || "") !== updated.note) entries.push(mkEntry("Note", original.note || "—", updated.note || "—"));
+    if (changePerformedOn(original) !== updated.performedOn) {
+      entries.push(mkEntry("Performed on", formatDateOnly(changePerformedOn(original)) || "—", formatDateOnly(updated.performedOn) || "—"));
+    }
+    if ((original.maintenanceId || "") !== updated.maintenanceId) {
+      const nameOfTask = id => {
+        if (!id) return "—";
+        const m = (selectedAsset.maintenanceItems || []).find(x => x && x.id === id);
+        return m ? m.task : "(deleted schedule)";
+      };
+      entries.push(mkEntry("Maintenance task", nameOfTask(original.maintenanceId), nameOfTask(updated.maintenanceId)));
+    }
+    // Nothing actually changed: no snapshot write, no audit row. Same as the
+    // breaker unit save.
+    if (entries.length === 0) { setChangeModal(null); return; }
+    const next = assets.map(a => (
+      a.id === selectedId ? { ...a, changes: list.map((c, i) => (i === idx ? updated : c)) } : a
+    ));
+    await persist(next, { auditLog: logAudit(entries) });
+    setChangeModal(null);
+  }
+
   async function addChange() {
     if (savingRef.current) return; // double-submit guard, see savingRef
     if (!changeDraft.changeType || !selectedAsset) return;
@@ -4507,6 +4601,7 @@ function AssetTracker() {
     }] : [];
     await persist(nextAssets, entries.length ? { auditLog: logAudit(entries) } : { columns });
     setChangeDraft({ changeType: "", vendor: "", cost: "", note: "", maintenanceId: "", markPerformed: false, performedOn: localDateString() });
+    setChangeModal(null);
   }
 
   async function deleteChange(idx) {
@@ -4576,6 +4671,14 @@ function AssetTracker() {
 
   // Adding a new schedule isn't separately audited — its own at/by plus its
   // presence in the Maintenance tab is enough (same reasoning as comments/changes).
+  // Opens the add dialog on a CLEAN draft. Reseeding here rather than only on
+  // close means a cancelled edit can never leave half-typed values waiting in
+  // the next dialog -- the same reason entering breaker edit mode reseeds.
+  function openMaintenanceAdd() {
+    setMaintenanceDraft({ task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
+    setShowMaintenanceAdd(true);
+  }
+
   async function addMaintenanceItem() {
     if (savingRef.current) return; // double-submit guard, see savingRef
     if (!maintenanceDraft.task.trim() || !selectedAsset) return;
@@ -4592,6 +4695,7 @@ function AssetTracker() {
     const next = assets.map(a => (a.id === selectedId ? { ...a, maintenanceItems: [...(a.maintenanceItems || []), item] } : a));
     await persist(next, { columns });
     setMaintenanceDraft({ task: "", frequency: freq.label, lastPerformed: "", owner: "" });
+    setShowMaintenanceAdd(false);
   }
 
   function startEditMaintenance(idx) {
@@ -7169,53 +7273,19 @@ function AssetTracker() {
 
           {detailTab === "maintenance" && maintenanceSubTab === "scheduled" && (
             <>
+              {/* Add is a dialog, not a form pinned above the list. The form
+                  was permanently open and pushed the schedules themselves --
+                  the thing this tab exists to show -- below the fold, buying
+                  nothing on the common visit where nothing is being added. */}
               {canEdit && (
-              <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)", marginBottom: 20 }}>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
-                  <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
-                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Task</span>
-                    <input
-                      value={maintenanceDraft.task}
-                      onChange={e => setMaintenanceDraft({ ...maintenanceDraft, task: e.target.value })}
-                      placeholder="e.g. Replace HVAC filter"
-                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                    />
-                  </label>
-                  <PickerField
-                    label="Frequency"
-                    value={maintenanceDraft.frequency}
-                    onChange={v => setMaintenanceDraft({ ...maintenanceDraft, frequency: v })}
-                    options={MAINTENANCE_FREQUENCIES.map(f => f.label)}
-                    title="Select frequency"
-                  />
-                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Last performed</span>
-                    <input
-                      type="date"
-                      value={maintenanceDraft.lastPerformed}
-                      onChange={e => setMaintenanceDraft({ ...maintenanceDraft, lastPerformed: e.target.value })}
-                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                    />
-                  </label>
-                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Owner</span>
-                    <input
-                      value={maintenanceDraft.owner}
-                      onChange={e => setMaintenanceDraft({ ...maintenanceDraft, owner: e.target.value })}
-                      placeholder="Who's responsible?"
-                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                    />
-                  </label>
-                </div>
-                <div style={{ display: "flex", justifyContent: "flex-end" }}>
-                  <button
-                    onClick={addMaintenanceItem}
-                    disabled={isSaving || !maintenanceDraft.task.trim()}
-                    style={{ padding: "8px 14px", background: (!isSaving && maintenanceDraft.task.trim()) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
-                  >
-                    {isSaving ? "Saving…" : "Schedule"}
-                  </button>
-                </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
+                <button
+                  onClick={openMaintenanceAdd}
+                  disabled={isSaving}
+                  style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                >
+                  <Plus size={14} /> Add task
+                </button>
               </div>
               )}
 
@@ -7375,122 +7445,19 @@ function AssetTracker() {
                   Total logged: ${totalLoggedCost.toFixed(2)}
                 </div>
               )}
+              {/* Log change is a dialog now, for the same reason Add task is:
+                  a permanently open form pushed the history itself below the
+                  fold on every visit, including the many where nothing is
+                  being logged. */}
               {canEdit && (
-              <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)", marginBottom: 20 }}>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
-                  <PickerField
-                    label="Change type"
-                    value={changeDraft.changeType}
-                    onChange={v => setChangeDraft({ ...changeDraft, changeType: v })}
-                    options={["", ...changeTypes]}
-                    labelForOption={t => t || "Select…"}
-                    onManage={() => setShowChangeTypeManager(true)}
-                    manageLabel="Manage change types"
-                    title="Select change type"
-                  />
-                  {/* Applies to EVERY change, not just one linked to a schedule:
-                      the point is that work written up days later can still be dated
-                      honestly. `at` still records when it was typed. */}
-                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Performed on</span>
-                    <input
-                      type="date"
-                      value={changeDraft.performedOn}
-                      onChange={e => setChangeDraft({ ...changeDraft, performedOn: e.target.value })}
-                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                    />
-                  </label>
-                  <PickerField
-                    label="Vendor"
-                    value={changeDraft.vendor}
-                    onChange={v => setChangeDraft({ ...changeDraft, vendor: v })}
-                    options={["", ...(changeDraft.vendor && !vendors.includes(changeDraft.vendor) ? [changeDraft.vendor, ...vendors] : vendors)]}
-                    labelForOption={v => v || (vendors.length ? "Select…" : "No vendors yet")}
-                    onManage={() => setShowVendorManager(true)}
-                    manageLabel="Manage vendors"
-                    title="Select vendor"
-                  />
-                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Cost</span>
-                    <input
-                      type="number"
-                      inputMode="decimal"
-                      value={changeDraft.cost}
-                      onChange={e => setChangeDraft({ ...changeDraft, cost: e.target.value })}
-                      placeholder="0.00"
-                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                    />
-                  </label>
-                  {/* v34, optional: attach this change to one of the asset's
-                      maintenance schedules. LINK ONLY -- it does not mark the
-                      task performed; that stays a Maintenance-tab action.
-                      Hidden entirely when the asset has no schedules, so it
-                      costs a Computer's change form nothing. */}
-                  {(selectedAsset.maintenanceItems || []).length > 0 && (
-                  <PickerField
-                    label="Maintenance task"
-                    value={changeDraft.maintenanceId}
-                    onChange={v => setChangeDraft({ ...changeDraft, maintenanceId: v })}
-                    options={["", ...(selectedAsset.maintenanceItems || []).map(m => m.id)]}
-                    labelForOption={id => {
-                      if (!id) return "Not linked";
-                      const m = (selectedAsset.maintenanceItems || []).find(x => x && x.id === id);
-                      return m ? m.task : "(deleted schedule)";
-                    }}
-                    title="Link to a maintenance task"
-                  />
-                  )}
-                </div>
-                {/* Only once a schedule is actually linked: there is nothing to
-                    complete otherwise, and a checkbox that does nothing until
-                    another field is set reads as broken. Defaults OFF -- the
-                    picker's main use is attaching a change that ISN'T a
-                    completion (parts ordered, a repair found during the service),
-                    and a stamp is much harder to notice than a missing one.
-
-                    It carries no date of its own any more: the form has one, it is
-                    the date this work happened, and that is exactly the date the
-                    schedule should record. Two date fields could disagree, and a
-                    user would have no way to know which one won. */}
-                {changeDraft.maintenanceId && (
-                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10, padding: "8px 10px", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10 }}>
-                  <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: C.ink, cursor: "pointer" }}>
-                    <input
-                      type="checkbox"
-                      checked={!!changeDraft.markPerformed}
-                      onChange={e => setChangeDraft({ ...changeDraft, markPerformed: e.target.checked })}
-                      style={{ width: 16, height: 16, cursor: "pointer" }}
-                    />
-                    Mark this task performed
-                  </label>
-                  {changeDraft.markPerformed && changeDraft.performedOn && (
-                    <span style={{ fontSize: 13, color: C.muted }}>on {formatDateOnly(changeDraft.performedOn)}</span>
-                  )}
-                </div>
-                )}
-                <textarea
-                  value={changeDraft.note}
-                  onChange={e => setChangeDraft({ ...changeDraft, note: e.target.value })}
-                  placeholder="Details — what happened, why…"
-                  rows={2}
-                  style={{ width: "100%", padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, resize: "vertical", color: C.ink }}
-                />
-                {/* Ticking the box with no date would otherwise log the change
-                    and silently NOT stamp the schedule -- the completion modal
-                    refuses that case with a message, so this refuses it too,
-                    by the disabled-until-valid pattern the form already uses. */}
-                <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 10, marginTop: 8 }}>
-                  {changeDraft.markPerformed && !changeDraft.performedOn && (
-                    <span style={{ fontSize: 12, color: C.danger }}>Pick the date it was performed.</span>
-                  )}
-                  <button
-                    onClick={addChange}
-                    disabled={isSaving || !changeDraft.changeType || (changeDraft.markPerformed && !changeDraft.performedOn)}
-                    style={{ padding: "8px 14px", background: (!isSaving && changeDraft.changeType && !(changeDraft.markPerformed && !changeDraft.performedOn)) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
-                  >
-                    {isSaving ? "Saving…" : "Log change"}
-                  </button>
-                </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
+                <button
+                  onClick={openChangeAdd}
+                  disabled={isSaving}
+                  style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                >
+                  <Plus size={14} /> Log change
+                </button>
               </div>
               )}
 
@@ -7522,10 +7489,21 @@ function AssetTracker() {
                               );
                             })()}
                           </div>
+                          {/* Icon-only pencil at the trailing edge, beside the row's
+                              other icon action -- the convention every other edit
+                              trigger in this app follows. Both live in one flex
+                              cluster: as bare siblings of the row's space-between
+                              container the pencil would sit in the middle of the row
+                              rather than next to the delete it belongs with. */}
                           {canEdit && (
-                          <button onClick={() => setConfirmChangeDelete(realIdx)} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4, flexShrink: 0 }} aria-label="Delete change entry">
-                            <X size={13} color={C.placeholder} />
-                          </button>
+                          <div style={{ display: "flex", alignItems: "center", gap: 2, flexShrink: 0 }}>
+                            <button onClick={() => openChangeEdit(realIdx)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Edit ${ch.changeType} entry`}>
+                              <Pencil size={13} color={C.muted} />
+                            </button>
+                            <button onClick={() => setConfirmChangeDelete(realIdx)} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4 }} aria-label="Delete change entry">
+                              <X size={13} color={C.placeholder} />
+                            </button>
+                          </div>
                           )}
                         </div>
                         <div style={{ fontSize: 13, color: C.muted, marginBottom: 4 }}>
@@ -7775,6 +7753,184 @@ function AssetTracker() {
           </div>
         )}
 
+        {/* Log or edit a change. ONE dialog for both, because they are the same
+            form over the same fields -- a separate edit form would be a second
+            copy to keep in step, and this file has been bitten by that before. */}
+        {changeModal && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20, padding: 16 }}>
+            <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 560, maxHeight: "90vh", overflowY: "auto" }}>
+              <div style={{ fontWeight: 700, marginBottom: 16, color: C.brandDark }}>
+                {changeModal.mode === "edit" ? "Edit change" : "Log change"}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
+                <PickerField
+                  label="Change type"
+                  value={changeDraft.changeType}
+                  onChange={v => setChangeDraft({ ...changeDraft, changeType: v })}
+                  options={["", ...changeTypes]}
+                  labelForOption={t => t || "Select…"}
+                  onManage={() => setShowChangeTypeManager(true)}
+                  manageLabel="Manage change types"
+                  title="Select change type"
+                />
+                {/* Applies to EVERY change, not just one linked to a schedule:
+                    the point is that work written up days later can still be dated
+                    honestly. `at` still records when it was typed. */}
+                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Performed on</span>
+                  <input
+                    type="date"
+                    value={changeDraft.performedOn}
+                    onChange={e => setChangeDraft({ ...changeDraft, performedOn: e.target.value })}
+                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                  />
+                </label>
+                <PickerField
+                  label="Vendor"
+                  value={changeDraft.vendor}
+                  onChange={v => setChangeDraft({ ...changeDraft, vendor: v })}
+                  options={["", ...(changeDraft.vendor && !vendors.includes(changeDraft.vendor) ? [changeDraft.vendor, ...vendors] : vendors)]}
+                  labelForOption={v => v || (vendors.length ? "Select…" : "No vendors yet")}
+                  onManage={() => setShowVendorManager(true)}
+                  manageLabel="Manage vendors"
+                  title="Select vendor"
+                />
+                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Cost</span>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    value={changeDraft.cost}
+                    onChange={e => setChangeDraft({ ...changeDraft, cost: e.target.value })}
+                    placeholder="0.00"
+                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                  />
+                </label>
+                {/* v34, optional: attach this change to one of the asset's
+                    maintenance schedules. LINK ONLY -- it does not mark the
+                    task performed; that stays a Maintenance-tab action.
+                    Hidden entirely when the asset has no schedules, so it
+                    costs a Computer's change form nothing. */}
+                {(selectedAsset.maintenanceItems || []).length > 0 && (
+                <PickerField
+                  label="Maintenance task"
+                  value={changeDraft.maintenanceId}
+                  onChange={v => setChangeDraft({ ...changeDraft, maintenanceId: v })}
+                  options={["", ...(selectedAsset.maintenanceItems || []).map(m => m.id)]}
+                  labelForOption={id => {
+                    if (!id) return "Not linked";
+                    const m = (selectedAsset.maintenanceItems || []).find(x => x && x.id === id);
+                    return m ? m.task : "(deleted schedule)";
+                  }}
+                  title="Link to a maintenance task"
+                />
+                )}
+              </div>
+              {/* Only once a schedule is actually linked: there is nothing to
+                  complete otherwise, and a checkbox that does nothing until
+                  another field is set reads as broken. Defaults OFF -- the
+                  picker's main use is attaching a change that ISN'T a
+                  completion (parts ordered, a repair found during the service),
+                  and a stamp is much harder to notice than a missing one.
+
+                  It carries no date of its own any more: the form has one, it is
+                  the date this work happened, and that is exactly the date the
+                  schedule should record. Two date fields could disagree, and a
+                  user would have no way to know which one won. */}
+              {changeDraft.maintenanceId && changeModal && changeModal.mode === "add" && (
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10, padding: "8px 10px", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: C.ink, cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={!!changeDraft.markPerformed}
+                    onChange={e => setChangeDraft({ ...changeDraft, markPerformed: e.target.checked })}
+                    style={{ width: 16, height: 16, cursor: "pointer" }}
+                  />
+                  Mark this task performed
+                </label>
+                {changeDraft.markPerformed && changeDraft.performedOn && (
+                  <span style={{ fontSize: 13, color: C.muted }}>on {formatDateOnly(changeDraft.performedOn)}</span>
+                )}
+              </div>
+              )}
+              <textarea
+                value={changeDraft.note}
+                onChange={e => setChangeDraft({ ...changeDraft, note: e.target.value })}
+                placeholder="Details — what happened, why…"
+                rows={2}
+                style={{ width: "100%", padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, resize: "vertical", color: C.ink }}
+              />
+              {changeDraft.markPerformed && !changeDraft.performedOn && (
+                <div style={{ fontSize: 12, color: C.danger, marginTop: 8 }}>Pick the date it was performed.</div>
+              )}
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
+                <button onClick={() => setChangeModal(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                <button
+                  onClick={changeModal.mode === "edit" ? saveChangeEdit : addChange}
+                  disabled={isSaving || !changeDraft.changeType || (changeDraft.markPerformed && !changeDraft.performedOn)}
+                  style={{ padding: "8px 14px", background: (!isSaving && changeDraft.changeType && !(changeDraft.markPerformed && !changeDraft.performedOn)) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                >
+                  {isSaving ? "Saving…" : (changeModal.mode === "edit" ? "Save changes" : "Log change")}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {/* Add a maintenance schedule -- the same fields as the form this
+            replaced, moved into a dialog. */}
+        {showMaintenanceAdd && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20, padding: 16 }}>
+            <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 520, maxHeight: "90vh", overflowY: "auto" }}>
+              <div style={{ fontWeight: 700, marginBottom: 16, color: C.brandDark }}>Add maintenance task</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
+                <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Task</span>
+                  <input
+                    value={maintenanceDraft.task}
+                    onChange={e => setMaintenanceDraft({ ...maintenanceDraft, task: e.target.value })}
+                    placeholder="e.g. Replace HVAC filter"
+                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                  />
+                </label>
+                <PickerField
+                  label="Frequency"
+                  value={maintenanceDraft.frequency}
+                  onChange={v => setMaintenanceDraft({ ...maintenanceDraft, frequency: v })}
+                  options={MAINTENANCE_FREQUENCIES.map(f => f.label)}
+                  title="Select frequency"
+                />
+                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Last performed</span>
+                  <input
+                    type="date"
+                    value={maintenanceDraft.lastPerformed}
+                    onChange={e => setMaintenanceDraft({ ...maintenanceDraft, lastPerformed: e.target.value })}
+                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                  />
+                </label>
+                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Owner</span>
+                  <input
+                    value={maintenanceDraft.owner}
+                    onChange={e => setMaintenanceDraft({ ...maintenanceDraft, owner: e.target.value })}
+                    placeholder="Who's responsible?"
+                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                  />
+                </label>
+              </div>
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
+                <button onClick={() => setShowMaintenanceAdd(false)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                <button
+                  onClick={addMaintenanceItem}
+                  disabled={isSaving || !maintenanceDraft.task.trim()}
+                  style={{ padding: "8px 14px", background: (!isSaving && maintenanceDraft.task.trim()) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                >
+                  {isSaving ? "Saving…" : "Schedule"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         {/* v34: the maintenance completion form. Opens prefilled, so a routine
             filter clean is still effectively one click -- but the fields that
             used to have nowhere to go (what it cost, who did it, what they

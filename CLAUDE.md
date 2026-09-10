@@ -1496,6 +1496,33 @@ tab itself in red when anything's overdue. Adding an item isn't separately audit
 own `at`/`by` is enough); marking done, editing, or deleting one is, since those mutate
 or remove data with no other history trail.
 
+**Add and Log change are DIALOGS, and a history entry is editable (2026-09-10).** Both
+sub-tabs used to open with a permanently expanded form pinned above their list, which pushed
+the schedules and the history — the things the tab exists to show — below the fold on every
+visit, including the many where nothing was being added. They are now an **Add task** and a
+**Log change** button.
+- **One dialog serves add AND edit for a change** (`changeModal` = `{ mode: "add" }` or
+  `{ mode: "edit", idx }`, with `changeDraft` holding the fields either way). A separate edit
+  form would be a second copy of the same fields to keep in step, which this file has been
+  bitten by before.
+- **Both openers reseed the draft on OPEN**, not only on close, so a cancelled edit cannot
+  leave half-typed values waiting in the next dialog — the same rule entering breaker edit
+  mode follows.
+- **Editing a change is AUDITED, field by field**, exactly as editing a maintenance item is
+  and for the same stated reason: it rewrites a record and, unlike adding one, leaves no other
+  trail of what it used to say. A save that changed nothing writes no snapshot and no audit
+  row.
+- **`at` and `by` are never touched by an edit.** They record who first entered this and when,
+  which stays true after a correction; the audit row records who changed it. Editing a typo
+  must not rewrite provenance.
+- **An edit does NOT restamp a linked schedule's `lastPerformed`,** even when the performed
+  date is edited, and the *Mark this task performed* checkbox is **hidden in edit mode**.
+  Completing is an act with its own opt-in; re-applying it every time someone fixed a typo
+  would silently move a due date. `openChangeEdit` therefore never pre-ticks it.
+- `openChangeEdit` seeds the date through **`changePerformedOn(ch)`**, not `ch.performedOn` —
+  a pre-v34 entry has no such field and seeding blank would blank a real date on save.
+- **The maintenance ADD is a dialog; its inline edit was left alone.** Not an oversight —
+  only add was asked for, and the two are different flows. Worth revisiting together.
 **The Change Log is no longer a top-level tab — it is Maintenance › History (2026-09-10).**
 The detail tabs are now Details / Maintenance / Comments / Audit, and Maintenance has two
 sub-tabs: **Scheduled** (the recurring items) and **History** (what was actually done, i.e.
