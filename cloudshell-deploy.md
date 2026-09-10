@@ -74,8 +74,17 @@ Or every tenant in one go, which reports each and tells you if any did not take:
 node deploy.mjs --all
 ```
 
-The `git pull` matters: Cloud Shell reuses the copy of the project from your last visit,
-so without it you could deploy a version that has since been superseded.
+The `git pull` matters. Opening the tutorial link CLONES THE PROJECT FRESH each time,
+into a new directory (`~/cloudshell_open/BCA-asset-tracker`, then `-1`, `-2`, and so on),
+so a fresh clone is already current -- but if you come back to a shell you left open, or
+`cd` into an earlier clone, you are on whatever that copy last had. Pulling first costs
+nothing and removes the question.
+
+Your Script IDs are NOT in the clone. They live in `~/.bca-asset-tracker-deploy.json`,
+which is the one thing Cloud Shell keeps between visits -- which is why a pile of old
+clone directories is untidy but harmless. If a deploy ever says it does not know a
+tenant, the error now prints which file it read, which tenants were in it, and which
+directory it ran from; read that before theorising.
 
 This uploads the script, publishes a new version, keeps the same `/exec` URL, and then
 confirms the live backend is reporting the new version.

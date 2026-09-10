@@ -83,6 +83,18 @@ infer*. `cat` on the config was one command and would have settled it before any
 built. It was the fourth thing tried, not the first, because the code-reading suggested a
 tidier answer.
 
+**MITIGATED 2026-09-10, not fixed.** The precedence order is unchanged — a repo
+`deploy.config.json` still wins — but `deploy.mjs` now DETECTS the case and says so, and
+the tenant-missing error prints which config file it read, which tenants were in it, and
+which directory it ran from. The shadowing warning names the one-line fix (`rm` the repo
+copy). Verified by creating both files and running a deploy.
+
+That is deliberately a diagnostic rather than a behaviour change. Which copy *should* win
+is still an open design question with no obviously right answer, and picking one under
+time pressure before a deploy to a school is how the original wrong theory got written.
+What was actually costly was not the precedence — it was that the failure said nothing,
+so reasoning replaced looking. That part is now closed.
+
 **Blocks:** nothing.
 
 ---
