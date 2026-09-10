@@ -255,14 +255,18 @@ is an outage on a school's live system.
 
 **Three decisions needed before any of this is built:**
 
-1. **Should photos show on the public QR panel page?** This is the only one that changes the
-   architecture (§4).
+1. ~~**Should photos show on the public QR panel page?**~~ **DECIDED — yes, see §7.**
 2. **Cloudinary or R2** — free thumbnails, or owning the bytes (§2).
 3. **Assets only, or work items too** — the second needs stable ids on child rows first (§3).
 
 ---
 
 ## 7. Decision 1 — should photos appear on the public `?panel=` QR page?
+
+**DECIDED 2026-09-10: yes, as recommended in §7.7.** Eric accepted the recommendation
+in full — panel-owned photos published by default, a per-photo hide flag as the escape
+hatch, open unguessable URLs rather than signed reads, thumbnails inline with full size
+on tap. The reasoning below is the record of why; §7.7 is the spec.
 
 Expanded 2026-09-10, at Eric's request, to answer §6's first open question.
 
