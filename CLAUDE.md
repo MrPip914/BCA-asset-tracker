@@ -2093,6 +2093,67 @@ with the branch instead of outliving it here.
   *match* against a script missing half the change. They were merged into one version rather
   than renumbered, because renumbering alone leaves the same trap somewhere else.
 
+### Photos attach by reference, never by value
+
+Photos live in **Cloudinary**; the Sheet stores a reference and nothing else. The full
+evaluation and the three decisions behind it are in `PHOTOS_EVAL.md`.
+
+- **The bytes could never have gone in the Sheet, for three independent reasons.** Every
+  save posts the entire state, so a base64 image would be re-sent on every unrelated edit;
+  a cell holds 50,000 characters, about 28KB of image against a 2-5MB phone photo; and
+  `ContentService` has no image MIME type, so bytes could not be served back out even if
+  they got in. That third one is the easiest to miss when sketching a Drive-based design.
+- **The browser uploads directly and the backend only SIGNS, which is why this needed no
+  new OAuth scope.** `Utilities.computeDigest` requires no authorization, so the manifest
+  is untouched and `deploy.mjs` keeps working. Writing to Drive instead needs a scope the
+  live manifest does not declare, and granting one means the owner re-authorizing while
+  **every user's requests fail** — the trap v29's `DriveApp` import hit and v30 backed out
+  of. **The rule that generalizes: prefer a design that needs no scope the script does not
+  already hold.**
+- **Credentials are per-tenant Script Properties and the deploy does not carry them**:
+  `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`, optionally
+  `CLOUDINARY_FOLDER`. `op:"photoSign"` refuses and NAMES the missing keys, because a
+  per-tenant setup step is easy to forget on a newly onboarded school and the symptom
+  otherwise looks like a broken feature.
+  - **Never an unsigned upload preset.** The preset name would have to ship in
+    `index.html`, which is public, and anyone holding it can upload into the account.
+    Server-side signing is also what keeps the `editor` check on uploads, where every other
+    write rule lives.
+  - **The folder and object name are chosen by the BACKEND, never taken from the request.**
+    A client picking its own could overwrite an existing photo by naming it. A signature
+    authorizes exactly one object, and deciding the name server-side is what makes that true.
+- **`photos` is a revision domain of its own, not part of `assets`.** A photo can belong to
+  a breaker or a work entry, so folding it in would make attaching one conflict with anyone
+  editing any asset anywhere.
+- **The write is gated on `dirty.photos`, which is what makes the backend safe to deploy
+  ahead of the frontend.** A client that sends `_dirty` without that key leaves it
+  `undefined`, so the Photos tab is untouched; only a client sending no `_dirty` at all gets
+  the rewrite-everything fallback. Same shape as the `_dirty`-all-false guard on `op:"read"`.
+- **The public `?panel=` page publishes photos, scoped to the panel, its breakers and its
+  circuits** (`PHOTOS_EVAL.md` §7). The scope is a whitelist of ids assembled from what is
+  already in that payload, so a photo of a laptop, a room or a person is **unreachable
+  rather than filtered** — keep it that way rather than turning it into a query by owner
+  type, because that bound is the entire reason publishing on an anonymous page was judged
+  safe. `hiddenFromPublic` is the per-photo escape hatch and is checked BEFORE ownership, so
+  a later change to the scoping cannot route around it. `PUBLIC_PHOTO_FIELDS` omits
+  `storageKey` (the write handle) and `by` (a staff member's name).
+- **`storageKey` is stored alongside the URL** because it is NOT recoverable from a
+  transformed delivery URL, and it is what a deletion or a change of host would need. It is
+  why moving off Cloudinary stays a copy plus one column rewrite.
+- **An id exists once something points at the record, and not before** — the rule work
+  entries and maintenance items arrived at twice. Photos are what made a work entry need
+  one. Comments still have none, deliberately: nothing references a comment.
+- **Deleting a photo row does not delete the image.** Orphans are the safe failure — upload
+  the bytes first, write the reference second, so a rejected save strands bytes rather than
+  leaving a row whose image 404s. A sweeper is deferred and is the dangerous half:
+  "the client sent no photo rows" and "delete every object" are the same request on the
+  wire, the same ambiguity behind `doPost`'s mass-deletion guard.
+- **Covered by `test-backend-photos.js`**, the only place it *can* be covered — Sandbox
+  never contacts Apps Script and signing needs credentials that exist only in Script
+  Properties. Verified by mutation that six silent-failure modes fail it: dropping either
+  public filter, leaking `storageKey` or `by` into the whitelist, ceasing to write
+  `storageKey`, an unmasked byte in `sha1Hex_`, and signing parameters unsorted.
+
 ### The asset key: `id`, `label` and `tag`
 
 `ASSET_KEY_REFACTOR_PLAN.md` is the full plan. `id` is the app's identity, `label` is legacy
