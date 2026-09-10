@@ -256,7 +256,7 @@ is an outage on a school's live system.
 **Three decisions needed before any of this is built:**
 
 1. ~~**Should photos show on the public QR panel page?**~~ **DECIDED — yes, see §7.**
-2. **Cloudinary or R2** — free thumbnails, or owning the bytes (§2).
+2. ~~**Cloudinary or R2**~~ **DECIDED — Cloudinary, see §8.**
 3. **Assets only, or work items too** — the second needs stable ids on child rows first (§3).
 
 ---
@@ -405,3 +405,100 @@ different decision, and this one does not prejudge it.
 public-page or not, is protected by URL unguessability rather than by access control. That is
 the right trade for photos of equipment. It would be the wrong trade for photos of documents
 or people, which is why §7.4's norm is part of the recommendation rather than an aside.
+
+---
+
+## 8. Decision 2 — Cloudinary or Cloudflare R2?
+
+Answered 2026-09-10. Free-tier figures below were **checked on the day**, not recalled;
+sources at the end of the section. Re-check before committing money — this is the kind of
+line that goes stale, exactly like the deploy-version lines this file keeps apologising for.
+
+### 8.1 The finding that decides it: R2 has no production-grade free URL
+
+§7 decided photos are served as plain, openly-fetchable URLs. So "how does a browser get
+the bytes" is now a load-bearing requirement, not a detail.
+
+R2's obvious answer is its `r2.dev` public bucket URL. **Cloudflare's own documentation says
+not to use it for this:**
+
+> "Public access through `r2.dev` subdomains is rate-limited and should only be used for
+> development purposes."
+
+and, of the workaround someone would reach for next:
+
+> "Avoid creating a CNAME record pointing to the `r2.dev` subdomain. This is an
+> **unsupported access path**, and we cannot guarantee consistent reliability or
+> performance."
+
+Production R2 wants a **custom domain**, and a custom domain on R2 requires the zone to be
+on Cloudflare. **`stama.tech` is not on Cloudflare** — verified by DNS lookup on
+2026-09-10: its nameservers are `ns-canada/ns-usa/ns-uk.topdns.com`, and `assets.stama.tech`
+is a CNAME to `mrpip914.github.io`.
+
+So choosing R2 means one of:
+
+| Path | Cost |
+|---|---|
+| Move `stama.tech`'s nameservers to Cloudflare | A DNS migration on the domain that serves the live app to two schools, to add photos. The blast radius of a mistake is the whole site, not the photos. |
+| Put a second, throwaway domain on Cloudflare | A domain to buy and renew, and a second thing to remember exists. |
+| Write a Worker on `*.workers.dev` to serve from an R2 binding | Free and it works — but it is a new deployable, with `wrangler` tooling, in a repo whose defining constraint is **no build step and no `node_modules`**, and a second deploy path beside the Apps Script one Eric already runs from his phone. |
+
+None is fatal. All three are a bigger change than the feature.
+
+### 8.2 The rest of the comparison
+
+| | **Cloudinary** | **Cloudflare R2** |
+|---|---|---|
+| Free tier | 25 credits/mo; 1 credit = 1GB storage **or** 1GB bandwidth **or** 1,000 transformations, pooled | 10GB storage, 1M Class A ops, 10M Class B ops, **zero egress** |
+| Overage behaviour | Soft limits — warnings from ~90%, no silent overage billing on the free plan | Pay-as-you-go past the free tier |
+| Serving | `res.cloudinary.com`, CDN, nothing to build | §8.1 |
+| Thumbnails | URL parameter (`w_200,c_fill`), generated and cached on demand | Build them client-side, store and upload a **second object per photo** |
+| EXIF / auto-orient | Server-side | Yours |
+| Signing in Apps Script | SHA-1 of sorted params + `api_secret`. `Utilities.computeDigest` — a few lines | AWS SigV4. ~40 lines of HMAC chaining. Well-trodden, but it is 40 lines of crypto in a file with no tests around it |
+| Bytes live | Cloudinary | Your bucket |
+
+**On sizing:** this app has ~160 assets. Even 1,000 photos at ~300KB (post-downscale, §4) is
+~0.3GB stored. Thumbnails are cached derived assets, so transformations are counted per
+*unique* transform, not per view. Both free tiers are comfortable; neither is close to being
+the deciding factor, which is why §8.1 is.
+
+### 8.3 The counter-argument, stated fairly
+
+R2 is the better *primitive*: cheaper at scale, zero egress, the bytes are yours, and no
+vendor sits between the app and its own images. If this were a project with an existing
+Cloudflare footprint and a build step, R2 would win.
+
+It isn't. It is a no-build-step static site whose backend is Apps Script and whose deploy
+story is one command from a phone. **R2 asks this project to grow a second deployable or
+migrate its DNS; Cloudinary asks it to store one more secret in Script Properties.**
+
+### 8.4 Lock-in is low by construction, which is what makes this safe to decide quickly
+
+§3 stores `url`, `thumbUrl` **and** `storageKey` per photo. `storageKey` is there precisely
+so a move is possible: copy the objects, rewrite one column. Nothing in the app's data model
+knows which vendor it is talking to, and the signing lives in one `doPost` branch.
+
+So this is a reversible decision wearing the costume of an irreversible one. That is the
+argument for taking the cheap path now rather than the architecturally purer one.
+
+### 8.5 Recommendation
+
+**Cloudinary.** Signed uploads only — the API secret in each tenant's **Script Properties**,
+never in `clients.js`, and never an unsigned upload preset: Cloudinary's own docs warn that
+a leaked preset name lets anyone upload into your account, and this repo is public.
+
+Two operational notes:
+
+- **One account, a folder per tenant** (`bca/`, `dev/`). Eric owns every tenant's script, so
+  a shared secret crosses no trust boundary that isn't already crossed. Per-tenant accounts
+  would be tidier and buy nothing.
+- **Deletion is an API call, not a URL**, so the orphan-sweeper question in §5 stays exactly
+  as described — and stays deferred.
+
+**What would change this:** if `stama.tech` ends up on Cloudflare for some other reason, or
+the project grows a build step, R2 becomes the better answer and §8.4 is the escape route.
+
+Sources (checked 2026-09-10): Cloudflare R2 public buckets documentation; Cloudinary pricing
+and credits documentation; Cloudinary client-side uploading security notes; DNS lookup of
+`stama.tech` NS and `assets.stama.tech` CNAME.
