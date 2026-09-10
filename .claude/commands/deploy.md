@@ -2,41 +2,52 @@
 description: Print the backend deploy link and instructions for Eric (Google Apps Script)
 ---
 
-Give Eric what he needs to deploy `AssetTrackerSync.gs`. He is usually on a phone, so
-hand him a link and a tap — never Apps Script editor steps, and never a wall of text.
+Give Eric what he needs to deploy `AssetTrackerSync.gs`. He is usually on a phone, so hand
+him a link and a tap — never Apps Script editor steps, and never a wall of text.
+
+**This command carries no deploy text of its own, deliberately.** The blocks live in
+`CLAUDE.md` ("Working here"), the procedure lives in `cloudshell-deploy.md`, and the
+success and failure lines belong to `deploy.mjs`. A second copy here is what drifted last
+time: this file spent a month telling him to watch for a success line the tool has never
+printed, so a failed deploy and a good one read the same. Quote those three sources; do
+not paraphrase them.
 
 Do this:
 
-1. Read `SCRIPT_VERSION` from `AssetTrackerSync.gs` on `main` — that is the version he
-   is about to deploy. Also check `FRONTEND_SCRIPT_VERSION` in `index.html` matches it;
-   if they disagree, say so and stop, because `deploy.mjs` will refuse to run anyway.
-2. Ask every tenant what it is currently running, so you can tell him whether a deploy is
-   even needed and for which tenants:
+1. **Work out which branch the change is on, and do not assume `main`.** If `$ARGUMENTS`
+   names a branch, that is the answer. Otherwise it is the branch this session has been
+   working on — check what you actually committed to, and confirm with
+   `git log --oneline -1 origin/main` whether the change is in `main` yet. Getting this
+   wrong is the single most expensive mistake here: it is what sent a `main` deploy for
+   work that lived on a branch, and the downgrade guard stopped him with a confusing
+   message. Ask him if you genuinely cannot tell.
 
-   `node deploy.mjs --status`
+2. **Read `SCRIPT_VERSION` from `AssetTrackerSync.gs` on that branch** — not on `main`,
+   unless that is where the work is. Check `FRONTEND_SCRIPT_VERSION` in `index.html`
+   matches; if they disagree, say so and stop, because `deploy.mjs` refuses to run anyway.
 
-   That prints a tenant/live-version table, needs no sign-in, and is the documented
-   diagnostic. Never state a live version from memory or from a line in a doc.
-3. If live already matches, tell him that in one line and stop. Otherwise print exactly
-   this, with the version filled in:
+3. **Ask every tenant what it is running:** `node deploy.mjs --status`. This works from a
+   cloud session — it is an unauthenticated fetch of each `/exec`, no sign-in and no
+   `clasp`. Never state a live version from memory or from a line in a doc; every such
+   line in this repo has gone stale at least once.
 
-> **Deploy v<NN>** to `<tenant>` — open this, then tap the command in Step 3
-> (`node deploy.mjs <tenant>`; `--all` for every tenant):
->
-> https://shell.cloud.google.com/cloudshell/open?cloudshell_git_repo=https://github.com/MrPip914/BCA-asset-tracker&cloudshell_tutorial=cloudshell-deploy.md
->
-> Look for `✓ Live backend is now v<NN>.` as the last line. Anything starting with `✗`
-> means it did not deploy, and says why.
+4. If live already matches on every tenant that needs it, tell him in one line and stop.
 
-If `$ARGUMENTS` names a branch, deploy that branch instead: read its `SCRIPT_VERSION`,
-and give him the link plus this command, with the branch filled in —
+5. Otherwise **send exactly one block, quoted verbatim from `CLAUDE.md`'s "Working here"
+   section**, with `<NN>`, `<branch>` and the tenant filled in:
+   - the change is merged into `origin/main` → **block A**
+   - the change is on a branch → **block B**, which targets `dev`
 
-> `git fetch origin && git checkout -B <branch> origin/<branch> && node deploy.mjs dev`
+   They are alternatives, never a sequence. Sending both, `main` first, is the documented
+   way this has already gone wrong once.
 
-— targeting **`dev`**, which exists precisely so an unmerged branch has a harmless home.
-Only name a school's tenant instead if he asked for that, and then say plainly that it is
-that school's live data behind it. Do not refuse a branch deploy either way: it is the only
-way to exercise a backend write path, because Sandbox mode never contacts Apps Script.
+6. Add one line naming what is in this version, so he knows what he is shipping. Nothing
+   else — no setup walkthrough (his sign-in persists in Cloud Shell), no editor fallback.
 
-Add one line naming what is in this version, so he knows what he is shipping. Nothing
-else — no setup walkthrough (his sign-in persists in Cloud Shell), no editor fallback.
+Only send a branch to a school's tenant if he asked for that, or as step 2 of the
+backend-first release order, and then say plainly that it is their live data behind it.
+Do not refuse a branch deploy: it is the only way to exercise a backend write path, since
+Sandbox never contacts Apps Script.
+
+Do not put a school command in the same response as an unverified branch deploy. Wait for
+him to confirm `dev` first.

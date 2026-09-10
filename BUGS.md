@@ -16,6 +16,33 @@ version that fixed them.
 
 ## Open
 
+### Three backend tests slice the .gs with hardcoded `\r\n` markers and fail on any LF checkout
+**Found:** 2026-09-10, while auditing the deploy docs — `node test-backend-maintenance-link.js`
+throws before running a single assertion.
+**Needs a deploy:** no — test files only.
+**Confirmed:** the failure reproduces on a clean checkout with my changes stashed, so it is
+not from that work. `AssetTrackerSync.gs` is LF in the git blob AND in the working copy
+(`grep -c $'\r'` returns 0 for both), while the test looks for `'\r\n    const auditLog ='`.
+
+`test-backend-maintenance-link.js` slices `doGet`/`doPost` out of the .gs as source text
+using markers that embed a **CRLF**. Git for Windows defaults to `core.autocrlf=true`, so
+Eric's checkout has CRLF and the marker matches; every LF checkout — a cloud session, CI, a
+Mac, anyone with `autocrlf=false` — gets `Error: end marker not found` and the whole file
+exits non-zero without testing anything. There is no `.gitattributes` pinning either way.
+
+`test-backend-admin.js` and `test-frontend-export.js` also contain `\r\n` markers and
+currently pass, so they are either tolerant or matching a different site — worth checking
+alongside, since the same trap is sitting in them.
+
+Fix is one line per marker: match `/\r?\n/` rather than a literal `\r\n`. Pinning the
+repo's line endings with a `.gitattributes` would also work and is the broader change.
+
+**Blocks:** the maintenance-link backend contract is currently unverified anywhere except
+Eric's own machine — and this is the suite CLAUDE.md cites as proving all four silent
+failure modes of the `maintenanceId` column. It does not block the app.
+
+---
+
 ### A value that doesn't match its field's kind shows as BLANK, then refuses the save
 **Found:** 2026-09-10. **Mostly closed the same day** — see below.
 **Needs a deploy:** no — `index.html` only.

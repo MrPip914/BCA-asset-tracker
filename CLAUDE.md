@@ -93,6 +93,16 @@ warning that a branch deploy is testing in production is kept below because it i
 true of a school's tenant, but it is no longer the default, and telling him to test on
 production when dev exists would be wrong.
 
+**Four files used to carry this procedure and two of them went stale**, which is what
+made a deploy fail on 2026-09-10. The arrangement now, and `test-deploy-docs.js` enforces
+it: `cloudshell-deploy.md` owns the PROCEDURE (its Step 3 is the main-or-branch choice);
+this file owns the two BLOCKS above, which are what Eric is handed; `DEPLOY.md` is
+reference and rationale only; `/deploy` generates a block and carries no strings of its
+own. **Never restate what `deploy.mjs` prints** — the slash command spent a month naming
+a success line the tool has never printed, so a failed deploy read exactly like a good
+one. Quote the tool, or point at it. If a fifth file ever needs deploy text, add it to
+that test's `DOCS` list the same day.
+
 That link opens Google Cloud Shell, clones this repo, and shows `cloudshell-deploy.md` as
 a walkthrough where every command has a tap-to-run button. Eric's sign-in and Script ID
 persist in Cloud Shell's `$HOME`, so a repeat deploy is that one tap — do NOT walk him
