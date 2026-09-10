@@ -98,7 +98,10 @@ made a deploy fail on 2026-09-10. The arrangement now, and `test-deploy-docs.js`
 it: `cloudshell-deploy.md` owns the PROCEDURE (its Step 3 is the main-or-branch choice);
 this file owns the two BLOCKS above, which are what Eric is handed; `DEPLOY.md` is
 reference and rationale only; `/deploy` generates a block and carries no strings of its
-own. **Never restate what `deploy.mjs` prints** — the slash command spent a month naming
+own. **And never write down what is deployed** — `node deploy.mjs --status` answers it per
+tenant in one command; the same test fails the build on a "vNN is DEPLOYED" line, because
+that claim went stale here four separate times and once cost a session real work.
+**Never restate what `deploy.mjs` prints** — the slash command spent a month naming
 a success line the tool has never printed, so a failed deploy read exactly like a good
 one. Quote the tool, or point at it. If a fifth file ever needs deploy text, add it to
 that test's `DOCS` list the same day.
@@ -1997,422 +2000,230 @@ When you do:
 
 ## Known constraints / things to watch
 
-- **v33 is PENDING A DEPLOY as of 2026-09-09 — and do not read that as fact either.**
-  `node deploy.mjs --status` answers it per tenant in one command and cannot go stale, which
-  is the standing instruction this section has now recorded going wrong four separate times
-  about itself. It adds ONE Config key, `typeCategories` (see "A type is filed under a
-  CATEGORY" under Data model): one line in `doGet`, one `configRows.push` in `doPost`, no
-  `ASSET_FIELDS` entry, no new tab, no migration.
-  - **Until it is deployed, a category edit works in-session and is forgotten on reload.**
-    `doPost` writes a fixed list of config keys and drops the rest, so the key is discarded on
-    every save — the same window the pre-v24 `typeSettings` work sat in. Nothing else is
-    affected: the shipped categories still group the pickers, because they come from
-    `TYPE_REGISTRY` and need nothing stored.
-  - **RELEASE ORDER IS BACKEND FIRST**, the rule the phase-2 key refactor established: the
-    frontend ships from `main` to every tenant at once while backends deploy one at a time, so
-    merging first would put a category-writing frontend in front of a backend that drops the
-    key. Deploy, confirm with `--status`, then merge.
-  - The other two features in that change — field data types and required fields — are
-    frontend-only and are unaffected by whether this deploy has happened.
+**Nothing here records what is deployed, or what is on a live Sheet.** Both are one
+command away, and both have gone stale in this file — deploy state four separate times,
+the Sheet's own schema once, and that one outlived ten backend versions because no banner
+catches it:
 
-- **v31 is superseded by the v32 deploy below and is history.** Do not take that on faith
-  either, for exactly the reason every entry here says: `node deploy.mjs --status` answers
-  it in one command, per tenant, and cannot go stale. It added an `id` column to the Assets
-  tab: the asset's real primary key, and the first phase of `ASSET_KEY_REFACTOR_PLAN.md`.
-  - **Purely additive, and identical in behaviour until something writes an id.** The column
-    is empty on every existing row, and both join sites read `a.id || a.label`, so an
-    existing asset's key IS its label. Nothing in the sheet changes meaning.
-  - **That fallback is the whole migration strategy.** Every reference already stored —
-    `parentId`, `personIds`, a child row's `assetLabel`, a breaker's `panelLabel`,
-    AuditLog's `assetLabel` and `related` — is therefore *already a valid id*. No backfill,
-    no migration script, and **AuditLog is never touched**, which matters because it is the
-    one tab with no rewrite path (see the v25 entry). Same trick `typesList` uses, where a
-    built-in type's id is its original name.
-  - **doGet and doPost are two halves of one contract.** If they key on different things,
-    every comment, change, allocation, maintenance item, breaker and circuit is written
-    under one key and read under another — they vanish, silently, with `SCRIPT_VERSION`
-    still matching its frontend. `test-backend-assetid.js` slices BOTH blocks out of the
-    .gs as source text and round-trips fake data through them, so a change to one side and
-    not the other fails. Verified by mutation: reverting either site to the label alone
-    fails the suite.
-  - **The public `?panel=` path needed the same treatment**, at five sites — the panel
-    lookup now accepts an id OR a label (a QR sticker taped inside a panel door encodes the
-    label and can never be redeployed), the parent-chain map is keyed on `id || label`
-    because that is what `parentId` holds, `nearestAncestorRow_`'s visited set matches (or
-    the loop guard stops guarding, on a *public* page), and the room-name map and upstream
-    panel lookup likewise.
-  - **`backfillAuditIds_` writes keys, not labels**, since what it fills is `related`.
-  - The admin import now also refuses duplicate **ids**, which is the merge hazard once the
-    id is what child rows are keyed by. A file with no id column skips the check entirely.
-  - **Deploy order is mandatory and is the one real hazard here: backend first.** A frontend
-    that wrote a generated id against a v30 backend would have the column dropped, leaving a
-    row with neither an id nor a matching label — unreferenceable. Nothing in phase 1 does
-    that yet (no frontend change ships with it), but phase 2 must not land until v31 is live
-    on the tenant it is being tested against.
+    node deploy.mjs --status        which tenant runs which backend version
+    node sheet.mjs tabs <tenant>    what columns a live Sheet actually has
 
-- **Phase 2 of the key refactor is MERGED and LIVE, confirmed 2026-09-09** — v32 is
-  deployed to every tenant (`node deploy.mjs --status`) and `main` carries the frontend, so
-  `assets.stama.tech` serves it. `id` is now the app's identity and `label` is display text.
-  - **`loadData()` adopts `id = a.id || a.label` first in its map chain**, before the
-    personIds normalize and before `adoptLegacyNames` — which walks the parent chain and so
-    has to walk it by the ids everything downstream joins on. From that point `a.id` is
-    populated on every asset and is the ONLY thing that should be compared for identity.
-  - **New assets mint `crypto.randomUUID()`** (`startAdd`, `duplicateAsset`,
-    `convertUsersToAssets`). Labels are still issued from `nextAssetNumber` and are still
-    required and unique-checked — nothing user-visible changed in this phase.
-  - **`MOCK_SNAPSHOT` is deliberately MIXED**: three assets carry an id that is not their
-    label (a Room reached by parentId/roomsServedIds/an allocation/two audit rows, a leaf
-    device, and a sub-panel that is a feedsPanelLabel target and owns 21 breaker
-    panelLabels); every other row carries none. A fixture that was all one shape would
-    exercise half the code — the `personIds` lesson, applied deliberately this time.
-  - **Every address accepts an id OR a label, permanently**: the `?asset=` deep link,
-    `panel.html?p=`, and the QR sheet's `?only=`. Links and stickers outlive the build that
-    made them, and a sticker taped inside a panel door can never be reprinted out of
-    existence.
-  - **Renaming stale parameters is what found the one real bug.** `childLabel` → `childId`
-    exposed `childId={selectedAsset.label}` on the edit form. It type-checks, it renders,
-    and it is correct on every legacy row — so only the rename surfaced it. `doDelete`,
-    `archiveAsset`, `restoreAsset` and the audit segment's `seg.label` were renamed for the
-    same reason. **A name that no longer says what the value is has cost this project real
-    time more than once; treat one as a bug, not a tidy-up.**
-  - **What deliberately still reads `label`**: `findLabelConflict` and
-    `assetNumberFromLabel` (both genuinely about labels), the Excel export's "Asset ID"
-    column, the detail header, and every "is this asset's name just its label?" display
-    test.
-  - **The release order was BACKEND FIRST, and that is the rule to reuse.** The frontend
-    ships from `main` to all tenants at once while backends deploy one at a time, so merging
-    while `bca` was on v30 would have put a UUID-minting frontend in front of a backend that
-    drops the column — leaving new assets with neither an id nor a matching label. That
-    hazard is what the whole plan was ordered around, and `node deploy.mjs --status` was the
-    gate: `main` was not merged until it reported v32 on both tenants.
-    - **The deploy took two attempts, and the near-miss is worth keeping.** The first run
-      reported `✓ bca is now v30` — Cloud Shell was checked out on `main`, which still
-      carried v30, so it deployed v30 over v30. Harmless only because the versions were
-      equal; against a v31 tenant `deploy.mjs` would have refused it as a downgrade. **The
-      version in the confirmation line is the thing to read, not the checkmark**, and a
-      Cloud Shell deploy of unmerged work needs `git fetch origin && git checkout -B <branch>
-      origin/<branch>` first — the tutorial link clones the DEFAULT branch, so a re-opened
-      link silently puts you back on `main`.
+`test-deploy-docs.js` fails if a live-version claim reappears in prose. What belongs here
+is the RULE a version taught, which does not expire. When a version is genuinely mid-flight
+and the window matters — "categories work in-session and vanish on reload until this is
+deployed" — that note goes in the branch's commit message or its plan file, where it dies
+with the branch instead of outliving it here.
 
-- **Phase 3 is DEPLOYED and MERGED, confirmed 2026-09-09** (backend v32) by
-  `node deploy.mjs --status` reporting v32 on `bca` and `dev`, and by the live
-  `assets.stama.tech` serving `FRONTEND_SCRIPT_VERSION = "v32"`. `label` becomes **`tag`** —
-  the sticker on the thing:
-  optional, editable, and absent entirely on a type that never carries one.
-  - **The backend change is one name in `ASSET_FIELDS`.** `label` is KEPT and is written
-    from the client's own value, **not mirrored from `tag`** — the plan originally said to
-    mirror it, which is self-defeating: clearing a Room's tag would clear its label with it,
-    destroying the rollback being preserved. Nothing in the UI writes `label` any more.
-  - **The tag is a per-type CHOICE, not a fixed rule** (Eric's call). It ships excluded on
-    Room/Building/Campus/User and can be switched on for any of them in the type editor.
-    What made that nearly free: the editor already turns an unticked field into
-    `excludedFields`, and the only thing holding `label` out of its list was
-    `TYPE_STRUCTURAL_FIELDS` — which contained it *because* it was the primary key. Once it
-    is only a sticker it stops being structural, so removing it is the correct change.
-  - **`adoptLegacyTag()` DECLINES rather than clears.** A type whose tag field is excluded
-    simply does not inherit its label as a tag, so the BCR/BCB/BCC and User labels are gone
-    from the UI with no migration to run. That is a load-time READ that declines, not the
-    load-time REWRITE this file warns against — no race between browsers, nothing by hand.
-    An explicitly-empty stored tag is never re-adopted, or clearing one would undo itself on
-    the next load.
-  - **`nameOf()` has three rungs now**: name, then tag, then `"<type> <short id>"`. The last
-    is a genuine last resort — `adoptLegacyNames` fills a blank name on everything it loads,
-    so only an in-session object (an add-form draft) reaches it. Its `typesList` argument is
-    OPTIONAL and its absence degrades rather than breaks: `typeNameOf` falls back to the type
-    id, and a built-in type's id IS its name.
-  - **A duplicate tag is still REFUSED, but for a different reason.** It used to be a data
-    question (two assets sharing a primary key are one merged asset); now it is only two
-    stickers reading the same thing, refused because that is a trap for whoever holds them.
-    **Empty tags are skipped** — load-bearing, since an unconditional check would make every
-    untagged asset collide with every other one and nothing could save. The EDIT form runs
-    the same check with the asset excluded, which the plan never mentioned and which the
-    add-only label never needed.
-    - **Consequence:** swapping two assets' tags is a three-step edit (clear one, set the
-      other, set the first), because the intermediate state is a duplicate. Accepted.
-  - **`peekAssetNumber()`'s `Math.max(counter, derived)` guard is DELETED.** It existed
-    because a reused label was a reused primary key, so a new asset inherited a dead one's
-    audit history. A real `id` makes that impossible, and deriving from the assets stopped
-    meaning anything once most rows have no tag at all.
-  - **The public panel path publishes `tag`** and accepts a tag, an id OR a label at
-    `?panel=` — three permanent ways in, because a sticker taped inside a panel door outlives
-    all of them.
+### What costs a backend release, and what a removal destroys
+
+- **A property on an existing Config blob is free; a Config KEY of its own is a release.**
+  `doPost` stringifies the whole `columns` and `typeSettings` blobs and reads nothing inside
+  them but `customColumnKeys_`, so a column's `dataType` or a type's `requiredFields` cost
+  nothing. But `doPost` writes a FIXED list of config keys and silently drops the rest, so a
+  new key — `typeCategories`, and `typeSettings` before it — is discarded on every save until
+  it is deployed. **This is the test to run against any future per-field or per-type setting**
+  before estimating it.
+- **`ASSET_FIELDS` is the schema, and dropping a name from it deletes that column on the next
+  asset-domain save.** `writeTable_` clears the tab and writes those headers. The Sheet's own
+  version history is the only way back — that is the entire rollback story. So treat any
+  removal the way v25's six columns were treated: confirm the replacement column is populated
+  on every row, and deploy only after a save has written it.
+  - What a removal takes with it can be unrebuildable. `hasMisadoptedName()` repaired names
+    written by a broken backfill by comparing against `room`/`building`/`campus`; with those
+    columns gone a wrong name can no longer even be *detected*, only retyped. That is why the
+    removal waited for a save that wrote every repaired name into the sheet.
+  - **A public page reading a column needs the fallback FIRST.** Three sites in `panel.html`
+    read `room`/`building` with no `name` fallback, unlike the rest of the file — harmless
+    while the column was still written, and a blank location on every QR page the moment it
+    was not.
+- **AuditLog is the one tab with no rewrite path, and it has its own hazard.** It is
+  append-only, so its header row is written once and never again: adding a column to its field
+  list does NOT widen the stored header, and `readTable_` — which keys off the *sheet's*
+  headers — then reads every new column back as `obj[""]`, colliding them onto one key and
+  losing the data. Silently, with `SCRIPT_VERSION` still matching its frontend, because the
+  script really is the version it claims. `appendNewRows_` now widens a narrow stored header
+  and never shrinks one (dropping a column would strand the values under it).
+- **The Assets tab's column set is dynamic** — the fixed `ASSET_FIELDS` plus the custom columns
+  named in Config (`customColumnKeys_`). That is what makes a custom column's value persist at
+  all, and therefore what per-type custom fields rest on.
+- **A backend write path cannot be covered by browser testing, structurally.** Sandbox never
+  contacts Apps Script and the live backend needs a sign-in, so a `.gs` change is verified by
+  slicing the source out and unit-testing it: `test-backend-fields.js`, `test-backend-admin.js`,
+  `test-backend-assetid.js`, `test-backend-maintenance-link.js`. Keep the habit.
+- **`doGet` and `doPost` are two halves of one contract.** If they key on different things,
+  every comment, change, allocation, maintenance item, breaker and circuit is written under one
+  key and read under another — they vanish, silently, with the version check still matching.
+  `test-backend-assetid.js` slices BOTH blocks out as source text and round-trips fake data, so
+  changing one side and not the other fails. Verified by mutation.
+- **The admin import reads a TAB in the Sheet, not Drive.** The `DriveApp` version failed at
+  runtime — "You do not have permission to call DriveApp.getFilesByName" — because the live
+  manifest declares its `oauthScopes` explicitly, so Apps Script does not auto-detect a newly
+  used API's scope. See "Wipe and import" under Architecture for why adding the scope is not
+  free either. **The rule: use an API the script already holds a scope for.**
+- **`_dirty` on the read payload is load-bearing — do not remove it.** `loadData()` sends
+  `_dirty: { assets:false, config:false, breakerTypes:false }` explicitly. Against a backend too
+  old to recognise `op:"read"`, the read is treated as an ordinary save; a read payload carries
+  no assets, and absent `_dirty` means "rewrite everything", so the first load of a new frontend
+  against an old backend would blank the Assets tab and every child tab with it. With the flags
+  present the old backend writes *nothing* and the load fails cleanly on "Malformed response".
+  The current backend never reads them.
+
+### Release ordering, and the deploys that went wrong
+
+- **BACKEND FIRST, MERGE SECOND.** The frontend ships from `main` to every tenant at once
+  through GitHub Pages, while backends deploy one tenant at a time. Merging first puts a
+  frontend writing new columns in front of a school whose backend still drops them — written,
+  then silently gone. Deploy the branch to `dev`, then to the school, then merge; `--status` is
+  the gate between each step. Between the school deploy and the merge that school shows the
+  "Backend outdated" banner, which is correct and which the merge clears.
+- **Read the VERSION in the confirmation line, not the checkmark.** A deploy once reported
+  `✓ bca is now v30` when v31 was intended: Cloud Shell was checked out on `main`, which still
+  carried v30, so it deployed v30 over v30. Harmless only because the versions were equal —
+  against a newer tenant `deploy.mjs` would have refused it as a downgrade. **The tutorial link
+  clones the DEFAULT branch**, so a re-opened link silently puts you back on `main`; unmerged
+  work needs `git fetch origin && git checkout -B <branch> origin/<branch>` first.
+- **Never deploy something OLDER than what is live.** v22 was once pushed over a live v24 from
+  a branch that was simply behind `main`. An older backend does not merely revert behaviour —
+  it drops columns a newer one added, and the next save destroys that data. `deploy.mjs` refuses
+  to go backwards, which is the only reason a repeat is merely annoying.
+- **Two branches cannot both call themselves the next version.** v14, v15 and v16 were each
+  pending on their own branch, each claiming to be next, and all three edited the same `doGet` —
+  so deploying one after another would have silently erased the first, while each also bumped
+  `FRONTEND_SCRIPT_VERSION` to its own string, making the "Backend outdated" banner report a
+  *match* against a script missing half the change. They were merged into one version rather
+  than renumbered, because renumbering alone leaves the same trap somewhere else.
+
+### The asset key: `id`, `label` and `tag`
+
+`ASSET_KEY_REFACTOR_PLAN.md` is the full plan. `id` is the app's identity, `label` is legacy
+display text, and `tag` is the sticker on the thing.
+
+- **Adopting each asset's LABEL as its `id` is what made the refactor need no migration.**
+  Both join sites read `a.id || a.label`, so an existing asset's key IS its label, and every
+  reference already stored — `parentId`, `personIds`, a child row's `assetLabel`, a breaker's
+  `panelLabel`, AuditLog's `assetLabel` and `related` — was therefore *already a valid id*. No
+  backfill, no script, and **AuditLog was never touched**. Same trick `typesList` uses, where a
+  built-in type's id is its original name.
+- **`loadData()` adopts `id = a.id || a.label` FIRST in its map chain**, before the `personIds`
+  normalize and before `adoptLegacyNames` — which walks the parent chain, and so has to walk it
+  by the ids everything downstream joins on. From that point `a.id` is populated on every asset
+  and is the ONLY thing that should be compared for identity.
+- **New assets mint `crypto.randomUUID()`** (`startAdd`, `duplicateAsset`,
+  `convertUsersToAssets`).
+- **Every address accepts an id OR a label, permanently** — the `?asset=` deep link,
+  `panel.html?p=`, the QR sheet's `?only=`, and `?panel=` (which takes a tag as well). Links and
+  stickers outlive the build that made them, and a sticker taped inside a panel door can never
+  be reprinted out of existence.
+- **Renaming stale parameters is what found the one real bug.** `childLabel` → `childId` exposed
+  `childId={selectedAsset.label}` on the edit form: it type-checks, it renders, and it is correct
+  on every legacy row, so only the rename surfaced it. **A name that no longer says what the
+  value is has cost this project real time more than once; treat one as a bug, not a tidy-up.**
+- **What deliberately still reads `label`**: `findLabelConflict` and `assetNumberFromLabel` (both
+  genuinely about labels), the Excel export's "Asset ID" column, the detail header, and every
+  "is this asset's name just its label?" display test.
+- **`MOCK_SNAPSHOT` is deliberately MIXED** — three assets carry an id that is not their label (a
+  Room reached by parentId/roomsServedIds/an allocation/two audit rows, a leaf device, and a
+  sub-panel that is a `feedsPanelLabel` target and owns 21 breaker `panelLabel`s); every other
+  row carries none. A fixture that was all one shape would exercise half the code. That is the
+  `personIds` lesson, applied deliberately this time.
+- **`tag` is a per-type CHOICE, not a fixed rule** (Eric's call). It ships excluded on
+  Room/Building/Campus/User and can be switched on for any of them in the type editor. The
+  editor already turns an unticked field into `excludedFields`; the only thing holding `label`
+  out of that list was `TYPE_STRUCTURAL_FIELDS`, which contained it *because* it was the primary
+  key. Once it is only a sticker it stops being structural.
+  - **`label` is KEPT and written from the client's own value, not mirrored from `tag`.** The
+    plan said to mirror it, which is self-defeating: clearing a Room's tag would clear its label
+    with it, destroying the rollback being preserved. Nothing in the UI writes `label` any more.
+  - **`adoptLegacyTag()` DECLINES rather than clears.** A type whose tag field is excluded does
+    not inherit its label as a tag, so the BCR/BCB/BCC and User labels left the UI with no
+    migration to run — a load-time READ that declines, not the load-time REWRITE this file warns
+    about. An explicitly-empty stored tag is never re-adopted, or clearing one would undo itself
+    on the next load.
+  - **`nameOf()` has three rungs**: name, then tag, then `"<type> <short id>"`. The last is a
+    genuine last resort, since `adoptLegacyNames` fills a blank name on everything it loads — only
+    an in-session object (an add-form draft) reaches it. Its `typesList` argument is OPTIONAL and
+    degrades rather than breaks.
+  - **A duplicate tag is REFUSED, but for a different reason than a duplicate label was.** It used
+    to be a data question (two assets sharing a primary key are one merged asset); now it is two
+    stickers reading the same thing, refused because that traps whoever holds them. **Empty tags
+    are skipped** — load-bearing, since an unconditional check would make every untagged asset
+    collide with every other one and nothing could save. The EDIT form runs the same check with
+    the asset excluded, which the add-only label never needed.
+    - **Consequence:** swapping two assets' tags is a three-step edit (clear one, set the other,
+      set the first), because the intermediate state is a duplicate. Accepted.
+  - **`peekAssetNumber()`'s `Math.max(counter, derived)` guard is DELETED.** It existed because a
+    reused label was a reused primary key, so a new asset inherited a dead one's audit history. A
+    real `id` makes that impossible, and deriving from the assets stopped meaning anything once
+    most rows carry no tag at all.
   - Covered by `test-frontend-tag.js`, which runs the real registry, the real
     `recomputeDerivedTypeSets` and the real `nameOf`. Verified by mutation that all three
-    silent-failure modes fail it: a Room that stops excluding the tag, a `nameOf` that loses
-    its last rung, and a conflict check that stops skipping empties.
+    silent-failure modes fail it: a Room that stops excluding the tag, a `nameOf` that loses its
+    last rung, and a conflict check that stops skipping empties.
+- **`backfillAuditIds_` writes keys, not labels**, since what it fills is `related`. Run it ONCE
+  by hand from the Apps Script editor, after a save has created the `related` column — it is
+  deliberately unreachable from `doGet`/`doPost` and never on a trigger, since it rewrites
+  history.
+- The admin import refuses duplicate **ids** as well as tags — the merge hazard once the id is
+  what child rows are keyed by. A file with no id column skips the check entirely.
 
-- **A ONE-TIME id migration exists and is meant to be DELETED after use**:
-  `migrate-asset-ids.mjs` + `migrate-asset-ids-lib.mjs` + `test-migrate-asset-ids.mjs`
-  (Eric's call, 2026-09-09 — explicitly NOT a menu item, since it applies to exactly one
-  situation and would otherwise sit next to "Wipe all data" forever).
-  - **What it is for.** Phase 1 adopted each asset's LABEL as its `id`, which is what made
-    the refactor need no migration — every reference already stored was already a valid id.
-    The cost is a sheet that carried data across v31 ends up with two kinds of id: legacy
-    `BCA0001`-shaped ones, uuids on anything created since. Nothing breaks (an id is opaque
-    everywhere), but once phase 4 drops `label` a legacy id is the only trace of an old
-    label with nothing left to explain it.
-  - **It rewrites 12 key-bearing columns across 8 tabs**, and `AuditLog` is the dangerous
-    one. Every other tab is rebuilt by the app's next save, so a mistake self-corrects;
-    AuditLog is append-only, outlives the assets it describes, and nothing rewrites it — a
-    wrong mapping there is silent, permanent, and indistinguishable from real history.
-    Version history is the only undo.
-  - **Dry run is the DEFAULT**; `--apply` is required. It verifies every reference resolves
-    BEFORE writing anything and refuses the whole migration if any does not.
-  - **A pre-existing dangling reference is carried through unchanged, not "fixed"** — one
-    that pointed nowhere before still points nowhere after, which is honest — but it is
-    reported, since a migration is exactly when someone would want to know.
-  - **An asset whose id is already a uuid is left alone.** Remapping one would churn every
-    reference to it for nothing.
-  - **It bumps the revision counters, and that is not optional**: a browser open through the
-    run holds the old ids and its next save would write them straight back.
-  - **Everyone must be OUT of the app while it runs**, for the same reason.
-  - **Ordering**: it can only run after v31+ is deployed AND one save has written the `id`
-    column — before that there is no column to write into. **`dev` is migrated; `bca` is
-    not, as of 2026-09-09.** v32 is deployed there and the frontend is live, so what remains
-    on `bca` is one save in the app (which fills the `id` column for every row at once, since
-    every save rewrites the whole Assets tab) and sharing that Sheet with the service account
-    — as of 2026-09-09 only `dev` is shared. Check with `node sheet.mjs tenants`, not with
-    this line.
-  - `sheet.mjs` gained `export` on six helpers so this reuses its auth, backup, plain-text
-    write and revision bump rather than re-rolling them. The decision logic lives in the
-    `-lib` half with no network in it, because rehearsing an AuditLog rewrite against a live
-    Sheet is precisely what is being avoided; `test-migrate-asset-ids.mjs` drives it against
-    fixtures. Verified by mutation that dropping AuditLog from the column list, losing
-    `related`'s role suffix, treating a comma-joined list as one key, or remapping an
-    existing uuid all fail the suite.
+### The one-time id migration, meant to be DELETED after use
 
-- **v30 is DEPLOYED, confirmed 2026-09-04** by fetching the `/exec` URL and reading
-  `scriptVersion` back. It makes the admin import read a **tab in the Sheet** instead of
-  Drive. v29 shipped the `DriveApp` version, which failed at runtime — "You do not have
-  permission to call DriveApp.getFilesByName" — because the live manifest declares its
-  scopes explicitly. See "Wipe and import" under Architecture for why that was not just a
-  matter of adding the scope.
-  - So **"BCA Admin > Import inventory" works**. This entry said the opposite, and said it
-    for over a week: it read "v30 is UNDEPLOYED as of 2026-08-26", written the day v30 was
-    still pending and never updated when it landed. **That is the third time a deploy-state
-    line here has gone stale** — the v26 and v28 entries below both record the same failure
-    about themselves, and one of them cost a session real work. The standing instruction is
-    two lines down and is worth obeying: a line in this file is not evidence. One `curl` of
-    the `/exec` answers it in a second, unauthenticated. **Check, don't read.**
-  - Covered by `test-backend-admin.js`, which is the only place it *can* be covered —
-    Sandbox never contacts Apps Script, and this is a menu path a browser cannot reach.
-- **v29 is DEPLOYED, confirmed 2026-08-26** by fetching the `/exec` URL and reading
-  `scriptVersion` back. Superseded by v30 above, which is what is live now; kept for the record.
-- **v28 is DEPLOYED, confirmed 2026-08-26** by fetching the `/exec` URL and reading
-  `scriptVersion` back. It adds the `personIds` column to Assets (see "Users are assets"
-  under Data model), so assignments persist and the users conversion is safe to run
-  against the live sheet.
-  - **This entry said UNDEPLOYED on the same day the deploy landed** — the same failure as
-    the v26 entry two below, which the entry itself calls a standing warning. It is worth
-    stating once more because it keeps happening: a line here recording a deploy state is
-    stale the moment someone deploys, and nothing prompts anyone to update it. One `curl`
-    of the `/exec` URL settles it in a second, unauthenticated. **Check, don't read.**
-- **v27 is DEPLOYED, confirmed 2026-08-26** by fetching the `/exec` URL and reading
-  `scriptVersion` back. It adds the `related` column
-  to AuditLog (see "Audit entries name the OTHER assets they concern" under Data model) and
-  fixes `appendNewRows_` so that column's header actually gets written. Until it's deployed,
-  a `related` value the app sends is dropped on write, so the associated-resource views work
-  in-session and forget on reload — the same shape of window as the pre-v17 `parentId` one.
-  Sandbox is unaffected, as ever, and is where the whole feature was built and verified.
-  - After deploying, run **`backfillAuditIds_()` once from the Apps Script editor** to fill
-    `related` on the existing history. It refuses to run until the `related` column exists,
-    so let one save land first.
-- **v26 is DEPLOYED, confirmed 2026-08-26** by fetching the `/exec` URL and reading
-  `scriptVersion` back (it reports the version even on the `authFailed` response, which is what
-  makes that check possible without a sign-in). It makes the Assets tab's
-  column set dynamic — the fixed `ASSET_FIELDS` plus the custom columns named in Config — which
-  is what makes a custom column's value persist at all (see the Fixed entry in `BUGS.md`), and
-  therefore what unblocks per-type custom fields. Custom column values, including per-type
-  fields, now persist normally.
-  - **This entry said UNDEPLOYED for a day after it went live, and cost a session real work** —
-    a scope was written around "deploy v26 first" that was pure fiction. That is the standing
-    warning a few entries down being proven again: *don't take a hardcoded "the live backend is
-    vN" line here on faith, including this one.* One `curl` of the `/exec` URL settles it in a
-    second, and the answer comes back even unauthenticated. Check before planning around it.
-  - `test-backend-fields.js` in the repo root unit-tests `customColumnKeys_` directly. Worth
-    keeping the habit: Sandbox never contacts Apps Script and the live backend needs a sign-in,
-    so browser testing structurally cannot cover a backend write path.
-- **v25 is DEPLOYED, confirmed 2026-08-25** by fetching the `/exec` URL and reading
-  `scriptVersion` back, and the six columns are gone from the live sheet. It was the first
-  DESTRUCTIVE version: it deleted six columns from the Assets tab that were kept only to keep an earlier
-  change reversible: `roomId`/`buildingId` (replaced by `parentId` in v17), `room`/`building`/
-  `campus` (replaced by `name` in v23) and `itemName` (replaced by `subType` in v24).
-  - **AuditLog is the ONE tab this does not apply to** (see `appendNewRows_`, fixed in v27).
-    It is append-only, so its header row was written once and never again — meaning adding a
-    column to its field list did NOT widen the stored header, and `readTable_` (which keys off
-    the *sheet's* headers) read the new column back as `obj[""]`, colliding every such column
-    onto one key and losing the data. Silently, with `SCRIPT_VERSION` still matching its
-    frontend — the version check cannot see this, because the script really is the version it
-    claims. `appendNewRows_` now widens a narrow stored header (never shrinks it: dropping a
-    column would strand the values under it). Covered by `test-backend-fields.js`, which is the
-    only place it *can* be covered — Sandbox never contacts Apps Script.
-  - **`ASSET_FIELDS` is the schema.** `writeTable_` clears the tab and writes those headers, so
-    dropping a name from that list deletes the column on the next asset-domain save. The sheet's
-    version history is the only way back — that is the whole rollback story now. Treat any future
-    removal from that list the same way: confirm the replacement column is populated on every
-    row, and deploy only after a save has written it.
-  - **What went with them, and can't be rebuilt.** `adoptLegacyParentage()` and
-    `adoptLegacySubType()` are gone (nothing left to adopt), and so is `hasMisadoptedName()` —
-    which matters most. It repaired names written by the broken first backfill by comparing a
-    name against `room`/`building`/`campus`, so with those columns deleted a wrong name can no
-    longer even be *detected*; it's just a name someone has to retype. That is why the removal
-    waited for a save that wrote every repaired name into the sheet.
-  - `LEGACY_NAME_COLUMNS` shrank to `NAME_FROM_FIELD` — one entry, Bulk Item → `subType`, which
-    isn't legacy at all but the live rule that a bulk item is called by its sub-type.
-  - **`panel.html` had to be fixed first.** Three sites there read `room`/`building` with no
-    `name` fallback, unlike the rest of the file. Harmless while the column was still written;
-    deleting it without fixing them would have blanked the location on every QR page.
-  - `MOCK_SNAPSHOT` no longer carries any legacy shape, because there is no longer one to
-    reproduce. Its places hold their names in `name`. Note the *stored column config* it carries
-    still uses the old keys — that's the column config, not the sheet's columns, and
-    `RETIRED_COLUMN_KEYS`/`RENAMED_COLUMN_KEYS` still have to handle it.
-- **v24 (the `typeSettings` Config key and the `subType` column) is live**, superseded by the
-  v25 deploy above — a deployment serves one version of the whole script. Kept for what it
-  records. It bundled two things: the
-  `typeSettings` Config key (per-type overrides from the type editor) and the `subType` column
-  (the Bulk Item sub-type, renamed from `itemName`). Until it's pasted in and a **New version**
-  deploy is created:
-  - Type settings do not persist. `doPost` writes a FIXED list of config keys and drops
-    unknown ones, so a `typeSettings` row would be discarded on every save — the editor works
-    in-session and forgets on reload. Renaming a type is unaffected: that lives in `typesList`,
-    which the live backend already stores.
-  - A Bulk Item's `subType` is dropped on write and read back from `itemName` on every load
-    (`adoptLegacySubType()`), so sub-types *display* correctly but a change to one doesn't
-    survive a refresh. Same shape as the pre-v17 `parentId` window.
-  - Sandbox mode is unaffected either way — it never touches the backend.
-  - No migration script: every save rewrites the whole Assets tab, so the first asset-domain
-    save after the deploy fills `subType` in for every bulk item at once. `itemName` is kept and
-    still written, so the deploy is reversible; clearing it is a separate later step.
-- **The backend was v23 (the `name` field), confirmed deployed on 2026-08-25** by fetching the
-  `/exec` URL and reading `scriptVersion` back — which is the check the standing warning below
-  asks for, not a line taken on faith. It supersedes every "UNDEPLOYED" note that used to sit
-  here: v23 being live means v18 through v22 are too, since a deployment serves one version of
-  the whole script.
-  - This corrects two notes that said the opposite. `NAME_FIELD_PLAN.md` contradicted *itself*
-    (its status header said undeployed, its Sequence section said deployed), and the entry here
-    said undeployed while admitting it had not checked. Both were written the day the deploy
-    happened, which is exactly when such a line goes stale.
-  - So `name` persists normally now. `adoptLegacyNames()` still runs and still matters — it is
-    what names any row last written before the deploy, until a save rewrites it. The legacy
-    `room`/`building`/`campus` columns stay readable, so the deploy remains reversible;
-    clearing them is a separate later step that has NOT been done.
-- **v18 (Google Sign-In) is live** — it predates the v23 deploy confirmed above, so
-  authentication is in force and the inventory is no longer served to anyone with the URL.
-  The rest of this entry is kept because the guard it describes is still load-bearing.
-  - **The mismatch was nearly destructive, and the guard against it is load-bearing.** v18's
-    `index.html` POSTs `op:"read"`, which a v17 backend doesn't recognise and treats as an
-    ordinary save. A read payload carries no assets, and `_dirty` absent means "rewrite
-    everything" — so the first load of the new frontend against the old backend would have
-    blanked the Assets tab and every child tab with it. `loadData()` therefore sends
-    `_dirty: { assets:false, config:false, breakerTypes:false }` explicitly. Every write
-    branch in `doPost` is gated on one of those flags, the audit append receives an empty
-    list, and the Config block is skipped because no domain was written — so an old backend
-    writes *nothing* and the load fails cleanly on "Malformed response" instead. Do not
-    remove that `_dirty` from the read payload; v18 itself never reads it.
-  - Deploy the backend and the frontend together. Everything below about v17 is history.
-- **The backend was v17, a single COMBINED version, confirmed deployed on
-  2026-08-21** (by fetching the `/exec` URL and reading `scriptVersion` back — not by trusting
-  this line; see the standing warning about that a few paragraphs down, which applies to this
-  sentence exactly as much as to the ones it replaced). v14 (the public
-  QR panel view), v15 (`parentId`) and v16 (`campus`) were each pending on their own branch and
-  each called itself the next version. They edit the same `doGet`, so pasting one into the Apps
-  Script editor after the other would have silently erased the first — and because each also
-  bumped `FRONTEND_SCRIPT_VERSION` to its own string, the "Backend outdated" banner would have
-  reported a *match* while the deployed script was missing one of the two changes. That's the
-  exact failure the version check exists to catch, so the numbering couldn't be left to sort
-  itself out.
-  They were merged rather than renumbered (2026-08-20), because renumbering alone would have
-  left the same trap in a different place. `panel.html`, `panel-qr-sheet.html`, the
-  `PUBLIC_*_FIELDS` whitelists, `publicPanelPayload_`, `respond_` and the panel QR button all
-  live here now; the sibling worktree `.claude/worktrees/practical-dhawan-c50573` still holds
-  the original uncommitted v14 and is now **superseded — don't merge it**, it would reintroduce
-  the pre-parent-chain version of the same code.
-  The merge was not a concatenation: the public projection resolved a panel's Room and Building
-  by reading `roomId`/`buildingId` directly, at four sites plus the whitelist. Those are what
-  `parentId` replaced, so left alone the QR page would have shown a blank location the moment
-  the sheet migrated. It now walks the chain (`effectiveParentId_`/`nearestAncestorRow_`, with
-  the legacy pair as a fallback so it's right before AND after migration), and the same walk was
-  applied to `panel.html`'s local-sandbox projection and `panel-qr-sheet.html`'s label text.
-  Don't take a hardcoded "the live backend is vN" line here on
-  faith, including this one: it goes stale the moment someone redeploys and nothing prompts
-  anyone to update it, which has already sent a wrong "you're two versions behind" down a
-  branch once. Check instead — the app's "Backend outdated" banner names both versions in its
-  tooltip, or fetch the deployed `/exec` URL and read `scriptVersion` in the raw JSON. (For
-  what it's worth as a dated data point rather than a standing claim: v17 — and therefore
-  everything before it — was confirmed live on 2026-08-21, superseding an earlier note that
-  said the same of v12 on 2026-08-16.)
-  - v17 bundles three things: the `campus` column (the Campus type's name field, purely
-    additive — a sheet without it round-trips Campus rows with a blank name), the `?panel=`
-    public read, and `parentId` on `ASSET_FIELDS` — see "The parent chain" under Data model, and
-    `PARENT_CHILD_MIGRATION.md` for the deploy/migration sequence. Now that it's deployed,
-    `parentId` persists normally. Before the deploy the live backend had no such column, so a
-    `parentId` the app sent was dropped on write and the app fell back to reading
-    `roomId`/`buildingId` on every load (`adoptLegacyParentage()`) — which meant it *worked*,
-    correctly, it just couldn't persist a move. That fallback still runs, and still matters:
-    it's what resolves any row last written before the deploy, until a save rewrites it. The old `roomId`/
-    `buildingId` columns are deliberately kept and still written, so v17 is reversible and
-    un-migrated rows keep resolving. **No migration script exists or is needed**: every save
-    rewrites the whole Assets tab, so the first asset-domain save after deploying fills
-    `parentId` in for every asset at once. Clearing the two legacy columns is a separate,
-    later, destructive step that has NOT been done — it's the one that closes the rollback.
-  - v13 adds `panelLabel` to `CIRCUIT_FIELDS` and the `unassignedCircuits` array on panel
-    assets — see "A circuit can belong to a panel without belonging to a breaker" under Data
-    model. Live since the v17 deploy (v17 supersedes it). While it was pending, the live backend
-    had no `panelLabel` column: circuits attached to breakers kept round-tripping exactly as
-    before, but that backend's `doPost` only walked `a.breakers`, so an asset's
-    `unassignedCircuits` were silently **not written at all** and disappeared on the next reload.
-    Sandbox mode was unaffected — it never touches the backend. No data migration was needed:
-    existing circuit rows all have a `breakerId` and get their `panelLabel` filled in on the
-    next save.
-  - v12 added the per-domain revision counters (`rev_assets`/`rev_config`/`rev_breakerTypes`
-    in Config) behind the optimistic-concurrency check — see "Optimistic concurrency" under
-    Architecture. Deployed 2026-08-16 and confirmed by a write coming back with a bumped
-    `revisions` object, which only a v12+ backend returns — so conflict detection is real
-    live behavior, not pending, and the three `rev_*` rows are seeded in Config.
-  - Already live from the v11 deploy, both confirmed against the live payload: `Circuit.notes`
-    round-trips (the Circuits tab was rewritten with a `notes` column on the first save after
-    the deploy, and the legacy `description` column is gone — its old values were dropped at
-    that rewrite, intended, since nothing had read them since the frontend collapsed
-    label/description into `label`), and doGet returns `nextAssetNumber`. That counter reads
-    116 on the live Sheet as of 2026-09-08 — this entry said it "still reads `null` because no
-    asset has been created since the deploy", which stopped being true the first time anyone
-    added one. `peekAssetNumber()` returning `max(counter, derived)` is what made the stale
-    value harmless, and is why nobody noticed.
-- **The live Sheet's schema is current, verified 2026-09-08** by reading the Assets tab
-  directly (`node sheet.mjs tabs bca`) rather than by trusting a line here. Its header row is
-  exactly `ASSET_FIELDS`: `parentId` is present and populated on 135 of 161 rows, and not one
-  of the six columns v25 deleted (`roomId`/`buildingId`/`room`/`building`/`campus`/`itemName`)
-  survives. So the parent chain is fully migrated and the rollback v25 closed is closed. No
-  custom columns exist either, which is why the tab is the bare 20.
-  - **This entry said the opposite until 2026-09-08** — that v15 had "NOT been deployed or
-    migrated" and live assets "still carry `roomId`/`buildingId` and no `parentId`". It was
-    written on 2026-08-13, was true then, and was never revisited, so it outlived ten
-    backend versions. It is the same failure the deploy-state entries above record about
-    themselves, in the same section that already warns about it twice — but about the SHEET
-    rather than the script, which is worse, because there is no `curl` that answers it and
-    no banner that catches it. `node sheet.mjs tabs <tenant>` is the check.
-- **There are no Electrical Panel assets on the live Sheet, and the Breakers, Circuits and
-  BreakerTypes tabs are all empty** (verified 2026-09-08). This file previously described
-  four real panels — BCA0082 as a 32-slot main with sub-panel feeds to BCA0083/84/85, each
-  sized to its building's room count, plus a `BreakerTypes` tab seeded with the 5 catalog
-  types — and a great deal of the Data model section is still written as though that data is
-  sitting there: the printed door card, the panel diagram, the "fed from" banner, the
-  same-panel Move Circuit restriction.
-  - **The FEATURE is real and the code is all there; the DATA is not.** Nothing below about
-    how panels work is wrong — it just describes behaviour with no live rows to exercise it.
-  - **`MOCK_SNAPSHOT` is where panel data lives**, and deliberately: it carries the full
-    Panel/Breaker/Circuit structure (5 panels with populated `breakers` arrays). So Sandbox
-    mode is the only place panel work can be tried end to end, which inverts the usual
-    relationship — for this one area the fixture is richer than production, not a trimmed
-    subset of it. Seed the dev tenant by hand if a real backend write path needs exercising.
-- Mitsubishi mini-split sample data exists on the live Sheet: **18 "Mini Split" indoor units
-  across 19 Rooms**, with seeded maintenance items (Monthly filter clean + Annual coil clean).
-  - **The 4 "Condenser" outdoor units this entry used to claim are not there** — the live
-    Sheet has zero, against 6 Buildings. There is one "Evaporative Cooler" instead, a
-    user-created type whose id is a generated UUID (`179b3e3f-…`), which is the id scheme
-    working exactly as designed: it resolves through `typesList` and needs no registry entry.
-  - Sandbox is again the richer copy — `MOCK_SNAPSHOT` still carries Condensers, which is
-    what keeps the `parentTypes: ["Building"]` case in "The parent chain" exercisable.
+`migrate-asset-ids.mjs` + `migrate-asset-ids-lib.mjs` + `test-migrate-asset-ids.mjs` (Eric's
+call, 2026-09-09 — explicitly NOT a menu item, since it applies to exactly one situation and
+would otherwise sit next to "Wipe all data" forever).
+
+- **What it is for.** Adopting labels as ids is what made the refactor need no migration, and the
+  cost is that a sheet carrying data across that change ends up with two kinds of id: legacy
+  `BCA0001`-shaped ones, uuids on anything created since. Nothing breaks — an id is opaque
+  everywhere — but once `label` is dropped, a legacy id is the only trace of an old label with
+  nothing left to explain it.
+- **It rewrites 12 key-bearing columns across 8 tabs, and `AuditLog` is the dangerous one.** Every
+  other tab is rebuilt by the app's next save, so a mistake self-corrects; AuditLog is
+  append-only, outlives the assets it describes, and nothing rewrites it — a wrong mapping there
+  is silent, permanent, and indistinguishable from real history. Version history is the only undo.
+- **Dry run is the DEFAULT**; `--apply` is required. It verifies every reference resolves BEFORE
+  writing anything and refuses the whole migration if any does not.
+- **A pre-existing dangling reference is carried through unchanged, not "fixed"** — one that
+  pointed nowhere before still points nowhere after, which is honest — but it is reported, since
+  a migration is exactly when someone would want to know.
+- **An asset whose id is already a uuid is left alone.** Remapping one would churn every reference
+  to it for nothing.
+- **It bumps the revision counters, and that is not optional**: a browser open through the run
+  holds the old ids and its next save would write them straight back. **Everyone must be OUT of
+  the app while it runs**, for the same reason.
+- **Ordering**: it can only run against a tenant whose backend has the `id` column AND where one
+  save has written into it, and whose Sheet is shared with the service account. Which tenants
+  those are is `node sheet.mjs tenants` and `node deploy.mjs --status`, not a line here.
+- `sheet.mjs` gained `export` on six helpers so this reuses its auth, backup, plain-text write and
+  revision bump rather than re-rolling them. The decision logic lives in the `-lib` half with no
+  network in it, because rehearsing an AuditLog rewrite against a live Sheet is precisely what is
+  being avoided; `test-migrate-asset-ids.mjs` drives it against fixtures. Verified by mutation
+  that dropping AuditLog from the column list, losing `related`'s role suffix, treating a
+  comma-joined list as one key, or remapping an existing uuid all fail the suite.
+
+### What is actually on the live Sheets
+
+**Read this as a shape, not as a fact** — `node sheet.mjs tabs <tenant>` is the check, and the
+one time this section stated live data as fact it was wrong for ten backend versions.
+
+- **The panel feature has no live data.** The Breakers, Circuits and BreakerTypes tabs have been
+  empty and there have been no Electrical Panel assets, while a great deal of the Data model
+  section is written as though four real panels are sitting there — the printed door card, the
+  panel diagram, the "fed from" banner, the same-panel Move Circuit restriction. **The FEATURE is
+  real and the code is all there; the DATA is not.**
+  - **`MOCK_SNAPSHOT` is where panel data lives**, deliberately: it carries the full
+    Panel/Breaker/Circuit structure with populated `breakers` arrays. So Sandbox is the only place
+    panel work can be tried end to end, which inverts the usual relationship — for this one area
+    the fixture is richer than production rather than a trimmed subset of it. Seed the dev tenant
+    by hand if a real backend write path needs exercising.
+- **Mini-split sample data is the live inventory's own oddity**: Mitsubishi indoor units across
+  most Rooms, with seeded maintenance items (Monthly filter clean + Annual coil clean). Sandbox is
+  again the richer copy — `MOCK_SNAPSHOT` still carries Condensers, which is what keeps the
+  `parentTypes: ["Building"]` case in "The parent chain" exercisable against something.
+- **A user-created type's id is a generated UUID** and resolves through `typesList` with no
+  registry entry — the id scheme working exactly as designed. There is at least one on the live
+  sheet.
+
 - ~~No auth beyond the cosmetic name tag~~ — **fixed in v18**, see Authentication under
   Architecture. Worth recording why it mattered more than it looked: the GitHub repo is
   **public**, so `SHEET_API_URL` in `index.html` was published the whole time. The

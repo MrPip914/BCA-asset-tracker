@@ -199,5 +199,48 @@ check('only cloudshell-deploy.md carries the main-or-branch procedure', (() => {
   return problems;
 })());
 
+// ------------------------------------------- 5. no doc states what is deployed
+
+// A "vNN is DEPLOYED" line is stale the moment someone deploys, and nothing prompts anyone
+// to update it. It went wrong four times in CLAUDE.md, and one of those cost a session real
+// work — a scope written around "deploy v26 first" that was pure fiction. `--status` answers
+// it per tenant in one command and cannot go stale, so the claim has no reason to exist.
+//
+// Narrating HISTORY is still fine ("v22 was once pushed over a live v24"), and so is quoting
+// the tool ("bca is now v30"). What is banned is the present-tense claim about live state.
+// The ban is on the PRESENT-TENSE claim, plus the "confirmed deployed" idiom this file
+// used twelve times. Past-tense narration of an incident is history and stays allowed:
+// "v22 was deployed over a live v24" is exactly the sort of thing worth keeping.
+const STATE_CLAIMS = [
+  // "v33 is PENDING A DEPLOY", "v30 is DEPLOYED", "v26 is UNDEPLOYED"
+  /\bv\d+\s+is\s+(?:still\s+)?(?:DEPLOYED|UNDEPLOYED|PENDING|deployed|undeployed|pending)\b/,
+  // "the live backend is v26"
+  /\b(?:live\s+)?backend\s+is\s+v\d+\b/i,
+  // "confirmed deployed on 2026-08-25", "confirmed live 2026-09-09"
+  /\bconfirmed\s+(?:deployed|live)\b/i,
+  // "is PENDING A DEPLOY"
+  /\bis\s+PENDING\s+A\s+DEPLOY\b/i,
+];
+
+check('no doc claims what version is live (run --status instead)', (() => {
+  const problems = [];
+  for (const doc of DOCS) {
+    const text = read(doc);
+    text.split('\n').forEach((line, i) => {
+      for (const re of STATE_CLAIMS) {
+        const m = line.match(re);
+        if (m) {
+          problems.push(
+            `${doc}:${i + 1} — states live deploy state: ${JSON.stringify(m[0])}. ` +
+            `Keep the rule the version taught; get the state from \`node deploy.mjs --status\`.`
+          );
+          break;
+        }
+      }
+    });
+  }
+  return problems;
+})());
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
