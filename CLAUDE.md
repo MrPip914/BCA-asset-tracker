@@ -25,39 +25,86 @@ to any session you spawn; they inherit the same tendency.
 **Deploying the backend is Eric's job, done from his phone, and you hand him this
 verbatim — never the Apps Script editor steps.** `AssetTrackerSync.gs` changes are dead
 until deployed, so whenever you change that file (or notice `SCRIPT_VERSION` here is ahead
-of the live `/exec`), end your response with exactly this, filled in:
+of the live `/exec`), end your response with a deploy block.
 
-> **Deploy v<NN>** — open this, then tap the commands in Step 3:
+**ASK WHICH BRANCH THE WORK IS ON FIRST, AND SEND EXACTLY ONE BLOCK.** The two below are
+alternatives, not a sequence. On 2026-09-10 both were pasted, main-first, for work that
+lived on a branch — Eric followed them in order, deployed `main`, and got a downgrade
+refusal. He did nothing wrong; the instructions were wrong. If the change is not in
+`origin/main`, the second block is the only correct one.
+
+**A. The work is merged into `main`:**
+
+> **Deploy v<NN>** — open this, then tap the commands in Step 3a:
 >
 > https://shell.cloud.google.com/cloudshell/open?cloudshell_git_repo=https://github.com/MrPip914/BCA-asset-tracker&cloudshell_tutorial=cloudshell-deploy.md
 >
-> Try it on dev first: `node deploy.mjs dev`. Then the school: `node deploy.mjs bca`
-> (or `node deploy.mjs --all` for every tenant).
+> Try it on dev first:
+> `git checkout -B main origin/main && git pull --ff-only && node deploy.mjs dev`
+>
+> Then the school: `node deploy.mjs bca` (or `node deploy.mjs --all` for every tenant).
 >
 > Look for `✓ <tenant> is now v<NN>. Deploy confirmed.` as the last line. Anything
 > starting with `✗` means it did not deploy, and says why.
+
+**B. The work is on a branch (the normal case for anything just built):**
+
+> **Deploy v<NN> to the dev tenant** — this is a branch deploy, so it does NOT use the
+> Step 3a buttons.
+>
+> https://shell.cloud.google.com/cloudshell/open?cloudshell_git_repo=https://github.com/MrPip914/BCA-asset-tracker&cloudshell_tutorial=cloudshell-deploy.md
+>
+> Then tap the terminal and run:
+>
+> `git fetch origin && git checkout -B <branch> origin/<branch> && node deploy.mjs dev`
+>
+> Check line 2 reads `Deploying v<NN> from branch "<branch>" to "dev"`. If it says an
+> older version or `branch "main"`, stop — the checkout did not take.
+>
+> Success is `✓ dev is now v<NN>. Deploy confirmed.` That is the dev tenant's own Sheet —
+> throwaway data, nothing a school can see. To undo:
+> `git checkout -B main origin/main && ALLOW_DOWNGRADE=1 node deploy.mjs dev`
+
+**Do not put a school command in the same response as an unverified branch deploy.** Wait
+for him to confirm dev, then send `node deploy.mjs bca` on its own.
+
+**Releasing to a school is BACKEND FIRST, MERGE SECOND, and that ordering is not a
+preference.** The frontend ships from `main` to every tenant at once while backends go one
+at a time, so merging first puts a new frontend writing new columns in front of a school
+whose backend still drops them — written, then silently gone. Deploy the branch to dev,
+then to the school, then merge. Between the last two the school shows the "Backend
+outdated" banner, which is correct and which the merge clears.
 
 **Name the tenant. A bare `node deploy.mjs` now REFUSES** and lists them, because there is
 more than one and guessing would deploy to a school instead of to dev. `node deploy.mjs
 --status` says what each tenant is running — use it instead of stating a live version from
 memory or from a line in this file.
 
-**To deploy a BRANCH** (testing a backend change before merging — the normal case for
-unmerged work, since Sandbox cannot cover a write path), send it to **dev**, which exists
-for exactly this:
+**Deploying a BRANCH is block B above** — testing a backend change before merging is the
+normal case for unmerged work, since Sandbox cannot cover a write path. The command is
+written out once, there, deliberately: this section used to carry a second copy, and having
+the main procedure and the branch procedure in two places is what let both get pasted
+together in the wrong order.
 
-> Open the link above, then tap the terminal and run:
->
-> `git fetch origin && git checkout -B <branch> origin/<branch> && node deploy.mjs dev`
->
-> That is the dev tenant's own Sheet — throwaway data, nothing a school can see. To undo:
-> `git checkout -B main origin/main && ALLOW_DOWNGRADE=1 node deploy.mjs dev`.
-
-Only send a branch to a school's tenant if he asks for that specifically, and then say
+Only send a branch to a school's tenant if he asks for that specifically, or as step 2 of
+the backend-first release ordering above, and then say
 plainly that it is their live data behind it. **This used to be the only option** — the
 warning that a branch deploy is testing in production is kept below because it is still
 true of a school's tenant, but it is no longer the default, and telling him to test on
 production when dev exists would be wrong.
+
+**Four files used to carry this procedure and two of them went stale**, which is what
+made a deploy fail on 2026-09-10. The arrangement now, and `test-deploy-docs.js` enforces
+it: `cloudshell-deploy.md` owns the PROCEDURE (its Step 3 is the main-or-branch choice);
+this file owns the two BLOCKS above, which are what Eric is handed; `DEPLOY.md` is
+reference and rationale only; `/deploy` generates a block and carries no strings of its
+own. **And never write down what is deployed** — `node deploy.mjs --status` answers it per
+tenant in one command; the same test fails the build on a "vNN is DEPLOYED" line, because
+that claim went stale here four separate times and once cost a session real work.
+**Never restate what `deploy.mjs` prints** — the slash command spent a month naming
+a success line the tool has never printed, so a failed deploy read exactly like a good
+one. Quote the tool, or point at it. If a fifth file ever needs deploy text, add it to
+that test's `DOCS` list the same day.
 
 That link opens Google Cloud Shell, clones this repo, and shows `cloudshell-deploy.md` as
 a walkthrough where every command has a tap-to-run button. Eric's sign-in and Script ID
@@ -418,6 +465,17 @@ onboard one.
     user is already standing on is replaced rather than stacked on itself. `?asset=` still
     matches an id OR a label, permanently, and so does a pushed entry — a link pasted in or
     an entry from an older build can carry either.
+  - **A deep-link arrival keeps its URL EXACTLY as it arrived** — `replaceHistory` seeds
+    that entry's history *state* but passes no URL, and records the tab AS REQUESTED
+    rather than as resolved. Found when merging this work onto the Maintenance/photos
+    branch, which is the only place the two features meet: `?tab=changes` resolves to the
+    Maintenance tab's History SUB-tab, and no URL param names a sub-tab, so normalising the
+    address to `?tab=maintenance` would land a RELOAD of that link on Scheduled instead.
+    Links outlive the layout that produced them — which is the whole reason `"changes"` is
+    still accepted — so the one entry that *is* a link is the last place to tidy it away.
+    The tab the user clicks still writes the resolved tab, because they are standing there
+    rather than following a link. **The maintenance sub-tab is still not in the URL at
+    all**; giving it one is the real fix if sub-tab links are ever wanted.
   - **The "Copy link" button (panel layout view only) is now largely redundant** — the address
     bar holds the same URL for every asset, not just panels. Kept because it copies without
     the user having to find the address bar on a phone, which is where a panel gets looked at.
@@ -788,6 +846,36 @@ parent, the same cascade the id migration removed for Rooms.
 - Names needn't be unique for correctness, but add and rename both refuse a duplicate: two
   types both reading "Printer" in the picker is a trap for whoever is choosing.
 
+**A type is filed under a CATEGORY, and every list of types groups by it** (backend v33).
+`typeCategories` is its own Config key holding `[{ id, name }]` with **array order as display
+order**; a type points at one through `typeSettings[id].categoryId`.
+- **Eric chose the key over the free version, knowing it cost a deploy.** The cheap version
+  was a category NAME on each type with the list derived from whoever names one — no backend
+  change at all. What it cannot do is the two things a category list is for: it can only be
+  ordered by something else (the order types happen to appear in), and it cannot hold a
+  category nobody has filed a type under yet, so you could never build the scheme and then
+  sort types into it. **The argument that made the cheap version tempting is still worth
+  keeping**, because it is reusable: the store-an-id rule is about names held in several
+  places written at several times, and a category has exactly one holder (`typeSettings`, one
+  blob rewritten atomically), so a name there would have been safe — just not capable.
+- **A built-in category's id IS its own name** ("Places"), the same trick `typesList` and the
+  asset key refactor used: every shipped registry entry already names a valid id, so this
+  needed no seeding step and no migration. `ensureShippedCategories()` tops a stored list up
+  with any category added in a later release, at its shipped position rather than appended —
+  the lesson `ensureLockedTypes` learned when User landed under `Other`.
+- **A DANGLING `categoryId` is not an error, it is Uncategorized.** Deleting a category does
+  not rewrite the types that named it, so deletion needs no in-use block — only a
+  confirmation naming how many types fall back. Same permissive-storage stance as `removeType`
+  and `parentageProblem`. **Renaming is a one-row edit** with nothing to keep in sync, which
+  is the entire point of storing the id.
+- **`Other` ships with no category on purpose** — the catch-all belongs in Uncategorized, and
+  it keeps that bucket exercised in the shipped state.
+- **`SelectionModal` and `ColumnFilterModal` take an OPTIONAL `groupForOption`** and render
+  flat when it's absent, which is every caller but the Type picker and the Type column filter.
+  Forking either into a grouped twin is how the app would end up with two dropdown behaviours
+  — the thing `SelectionModal` exists to prevent. Both callers must hand it options already
+  sorted into category runs, or one heading appears several times down the list.
+
 **Per-type settings are a user-editable overlay on `TYPE_REGISTRY`** (the type editor,
 2026-08-25). The registry is the shipped default and is never written to; overrides live in
 Config under `typeSettings` keyed by type id (backend v24) and are merged on top at read time
@@ -811,6 +899,104 @@ default" is just deleting it.
   editor stays one commit and a cancelled edit leaves no stray column. They're created hidden —
   a field belonging to one type would otherwise add a mostly-empty column to everyone's table.
   Deleting one stays in the Columns menu, which already owns that destructive action.
+  - **Adding one is a DIALOG, opened by an "Add field" button** (2026-09-10). It was an
+    always-open text box under the field list, which sat there on every visit whether or not
+    anyone wanted a field — and left the field's KIND, the one thing that cannot be changed
+    later, with nowhere to be chosen except a row that did not exist yet. The dialog is where
+    a field is invented, so it holds the name, the kind, and a choice list when the kind is
+    one; the row list then shows every field's kind as plain text and offers no control at all.
+  - **It is rendered INSIDE the type-manager modal's tree, and that is what makes the layering
+    work.** The modal establishes a stacking context, so anything nested paints above its
+    content whatever the z-index, and the kind picker nested one deeper paints above the
+    dialog in turn. A sibling overlay would have had to out-number the modal and would still
+    have lost to its own picker.
+  - **A blank or duplicate name is REPORTED, not silently ignored.** The old inline version
+    `return`ed on both, so the button did nothing and said nothing.
+
+**Three things a type now decides that it didn't before** (backend **v33**, 2026-09-09 —
+see `TYPE_MANAGEMENT_PLAN.md`): which **category** it is filed under, which of its fields are
+**required**, and — a per-column question rather than a per-type one — what **kind of value**
+each field holds. Two of the three needed no backend change at all, and the exception is the
+one worth remembering.
+
+- **A column's `dataType` and a type's `requiredFields` cost NOTHING to add**, because
+  `doPost` stringifies the whole `columns` and `typeSettings` blobs and the only thing the
+  backend reads inside a column object is `customColumnKeys_`, which touches `custom` and
+  `key`. **A new Config KEY is the one thing that blob-freedom does not cover** — `doPost`
+  writes a fixed key list and silently drops the rest — which is exactly what categories
+  needed, and why that one phase cost a version bump and a deploy to every tenant. Reuse
+  that test for any future per-field or per-type setting: a property on an existing blob is
+  free, a key of its own is a release.
+- **The data type is PER COLUMN, resolved at READ time** (`columnDataType()`): the column's
+  own override, then `DEFAULT_COLUMN_DATA_TYPES`, then text. Per column because one key
+  holding a date on Computers and a number on TVs breaks sorting, filtering and the export
+  for a flexibility nobody asked for — a type decides *whether* it has a field, the column
+  decides what that field *holds*, and the editor says so on screen because changing it from
+  inside one type's editor changes every other type's form. Read-time because the column
+  migration only ever ADDS newly-introduced columns and never updates the properties of
+  stored ones, so a load-time backfill would bake today's defaults into every sheet forever.
+  `applyFieldKind` stores an override only when it DIFFERS from the shipped default and
+  removes it when it returns — "same as shipped" is never a stored fact.
+  - **CHOSEN AT CREATION, FIXED AFTERWARDS** (Eric's call, 2026-09-10). The kind is picked
+    where the field is born — the Columns menu's "add column", or a pending row in the type
+    editor — and every existing field then shows its kind as plain text with no control.
+    `saveTypeSettings` writes a kind only for a column it is inventing in that same save, so
+    the rule is structural and not merely a hidden picker.
+    - **This removed a problem rather than managing it.** A kind change could not convert
+      stored values (a full asset rewrite triggered by a settings edit, with nowhere to put
+      anything unparseable), so it left them intact but *undisplayable*: a number input
+      cannot render `MOCK-CMP-001`, so the form showed the field EMPTY and then refused to
+      save, naming a value that was not on screen. Across forty assets that was forty
+      unsaveable records complaining about blank fields. **If a different kind is needed,
+      the answer is a different field.**
+    - A `select` column's CHOICES follow the same rule and for the same reason — narrowing
+      the list under stored data leaves assets holding a value the field no longer offers.
+      They are shown read-only on an existing field, since "Choice list" alone says nothing
+      about what the field accepts.
+    - `validateColumnValue` stays regardless: data can still arrive out of step from the
+      admin import, a direct Sheet edit, or a hand-edited Config blob.
+  - **This was not purely additive.** The app's entire data-type awareness was
+    `type={c.key === "totalQuantity" ? "number" : undefined}` at two call sites, which is why
+    `purchaseDate` and `warrantyUntil` were plain text boxes for the app's whole life. The
+    general mechanism replaced that and gave them real date pickers on the way past.
+  - **The vocabulary is `ChildEntityTable`'s**, character for character —
+    text/textarea/number/date/select — so the app has one answer to "what kind of field is
+    this". `multiselect` is deliberately absent: `person`, `peripherals` and a circuit's
+    rooms each have a bespoke component with its own managed list, and a generic multiselect
+    column would be a fourth thing that looks like them and behaves differently.
+    `BESPOKE_FORM_FIELDS` names that set once, so the render and the save-time validation
+    cannot drift — and the editor shows "Built in" rather than a kind picker for them, since
+    offering a setting that does nothing is worse than offering none.
+- **Required is PER TYPE, and that is the opposite call from `restricted`** — a flag on the
+  column. The two look alike and are not: restriction HAD to live on the column, because
+  deriving it from whoever claims a field means unticking it from its last owner turns it
+  into a common field and splashes it across every type. Required is derived from nothing, so
+  per-type is simply the more expressive reading. **Nothing is required as shipped.**
+  - **Enforced on EVERY save, add and edit** (Eric's call). It is the only way a new rule
+    reaches the assets already on the sheet, and a rule you can dodge by editing something
+    else is not a rule. The cost is that someone who opened an old asset to fix a typo gets
+    stopped; the whole mitigation is that the message names the fields *and* the type.
+  - **At the FORM and nowhere else**, same posture as every other guard here — so existing
+    assets can violate a new rule, and `duplicateAsset`, `convertUsersToAssets`, the bulk
+    toolbar actions and the Sheet's admin import all bypass it.
+  - **Emptiness, never falsiness**: `0` and `"0"` are filled in. And `fieldValueIsEmpty` knows
+    the three fields that don't store a plain string — the parent is `parentId`, the people
+    are `personIds` or the legacy slash-joined `person`. Miss that fallback and every asset on
+    an un-converted sheet reads as unassigned, so a rule about User refuses every save.
+  - **A rule naming a field the type doesn't have is ignored at READ time**, not only pruned
+    on save: a settings blob can be hand-edited or written by an older build, and a rule about
+    an invisible field would refuse every save with nothing on screen to fix. Structural
+    fields go the same way, which is also what keeps **"Parent is required" out of scope** —
+    Unassigned is a deliberate state, not a gap to nag about.
+- **`draft.formError` + `draft.errorFields` replaced `draft.parentError`.** It was already
+  carrying the duplicate-tag message as well as the parent one, and data-type and required
+  errors were the third and fourth occupants. `errorFields` is what the rename made necessary:
+  one channel carrying errors about several fields can't say which input to outline.
+  **The message renders in exactly ONE place** — beside the field when it names one field
+  that is on this form, at form level otherwise. The first version rendered both and printed
+  the same sentence twice; each render site read correctly on its own, which is why only the
+  browser caught it. The add form's separate `addError` state is gone with it.
+
 - **What the editor can't do, and why.** An icon is stored as a NAME from a curated map
   (`TYPE_ICON_CHOICES`), since a React component can't survive JSON; an unknown name falls back
   to the shipped icon. A ticked field enters `onlyFields` only when it is *already* restricted
@@ -1435,6 +1621,196 @@ tab itself in red when anything's overdue. Adding an item isn't separately audit
 own `at`/`by` is enough); marking done, editing, or deleting one is, since those mutate
 or remove data with no other history trail.
 
+**"Change type" reads "Work type", and the button is "Log work" (2026-09-10).** LABELS ONLY.
+The stored field is still `changeType`, the managed list is still `changeTypes`, and the sheet
+column is unchanged -- renaming any of those is a schema change that would drop every existing
+value on the next write, and it would buy nothing, since the label people read is the whole
+point of the rename. Anything user-visible moved: the field, its picker title, its gear
+("Manage work types"), the manager modal and its placeholder, the completion modal's copy of
+the same field, the delete confirmation, and the Excel export's column header.
+- Sentence case ("Log work", not "Log Work") to match every other button in the app -- "Add
+  task", "Log completion", "Add comment".
+- The edit dialog reads "Edit work entry" rather than "Edit work", which would read as a verb.
+
+**Add and Log change are DIALOGS, and a history entry is editable (2026-09-10).** Both
+sub-tabs used to open with a permanently expanded form pinned above their list, which pushed
+the schedules and the history — the things the tab exists to show — below the fold on every
+visit, including the many where nothing was being added. They are now an **Add task** and a
+**Log change** button.
+- **One dialog serves add AND edit for a change** (`changeModal` = `{ mode: "add" }` or
+  `{ mode: "edit", idx }`, with `changeDraft` holding the fields either way). A separate edit
+  form would be a second copy of the same fields to keep in step, which this file has been
+  bitten by before.
+- **Both openers reseed the draft on OPEN**, not only on close, so a cancelled edit cannot
+  leave half-typed values waiting in the next dialog — the same rule entering breaker edit
+  mode follows.
+- **Editing a change is AUDITED, field by field**, exactly as editing a maintenance item is
+  and for the same stated reason: it rewrites a record and, unlike adding one, leaves no other
+  trail of what it used to say. A save that changed nothing writes no snapshot and no audit
+  row.
+- **`at` and `by` are never touched by an edit.** They record who first entered this and when,
+  which stays true after a correction; the audit row records who changed it. Editing a typo
+  must not rewrite provenance.
+- **An edit does NOT restamp a linked schedule's `lastPerformed`,** even when the performed
+  date is edited, and the *Mark this task performed* checkbox is **hidden in edit mode**.
+  Completing is an act with its own opt-in; re-applying it every time someone fixed a typo
+  would silently move a due date. `openChangeEdit` therefore never pre-ticks it.
+- `openChangeEdit` seeds the date through **`changePerformedOn(ch)`**, not `ch.performedOn` —
+  a pre-v34 entry has no such field and seeding blank would blank a real date on save.
+- **The maintenance ADD is a dialog; its inline edit was left alone.** Not an oversight —
+  only add was asked for, and the two are different flows. Worth revisiting together.
+**The site-wide Maintenance tab mirrors an asset's (2026-09-10):** a `HierarchyNav` scope
+filter, then **Scheduled** / **History** sub-tabs, then Add task / Log work.
+- **It shares `scopeId` with the Assets tab, deliberately.** Narrowing to a building and
+  switching tabs keeps you where you were; a second scope would silently widen the view and
+  there would be no way to tell which one was in force. The scope now filters Scheduled too,
+  which it did not before.
+- **History is `allWorkRows`** — every change entry on every active asset, flattened the way
+  `allMaintenanceRows` flattens schedules, defaulting to most-recently-performed first (the
+  mirror of Scheduled's due-soonest). Its row `idx` is the entry's position in ITS OWN
+  asset's `changes` array, never a position in the flattened sorted list — that would address
+  the wrong entry the moment anything is re-sorted.
+- **A History row opens that asset's History**, via `openDetail(asset, "changes")` — the
+  legacy alias, which is exactly what it is for.
+- **The two dialogs moved into `renderWorkDialogs()`, called from BOTH views.** They lived
+  inside the detail-view return, which is why the site-wide tab could not offer them at all.
+  A plain render helper, not a component: it closes over state and setters, so nothing has to
+  be threaded. **It must be CALLED, not used as `<renderWorkDialogs/>`** — as a component it
+  would remount every render and drop focus out of whatever field was being typed in.
+- **`workDialogAssetId` says which asset a dialog writes to, and its THREE states matter.**
+  `null` = the open asset (every detail-view case). A string = opened from the main page,
+  where `""` means "nothing picked yet" and is what makes the Asset field appear. It is
+  deliberately not `selectedId`: setting that would navigate the whole app behind a modal,
+  and cancelling would leave you somewhere you never asked to be.
+  - The openers use `assetId === undefined ? null : assetId`, NOT `assetId || null`. The
+    obvious form collapses `""` to `null`, the dialog reads that as the detail-view case, and
+    the Asset picker never appears — which is exactly what happened first time.
+- **`AssetPickerField` is `HierarchyBrowserModal` with the predicate opened up** from "Rooms
+  only" to "anything not archived". Everything being selectable means you drill with the
+  chevron and select with the row body — the two-affordance design that component was built
+  around, working as intended rather than by accident.
+- **Nothing is pre-selected from the scope.** The scope is always a PLACE, and pre-filling a
+  Room when most work is on a device inside it would be wrong more often than right.
+- Save is disabled until an asset is chosen, in both dialogs — `workTarget` is the guard, so
+  a main-page dialog cannot write to whatever happened to be open last.
+**The Change Log is no longer a top-level tab — it is Maintenance › History (2026-09-10).**
+The detail tabs are now Details / Maintenance / Comments / Audit, and Maintenance has two
+sub-tabs: **Scheduled** (the recurring items) and **History** (what was actually done, i.e.
+the entire former Change Log, unchanged). Answering "when is this due" and "what has been
+done to it" from two different tabs made the link between them invisible, which is the same
+problem `maintenanceId` was added to solve — this finishes it in the navigation.
+- **`?tab=changes` still works and must keep working.** `openDetail()` translates it to
+  Maintenance + the History sub-tab rather than dropping it, which would silently land on
+  Details. Deep links outlive the layout that produced them — the same reason the panel tab
+  kept its `"breakers"` key when its label became "Layout". `"changes"` is therefore a valid
+  REQUEST forever while no longer being a valid `detailTab` VALUE; those are different things
+  and the state's own comment says so.
+- **The Maintenance tab's badge counts SCHEDULES, not history**, and keeps its overdue red.
+  The badge answers "is there anything I have to do", and a growing count of completed work
+  would drown that. Each sub-tab carries its own count.
+- **The sub-tabs are styled as pills, deliberately unlike the tab bar above them.** They are a
+  division within one tab; matching the bar would read as two competing rows of navigation.
+- Implementation note: the two content blocks were NOT moved. Their conditions were narrowed
+  (`detailTab === "maintenance" && maintenanceSubTab === "..."`) and a bar rendered above
+  them, so the diff is three lines of condition rather than a re-indent of ~400 lines of JSX
+  that would have buried any real change inside it.
+**Both record types are addressed by their own id, never by array position (2026-09-10).**
+A maintenance item got its `id` when work entries began referencing it; a work entry got one
+when photos began attaching to it. Same rule, arrived at twice: **an id exists once something
+points at the record, and not before.**
+- **Why position was defensible until it wasn't.** `writeTable_` rewrites a tab in the order
+  the client sent, so position survives a save. What it does not survive is a DELETE: remove
+  an earlier entry and every later one shifts up, taking any attachment pointed at it to the
+  wrong row. Nothing pointed at a work entry until photos did.
+- **`change.id` was deliberately absent before this** — the reasoning is still in
+  `CHANGE_FIELDS` — and adding it was a schema change, so it went into v34 while v34 was
+  still undeployed, exactly as `performedOn` did. That trick expires the moment a version is
+  live: check `node deploy.mjs --status` first.
+- **Every handler now takes an id**: `openChangeEdit`, `deleteChange`, `saveChangeEdit`,
+  `startEditMaintenance`, `saveMaintenanceEdit`, `openMaintenanceComplete`,
+  `submitMaintenanceComplete`, `deleteMaintenanceItem`. The row objects no longer carry an
+  `idx` at all, on either the detail lists or the two site-wide tables — so there is no stale
+  index left to pass by mistake.
+- **`editingMaintenanceIdx` was renamed `editingMaintenanceId`.** It held an id; a name that
+  no longer says what the value is has cost this project real time more than once, and is
+  treated as a bug rather than a tidy-up.
+- **React keys are the ids too**, so deleting a row no longer re-keys every row beneath it.
+- **Both are adopted at load** (`m.id || crypto.randomUUID()`, `c.id || crypto.randomUUID()`)
+  — a read that fills a blank, reaching the Sheet inside whatever save happens next. No
+  migration, and two browsers minting different ids is caught by the revision check.
+- `MOCK_SNAPSHOT` stays MIXED: three work entries carry explicit ids, the rest are adopted,
+  so both paths are exercised by the fixture rather than only by a unit test.
+**A completion is a change-log entry, linked by `change.maintenanceId` (v34).** Marking a
+task done and logging a change used to be two unconnected acts: "Mark done today" stamped
+`lastPerformed` and wrote one audit row, so what a service visit actually cost, who did it
+and what they found had nowhere to go — and a change logged separately had no idea a
+schedule existed. The button is now **"Log completion…"**, opening a prefilled form
+(`maintenanceCompleteModal`).
+- **A maintenance item has a real `id`** — a `crypto.randomUUID()`, like a Breaker or a
+  Circuit. Array position cannot serve: items are deleted by index, so removing one
+  renumbers every item below it and would re-point every change referencing them.
+- **The reference lives on ONE side.** A change names its schedule; a schedule keeps no
+  list of its changes. Its history is derived (`changesByMaintenance`, a `useMemo` lifted
+  out of the detail render body for the reason `auditIndex` was). Storing both would be a
+  second copy to keep in sync, and it is the one that goes stale.
+- **A dangling `maintenanceId` is a normal state, not corruption.** Deleting a schedule
+  leaves its changes alone — a change records something that actually happened and outlives
+  the schedule that prompted it, exactly as audit entries outlive their assets. It renders
+  with no badge. No cascade, no cleanup, no repair pass.
+- **The prefill is what keeps it one click.** Date is today, change type is `Maintenance`
+  where that type still exists (seeded only if it does — the list is user-managed, and
+  seeding a value that isn't an option renders a picker showing something it cannot
+  re-select). A routine filter clean is still Save and go.
+- **The date field is new capability, not just plumbing.** Back-dating a completion was
+  previously impossible without hand-editing the schedule, and the audit row's `to` is the
+  chosen date rather than always today — a row claiming today would be a lie about when the
+  work happened.
+- **One `persist()` writes the completion, the change and the audit row.** Every save posts
+  the whole snapshot, so splitting it would mean several round trips for one logical act and
+  a real chance of the second being rejected as a conflict with the first. Same reasoning as
+  `saveBreakerUnit`.
+- **The change entry is not separately audited**, consistent with comments and changes: it
+  carries its own `at`/`by` and its presence in the Change Log is the record.
+- **The Change Log's add form can attach a change to a schedule too** — an optional picker,
+  hidden when the asset has no schedules — **and can complete it**, via a *Mark this task
+  performed* checkbox with its own date, revealed only once a task is linked.
+  - **The checkbox defaults OFF** (Eric's call, 2026-09-10), because the picker's main use is
+    attaching a change that ISN'T a completion: parts ordered for next service, or a repair
+    the tech found *during* it. Two entries against one schedule, one of them the completion.
+    An unwanted stamp is also much harder to notice than a missing one.
+  - **Completing is a deliberate tick, not a consequence of linking, and the date is why.**
+    A change entry's only date is `at` — when it was *logged*, not when the work happened — so
+    an automatic stamp could only ever say "today". Logging a visit from three months ago
+    would then push the next due date three months out, which is worse than no link at all:
+    it makes an overdue item read healthy. The checkbox carries its own date field for exactly
+    the reason the completion modal has one.
+  - It can move `lastPerformed` **backwards**, since `nextMaintenanceDue` reads it and nothing
+    else. That is correct — recording a visit you hadn't logged yet is the point — and is why
+    the date is editable rather than pinned to today.
+  - **Ticked with an empty date is refused**, by the disabled-until-valid pattern the form
+    already uses. Otherwise the change would log and the schedule would silently not move.
+  - It writes the same `maintenance_completed` audit row as the modal, in the same single
+    `persist()`, so a completion reads identically in the history whichever door it came
+    through. The two paths are now the same operation reached from the schedule or from the
+    log; they are kept as separate forms because the entry points differ, not the semantics.
+- **`adoptLegacyMaintenanceIds` is a load-time READ that fills a blank**, last in
+  `loadData()`'s map chain — not a load-time rewrite. A minted id reaches the Sheet only when
+  some save happens for other reasons, inside that same snapshot: no migration, no script.
+  **Two browsers can mint different ids for one item, and the revision counters are what make
+  that safe** — whichever saves second is refused as a conflict and reloads onto the id the
+  first wrote. Without optimistic concurrency this pattern would not be safe.
+- The site-wide Maintenance overview gains **no column**: it is for triage, and clicking a
+  row already lands on the asset's Maintenance tab where the history is. The Excel export's
+  Changes sheet does gain a resolved **Maintenance task** column, since a spreadsheet is
+  where anyone would total spend by schedule.
+- Covered by `test-backend-maintenance-link.js`, which slices both `doGet` and `doPost` out
+  of the .gs as source text. Verified by mutation that all four silent failure modes fail it:
+  dropping the column from either header constant, from either per-row projection, or
+  re-inlining a header literal at a call site. `MOCK_SNAPSHOT` is deliberately **mixed** —
+  two assets carry item ids and linked changes (one with a dangling link), the rest are
+  legacy-shaped with neither. A uniform fixture exercises half the code; that is the
+  `personIds` lesson.
+
 **Electrical Panel** assets (`type: "Electrical Panel"`) are otherwise device-like — real
 brand/model/serial, purchase date, warranty, room placement via its `parentId` like any
 other device — they just don't have `peripherals` (their registry entry's `excludedFields`). Each
@@ -1630,476 +2006,367 @@ array position can't serve as identity once things move.
   `snake_case` action names: `breaker_added`, `breaker_edited`, `breaker_swapped`,
   `breaker_removed`, `circuit_added`, `circuit_edited`, `circuit_reassigned`, `circuit_removed`.
 
-## Feature request tracking (shared with Cowork)
-
-Eric keeps the running feature request list for this app in his Logseq graph, not in this
-repo: `C:\Users\mrpip\OneDrive\Logseq\pages\Asset Tracker - Feature Requests.md`. It's a
-plain markdown file — read/write it directly with normal file tools, same as any other
-file. A separate Cowork session (cloud) is where Eric describes new feature ideas out
-loud and where they first get added to the list; a scheduled daily job on that side also
-scans this repo and marks things done as a backstop. Since Claude Code runs locally and
-actually does the implementation work, it's in the best position to update the list
-**the moment a feature ships** — don't leave it to the backstop job to catch up.
-
-**Never edit this file from a stale copy.** This page is written to by two independent
-systems (this repo's Claude Code, and a Cowork session/scheduled job in the cloud), so a
-version you read 10 minutes — or even 1 minute — ago may already be out of date. This has
-already caused real data loss twice (once from Cowork's side, once from Claude Code's
-side re-introducing an old bullet-list version over Cowork's table conversion). The rule,
-no exceptions: immediately before every single write to this file, re-read it fresh from
-disk in that same turn, apply your change to that fresh copy, and write it back right
-away. Never reuse a copy read earlier in the session, never batch up multiple planned
-edits against one earlier read, and never assume the format you remember is still what's
-on disk — check.
-
-**File format — as of Aug 1 2026 this is a TABLE, not a bullet list** (don't restructure
-it again, just follow this shape):
-- Page properties at the top: `title::`, `type:: project`, `alias::`.
-- A `# Requests` section (open/in-progress items) and a `# Done / Shipped` section, each
-  containing one markdown table (a single Logseq block — the whole table is one bullet's
-  multi-line content, not one bullet per row).
-- Requests table columns: `Feature | Status | Effort | Added | Source | Details`.
-  Done/Shipped table columns: `Feature | Effort | Added | Completed | Source | Details`
-  (Completed replaces Status once something's done).
-  - `Status`: `idea` → `planned` → `in-progress` (done rows move to the other table
-    entirely, not marked `done` in place).
-  - `Effort`: T-shirt size — `S` / `M` / `L` / `XL`, or `TBD` if unsized. Don't guess a
-    size just to fill the cell — leave `TBD` unless you're actually confident.
-  - `Added` / `Completed`: Logseq date-link format, `[[Aug 1st, 2026]]`.
-  - `Source`: `eric` or `claude-code`.
-  - `Details`: free text, single cell (no line breaks — keep it to one or two sentences,
-    semicolon-separated if it needs more than one point).
-
-**When you finish implementing a feature that has a matching row in the Requests table:**
-1. Move that entire row to the Done/Shipped table (reshape it into that table's column
-   order — Effort/Added/Completed/Source/Details, dropping Status).
-2. Fill in `Completed` with today's date, same link format as `Added`.
-3. Leave every other row untouched — don't reformat, reorder, resize columns, or "clean
-   up" the rest of either table in the same edit.
-
-**You may also add new request rows directly** — e.g. when you notice a real gap while
-implementing something (an obvious follow-up, an edge case the current work doesn't
-cover, something that clearly wants to exist but is out of scope for the current change).
-When you do:
-- Set `Source` to `claude-code` (Eric's own requests from Cowork are `eric`) so it's
-  visibly distinguishable at a glance from something Eric actually asked for.
-- Default `Status` to `idea` and `Effort` to `TBD`, and use the `Details` cell to explain
-  why you're suggesting it / what prompted it — Eric wasn't in the room for this one, so
-  give him enough context to evaluate it without having to ask you.
-- Don't add speculative "nice to have" noise for its own sake — add it because you hit a
-  concrete, real gap while working, not as a general brainstorm.
-
-**What NOT to do:**
-- Don't mark something done on a guess — only when you've actually shipped the matching
-  work in this session. A false "done" is worse than leaving it as `in-progress`, since
-  this file is Eric's source of truth for what's still outstanding.
-- If two systems touch the file close together, only ever change the specific row(s)
-  you're updating — never regenerate the whole table — so a concurrent edit from the
-  other side doesn't get clobbered.
-- Before writing, re-read the file fresh rather than reusing a copy from earlier in your
-  session — a stale copy is exactly what caused this file to get accidentally clobbered
-  once already (Cowork made the same mistake and fixed its own process after).
-
 ## Known constraints / things to watch
 
-- **v31 is superseded by the v32 deploy below and is history.** Do not take that on faith
-  either, for exactly the reason every entry here says: `node deploy.mjs --status` answers
-  it in one command, per tenant, and cannot go stale. It added an `id` column to the Assets
-  tab: the asset's real primary key, and the first phase of `ASSET_KEY_REFACTOR_PLAN.md`.
-  - **Purely additive, and identical in behaviour until something writes an id.** The column
-    is empty on every existing row, and both join sites read `a.id || a.label`, so an
-    existing asset's key IS its label. Nothing in the sheet changes meaning.
-  - **That fallback is the whole migration strategy.** Every reference already stored —
-    `parentId`, `personIds`, a child row's `assetLabel`, a breaker's `panelLabel`,
-    AuditLog's `assetLabel` and `related` — is therefore *already a valid id*. No backfill,
-    no migration script, and **AuditLog is never touched**, which matters because it is the
-    one tab with no rewrite path (see the v25 entry). Same trick `typesList` uses, where a
-    built-in type's id is its original name.
-  - **doGet and doPost are two halves of one contract.** If they key on different things,
-    every comment, change, allocation, maintenance item, breaker and circuit is written
-    under one key and read under another — they vanish, silently, with `SCRIPT_VERSION`
-    still matching its frontend. `test-backend-assetid.js` slices BOTH blocks out of the
-    .gs as source text and round-trips fake data through them, so a change to one side and
-    not the other fails. Verified by mutation: reverting either site to the label alone
-    fails the suite.
-  - **The public `?panel=` path needed the same treatment**, at five sites — the panel
-    lookup now accepts an id OR a label (a QR sticker taped inside a panel door encodes the
-    label and can never be redeployed), the parent-chain map is keyed on `id || label`
-    because that is what `parentId` holds, `nearestAncestorRow_`'s visited set matches (or
-    the loop guard stops guarding, on a *public* page), and the room-name map and upstream
-    panel lookup likewise.
-  - **`backfillAuditIds_` writes keys, not labels**, since what it fills is `related`.
-  - The admin import now also refuses duplicate **ids**, which is the merge hazard once the
-    id is what child rows are keyed by. A file with no id column skips the check entirely.
-  - **Deploy order is mandatory and is the one real hazard here: backend first.** A frontend
-    that wrote a generated id against a v30 backend would have the column dropped, leaving a
-    row with neither an id nor a matching label — unreferenceable. Nothing in phase 1 does
-    that yet (no frontend change ships with it), but phase 2 must not land until v31 is live
-    on the tenant it is being tested against.
+**Nothing here records what is deployed, or what is on a live Sheet.** Both are one
+command away, and both have gone stale in this file — deploy state four separate times,
+the Sheet's own schema once, and that one outlived ten backend versions because no banner
+catches it:
 
-- **Phase 2 of the key refactor is MERGED and LIVE, confirmed 2026-09-09** — v32 is
-  deployed to every tenant (`node deploy.mjs --status`) and `main` carries the frontend, so
-  `assets.stama.tech` serves it. `id` is now the app's identity and `label` is display text.
-  - **`loadData()` adopts `id = a.id || a.label` first in its map chain**, before the
-    personIds normalize and before `adoptLegacyNames` — which walks the parent chain and so
-    has to walk it by the ids everything downstream joins on. From that point `a.id` is
-    populated on every asset and is the ONLY thing that should be compared for identity.
-  - **New assets mint `crypto.randomUUID()`** (`startAdd`, `duplicateAsset`,
-    `convertUsersToAssets`). Labels are still issued from `nextAssetNumber` and are still
-    required and unique-checked — nothing user-visible changed in this phase.
-  - **`MOCK_SNAPSHOT` is deliberately MIXED**: three assets carry an id that is not their
-    label (a Room reached by parentId/roomsServedIds/an allocation/two audit rows, a leaf
-    device, and a sub-panel that is a feedsPanelLabel target and owns 21 breaker
-    panelLabels); every other row carries none. A fixture that was all one shape would
-    exercise half the code — the `personIds` lesson, applied deliberately this time.
-  - **Every address accepts an id OR a label, permanently**: the `?asset=` deep link,
-    `panel.html?p=`, and the QR sheet's `?only=`. Links and stickers outlive the build that
-    made them, and a sticker taped inside a panel door can never be reprinted out of
-    existence.
-  - **Renaming stale parameters is what found the one real bug.** `childLabel` → `childId`
-    exposed `childId={selectedAsset.label}` on the edit form. It type-checks, it renders,
-    and it is correct on every legacy row — so only the rename surfaced it. `doDelete`,
-    `archiveAsset`, `restoreAsset` and the audit segment's `seg.label` were renamed for the
-    same reason. **A name that no longer says what the value is has cost this project real
-    time more than once; treat one as a bug, not a tidy-up.**
-  - **What deliberately still reads `label`**: `findLabelConflict` and
-    `assetNumberFromLabel` (both genuinely about labels), the Excel export's "Asset ID"
-    column, the detail header, and every "is this asset's name just its label?" display
-    test.
-  - **The release order was BACKEND FIRST, and that is the rule to reuse.** The frontend
-    ships from `main` to all tenants at once while backends deploy one at a time, so merging
-    while `bca` was on v30 would have put a UUID-minting frontend in front of a backend that
-    drops the column — leaving new assets with neither an id nor a matching label. That
-    hazard is what the whole plan was ordered around, and `node deploy.mjs --status` was the
-    gate: `main` was not merged until it reported v32 on both tenants.
-    - **The deploy took two attempts, and the near-miss is worth keeping.** The first run
-      reported `✓ bca is now v30` — Cloud Shell was checked out on `main`, which still
-      carried v30, so it deployed v30 over v30. Harmless only because the versions were
-      equal; against a v31 tenant `deploy.mjs` would have refused it as a downgrade. **The
-      version in the confirmation line is the thing to read, not the checkmark**, and a
-      Cloud Shell deploy of unmerged work needs `git fetch origin && git checkout -B <branch>
-      origin/<branch>` first — the tutorial link clones the DEFAULT branch, so a re-opened
-      link silently puts you back on `main`.
+    node deploy.mjs --status        which tenant runs which backend version
+    node sheet.mjs tabs <tenant>    what columns a live Sheet actually has
 
-- **Phase 3 is DEPLOYED and MERGED, confirmed 2026-09-09** (backend v32) by
-  `node deploy.mjs --status` reporting v32 on `bca` and `dev`, and by the live
-  `assets.stama.tech` serving `FRONTEND_SCRIPT_VERSION = "v32"`. `label` becomes **`tag`** —
-  the sticker on the thing:
-  optional, editable, and absent entirely on a type that never carries one.
-  - **The backend change is one name in `ASSET_FIELDS`.** `label` is KEPT and is written
-    from the client's own value, **not mirrored from `tag`** — the plan originally said to
-    mirror it, which is self-defeating: clearing a Room's tag would clear its label with it,
-    destroying the rollback being preserved. Nothing in the UI writes `label` any more.
-  - **The tag is a per-type CHOICE, not a fixed rule** (Eric's call). It ships excluded on
-    Room/Building/Campus/User and can be switched on for any of them in the type editor.
-    What made that nearly free: the editor already turns an unticked field into
-    `excludedFields`, and the only thing holding `label` out of its list was
-    `TYPE_STRUCTURAL_FIELDS` — which contained it *because* it was the primary key. Once it
-    is only a sticker it stops being structural, so removing it is the correct change.
-  - **`adoptLegacyTag()` DECLINES rather than clears.** A type whose tag field is excluded
-    simply does not inherit its label as a tag, so the BCR/BCB/BCC and User labels are gone
-    from the UI with no migration to run. That is a load-time READ that declines, not the
-    load-time REWRITE this file warns against — no race between browsers, nothing by hand.
-    An explicitly-empty stored tag is never re-adopted, or clearing one would undo itself on
-    the next load.
-  - **`nameOf()` has three rungs now**: name, then tag, then `"<type> <short id>"`. The last
-    is a genuine last resort — `adoptLegacyNames` fills a blank name on everything it loads,
-    so only an in-session object (an add-form draft) reaches it. Its `typesList` argument is
-    OPTIONAL and its absence degrades rather than breaks: `typeNameOf` falls back to the type
-    id, and a built-in type's id IS its name.
-  - **A duplicate tag is still REFUSED, but for a different reason.** It used to be a data
-    question (two assets sharing a primary key are one merged asset); now it is only two
-    stickers reading the same thing, refused because that is a trap for whoever holds them.
-    **Empty tags are skipped** — load-bearing, since an unconditional check would make every
-    untagged asset collide with every other one and nothing could save. The EDIT form runs
-    the same check with the asset excluded, which the plan never mentioned and which the
-    add-only label never needed.
-    - **Consequence:** swapping two assets' tags is a three-step edit (clear one, set the
-      other, set the first), because the intermediate state is a duplicate. Accepted.
-  - **`peekAssetNumber()`'s `Math.max(counter, derived)` guard is DELETED.** It existed
-    because a reused label was a reused primary key, so a new asset inherited a dead one's
-    audit history. A real `id` makes that impossible, and deriving from the assets stopped
-    meaning anything once most rows have no tag at all.
-  - **The public panel path publishes `tag`** and accepts a tag, an id OR a label at
-    `?panel=` — three permanent ways in, because a sticker taped inside a panel door outlives
-    all of them.
+`test-deploy-docs.js` fails if a live-version claim reappears in prose. What belongs here
+is the RULE a version taught, which does not expire. When a version is genuinely mid-flight
+and the window matters — "categories work in-session and vanish on reload until this is
+deployed" — that note goes in the branch's commit message or its plan file, where it dies
+with the branch instead of outliving it here.
+
+### What costs a backend release, and what a removal destroys
+
+- **A property on an existing Config blob is free; a Config KEY of its own is a release.**
+  `doPost` stringifies the whole `columns` and `typeSettings` blobs and reads nothing inside
+  them but `customColumnKeys_`, so a column's `dataType` or a type's `requiredFields` cost
+  nothing. But `doPost` writes a FIXED list of config keys and silently drops the rest, so a
+  new key — `typeCategories`, and `typeSettings` before it — is discarded on every save until
+  it is deployed. **This is the test to run against any future per-field or per-type setting**
+  before estimating it.
+- **`ASSET_FIELDS` is the schema, and dropping a name from it deletes that column on the next
+  asset-domain save.** `writeTable_` clears the tab and writes those headers. The Sheet's own
+  version history is the only way back — that is the entire rollback story. So treat any
+  removal the way v25's six columns were treated: confirm the replacement column is populated
+  on every row, and deploy only after a save has written it.
+  - What a removal takes with it can be unrebuildable. `hasMisadoptedName()` repaired names
+    written by a broken backfill by comparing against `room`/`building`/`campus`; with those
+    columns gone a wrong name can no longer even be *detected*, only retyped. That is why the
+    removal waited for a save that wrote every repaired name into the sheet.
+  - **A public page reading a column needs the fallback FIRST.** Three sites in `panel.html`
+    read `room`/`building` with no `name` fallback, unlike the rest of the file — harmless
+    while the column was still written, and a blank location on every QR page the moment it
+    was not.
+- **AuditLog is the one tab with no rewrite path, and it has its own hazard.** It is
+  append-only, so its header row is written once and never again: adding a column to its field
+  list does NOT widen the stored header, and `readTable_` — which keys off the *sheet's*
+  headers — then reads every new column back as `obj[""]`, colliding them onto one key and
+  losing the data. Silently, with `SCRIPT_VERSION` still matching its frontend, because the
+  script really is the version it claims. `appendNewRows_` now widens a narrow stored header
+  and never shrinks one (dropping a column would strand the values under it).
+- **The Assets tab's column set is dynamic** — the fixed `ASSET_FIELDS` plus the custom columns
+  named in Config (`customColumnKeys_`). That is what makes a custom column's value persist at
+  all, and therefore what per-type custom fields rest on.
+- **A backend write path cannot be covered by browser testing, structurally.** Sandbox never
+  contacts Apps Script and the live backend needs a sign-in, so a `.gs` change is verified by
+  slicing the source out and unit-testing it: `test-backend-fields.js`, `test-backend-admin.js`,
+  `test-backend-assetid.js`, `test-backend-maintenance-link.js`. Keep the habit.
+- **`doGet` and `doPost` are two halves of one contract.** If they key on different things,
+  every comment, change, allocation, maintenance item, breaker and circuit is written under one
+  key and read under another — they vanish, silently, with the version check still matching.
+  `test-backend-assetid.js` slices BOTH blocks out as source text and round-trips fake data, so
+  changing one side and not the other fails. Verified by mutation.
+- **The admin import reads a TAB in the Sheet, not Drive.** The `DriveApp` version failed at
+  runtime — "You do not have permission to call DriveApp.getFilesByName" — because the live
+  manifest declares its `oauthScopes` explicitly, so Apps Script does not auto-detect a newly
+  used API's scope. See "Wipe and import" under Architecture for why adding the scope is not
+  free either. **The rule: use an API the script already holds a scope for.**
+- **`_dirty` on the read payload is load-bearing — do not remove it.** `loadData()` sends
+  `_dirty: { assets:false, config:false, breakerTypes:false }` explicitly. Against a backend too
+  old to recognise `op:"read"`, the read is treated as an ordinary save; a read payload carries
+  no assets, and absent `_dirty` means "rewrite everything", so the first load of a new frontend
+  against an old backend would blank the Assets tab and every child tab with it. With the flags
+  present the old backend writes *nothing* and the load fails cleanly on "Malformed response".
+  The current backend never reads them.
+
+### Release ordering, and the deploys that went wrong
+
+- **BACKEND FIRST, MERGE SECOND.** The frontend ships from `main` to every tenant at once
+  through GitHub Pages, while backends deploy one tenant at a time. Merging first puts a
+  frontend writing new columns in front of a school whose backend still drops them — written,
+  then silently gone. Deploy the branch to `dev`, then to the school, then merge; `--status` is
+  the gate between each step. Between the school deploy and the merge that school shows the
+  "Backend outdated" banner, which is correct and which the merge clears.
+- **Read the VERSION in the confirmation line, not the checkmark.** A deploy once reported
+  `✓ bca is now v30` when v31 was intended: Cloud Shell was checked out on `main`, which still
+  carried v30, so it deployed v30 over v30. Harmless only because the versions were equal —
+  against a newer tenant `deploy.mjs` would have refused it as a downgrade. **The tutorial link
+  clones the DEFAULT branch**, so a re-opened link silently puts you back on `main`; unmerged
+  work needs `git fetch origin && git checkout -B <branch> origin/<branch>` first.
+- **Never deploy something OLDER than what is live.** v22 was once pushed over a live v24 from
+  a branch that was simply behind `main`. An older backend does not merely revert behaviour —
+  it drops columns a newer one added, and the next save destroys that data. `deploy.mjs` refuses
+  to go backwards, which is the only reason a repeat is merely annoying.
+- **Two branches cannot both call themselves the next version.** v14, v15 and v16 were each
+  pending on their own branch, each claiming to be next, and all three edited the same `doGet` —
+  so deploying one after another would have silently erased the first, while each also bumped
+  `FRONTEND_SCRIPT_VERSION` to its own string, making the "Backend outdated" banner report a
+  *match* against a script missing half the change. They were merged into one version rather
+  than renumbered, because renumbering alone leaves the same trap somewhere else.
+
+### Photos attach by reference, never by value
+
+Photos live in **Cloudinary**; the Sheet stores a reference and nothing else. The full
+evaluation and the three decisions behind it are in `PHOTOS_EVAL.md`.
+
+- **The bytes could never have gone in the Sheet, for three independent reasons.** Every
+  save posts the entire state, so a base64 image would be re-sent on every unrelated edit;
+  a cell holds 50,000 characters, about 28KB of image against a 2-5MB phone photo; and
+  `ContentService` has no image MIME type, so bytes could not be served back out even if
+  they got in. That third one is the easiest to miss when sketching a Drive-based design.
+- **The browser uploads directly and the backend only SIGNS, which is why this needed no
+  new OAuth scope.** `Utilities.computeDigest` requires no authorization, so the manifest
+  is untouched and `deploy.mjs` keeps working. Writing to Drive instead needs a scope the
+  live manifest does not declare, and granting one means the owner re-authorizing while
+  **every user's requests fail** — the trap v29's `DriveApp` import hit and v30 backed out
+  of. **The rule that generalizes: prefer a design that needs no scope the script does not
+  already hold.**
+- **Credentials are per-tenant Script Properties and the deploy does not carry them**:
+  `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`, optionally
+  `CLOUDINARY_FOLDER`. `op:"photoSign"` refuses and NAMES the missing keys, because a
+  per-tenant setup step is easy to forget on a newly onboarded school and the symptom
+  otherwise looks like a broken feature.
+  - **Never an unsigned upload preset.** The preset name would have to ship in
+    `index.html`, which is public, and anyone holding it can upload into the account.
+    Server-side signing is also what keeps the `editor` check on uploads, where every other
+    write rule lives.
+  - **The folder and object name are chosen by the BACKEND, never taken from the request.**
+    A client picking its own could overwrite an existing photo by naming it. A signature
+    authorizes exactly one object, and deciding the name server-side is what makes that true.
+- **`photos` is a revision domain of its own, not part of `assets`.** A photo can belong to
+  a breaker or a work entry, so folding it in would make attaching one conflict with anyone
+  editing any asset anywhere.
+- **The write is gated on `dirty.photos`, which is what makes the backend safe to deploy
+  ahead of the frontend.** A client that sends `_dirty` without that key leaves it
+  `undefined`, so the Photos tab is untouched; only a client sending no `_dirty` at all gets
+  the rewrite-everything fallback. Same shape as the `_dirty`-all-false guard on `op:"read"`.
+- **The public `?panel=` page publishes photos, scoped to the panel, its breakers and its
+  circuits** (`PHOTOS_EVAL.md` §7). The scope is a whitelist of ids assembled from what is
+  already in that payload, so a photo of a laptop, a room or a person is **unreachable
+  rather than filtered** — keep it that way rather than turning it into a query by owner
+  type, because that bound is the entire reason publishing on an anonymous page was judged
+  safe. `hiddenFromPublic` is the per-photo escape hatch and is checked BEFORE ownership, so
+  a later change to the scoping cannot route around it. `PUBLIC_PHOTO_FIELDS` omits
+  `storageKey` (the write handle) and `by` (a staff member's name).
+- **`storageKey` is stored alongside the URL** because it is NOT recoverable from a
+  transformed delivery URL, and it is what a deletion or a change of host would need. It is
+  why moving off Cloudinary stays a copy plus one column rewrite.
+- **A PHOTO ROW AND THE ID IT NAMES MUST BE WRITTEN IN THE SAME SAVE** (2026-09-11), and
+  the bug that taught it is the sharpest example in this file of what a load-time adoption
+  cannot cover. A work entry's and a schedule's id are adopted with
+  `c.id || crypto.randomUUID()`, so a row written before v34 has a blank id cell and is
+  handed a **fresh random id on every load**. Attaching a photo marks only the photos
+  domain dirty, so the row landed in the sheet naming an id the very next load replaced.
+  The photo was written, correct, and permanently unreachable — and the already-orphaned
+  rows cannot be repaired, because the id they name never existed anywhere but one
+  browser's memory.
+  - **The asymmetry is what made it look like a photos bug rather than an id bug.** Asset
+    photos survived, because an asset's id is adopted as `a.id || a.label` — deterministic,
+    so a blank cell yields the SAME id every load. Only the two randomly-adopted owner types
+    could orphan. Breakers and circuits mint theirs inside an asset save, so they are stored.
+  - `attachPhotos` therefore passes a NEW assets array (`assets.slice()`) for a `change` or
+    `maintenance` owner, which marks the assets domain dirty by reference and writes those
+    ids alongside the row that points at them. It deliberately does NOT for the other owner
+    types: rewriting five tabs and bumping the assets revision would conflict with anyone
+    mid-edit for no gain.
+  - **Generalize it:** wherever a reference is minted by a load-time adoption, the save that
+    writes the reference must also carry the domain holding the target. `saveChangeEdit`'s
+    "nothing changed, no write" path is the same trap from the other side — it is correct,
+    and it means the id can still be memory-only when that dialog closes.
+  - Covered by `test-frontend-photos.js`, which EXECUTES `attachPhotos` — the whole
+    mechanism is one array identity, so it cannot be read off the source.
+- **`adoptPhoto` never guesses a blank `ownerType`** (it defaulted to `"asset"` until
+  2026-09-11). A blank can only come from a hand edit, and defaulting files a work entry's
+  photo in its asset's gallery: the wrong photo shown confidently in the wrong place, which
+  is worse than one that cannot be found. Left blank it matches no owner and stays out of
+  every gallery until the cell is fixed.
+- **An id exists once something points at the record, and not before** — the rule work
+  entries and maintenance items arrived at twice. Photos are what made a work entry need
+  one. Comments still have none, deliberately: nothing references a comment.
+  - **An id also has to exist at CREATE time, not only after a load-time adoption.**
+    `addMaintenanceItem` minted none at all until 2026-09-11: v34 gave schedules an id,
+    moved every handler onto it and keyed the rows on it, but never wrote one where a
+    schedule is born, and `adoptLegacyMaintenanceIds` filled the blank on the next load.
+    That is exactly what hid it — reloading is the only cheap way to check, and after a
+    reload it looks correct. Inside one session `startEditMaintenance(undefined)` matched
+    the FIRST id-less item, so two new schedules meant editing the wrong one. **Where a
+    load-time adoption exists, check the create path separately**; it is the one place the
+    adoption cannot cover.
+
+**Where a photo's gallery lives follows what the photo is FOR** (2026-09-11), and the two
+work-item cases deliberately differ:
+
+- **A work entry's photos are EVIDENCE of a moment** — a receipt, a before and after — so
+  they live in its dialog, and the entry's id is minted when that dialog OPENS rather than
+  when it saves. Otherwise a photo could only be attached by saving and reopening to edit,
+  which is how the photo does not get taken. **The accepted cost is stranded bytes**:
+  uploads start as soon as a file is picked, so cancelling the dialog afterwards leaves an
+  orphan at the host. That is the same trade this feature takes everywhere — an invisible
+  orphan over a row whose image 404s. The History row shows a READ-ONLY strip, because a
+  photo only reachable through an edit form is nearly useless, and a second set of write
+  controls out there would be a second thing to keep in step.
+- **A schedule's photos are REFERENCE material** — where the access panel is, what the
+  filter looks like when it actually needs doing — so the full gallery, add control
+  included, sits on the Scheduled row where the schedule is READ. The photo that matters
+  gets taken later, when someone is finally standing in front of the thing, and putting the
+  control behind an edit form would be putting it where nobody is.
+
+- **The lightbox renders from `renderWorkDialogs`, not the detail view**, and that is a
+  fixed bug rather than a preference: the work dialogs render from BOTH views, so once one
+  grew a gallery, opening a photo from the site-wide Maintenance tab set the state and
+  painted nothing. Anything reachable from both views belongs there.
+- **Captions are edited in the lightbox**, because that is the moment you are looking at
+  the photo and can say what it is. The draft is held apart from the photo and reseeded
+  every time the viewer opens, so an abandoned edit leaves nothing behind — the rule the
+  work dialog and breaker edit mode already follow. Every gallery opens through
+  `openPhotoViewer` rather than `setPhotoViewer`, or the draft carries one photo's caption
+  into the next.
+- **Photo rows CASCADE when an asset is permanently deleted** (Eric's call, 2026-09-11).
+  `photoOwnerIdsOf` collects every id the asset carries that can own one — itself, its work
+  entries, its maintenance items, its breakers and their circuits. Deliberately not a
+  blocked delete: permanent delete is already a rare, twice-confirmed action on an
+  already-archived asset. The images survive at the host either way, so dropping the rows
+  destroys nothing. It passes `persist` the same array reference when nothing matched, so a
+  delete that removed no photos does not mark the photos domain dirty.
+- **Deleting a photo row does not delete the image.** Orphans are the safe failure — upload
+  the bytes first, write the reference second, so a rejected save strands bytes rather than
+  leaving a row whose image 404s. A sweeper is deferred and is the dangerous half:
+  "the client sent no photo rows" and "delete every object" are the same request on the
+  wire, the same ambiguity behind `doPost`'s mass-deletion guard.
+- **Covered by `test-backend-photos.js`**, the only place it *can* be covered — Sandbox
+  never contacts Apps Script and signing needs credentials that exist only in Script
+  Properties. Verified by mutation that six silent-failure modes fail it: dropping either
+  public filter, leaking `storageKey` or `by` into the whitelist, ceasing to write
+  `storageKey`, an unmasked byte in `sha1Hex_`, and signing parameters unsorted.
+
+### The asset key: `id`, `label` and `tag`
+
+`ASSET_KEY_REFACTOR_PLAN.md` is the full plan. `id` is the app's identity, `label` is legacy
+display text, and `tag` is the sticker on the thing.
+
+- **Adopting each asset's LABEL as its `id` is what made the refactor need no migration.**
+  Both join sites read `a.id || a.label`, so an existing asset's key IS its label, and every
+  reference already stored — `parentId`, `personIds`, a child row's `assetLabel`, a breaker's
+  `panelLabel`, AuditLog's `assetLabel` and `related` — was therefore *already a valid id*. No
+  backfill, no script, and **AuditLog was never touched**. Same trick `typesList` uses, where a
+  built-in type's id is its original name.
+- **`loadData()` adopts `id = a.id || a.label` FIRST in its map chain**, before the `personIds`
+  normalize and before `adoptLegacyNames` — which walks the parent chain, and so has to walk it
+  by the ids everything downstream joins on. From that point `a.id` is populated on every asset
+  and is the ONLY thing that should be compared for identity.
+- **New assets mint `crypto.randomUUID()`** (`startAdd`, `duplicateAsset`,
+  `convertUsersToAssets`).
+- **Every address accepts an id OR a label, permanently** — the `?asset=` deep link,
+  `panel.html?p=`, the QR sheet's `?only=`, and `?panel=` (which takes a tag as well). Links and
+  stickers outlive the build that made them, and a sticker taped inside a panel door can never
+  be reprinted out of existence.
+- **Renaming stale parameters is what found the one real bug.** `childLabel` → `childId` exposed
+  `childId={selectedAsset.label}` on the edit form: it type-checks, it renders, and it is correct
+  on every legacy row, so only the rename surfaced it. **A name that no longer says what the
+  value is has cost this project real time more than once; treat one as a bug, not a tidy-up.**
+- **What deliberately still reads `label`**: `findLabelConflict` and `assetNumberFromLabel` (both
+  genuinely about labels), the Excel export's "Asset ID" column, the detail header, and every
+  "is this asset's name just its label?" display test.
+- **`MOCK_SNAPSHOT` is deliberately MIXED** — three assets carry an id that is not their label (a
+  Room reached by parentId/roomsServedIds/an allocation/two audit rows, a leaf device, and a
+  sub-panel that is a `feedsPanelLabel` target and owns 21 breaker `panelLabel`s); every other
+  row carries none. A fixture that was all one shape would exercise half the code. That is the
+  `personIds` lesson, applied deliberately this time.
+- **`tag` is a per-type CHOICE, not a fixed rule** (Eric's call). It ships excluded on
+  Room/Building/Campus/User and can be switched on for any of them in the type editor. The
+  editor already turns an unticked field into `excludedFields`; the only thing holding `label`
+  out of that list was `TYPE_STRUCTURAL_FIELDS`, which contained it *because* it was the primary
+  key. Once it is only a sticker it stops being structural.
+  - **`label` is KEPT and written from the client's own value, not mirrored from `tag`.** The
+    plan said to mirror it, which is self-defeating: clearing a Room's tag would clear its label
+    with it, destroying the rollback being preserved. Nothing in the UI writes `label` any more.
+  - **`adoptLegacyTag()` DECLINES rather than clears.** A type whose tag field is excluded does
+    not inherit its label as a tag, so the BCR/BCB/BCC and User labels left the UI with no
+    migration to run — a load-time READ that declines, not the load-time REWRITE this file warns
+    about. An explicitly-empty stored tag is never re-adopted, or clearing one would undo itself
+    on the next load.
+  - **`nameOf()` has three rungs**: name, then tag, then `"<type> <short id>"`. The last is a
+    genuine last resort, since `adoptLegacyNames` fills a blank name on everything it loads — only
+    an in-session object (an add-form draft) reaches it. Its `typesList` argument is OPTIONAL and
+    degrades rather than breaks.
+  - **A duplicate tag is REFUSED, but for a different reason than a duplicate label was.** It used
+    to be a data question (two assets sharing a primary key are one merged asset); now it is two
+    stickers reading the same thing, refused because that traps whoever holds them. **Empty tags
+    are skipped** — load-bearing, since an unconditional check would make every untagged asset
+    collide with every other one and nothing could save. The EDIT form runs the same check with
+    the asset excluded, which the add-only label never needed.
+    - **Consequence:** swapping two assets' tags is a three-step edit (clear one, set the other,
+      set the first), because the intermediate state is a duplicate. Accepted.
+  - **`peekAssetNumber()`'s `Math.max(counter, derived)` guard is DELETED.** It existed because a
+    reused label was a reused primary key, so a new asset inherited a dead one's audit history. A
+    real `id` makes that impossible, and deriving from the assets stopped meaning anything once
+    most rows carry no tag at all.
   - Covered by `test-frontend-tag.js`, which runs the real registry, the real
     `recomputeDerivedTypeSets` and the real `nameOf`. Verified by mutation that all three
-    silent-failure modes fail it: a Room that stops excluding the tag, a `nameOf` that loses
-    its last rung, and a conflict check that stops skipping empties.
+    silent-failure modes fail it: a Room that stops excluding the tag, a `nameOf` that loses its
+    last rung, and a conflict check that stops skipping empties.
+- **`backfillAuditIds_` writes keys, not labels**, since what it fills is `related`. Run it ONCE
+  by hand from the Apps Script editor, after a save has created the `related` column — it is
+  deliberately unreachable from `doGet`/`doPost` and never on a trigger, since it rewrites
+  history.
+- The admin import refuses duplicate **ids** as well as tags — the merge hazard once the id is
+  what child rows are keyed by. A file with no id column skips the check entirely.
 
-- **A ONE-TIME id migration exists and is meant to be DELETED after use**:
-  `migrate-asset-ids.mjs` + `migrate-asset-ids-lib.mjs` + `test-migrate-asset-ids.mjs`
-  (Eric's call, 2026-09-09 — explicitly NOT a menu item, since it applies to exactly one
-  situation and would otherwise sit next to "Wipe all data" forever).
-  - **What it is for.** Phase 1 adopted each asset's LABEL as its `id`, which is what made
-    the refactor need no migration — every reference already stored was already a valid id.
-    The cost is a sheet that carried data across v31 ends up with two kinds of id: legacy
-    `BCA0001`-shaped ones, uuids on anything created since. Nothing breaks (an id is opaque
-    everywhere), but once phase 4 drops `label` a legacy id is the only trace of an old
-    label with nothing left to explain it.
-  - **It rewrites 12 key-bearing columns across 8 tabs**, and `AuditLog` is the dangerous
-    one. Every other tab is rebuilt by the app's next save, so a mistake self-corrects;
-    AuditLog is append-only, outlives the assets it describes, and nothing rewrites it — a
-    wrong mapping there is silent, permanent, and indistinguishable from real history.
-    Version history is the only undo.
-  - **Dry run is the DEFAULT**; `--apply` is required. It verifies every reference resolves
-    BEFORE writing anything and refuses the whole migration if any does not.
-  - **A pre-existing dangling reference is carried through unchanged, not "fixed"** — one
-    that pointed nowhere before still points nowhere after, which is honest — but it is
-    reported, since a migration is exactly when someone would want to know.
-  - **An asset whose id is already a uuid is left alone.** Remapping one would churn every
-    reference to it for nothing.
-  - **It bumps the revision counters, and that is not optional**: a browser open through the
-    run holds the old ids and its next save would write them straight back.
-  - **Everyone must be OUT of the app while it runs**, for the same reason.
-  - **Ordering**: it can only run after v31+ is deployed AND one save has written the `id`
-    column — before that there is no column to write into. **`dev` is migrated; `bca` is
-    not, as of 2026-09-09.** v32 is deployed there and the frontend is live, so what remains
-    on `bca` is one save in the app (which fills the `id` column for every row at once, since
-    every save rewrites the whole Assets tab) and sharing that Sheet with the service account
-    — as of 2026-09-09 only `dev` is shared. Check with `node sheet.mjs tenants`, not with
-    this line.
-  - `sheet.mjs` gained `export` on six helpers so this reuses its auth, backup, plain-text
-    write and revision bump rather than re-rolling them. The decision logic lives in the
-    `-lib` half with no network in it, because rehearsing an AuditLog rewrite against a live
-    Sheet is precisely what is being avoided; `test-migrate-asset-ids.mjs` drives it against
-    fixtures. Verified by mutation that dropping AuditLog from the column list, losing
-    `related`'s role suffix, treating a comma-joined list as one key, or remapping an
-    existing uuid all fail the suite.
+### The one-time id migration, meant to be DELETED after use
 
-- **v30 is DEPLOYED, confirmed 2026-09-04** by fetching the `/exec` URL and reading
-  `scriptVersion` back. It makes the admin import read a **tab in the Sheet** instead of
-  Drive. v29 shipped the `DriveApp` version, which failed at runtime — "You do not have
-  permission to call DriveApp.getFilesByName" — because the live manifest declares its
-  scopes explicitly. See "Wipe and import" under Architecture for why that was not just a
-  matter of adding the scope.
-  - So **"BCA Admin > Import inventory" works**. This entry said the opposite, and said it
-    for over a week: it read "v30 is UNDEPLOYED as of 2026-08-26", written the day v30 was
-    still pending and never updated when it landed. **That is the third time a deploy-state
-    line here has gone stale** — the v26 and v28 entries below both record the same failure
-    about themselves, and one of them cost a session real work. The standing instruction is
-    two lines down and is worth obeying: a line in this file is not evidence. One `curl` of
-    the `/exec` answers it in a second, unauthenticated. **Check, don't read.**
-  - Covered by `test-backend-admin.js`, which is the only place it *can* be covered —
-    Sandbox never contacts Apps Script, and this is a menu path a browser cannot reach.
-- **v29 is DEPLOYED, confirmed 2026-08-26** by fetching the `/exec` URL and reading
-  `scriptVersion` back. Superseded by v30 above, which is what is live now; kept for the record.
-- **v28 is DEPLOYED, confirmed 2026-08-26** by fetching the `/exec` URL and reading
-  `scriptVersion` back. It adds the `personIds` column to Assets (see "Users are assets"
-  under Data model), so assignments persist and the users conversion is safe to run
-  against the live sheet.
-  - **This entry said UNDEPLOYED on the same day the deploy landed** — the same failure as
-    the v26 entry two below, which the entry itself calls a standing warning. It is worth
-    stating once more because it keeps happening: a line here recording a deploy state is
-    stale the moment someone deploys, and nothing prompts anyone to update it. One `curl`
-    of the `/exec` URL settles it in a second, unauthenticated. **Check, don't read.**
-- **v27 is DEPLOYED, confirmed 2026-08-26** by fetching the `/exec` URL and reading
-  `scriptVersion` back. It adds the `related` column
-  to AuditLog (see "Audit entries name the OTHER assets they concern" under Data model) and
-  fixes `appendNewRows_` so that column's header actually gets written. Until it's deployed,
-  a `related` value the app sends is dropped on write, so the associated-resource views work
-  in-session and forget on reload — the same shape of window as the pre-v17 `parentId` one.
-  Sandbox is unaffected, as ever, and is where the whole feature was built and verified.
-  - After deploying, run **`backfillAuditIds_()` once from the Apps Script editor** to fill
-    `related` on the existing history. It refuses to run until the `related` column exists,
-    so let one save land first.
-- **v26 is DEPLOYED, confirmed 2026-08-26** by fetching the `/exec` URL and reading
-  `scriptVersion` back (it reports the version even on the `authFailed` response, which is what
-  makes that check possible without a sign-in). It makes the Assets tab's
-  column set dynamic — the fixed `ASSET_FIELDS` plus the custom columns named in Config — which
-  is what makes a custom column's value persist at all (see the Fixed entry in `BUGS.md`), and
-  therefore what unblocks per-type custom fields. Custom column values, including per-type
-  fields, now persist normally.
-  - **This entry said UNDEPLOYED for a day after it went live, and cost a session real work** —
-    a scope was written around "deploy v26 first" that was pure fiction. That is the standing
-    warning a few entries down being proven again: *don't take a hardcoded "the live backend is
-    vN" line here on faith, including this one.* One `curl` of the `/exec` URL settles it in a
-    second, and the answer comes back even unauthenticated. Check before planning around it.
-  - `test-backend-fields.js` in the repo root unit-tests `customColumnKeys_` directly. Worth
-    keeping the habit: Sandbox never contacts Apps Script and the live backend needs a sign-in,
-    so browser testing structurally cannot cover a backend write path.
-- **v25 is DEPLOYED, confirmed 2026-08-25** by fetching the `/exec` URL and reading
-  `scriptVersion` back, and the six columns are gone from the live sheet. It was the first
-  DESTRUCTIVE version: it deleted six columns from the Assets tab that were kept only to keep an earlier
-  change reversible: `roomId`/`buildingId` (replaced by `parentId` in v17), `room`/`building`/
-  `campus` (replaced by `name` in v23) and `itemName` (replaced by `subType` in v24).
-  - **AuditLog is the ONE tab this does not apply to** (see `appendNewRows_`, fixed in v27).
-    It is append-only, so its header row was written once and never again — meaning adding a
-    column to its field list did NOT widen the stored header, and `readTable_` (which keys off
-    the *sheet's* headers) read the new column back as `obj[""]`, colliding every such column
-    onto one key and losing the data. Silently, with `SCRIPT_VERSION` still matching its
-    frontend — the version check cannot see this, because the script really is the version it
-    claims. `appendNewRows_` now widens a narrow stored header (never shrinks it: dropping a
-    column would strand the values under it). Covered by `test-backend-fields.js`, which is the
-    only place it *can* be covered — Sandbox never contacts Apps Script.
-  - **`ASSET_FIELDS` is the schema.** `writeTable_` clears the tab and writes those headers, so
-    dropping a name from that list deletes the column on the next asset-domain save. The sheet's
-    version history is the only way back — that is the whole rollback story now. Treat any future
-    removal from that list the same way: confirm the replacement column is populated on every
-    row, and deploy only after a save has written it.
-  - **What went with them, and can't be rebuilt.** `adoptLegacyParentage()` and
-    `adoptLegacySubType()` are gone (nothing left to adopt), and so is `hasMisadoptedName()` —
-    which matters most. It repaired names written by the broken first backfill by comparing a
-    name against `room`/`building`/`campus`, so with those columns deleted a wrong name can no
-    longer even be *detected*; it's just a name someone has to retype. That is why the removal
-    waited for a save that wrote every repaired name into the sheet.
-  - `LEGACY_NAME_COLUMNS` shrank to `NAME_FROM_FIELD` — one entry, Bulk Item → `subType`, which
-    isn't legacy at all but the live rule that a bulk item is called by its sub-type.
-  - **`panel.html` had to be fixed first.** Three sites there read `room`/`building` with no
-    `name` fallback, unlike the rest of the file. Harmless while the column was still written;
-    deleting it without fixing them would have blanked the location on every QR page.
-  - `MOCK_SNAPSHOT` no longer carries any legacy shape, because there is no longer one to
-    reproduce. Its places hold their names in `name`. Note the *stored column config* it carries
-    still uses the old keys — that's the column config, not the sheet's columns, and
-    `RETIRED_COLUMN_KEYS`/`RENAMED_COLUMN_KEYS` still have to handle it.
-- **v24 (the `typeSettings` Config key and the `subType` column) is live**, superseded by the
-  v25 deploy above — a deployment serves one version of the whole script. Kept for what it
-  records. It bundled two things: the
-  `typeSettings` Config key (per-type overrides from the type editor) and the `subType` column
-  (the Bulk Item sub-type, renamed from `itemName`). Until it's pasted in and a **New version**
-  deploy is created:
-  - Type settings do not persist. `doPost` writes a FIXED list of config keys and drops
-    unknown ones, so a `typeSettings` row would be discarded on every save — the editor works
-    in-session and forgets on reload. Renaming a type is unaffected: that lives in `typesList`,
-    which the live backend already stores.
-  - A Bulk Item's `subType` is dropped on write and read back from `itemName` on every load
-    (`adoptLegacySubType()`), so sub-types *display* correctly but a change to one doesn't
-    survive a refresh. Same shape as the pre-v17 `parentId` window.
-  - Sandbox mode is unaffected either way — it never touches the backend.
-  - No migration script: every save rewrites the whole Assets tab, so the first asset-domain
-    save after the deploy fills `subType` in for every bulk item at once. `itemName` is kept and
-    still written, so the deploy is reversible; clearing it is a separate later step.
-- **The backend was v23 (the `name` field), confirmed deployed on 2026-08-25** by fetching the
-  `/exec` URL and reading `scriptVersion` back — which is the check the standing warning below
-  asks for, not a line taken on faith. It supersedes every "UNDEPLOYED" note that used to sit
-  here: v23 being live means v18 through v22 are too, since a deployment serves one version of
-  the whole script.
-  - This corrects two notes that said the opposite. `NAME_FIELD_PLAN.md` contradicted *itself*
-    (its status header said undeployed, its Sequence section said deployed), and the entry here
-    said undeployed while admitting it had not checked. Both were written the day the deploy
-    happened, which is exactly when such a line goes stale.
-  - So `name` persists normally now. `adoptLegacyNames()` still runs and still matters — it is
-    what names any row last written before the deploy, until a save rewrites it. The legacy
-    `room`/`building`/`campus` columns stay readable, so the deploy remains reversible;
-    clearing them is a separate later step that has NOT been done.
-- **v18 (Google Sign-In) is live** — it predates the v23 deploy confirmed above, so
-  authentication is in force and the inventory is no longer served to anyone with the URL.
-  The rest of this entry is kept because the guard it describes is still load-bearing.
-  - **The mismatch was nearly destructive, and the guard against it is load-bearing.** v18's
-    `index.html` POSTs `op:"read"`, which a v17 backend doesn't recognise and treats as an
-    ordinary save. A read payload carries no assets, and `_dirty` absent means "rewrite
-    everything" — so the first load of the new frontend against the old backend would have
-    blanked the Assets tab and every child tab with it. `loadData()` therefore sends
-    `_dirty: { assets:false, config:false, breakerTypes:false }` explicitly. Every write
-    branch in `doPost` is gated on one of those flags, the audit append receives an empty
-    list, and the Config block is skipped because no domain was written — so an old backend
-    writes *nothing* and the load fails cleanly on "Malformed response" instead. Do not
-    remove that `_dirty` from the read payload; v18 itself never reads it.
-  - Deploy the backend and the frontend together. Everything below about v17 is history.
-- **The backend was v17, a single COMBINED version, confirmed deployed on
-  2026-08-21** (by fetching the `/exec` URL and reading `scriptVersion` back — not by trusting
-  this line; see the standing warning about that a few paragraphs down, which applies to this
-  sentence exactly as much as to the ones it replaced). v14 (the public
-  QR panel view), v15 (`parentId`) and v16 (`campus`) were each pending on their own branch and
-  each called itself the next version. They edit the same `doGet`, so pasting one into the Apps
-  Script editor after the other would have silently erased the first — and because each also
-  bumped `FRONTEND_SCRIPT_VERSION` to its own string, the "Backend outdated" banner would have
-  reported a *match* while the deployed script was missing one of the two changes. That's the
-  exact failure the version check exists to catch, so the numbering couldn't be left to sort
-  itself out.
-  They were merged rather than renumbered (2026-08-20), because renumbering alone would have
-  left the same trap in a different place. `panel.html`, `panel-qr-sheet.html`, the
-  `PUBLIC_*_FIELDS` whitelists, `publicPanelPayload_`, `respond_` and the panel QR button all
-  live here now; the sibling worktree `.claude/worktrees/practical-dhawan-c50573` still holds
-  the original uncommitted v14 and is now **superseded — don't merge it**, it would reintroduce
-  the pre-parent-chain version of the same code.
-  The merge was not a concatenation: the public projection resolved a panel's Room and Building
-  by reading `roomId`/`buildingId` directly, at four sites plus the whitelist. Those are what
-  `parentId` replaced, so left alone the QR page would have shown a blank location the moment
-  the sheet migrated. It now walks the chain (`effectiveParentId_`/`nearestAncestorRow_`, with
-  the legacy pair as a fallback so it's right before AND after migration), and the same walk was
-  applied to `panel.html`'s local-sandbox projection and `panel-qr-sheet.html`'s label text.
-  Don't take a hardcoded "the live backend is vN" line here on
-  faith, including this one: it goes stale the moment someone redeploys and nothing prompts
-  anyone to update it, which has already sent a wrong "you're two versions behind" down a
-  branch once. Check instead — the app's "Backend outdated" banner names both versions in its
-  tooltip, or fetch the deployed `/exec` URL and read `scriptVersion` in the raw JSON. (For
-  what it's worth as a dated data point rather than a standing claim: v17 — and therefore
-  everything before it — was confirmed live on 2026-08-21, superseding an earlier note that
-  said the same of v12 on 2026-08-16.)
-  - v17 bundles three things: the `campus` column (the Campus type's name field, purely
-    additive — a sheet without it round-trips Campus rows with a blank name), the `?panel=`
-    public read, and `parentId` on `ASSET_FIELDS` — see "The parent chain" under Data model, and
-    `PARENT_CHILD_MIGRATION.md` for the deploy/migration sequence. Now that it's deployed,
-    `parentId` persists normally. Before the deploy the live backend had no such column, so a
-    `parentId` the app sent was dropped on write and the app fell back to reading
-    `roomId`/`buildingId` on every load (`adoptLegacyParentage()`) — which meant it *worked*,
-    correctly, it just couldn't persist a move. That fallback still runs, and still matters:
-    it's what resolves any row last written before the deploy, until a save rewrites it. The old `roomId`/
-    `buildingId` columns are deliberately kept and still written, so v17 is reversible and
-    un-migrated rows keep resolving. **No migration script exists or is needed**: every save
-    rewrites the whole Assets tab, so the first asset-domain save after deploying fills
-    `parentId` in for every asset at once. Clearing the two legacy columns is a separate,
-    later, destructive step that has NOT been done — it's the one that closes the rollback.
-  - v13 adds `panelLabel` to `CIRCUIT_FIELDS` and the `unassignedCircuits` array on panel
-    assets — see "A circuit can belong to a panel without belonging to a breaker" under Data
-    model. Live since the v17 deploy (v17 supersedes it). While it was pending, the live backend
-    had no `panelLabel` column: circuits attached to breakers kept round-tripping exactly as
-    before, but that backend's `doPost` only walked `a.breakers`, so an asset's
-    `unassignedCircuits` were silently **not written at all** and disappeared on the next reload.
-    Sandbox mode was unaffected — it never touches the backend. No data migration was needed:
-    existing circuit rows all have a `breakerId` and get their `panelLabel` filled in on the
-    next save.
-  - v12 added the per-domain revision counters (`rev_assets`/`rev_config`/`rev_breakerTypes`
-    in Config) behind the optimistic-concurrency check — see "Optimistic concurrency" under
-    Architecture. Deployed 2026-08-16 and confirmed by a write coming back with a bumped
-    `revisions` object, which only a v12+ backend returns — so conflict detection is real
-    live behavior, not pending, and the three `rev_*` rows are seeded in Config.
-  - Already live from the v11 deploy, both confirmed against the live payload: `Circuit.notes`
-    round-trips (the Circuits tab was rewritten with a `notes` column on the first save after
-    the deploy, and the legacy `description` column is gone — its old values were dropped at
-    that rewrite, intended, since nothing had read them since the frontend collapsed
-    label/description into `label`), and doGet returns `nextAssetNumber`. That counter reads
-    116 on the live Sheet as of 2026-09-08 — this entry said it "still reads `null` because no
-    asset has been created since the deploy", which stopped being true the first time anyone
-    added one. `peekAssetNumber()` returning `max(counter, derived)` is what made the stale
-    value harmless, and is why nobody noticed.
-- **The live Sheet's schema is current, verified 2026-09-08** by reading the Assets tab
-  directly (`node sheet.mjs tabs bca`) rather than by trusting a line here. Its header row is
-  exactly `ASSET_FIELDS`: `parentId` is present and populated on 135 of 161 rows, and not one
-  of the six columns v25 deleted (`roomId`/`buildingId`/`room`/`building`/`campus`/`itemName`)
-  survives. So the parent chain is fully migrated and the rollback v25 closed is closed. No
-  custom columns exist either, which is why the tab is the bare 20.
-  - **This entry said the opposite until 2026-09-08** — that v15 had "NOT been deployed or
-    migrated" and live assets "still carry `roomId`/`buildingId` and no `parentId`". It was
-    written on 2026-08-13, was true then, and was never revisited, so it outlived ten
-    backend versions. It is the same failure the deploy-state entries above record about
-    themselves, in the same section that already warns about it twice — but about the SHEET
-    rather than the script, which is worse, because there is no `curl` that answers it and
-    no banner that catches it. `node sheet.mjs tabs <tenant>` is the check.
-- **There are no Electrical Panel assets on the live Sheet, and the Breakers, Circuits and
-  BreakerTypes tabs are all empty** (verified 2026-09-08). This file previously described
-  four real panels — BCA0082 as a 32-slot main with sub-panel feeds to BCA0083/84/85, each
-  sized to its building's room count, plus a `BreakerTypes` tab seeded with the 5 catalog
-  types — and a great deal of the Data model section is still written as though that data is
-  sitting there: the printed door card, the panel diagram, the "fed from" banner, the
-  same-panel Move Circuit restriction.
-  - **The FEATURE is real and the code is all there; the DATA is not.** Nothing below about
-    how panels work is wrong — it just describes behaviour with no live rows to exercise it.
-  - **`MOCK_SNAPSHOT` is where panel data lives**, and deliberately: it carries the full
-    Panel/Breaker/Circuit structure (5 panels with populated `breakers` arrays). So Sandbox
-    mode is the only place panel work can be tried end to end, which inverts the usual
-    relationship — for this one area the fixture is richer than production, not a trimmed
-    subset of it. Seed the dev tenant by hand if a real backend write path needs exercising.
-- Mitsubishi mini-split sample data exists on the live Sheet: **18 "Mini Split" indoor units
-  across 19 Rooms**, with seeded maintenance items (Monthly filter clean + Annual coil clean).
-  - **The 4 "Condenser" outdoor units this entry used to claim are not there** — the live
-    Sheet has zero, against 6 Buildings. There is one "Evaporative Cooler" instead, a
-    user-created type whose id is a generated UUID (`179b3e3f-…`), which is the id scheme
-    working exactly as designed: it resolves through `typesList` and needs no registry entry.
-  - Sandbox is again the richer copy — `MOCK_SNAPSHOT` still carries Condensers, which is
-    what keeps the `parentTypes: ["Building"]` case in "The parent chain" exercisable.
+`migrate-asset-ids.mjs` + `migrate-asset-ids-lib.mjs` + `test-migrate-asset-ids.mjs` (Eric's
+call, 2026-09-09 — explicitly NOT a menu item, since it applies to exactly one situation and
+would otherwise sit next to "Wipe all data" forever).
+
+- **What it is for.** Adopting labels as ids is what made the refactor need no migration, and the
+  cost is that a sheet carrying data across that change ends up with two kinds of id: legacy
+  `BCA0001`-shaped ones, uuids on anything created since. Nothing breaks — an id is opaque
+  everywhere — but once `label` is dropped, a legacy id is the only trace of an old label with
+  nothing left to explain it.
+- **It rewrites 12 key-bearing columns across 8 tabs, and `AuditLog` is the dangerous one.** Every
+  other tab is rebuilt by the app's next save, so a mistake self-corrects; AuditLog is
+  append-only, outlives the assets it describes, and nothing rewrites it — a wrong mapping there
+  is silent, permanent, and indistinguishable from real history. Version history is the only undo.
+- **Dry run is the DEFAULT**; `--apply` is required. It verifies every reference resolves BEFORE
+  writing anything and refuses the whole migration if any does not.
+- **A pre-existing dangling reference is carried through unchanged, not "fixed"** — one that
+  pointed nowhere before still points nowhere after, which is honest — but it is reported, since
+  a migration is exactly when someone would want to know.
+- **An asset whose id is already a uuid is left alone.** Remapping one would churn every reference
+  to it for nothing.
+- **It bumps the revision counters, and that is not optional**: a browser open through the run
+  holds the old ids and its next save would write them straight back. **Everyone must be OUT of
+  the app while it runs**, for the same reason.
+- **Ordering**: it can only run against a tenant whose backend has the `id` column AND where one
+  save has written into it, and whose Sheet is shared with the service account. Which tenants
+  those are is `node sheet.mjs tenants` and `node deploy.mjs --status`, not a line here.
+- `sheet.mjs` gained `export` on six helpers so this reuses its auth, backup, plain-text write and
+  revision bump rather than re-rolling them. The decision logic lives in the `-lib` half with no
+  network in it, because rehearsing an AuditLog rewrite against a live Sheet is precisely what is
+  being avoided; `test-migrate-asset-ids.mjs` drives it against fixtures. Verified by mutation
+  that dropping AuditLog from the column list, losing `related`'s role suffix, treating a
+  comma-joined list as one key, or remapping an existing uuid all fail the suite.
+
+### What is actually on the live Sheets
+
+**Read this as a shape, not as a fact** — `node sheet.mjs tabs <tenant>` is the check, and the
+one time this section stated live data as fact it was wrong for ten backend versions.
+
+- **The panel feature has no live data.** The Breakers, Circuits and BreakerTypes tabs have been
+  empty and there have been no Electrical Panel assets, while a great deal of the Data model
+  section is written as though four real panels are sitting there — the printed door card, the
+  panel diagram, the "fed from" banner, the same-panel Move Circuit restriction. **The FEATURE is
+  real and the code is all there; the DATA is not.**
+  - **`MOCK_SNAPSHOT` is where panel data lives**, deliberately: it carries the full
+    Panel/Breaker/Circuit structure with populated `breakers` arrays. So Sandbox is the only place
+    panel work can be tried end to end, which inverts the usual relationship — for this one area
+    the fixture is richer than production rather than a trimmed subset of it. Seed the dev tenant
+    by hand if a real backend write path needs exercising.
+- **Mini-split sample data is the live inventory's own oddity**: Mitsubishi indoor units across
+  most Rooms, with seeded maintenance items (Monthly filter clean + Annual coil clean). Sandbox is
+  again the richer copy — `MOCK_SNAPSHOT` still carries Condensers, which is what keeps the
+  `parentTypes: ["Building"]` case in "The parent chain" exercisable against something.
+- **A user-created type's id is a generated UUID** and resolves through `typesList` with no
+  registry entry — the id scheme working exactly as designed. There is at least one on the live
+  sheet.
+
 - ~~No auth beyond the cosmetic name tag~~ — **fixed in v18**, see Authentication under
   Architecture. Worth recording why it mattered more than it looked: the GitHub repo is
   **public**, so `SHEET_API_URL` in `index.html` was published the whole time. The

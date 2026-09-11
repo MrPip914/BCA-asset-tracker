@@ -4,7 +4,18 @@
 It used to be updated by hand: paste the file into the Apps Script editor, then
 Deploy > Manage deployments > pencil > Version: New version > Deploy.
 
-`node deploy.mjs` does all of that, and then checks it worked.
+`node deploy.mjs <tenant>` does all of that, and then checks it worked.
+
+## The procedure lives in `cloudshell-deploy.md`
+
+**That walkthrough is the single source for how to run a deploy** — it is what opens in the
+Cloud Shell tutorial pane, and its Step 3 is the main-or-branch choice that decides
+everything else. This file is the reference behind it: what the tool does, why it refuses
+what it refuses, and how the one-time setup works. When the two disagree, the walkthrough
+wins and this file is the one to fix.
+
+Nothing here restates what the tool prints. `deploy.mjs`'s own output is the authority on
+whether a deploy worked; a doc quoting a success line is a copy that can go stale, and has.
 
 ## Where to run it
 
@@ -15,7 +26,7 @@ locally, works on a phone. Open this link:
 
 It clones the repo and opens `cloudshell-deploy.md` as a guided walkthrough with tap-to-run
 command buttons. Cloud Shell's `$HOME` persists between sessions, so the sign-in and the
-Script ID are entered **once ever** — later visits go straight to `node deploy.mjs`.
+Script ID are entered **once ever** — later visits go straight to Step 3.
 ($HOME is deleted after 120 days with no Cloud Shell use; you'd redo the two setup steps.)
 
 It also works on your own machine. Same commands, same result — the only difference is
@@ -98,25 +109,39 @@ list, so an older backend **drops columns a newer one added** — the next save 
 downgrade destroys that data, rather than merely reverting behavior. It has happened once:
 v24 was live and v22 was pushed over it from a branch that was simply behind.
 
-If a rollback is genuinely what you want: `ALLOW_DOWNGRADE=1 node deploy.mjs`.
+If a rollback is genuinely what you want: `ALLOW_DOWNGRADE=1 node deploy.mjs <tenant>`.
 
 ## Deploying a branch
 
 Sandbox mode never contacts Apps Script, so a backend change cannot be exercised without
-deploying it. Deploying an unmerged branch is therefore supported and expected:
+deploying it. Deploying an unmerged branch is therefore supported and expected — and it
+goes to **`dev`**, which exists so an unmerged branch has a harmless home:
 
-    git fetch origin && git checkout -B <branch> origin/<branch> && node deploy.mjs
+    git fetch origin && git checkout -B <branch> origin/<branch> && node deploy.mjs dev
 
-The deploy names the branch it is shipping and warns when it isn't `main`. There is only
-one deployment, so **while your branch is deployed, that is what the school's app runs.**
+Step 3b of the walkthrough is this procedure with the traps called out; follow it there
+rather than from here.
 
-To put it back:
+**Each tenant has its own deployment**, so a branch on `dev` is invisible to every school —
+that is the whole point of the tenant. The warning the tool prints is keyed on the TENANT,
+not on the branch: it fires when you are deploying to a production backend, whatever branch
+you are on, and stays quiet on `dev`. Sending a branch to a school's tenant is still
+testing in production, and is only correct as step 2 of the release order below.
 
-    git checkout -B main origin/main && ALLOW_DOWNGRADE=1 node deploy.mjs
+To put `dev` back on `main`:
+
+    git checkout -B main origin/main && ALLOW_DOWNGRADE=1 node deploy.mjs dev
 
 The override is needed because `main` is older than what you just deployed. That is safe
 only while nothing has saved data using the newer version's columns — once it has, rolling
 back drops them on the next save, and fixing forward with a new version is the safer move.
+
+## Releasing to a school: backend first, merge second
+
+The frontend ships from `main` to every tenant at once; backends deploy one at a time. So
+merging first puts a new frontend, writing new columns, in front of a school whose backend
+still drops them. Deploy the branch to `dev`, then to the school, then merge. The
+walkthrough spells out the four steps.
 
 ## Things worth knowing
 

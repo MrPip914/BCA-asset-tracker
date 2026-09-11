@@ -132,6 +132,54 @@ function tenantConfig(id) {
   return null;
 }
 
+// Everything needed to answer "why does it not know about my tenant" in one
+// screen, without a second round trip to a phone.
+//
+// This exists because that exact failure cost a whole evening on 2026-09-09.
+// The message said only "No Apps Script ID configured for tenant dev", so the
+// obvious next step was to reason about WHY rather than to look -- and a tidy,
+// confident, wrong theory got written up before anyone ran `cat` on the config.
+// See BUGS.md. Printing the facts up front makes the cheap check the default
+// one instead of the fourth thing tried.
+function configDiagnostics() {
+  const lines = [];
+  const repoExists = fs.existsSync(REPO_CONFIG);
+  const homeExists = fs.existsSync(HOME_CONFIG);
+
+  lines.push("Where this looked:");
+  lines.push(`  1. ${REPO_CONFIG}  ${repoExists ? "(EXISTS - used)" : "(not present)"}`);
+  lines.push(`  2. ${HOME_CONFIG}  ${homeExists ? (repoExists ? "(exists, IGNORED - see below)" : "(EXISTS - used)") : "(not present)"}`);
+  lines.push(`  Read from: ${fs.existsSync(cfg._path) ? cfg._path : "(no config file found at all)"}`);
+  lines.push("");
+
+  // The shadowing trap, reported only when it is actually happening.
+  if (repoExists && homeExists) {
+    lines.push("!! A deploy.config.json in this clone is SHADOWING your $HOME config.");
+    lines.push("   Only the repo one is read; the two are never merged. The clone is");
+    lines.push("   disposable and $HOME is what persists, so this is almost certainly");
+    lines.push("   backwards. Delete the repo copy to fall back to $HOME:");
+    lines.push(`       rm ${REPO_CONFIG}`);
+    lines.push("");
+  }
+
+  const known = Object.keys((cfg.tenants || {}));
+  if (known.length) {
+    lines.push(`Tenants in that file: ${known.join(", ")}`);
+  } else if (cfg.scriptId) {
+    lines.push(`Tenants in that file: none named -- it holds the OLD flat shape, which`);
+    lines.push(`  is read as the default tenant ("${DEFAULT_ID}") only.`);
+  } else {
+    lines.push("Tenants in that file: NONE. Nothing has been saved yet.");
+  }
+  lines.push(`Tenants this repo knows about: ${Object.keys(CLIENTS).join(", ")}`);
+  lines.push("");
+
+  // Which clone am I in? The tutorial link clones fresh every visit, so this is
+  // genuinely ambiguous from inside Cloud Shell.
+  lines.push(`Running from: ${REPO}`);
+  return lines.join("\n");
+}
+
 function requireTenantConfig(id) {
   const t = tenantConfig(id) || {};
   // Env overrides stay, but only for a single named tenant — with --all they would point
@@ -141,6 +189,7 @@ function requireTenantConfig(id) {
   if (!scriptId || String(scriptId).startsWith("PASTE_")) {
     die(
       `No Apps Script ID configured for tenant "${id}".\n\n` +
+        configDiagnostics() + `\n\n` +
         `Find it in that tenant's Apps Script editor under Project Settings > IDs > Script ID,\n` +
         `then save it once (it persists, so this is a one-time step per tenant):\n\n` +
         `    node set-tenant.mjs ${id} <SCRIPT_ID> [DEPLOYMENT_ID]\n\n` +

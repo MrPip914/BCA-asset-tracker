@@ -49,7 +49,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v32";
+const SCRIPT_VERSION = "v35";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -61,6 +61,7 @@ const SHEET_NAMES = {
   circuits: "Circuits",
   breakerTypes: "BreakerTypes",
   audit: "AuditLog",
+  photos: "Photos",
   config: "Config",
 };
 
@@ -221,6 +222,63 @@ const CIRCUIT_FIELDS = ["id", "breakerId", "panelLabel", "label", "roomsServed",
 // not scoped to any one asset — its own flat tab, like Breakers/Circuits.
 const BREAKER_TYPE_FIELDS = ["id", "name", "slotSpan", "members"];
 
+// The Changes and Maintenance tabs' columns. Both lists were written out as
+// literal arrays at THREE sites each until v34 -- the doGet read, the doPost
+// write, and adminDataTabs_ -- and the three are not equal halves of one
+// contract, which is what made them a trap:
+//
+//   - the doGet read passes its list to readTable_, which IGNORES the argument
+//     entirely and keys off the sheet's own header row. That copy did nothing.
+//     Adding a column there and nowhere else is a silent no-op -- and it is the
+//     first site you find when grepping, and the one that reads authoritative.
+//   - the doPost write passes it to writeTable_, which clears the tab, writes
+//     exactly these headers and projects every row through them. THIS is the
+//     schema: whatever is in this list is what the tab becomes.
+//   - adminDataTabs_ is what Wipe/Import leave an emptied tab's header row as.
+//     Forgetting it is invisible day to day, then an import drops the column.
+//
+// One constant per tab removes the question.
+//
+// "maintenanceId" (v34) names the Maintenance row a change was performed
+// against, or is empty for an ordinary unattached change -- which is what every
+// row written before v34 is. Purely additive, so no migration: an empty value
+// already means exactly the right thing.
+//
+// "performedOn" (v34) is WHEN THE WORK HAPPENED, as a plain "yyyy-MM-dd" date.
+// Distinct from "at", which is when the entry was LOGGED and stays an untouched
+// record of that -- so a job done in August and typed up in September records
+// both facts instead of overwriting one with the other. That separation is what
+// lets a change entry mark a maintenance task performed: an editable date is
+// the one thing an automatic stamp could never get right.
+//
+// Empty on every row written before this, and the frontend falls back to the
+// date part of "at" for those -- which is what such a row always implicitly
+// meant. So no migration and no backfill.
+//
+// NOTE this column was added to v34 rather than cut as v35: v34 had not been
+// deployed to any tenant when it landed, so no Sheet had ever seen the earlier
+// shape and a second version number would have meant a second deploy for a
+// schema that only ever existed in git. Do NOT repeat that once a version is
+// live anywhere -- check `node deploy.mjs --status` before assuming.
+// "id" (v34) is the entry's own crypto.randomUUID(). It was deliberately absent
+// when maintenanceId arrived -- nothing referenced a change entry, so an id
+// would have been dead weight, and array position is stable because writeTable_
+// rewrites the tab in the order the client sent.
+//
+// Photos attach to a work entry, so something references one now, and position
+// stops being good enough the moment an entry above it is deleted: every photo
+// on every later entry would silently re-point one row up.
+const CHANGE_FIELDS = ["assetLabel", "id", "changeType", "vendor", "cost", "note", "at", "by", "maintenanceId", "performedOn"];
+// "id" (v34) is a maintenance item's stable key, a crypto.randomUUID() minted by
+// the frontend. Array position cannot serve as identity here: items are edited
+// and deleted by index, so deleting one renumbers every item below it and would
+// re-point every change entry referencing them. Same reasoning that gave
+// Breakers and Circuits a UUID. Blank on every row written before v34; the
+// frontend adopts one at load and it lands on the next save.
+const MAINTENANCE_FIELDS = [
+  "assetLabel", "id", "task", "frequencyLabel", "frequencyDays", "lastPerformed", "owner", "at", "by",
+];
+
 // AuditLog's columns. `related` is LAST and any future column must be too: this
 // is the one tab written by appendNewRows_ rather than writeTable_, so its header
 // row is not rewritten on every save and existing rows keep their column
@@ -235,6 +293,29 @@ const AUDIT_FIELDS = [
   // v27: comma-joined `label:role` pairs naming the OTHER assets an entry
   // concerns and how -- "BCR0002:from,BCR0005:to". See relate() in index.html.
   "related",
+];
+
+// Photos (v35). One flat tab for the whole app, keyed by an owner PAIR rather
+// than nested under an asset: a breaker, a circuit, a work entry and a
+// maintenance item are not assets and have nowhere to nest. Same reasoning that
+// makes BreakerTypes its own top-level tab.
+//
+// "ownerType" is one of: asset, breaker, circuit, change, maintenance.
+// "ownerId" is that owner's own stable id -- an asset's `id` (v31), or the
+// crypto.randomUUID() carried by every breaker, circuit, work entry (v34) and
+// maintenance item (v34). Never a tag: a tag is display text and is editable.
+//
+// "storageKey" is the object's own name at the image host, and is NOT
+// recoverable from a transformed delivery URL -- it is what a later deletion or
+// a move to a different host needs. Keeping it is the whole reason switching
+// hosts stays a copy plus one column rewrite instead of a re-upload.
+//
+// "hiddenFromPublic" is the per-photo escape hatch for the QR panel page: the
+// photo that caught a person, a screen, or paperwork that was never its subject.
+// Stored as the string "true" or blank, like every other flag in this sheet.
+const PHOTO_FIELDS = [
+  "id", "ownerType", "ownerId", "url", "thumbUrl", "storageKey",
+  "caption", "width", "height", "bytes", "hiddenFromPublic", "at", "by",
 ];
 
 // --- Public panel view (anonymous, read-only) --------------------------------
@@ -271,6 +352,11 @@ const PUBLIC_PANEL_FIELDS = ["tag", "label", "panelSlotCount", "panelLayout"];
 const PUBLIC_BREAKER_FIELDS = ["id", "cells", "ampRating", "groupId", "breakerTypeId", "notes"];
 const PUBLIC_CIRCUIT_FIELDS = ["id", "breakerId", "label", "roomsServedIds", "feedsPanelLabel", "notes"];
 const PUBLIC_BREAKER_TYPE_FIELDS = ["id", "name", "slotSpan", "members"];
+// Deliberately WITHOUT storageKey, by, bytes or at. storageKey is the handle a
+// write would use; `by` is a staff member's name. Neither answers "what does
+// this panel look like", which is the only question this endpoint exists to
+// answer, and the file's own rule is to publish the fewest fields that do.
+const PUBLIC_PHOTO_FIELDS = ["id", "ownerType", "ownerId", "url", "thumbUrl", "caption", "width", "height"];
 
 // Copies ONLY the named fields off a source object. Absent keys come back as ""
 // rather than being omitted, so the public payload's shape doesn't change based
@@ -312,11 +398,16 @@ function nearestAncestorRow_(startRow, byLabel, type) {
 }
 
 // --- Optimistic concurrency --------------------------------------------------
-// One revision counter per save domain — the same three domains `_dirty`
-// already describes. Per-domain rather than one global counter so two people
-// editing unrelated things (a managed list vs an asset) never collide: only a
-// domain this save actually writes can conflict.
-const REVISION_DOMAINS = ["assets", "config", "breakerTypes"];
+// One revision counter per save domain — the same domains `_dirty` already
+// describes. Per-domain rather than one global counter so two people editing
+// unrelated things (a managed list vs an asset) never collide: only a domain
+// this save actually writes can conflict.
+//
+// "photos" joined in v35 rather than folding photos into the assets domain, and
+// that is load-bearing rather than tidy: a photo can belong to a breaker or a
+// work entry, so an assets-domain photo write would make attaching a photo
+// conflict with anyone editing any asset anywhere.
+const REVISION_DOMAINS = ["assets", "config", "breakerTypes", "photos"];
 // Config-tab key each counter is stored under (rev_assets, rev_config,
 // rev_breakerTypes), alongside nextAssetNumber. Prefixed so it can't collide
 // with a managed-list key.
@@ -937,6 +1028,26 @@ function publicPanelPayload_(requestedLabel) {
     };
   }
 
+  // Photos, scoped to what is ALREADY in this payload: the panel itself, its
+  // breakers, and its circuits. A photo of a laptop, a room or a person is not
+  // filtered out here -- it is unreachable, because nothing else is in this
+  // payload to own one. That bound is the reason publishing photos on an
+  // anonymous page was judged safe at all (PHOTOS_EVAL.md section 7), so it must
+  // stay a whitelist of ids assembled above rather than a query by owner type.
+  const publicOwnerIds = {};
+  publicOwnerIds[panelLabel] = true;
+  breakers.forEach(b => {
+    publicOwnerIds[b.id] = true;
+    (b.circuits || []).forEach(c => { publicOwnerIds[c.id] = true; });
+  });
+  unassignedCircuits.forEach(c => { publicOwnerIds[c.id] = true; });
+  const photos = readTable_(SHEET_NAMES.photos, PHOTO_FIELDS)
+    // The per-photo escape hatch, checked BEFORE ownership so that a later
+    // change to the scoping rule above cannot accidentally route around it.
+    .filter(ph => String(ph.hiddenFromPublic) !== "true")
+    .filter(ph => publicOwnerIds[ph.ownerId])
+    .map(ph => pickPublic_(ph, PUBLIC_PHOTO_FIELDS));
+
   return {
     ok: true,
     scriptVersion: SCRIPT_VERSION,
@@ -945,6 +1056,7 @@ function publicPanelPayload_(requestedLabel) {
     unassignedCircuits,
     breakerTypes,
     rooms,
+    photos,
     fedFrom,
   };
 }
@@ -1055,15 +1167,17 @@ function handleAuthenticatedRead_(body, e) {
 
     const assetRows = readTable_(SHEET_NAMES.assets, ASSET_FIELDS);
     const commentRows = readTable_(SHEET_NAMES.comments, ["assetLabel", "text", "at", "by"]);
-    const changeRows = readTable_(SHEET_NAMES.changes, ["assetLabel", "changeType", "vendor", "cost", "note", "at", "by"]);
+    const changeRows = readTable_(SHEET_NAMES.changes, CHANGE_FIELDS);
     const allocationRows = readTable_(SHEET_NAMES.allocations, ["assetLabel", "room", "quantity"]);
-    const maintenanceRows = readTable_(SHEET_NAMES.maintenance, [
-      "assetLabel", "task", "frequencyLabel", "frequencyDays", "lastPerformed", "owner", "at", "by",
-    ]);
+    const maintenanceRows = readTable_(SHEET_NAMES.maintenance, MAINTENANCE_FIELDS);
     const breakerRows = readTable_(SHEET_NAMES.breakers, BREAKER_FIELDS);
     const circuitRows = readTable_(SHEET_NAMES.circuits, CIRCUIT_FIELDS);
     const breakerTypeRows = readTable_(SHEET_NAMES.breakerTypes, BREAKER_TYPE_FIELDS);
     const auditRows = readTable_(SHEET_NAMES.audit, AUDIT_FIELDS);
+    // getSheet_ creates the tab if it is missing, so a sheet that predates v35
+    // reads back an empty list here rather than throwing, and gets its header
+    // row on the first photo save.
+    const photoRows = readTable_(SHEET_NAMES.photos, PHOTO_FIELDS);
     const configRows = readTable_(SHEET_NAMES.config, ["key", "value"]);
 
     const config = {};
@@ -1086,10 +1200,11 @@ function handleAuthenticatedRead_(body, e) {
         comments: commentRows.filter(c => c.assetLabel === label).map(c => ({ text: c.text, at: c.at, by: c.by })),
         changes: changeRows.filter(c => c.assetLabel === label).map(c => ({
           changeType: c.changeType, vendor: c.vendor, cost: c.cost, note: c.note, at: c.at, by: c.by,
+          id: c.id || "", maintenanceId: c.maintenanceId || "", performedOn: c.performedOn || "",
         })),
         allocations: allocationRows.filter(al => al.assetLabel === label).map(al => ({ roomId: al.room, quantity: al.quantity })),
         maintenanceItems: maintenanceRows.filter(m => m.assetLabel === label).map(m => ({
-          task: m.task, frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
+          id: m.id || "", task: m.task, frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
           lastPerformed: m.lastPerformed, owner: m.owner, at: m.at, by: m.by,
         })),
         // Only meaningful for Electrical Panel assets, but attached unconditionally
@@ -1141,11 +1256,27 @@ function handleAuthenticatedRead_(body, e) {
       members: t.members ? JSON.parse(t.members) : [],
     }));
 
+    // Photos go back as ONE flat list, not distributed onto their owners: an
+    // owner may be a breaker, a circuit or a work entry, so there is no single
+    // place to hang them, and the frontend indexes them by ownerType+ownerId.
+    const photos = photoRows.map(ph => ({
+      id: ph.id, ownerType: ph.ownerType, ownerId: ph.ownerId,
+      url: ph.url, thumbUrl: ph.thumbUrl || "", storageKey: ph.storageKey || "",
+      caption: ph.caption || "",
+      width: ph.width === "" ? undefined : ph.width,
+      height: ph.height === "" ? undefined : ph.height,
+      bytes: ph.bytes === "" ? undefined : ph.bytes,
+      // Back to a real boolean here; the sheet stores the string.
+      hiddenFromPublic: String(ph.hiddenFromPublic) === "true",
+      at: ph.at, by: ph.by,
+    }));
+
     const payload = {
       scriptVersion: SCRIPT_VERSION,
       assets,
       auditLog,
       breakerTypes,
+      photos,
       columns: config.columns || null,
       changeTypes: config.changeTypes || null,
       vendors: config.vendors || null,
@@ -1157,6 +1288,14 @@ function handleAuthenticatedRead_(body, e) {
       // (see TYPE_SETTINGS in index.html). An object, not a list, unlike every
       // other managed key here.
       typeSettings: config.typeSettings || null,
+      // The category each type is filed under, as an ordered list of
+      // { id, name }. ARRAY ORDER IS DISPLAY ORDER -- that is the whole reason
+      // this is a key of its own rather than a name on each type, which would
+      // have needed no backend change at all: a derived list can only be ordered
+      // by something else (the order types happen to appear in), and cannot hold
+      // a category nobody has filed a type under yet.
+      // A type points at one by id, in typeSettings[id].categoryId.
+      typeCategories: config.typeCategories || null,
       // Monotonic counter for the next BCA asset number to issue — see
       // peekAssetNumber() in index.html. Not a managed list like the rest of
       // Config, just a number that has to survive asset deletion (deriving it
@@ -1196,6 +1335,120 @@ function handleAuthenticatedRead_(body, e) {
   }
 }
 
+// --- Photo uploads (v35) -----------------------------------------------------
+// Photos are NOT stored in this Sheet, and could not be. A save posts the entire
+// application state on every change, so a base64 image would be re-sent and
+// re-written on every unrelated edit; a Sheets cell holds 50,000 characters,
+// which is about 28KB of image against a 2-5MB phone photo; and ContentService
+// has no image MIME type at all, so bytes could not be served back out even if
+// they got in. The Sheet stores a REFERENCE. See PHOTOS_EVAL.md.
+//
+// The browser uploads DIRECTLY to Cloudinary and this script only hands out a
+// short-lived signature. That shape is why photos needed no new OAuth scope:
+// Utilities.computeDigest is a core call requiring no authorization, so the
+// manifest is untouched and deploy.mjs keeps working. The alternative -- writing
+// to Drive from here -- needs a scope the live manifest does not declare, and
+// granting it means the owner re-authorizing while every user's requests fail.
+//
+// Credentials live in Script Properties, never in this file and never in
+// clients.js: this repository is PUBLIC. Set once per tenant, in the Apps Script
+// editor under Project Settings > Script Properties:
+//   CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET
+//   CLOUDINARY_FOLDER  (optional, defaults to "assets")
+//
+// An UNSIGNED upload preset would remove all of this and is exactly what must
+// not be used: the preset name would have to ship in index.html, which is
+// public, and anyone holding it can upload into the account.
+
+// SHA-1 as lowercase hex. Apps Script hands back SIGNED bytes, so -1 has to
+// become "ff" and not "-1" -- mask first, then pad. Getting either half wrong
+// produces a plausible-looking hex string that Cloudinary simply rejects, with
+// an error that does not say why.
+function sha1Hex_(text) {
+  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_1, text, Utilities.Charset.UTF_8);
+  let hex = "";
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i] & 0xff;
+    hex += (b < 16 ? "0" : "") + b.toString(16);
+  }
+  return hex;
+}
+
+// Cloudinary's upload signature: every signed parameter, sorted by name, joined
+// as k=v&k=v, with the API secret appended directly (no separator), SHA-1'd.
+// Blank values are dropped rather than signed as empty, which is what Cloudinary
+// itself does -- signing them produces a signature the server will not match.
+function cloudinarySignature_(params, secret) {
+  const toSign = Object.keys(params)
+    .filter(k => params[k] !== "" && params[k] !== null && params[k] !== undefined)
+    .sort()
+    .map(k => k + "=" + params[k])
+    .join("&");
+  return sha1Hex_(toSign + secret);
+}
+
+// Hands the browser a signature for ONE upload. Writes nothing, so it takes no
+// lock -- serializing uploads behind saves would be a needless queue.
+function handlePhotoSign_(body) {
+  const configMap = readConfigMap_();
+  const auth = authorizeSession_(body.sessionId, configMap);
+  if (!auth.ok) {
+    return jsonOut_({
+      ok: false, authFailed: true, reason: auth.reason,
+      email: auth.email || "", error: auth.error,
+    });
+  }
+  // Uploading a photo is an EDIT. The app also hides the control from viewers,
+  // but that is a courtesy -- this is the rule, in the same place every other
+  // write rule in this file lives.
+  if (auth.role !== ROLE_EDITOR) {
+    return jsonOut_({
+      ok: false, authFailed: true, reason: "readonly",
+      error: "Your access is view-only, so photos can't be uploaded.",
+    });
+  }
+
+  const props = PropertiesService.getScriptProperties();
+  const cloudName = props.getProperty("CLOUDINARY_CLOUD_NAME");
+  const apiKey = props.getProperty("CLOUDINARY_API_KEY");
+  const apiSecret = props.getProperty("CLOUDINARY_API_SECRET");
+  if (!cloudName || !apiKey || !apiSecret) {
+    // Names the missing setup rather than failing as a generic error: this is a
+    // per-tenant step that is easy to forget on a newly onboarded school, and
+    // the symptom otherwise looks like a broken feature.
+    return jsonOut_({
+      ok: false,
+      error: "Photo uploads aren't set up for this tenant. Add CLOUDINARY_CLOUD_NAME, "
+        + "CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET under Project Settings > Script "
+        + "Properties in this Sheet's Apps Script project.",
+    });
+  }
+
+  // The folder and the object name are decided HERE and never taken from the
+  // request. A client that chose its own could overwrite an existing photo, or
+  // another tenant's, simply by naming it -- a signature authorizes exactly one
+  // object, and deciding the name server-side is what makes that true.
+  const folder = props.getProperty("CLOUDINARY_FOLDER") || "assets";
+  const publicId = Utilities.getUuid();
+  const timestamp = Math.floor(Date.now() / 1000);
+  const params = { folder: folder, public_id: publicId, timestamp: timestamp };
+
+  return jsonOut_({
+    ok: true,
+    cloudName: cloudName,
+    apiKey: apiKey,
+    folder: folder,
+    publicId: publicId,
+    timestamp: timestamp,
+    signature: cloudinarySignature_(params, apiSecret),
+    // The exact parameter names that were signed. Cloudinary rejects the upload
+    // if the posted set differs from the signed set by even one entry, and says
+    // only that the signature is invalid -- so the client is told what to send
+    // rather than having to keep a duplicate list in step with this one.
+    signedParams: Object.keys(params).sort(),
+  });
+}
+
 function doPost(e) {
   // Parsed before the lock so a read can be routed away without ever taking the
   // write lock — handleAuthenticatedRead_ acquires its own, and the script lock
@@ -1219,6 +1472,13 @@ function doPost(e) {
     return handleAuthenticatedRead_(body, e);
   }
 
+  // A photo upload signature. Writes nothing and takes no lock; see
+  // handlePhotoSign_ for why the browser uploads directly rather than through
+  // this script.
+  if (body.op === "photoSign") {
+    return handlePhotoSign_(body);
+  }
+
   // Sign out. Deliberately unconditional: an invalid or already-deleted session
   // still returns ok, because "this session is gone" is exactly what the caller
   // asked for and reporting failure would only invite a retry loop.
@@ -1235,7 +1495,13 @@ function doPost(e) {
     // in index.html — computed there by reference-equality against its current
     // state). Missing/absent _dirty (an older client, or a direct API call)
     // means "rewrite everything" — the safe default, same as before this existed.
-    const dirty = body._dirty || { assets: true, config: true, breakerTypes: true };
+    // NOTE the asymmetry with `photos`: a client that sends no _dirty at all
+    // gets the rewrite-everything fallback including photos, but a v34 client --
+    // which sends _dirty WITHOUT a photos key -- leaves dirty.photos undefined,
+    // so the Photos tab is not written. That is the property that lets a v35
+    // backend sit under a v34 frontend without destroying photos, which is the
+    // whole point of deploying the backend first.
+    const dirty = body._dirty || { assets: true, config: true, breakerTypes: true, photos: true };
 
     // --- Optimistic concurrency check ---------------------------------------
     // Deliberately inside the LockService critical section that already guards
@@ -1322,6 +1588,24 @@ function doPost(e) {
       }
     }
 
+    // The same guard, for the same reason, on the other full-overwrite tab that
+    // can be emptied in one save. A photo row going missing is not as bad as an
+    // asset going missing -- the image itself survives at the host -- but the row
+    // is the only thing that records WHICH asset it belonged to, and that is not
+    // recoverable from the image.
+    if (dirty.photos && (body.photos || []).length === 0 && body.confirmEmptyPhotos !== true) {
+      const existingPhotoRows = Math.max(0, getSheet_(SHEET_NAMES.photos).getLastRow() - 1);
+      if (existingPhotoRows > 0) {
+        return jsonOut_({
+          ok: false,
+          refused: "emptyPhotos",
+          existingRows: existingPhotoRows,
+          error: "Refused: this save would have removed all " + existingPhotoRows
+            + " photo records at once. Nothing was changed.",
+        });
+      }
+    }
+
     if (dirty.assets) {
       // Assets tab: flat fields only, plus any custom columns (see
       // customColumnKeys_ — without them, custom column values are dropped).
@@ -1348,10 +1632,11 @@ function doPost(e) {
         (a.comments || []).forEach(c => commentRows.push({ assetLabel: key, text: c.text, at: c.at, by: c.by || "" }));
         (a.changes || []).forEach(c => changeRows.push({
           assetLabel: key, changeType: c.changeType, vendor: c.vendor || "", cost: c.cost || "", note: c.note || "", at: c.at, by: c.by || "",
+          id: c.id || "", maintenanceId: c.maintenanceId || "", performedOn: c.performedOn || "",
         }));
         (a.allocations || []).forEach(al => allocationRows.push({ assetLabel: key, room: al.roomId, quantity: al.quantity }));
         (a.maintenanceItems || []).forEach(m => maintenanceRows.push({
-          assetLabel: key, task: m.task, frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
+          assetLabel: key, id: m.id || "", task: m.task, frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
           lastPerformed: m.lastPerformed || "", owner: m.owner || "", at: m.at, by: m.by || "",
         }));
         // panelLabel is derived from the parent asset here (not trusted from the
@@ -1384,13 +1669,9 @@ function doPost(e) {
         }));
       });
       writeTable_(SHEET_NAMES.comments, ["assetLabel", "text", "at", "by"], commentRows);
-      writeTable_(SHEET_NAMES.changes, ["assetLabel", "changeType", "vendor", "cost", "note", "at", "by"], changeRows);
+      writeTable_(SHEET_NAMES.changes, CHANGE_FIELDS, changeRows);
       writeTable_(SHEET_NAMES.allocations, ["assetLabel", "room", "quantity"], allocationRows);
-      writeTable_(
-        SHEET_NAMES.maintenance,
-        ["assetLabel", "task", "frequencyLabel", "frequencyDays", "lastPerformed", "owner", "at", "by"],
-        maintenanceRows
-      );
+      writeTable_(SHEET_NAMES.maintenance, MAINTENANCE_FIELDS, maintenanceRows);
       writeTable_(SHEET_NAMES.breakers, BREAKER_FIELDS, breakerRows);
       writeTable_(SHEET_NAMES.circuits, CIRCUIT_FIELDS, circuitRows);
     }
@@ -1409,6 +1690,31 @@ function doPost(e) {
         id: t.id, name: t.name, slotSpan: t.slotSpan, members: JSON.stringify(t.members || []),
       }));
       writeTable_(SHEET_NAMES.breakerTypes, BREAKER_TYPE_FIELDS, breakerTypeRows);
+    }
+
+    // Photos. A flat tab, written whole like every other -- but note it is NOT
+    // inside `if (dirty.assets)` with the other child tables, because a photo's
+    // owner may be a breaker, a circuit or a work entry rather than an asset,
+    // and because attaching one should not conflict with an unrelated asset edit.
+    if (dirty.photos) {
+      const photoRows = (body.photos || []).map(ph => ({
+        id: ph.id,
+        ownerType: ph.ownerType,
+        ownerId: ph.ownerId,
+        url: ph.url,
+        thumbUrl: ph.thumbUrl || "",
+        storageKey: ph.storageKey || "",
+        caption: ph.caption || "",
+        width: ph.width || "",
+        height: ph.height || "",
+        bytes: ph.bytes || "",
+        // Written as the string "true" or blank rather than a boolean, so the
+        // cell reads the same whether it came from here or was typed by hand.
+        hiddenFromPublic: ph.hiddenFromPublic ? "true" : "",
+        at: ph.at,
+        by: ph.by || "",
+      }));
+      writeTable_(SHEET_NAMES.photos, PHOTO_FIELDS, photoRows);
     }
 
     // --- Config tab + revision counters -------------------------------------
@@ -1443,6 +1749,7 @@ function doPost(e) {
         configRows.push({ key: "bulkItemTypes", value: JSON.stringify(body.bulkItemTypes || []) });
         configRows.push({ key: "typesList", value: JSON.stringify(body.typesList || []) });
         configRows.push({ key: "typeSettings", value: JSON.stringify(body.typeSettings || {}) });
+        configRows.push({ key: "typeCategories", value: JSON.stringify(body.typeCategories || []) });
         // The access allowlist, PRESERVED from the sheet unless this save
         // explicitly carries one. Every other key above is rewritten from the
         // posted body, which is exactly the hazard here: a client that predates
@@ -1659,13 +1966,18 @@ function adminDataTabs_() {
   return [
     { name: SHEET_NAMES.assets, headers: ASSET_FIELDS },
     { name: SHEET_NAMES.comments, headers: ["assetLabel", "text", "at", "by"] },
-    { name: SHEET_NAMES.changes, headers: ["assetLabel", "changeType", "vendor", "cost", "note", "at", "by"] },
+    { name: SHEET_NAMES.changes, headers: CHANGE_FIELDS },
     { name: SHEET_NAMES.allocations, headers: ["assetLabel", "room", "quantity"] },
-    { name: SHEET_NAMES.maintenance, headers: ["assetLabel", "task", "frequencyLabel", "frequencyDays", "lastPerformed", "owner", "at", "by"] },
+    { name: SHEET_NAMES.maintenance, headers: MAINTENANCE_FIELDS },
     { name: SHEET_NAMES.breakers, headers: BREAKER_FIELDS },
     { name: SHEET_NAMES.circuits, headers: CIRCUIT_FIELDS },
     { name: SHEET_NAMES.breakerTypes, headers: BREAKER_TYPE_FIELDS },
     { name: SHEET_NAMES.audit, headers: AUDIT_FIELDS },
+    // Wipe clears this too: a photo row's only content is a reference to an
+    // asset that would no longer exist, and leaving them would point the next
+    // import's assets at the previous inventory's pictures. The images
+    // themselves are not deleted -- nothing here can reach the image host.
+    { name: SHEET_NAMES.photos, headers: PHOTO_FIELDS },
   ];
 }
 

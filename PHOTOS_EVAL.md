@@ -1,0 +1,607 @@
+# Attaching photos — evaluation
+
+**Status: evaluation only. Nothing is built and nothing is decided.** Written 2026-09-10
+against backend **v32** (the number came from `SCRIPT_VERSION` in the repo at commit
+`559e784`, NOT from a live check — run `node deploy.mjs --status` before planning around
+it, per the standing rule).
+
+The question: attach photos to assets, work items, and other components of the app. Eric's
+assumption going in was that a separate service is needed. **That assumption is correct**,
+and this document is mostly about *which* separate service and *why the obvious one is the
+wrong one*.
+
+---
+
+## 1. Why photos cannot live where everything else lives
+
+Three constraints, each independently fatal to "just put it in the Sheet".
+
+**The persistence model is a full snapshot.** `persist()` posts the ENTIRE application
+state as one JSON body on every single change, and `doPost` rewrites whole tabs from it.
+A base64 photo in that payload would be re-uploaded and re-written on every unrelated edit
+— rename a room, re-post every photo in the school. This is not a tuning problem; it is
+the shape of the design.
+
+**A Sheets cell holds 50,000 characters.** That is ~37KB of base64, i.e. ~28KB of image.
+A phone photo is 2–5MB. Chunking across rows would work and would be an abomination.
+
+**Apps Script cannot serve an image back.** `ContentService` emits only ATOM, CSV, ICAL,
+JAVASCRIPT, JSON, RSS, TEXT, VCARD and XML — there is no image MIME type. So even if bytes
+got *in*, the only way *out* through `/exec` is base64 inside JSON, decoded client-side
+into a data URL: no browser caching, no `<img src>` against a CDN, the whole payload
+through a 6-minute-limit script. This one is easy to miss when sketching the Drive option
+and is what rules it out.
+
+**Therefore: the Sheet stores a REFERENCE; the bytes live somewhere that speaks HTTP.**
+Same principle the app already applies to everything else — see "Computed, not stored" and
+"A reference from one Asset to another stores the target's `label`" in `CLAUDE.md`. A photo
+reference is just another reference.
+
+---
+
+## 2. The options
+
+### Option A — Google Drive, written by the Apps Script backend
+
+The intuitive answer: the backend already lives inside Google, bound to a Sheet that
+already sits in a Drive folder. Post base64 to `/exec`, `DriveApp.createFile(blob)`.
+
+**This project has already tried to call `DriveApp` and it failed at runtime.** v29 shipped
+an admin import that read a file via `DriveApp.getFilesByName` and died with *"You do not
+have permission to call DriveApp.getFilesByName"*. The cause is recorded under "Wipe and
+import" in `CLAUDE.md`: **the live manifest declares its `oauthScopes` explicitly**, so
+Apps Script does not auto-detect a newly used API's scope. v30 rewrote the feature to read
+a Sheet tab instead, and the standing rule that came out of it is:
+
+> use an API the script already holds a scope for.
+
+Adding the Drive scope is possible, but it is not free and it fights the existing tooling:
+
+| Cost | Detail |
+|---|---|
+| Manifest edit, per tenant | `deploy.mjs` deliberately pulls and preserves the **live** manifest, so a deploy can never alter the web app's access settings. Adding a scope means a manual manifest change outside the normal path. |
+| An outage window, per tenant | The web app executes as its owner. Between the deploy and the owner re-granting, **every user's requests fail** — the same trap `forceAuthorizeExternalRequests` documents for `UrlFetchApp`. |
+| Repeat for every tenant | Two today, more later. |
+| It still doesn't solve serving | See §1. Displaying a Drive image means either link-sharing every photo publicly (unlisted-public, forever) or relying on undocumented `lh3.googleusercontent.com` thumbnail URLs, which Google has broken before. |
+| Upload path is the worst one | 4MB photo → base64 (+33%) → POST body → Apps Script → Drive, all inside a script with a 6-minute ceiling, for a job that wants to be a direct browser upload. |
+
+**Verdict: the option that looks free and isn't.** It buys "no new vendor" at the price of
+a scope escalation this codebase has explicitly ruled against, an outage window per tenant,
+and a serving story that doesn't work.
+
+### Option B — Browser uploads to Drive with the user's own OAuth token
+
+No backend change at all: add `google.accounts.oauth2` alongside the existing
+`google.accounts.id`, request `drive.file`, upload straight from the browser.
+
+Genuinely tempting, and **the ownership model kills it**. A file created this way is owned
+by the *uploading user*. Consolidating them under the school would need a Shared Drive, and
+**Shared Drives require Google Workspace — which this school does not have** (it is why the
+OAuth client is External in the first place; see Authentication in `CLAUDE.md`). So every
+photo is owned by whichever staff member happened to take it, and leaves with them. For an
+inventory system whose entire point is institutional memory, that is disqualifying. It also
+adds a second consent screen and still has §1's serving problem.
+
+**Verdict: no.**
+
+### Option C — Object storage, with the backend signing the uploads *(recommended)*
+
+The browser PUTs the photo directly to an object store; the Apps Script backend's only job
+is to hand out a short-lived signed permission to do so.
+
+**The reason this fits: it needs no new Google scope.** The signature is HMAC/SHA — Apps
+Script's `Utilities.computeHmacSha256Signature` and `Utilities.computeDigest` are core
+library calls requiring no authorization at all, and `UrlFetchApp` (if a server-side call
+is even wanted) has been authorized since v18. Nothing about the manifest changes, so
+`deploy.mjs` keeps working exactly as it does, and there is no re-grant outage.
+
+It also puts the role check in the one place this app trusts. `CLAUDE.md` is explicit that
+hiding edit controls is cosmetic and "`persist()` and `doPost` remain the control" — a
+signing endpoint inside `doPost` inherits that: **a viewer asks for an upload credential and
+is refused server-side.** This is precisely why the upload must NOT use an unsigned/public
+upload preset: this repo is **public**, so anything embedded in `index.html` is a key handed
+to the internet. The signing secret lives in Script Properties (where sessions already live,
+and for the same reason — the Sheet is readable by anyone it is shared with).
+
+Flow:
+
+1. Browser downscales and re-encodes the photo on a `<canvas>` (see §4).
+2. Browser POSTs `{ op: "photoUpload", ownerType, ownerId, contentType }` to `/exec`.
+3. `doPost` validates the session, checks the role is `editor`, computes a signature, returns
+   it. No bytes touch Apps Script.
+4. Browser PUT/POSTs the bytes straight to the storage host.
+5. Browser calls `persist()` with the new photo row. Normal snapshot write, normal revision
+   check, normal audit entry.
+
+**Two candidates, and the trade between them is thumbnails vs. ownership:**
+
+| | **Cloudinary** | **Cloudflare R2** |
+|---|---|---|
+| Signature in Apps Script | SHA-1 of sorted params + secret. Three lines. | AWS SigV4. ~40 lines, well-trodden, all HMAC. |
+| Thumbnails | Free, on-the-fly, by URL (`w_200,h_200,c_fill`). | You generate and store them yourself — a second object per photo. |
+| EXIF / auto-orient | Handled server-side. | Yours to handle. |
+| Free tier | ~25GB storage/bandwidth. | 10GB storage, **zero egress fees**. |
+| Bytes live | On Cloudinary. | In your bucket, servable from your own domain via a Worker. |
+
+**Thumbnails are not a nicety here.** A grid of photos on an asset detail page, or a column
+of them in a list, means loading N full-size phone photos over school wifi on a phone. One
+of these options gives you that for free and the other makes it a feature you build.
+
+**Recommendation: Cloudinary to start, R2 if Eric would rather own the bytes.** The switching
+cost is deliberately low if §3 is followed — the reference stores a URL, so migrating is a
+copy of the objects plus a rewrite of one column.
+
+---
+
+## 3. Where the reference goes
+
+**A new `Photos` tab, as its own `_dirty` domain with its own `rev_photos` counter.**
+
+Not an array nested on the asset, for the reason `DOORS_LOCKS_KEYS_NOTES.md` already
+established for `LockKeys`: the things being photographed are not all assets. A maintenance
+item, a change record, a circuit and a breaker are not assets and have nowhere to nest.
+
+One flat tab, keyed by an owner *pair*:
+
+| Column | Notes |
+|---|---|
+| `id` | `crypto.randomUUID()`, per the sub-entity convention |
+| `ownerType` | `asset` / `maintenance` / `change` / `comment` / `circuit` / `breaker` |
+| `ownerId` | the owner's `id` — an asset's real `id` since v32, never its `tag` |
+| `url` | full-size, the display reference |
+| `thumbUrl` | may be derived from `url` on Cloudinary; stored so a later move off it is one column, not a code change |
+| `storageKey` | the object's own key at the host — what a deletion or a migration needs, and NOT recoverable from a transformed URL |
+| `caption`, `width`, `height`, `bytes` | |
+| `at`, `by` | matches Comments/Changes/Maintenance |
+
+Making it its own domain means uploading a photo does not rewrite the Assets tab, and does
+not conflict with someone editing a managed list — the same reasoning that produced the
+existing three counters.
+
+Photos are a full-overwrite tab like every other, **except** that its rows point at bytes
+outside the Sheet. See §5.
+
+### The prerequisite nobody will expect
+
+**Comments, Changes and Maintenance rows have no `id`.** Verified in `AssetTrackerSync.gs`:
+they are `["assetLabel", "text", "at", "by"]`, `["assetLabel", "changeType", "vendor",
+"cost", "note", "at", "by"]` and `["assetLabel", "task", "frequencyLabel", "frequencyDays",
+"lastPerformed", "owner", "at", "by"]` respectively. The frontend edits maintenance items
+**by array index**.
+
+So "attach a photo to a work item" is blocked on giving work items a stable identity —
+exactly the problem `Circuit.id` and the breaker `groupId` already solved elsewhere in this
+app, and the same reasoning as the v31/v32 asset-key refactor. That is real scope, and it
+is what decides the phasing:
+
+- **Phase 1 — assets only.** Assets already have a real `id` (v31/v32). Nothing else needed.
+- **Phase 2 — work items.** Add `id` to Maintenance (and Changes/Comments if wanted),
+  adopting `id = id || <assetId>:<index>` on load the way phase 1 of the key refactor
+  adopted `id = a.id || a.label`. Purely additive, no migration script.
+
+Doing phase 1 first is not just risk-aversion: it is the phase that answers whether the
+storage choice is right, using the one entity that needs no schema work to find out.
+
+---
+
+## 4. Client-side work that is not optional
+
+**Downscale and re-encode before upload.** A `<canvas>` resize to ~1600px on the long edge
+at JPEG q0.8 turns a 4MB phone photo into ~300KB. Plain browser APIs, no build step, which
+matters in a codebase that has neither.
+
+**That same re-encode strips EXIF as a side effect — including GPS.** Phones geotag. Photos
+of a school's rooms, tagged with the school's coordinates, uploaded to a third party, is a
+thing to have decided deliberately rather than discovered. Canvas re-encoding decides it for
+free. (It also drops the orientation flag, so read and apply it before drawing, or portrait
+photos land sideways.)
+
+**Sandbox mode needs an answer, and the answer is "no network, as always".** Per
+`CLAUDE.md`, Sandbox makes **no** call to the real backend, so it cannot sign an upload.
+Hold `URL.createObjectURL` blobs in memory for the session and let them evaporate on reload
+— do NOT put data URLs in `localStorage`, whose ~5MB budget one photo would eat.
+`MOCK_SNAPSHOT` should carry a couple of rows pointing at real, small, public URLs so the
+render path is exercised. **The `personIds` lesson applies directly**: a fixture whose SHAPE
+differs from the backend's response hides exactly the bugs the fixture exists to catch.
+
+**The public `?panel=` page is a fork in the road.** If panel/breaker photos should appear
+on the anonymous QR page, the URLs must be publicly fetchable, which means unlisted-public.
+If they must not, the projection whitelists (`PUBLIC_*_FIELDS`) simply omit photos and the
+question disappears. **Decide this before choosing between an open bucket and a Worker with
+signed reads** — it is the only requirement that changes the storage shape.
+
+---
+
+## 5. What will go wrong, and which way to let it fail
+
+**Orphans, not broken references.** Upload the bytes FIRST, then write the reference. If the
+`persist()` is rejected by the revision check (which it can be — that path is real), the
+bytes are stranded but nothing in the app points at a 404. The other order gives a row whose
+image never loads, which looks like data loss to a user and is unrecoverable. Orphans are
+cheap and sweepable; broken references are not.
+
+**Deleting a photo row does not delete the object**, and deleting an *asset* silently
+strands every photo of it. Options: accept it (a few stranded megabytes on a free tier), or
+add a reaper that lists the bucket and removes objects with no matching row. **The reaper is
+the dangerous one** — the same shape as `doPost`'s mass-deletion guard: "the app sent no
+photo rows" and "delete every object" are the same request on the wire. If it gets built, it
+needs the equivalent of `--allow-empty` and a dry run, per `sheet.mjs`'s conventions.
+
+**A stale browser holding a pre-delete snapshot** is already handled by the revision check,
+provided `rev_photos` is a real domain rather than photos being folded into `rev_assets`.
+
+**The signing secret is per tenant.** It goes in that tenant's Script Properties, never in
+`clients.js` — which is public and is documented as holding only values that authorize
+nothing. Note this is a genuine asymmetry with `GOOGLE_CLIENT_ID`, which is shared precisely
+*because* holding it authorizes nothing. An upload secret is the opposite.
+
+---
+
+## 6. Summary
+
+| | Drive via backend | Drive via browser | **Object storage + signed** |
+|---|---|---|---|
+| New Google scope | **yes, + outage per tenant** | yes (user consent) | **none** |
+| Who owns the files | the school | **whoever uploaded** | the school |
+| Serving images | broken (§1) | broken (§1) | plain HTTPS URL |
+| Thumbnails | build it | build it | free (Cloudinary) |
+| Fights `deploy.mjs` | yes | no | no |
+| New vendor | no | no | **yes** |
+| Recurring cost | none | none | none at this scale |
+
+**Recommendation: Option C, Cloudinary, assets-only for phase 1.** The whole cost of being
+wrong about the vendor is one column of URLs; the cost of being wrong about the Drive scope
+is an outage on a school's live system.
+
+**Three decisions needed before any of this is built:**
+
+1. ~~**Should photos show on the public QR panel page?**~~ **DECIDED — yes, see §7.**
+2. ~~**Cloudinary or R2**~~ **DECIDED — Cloudinary, see §8.**
+3. ~~**Assets only, or work items too**~~ **DECIDED — see §9, which also corrects §3's phasing.**
+
+---
+
+## 7. Decision 1 — should photos appear on the public `?panel=` QR page?
+
+**DECIDED 2026-09-10: yes, as recommended in §7.7.** Eric accepted the recommendation
+in full — panel-owned photos published by default, a per-photo hide flag as the escape
+hatch, open unguessable URLs rather than signed reads, thumbnails inline with full size
+on tap. The reasoning below is the record of why; §7.7 is the spec.
+
+Expanded 2026-09-10, at Eric's request, to answer §6's first open question.
+
+### 7.1 What that page actually is today
+
+Verified by reading `panel.html` and `publicPanelPayload_`, not from memory:
+
+- **Genuinely anonymous.** `panel.html?p=BCA0082` fetches `/exec?panel=BCA0082`. There is
+  **no token in the URL** — not a session, not a signed link, nothing. `doGet`'s panel branch
+  runs before any auth check.
+- **The code is guessable.** Panel codes are sequential-ish asset tags. The one hardening
+  that exists is that a miss returns the same message whether the code names a non-panel
+  asset or nothing at all, so it won't confirm which asset IDs exist — but it does not stop
+  someone walking the range.
+- **The page is `noindex, nofollow`**, so it will not be crawled into a search engine.
+- **The projection is deliberately minimal**, and the file says why: *"A public endpoint
+  should publish the fewest fields that still answer the question."* Four panel fields, six
+  breaker fields, six circuit fields.
+- **The audience is explicit**: *"staff, an electrician, a contractor — gets that one panel's
+  layout with no login. That's intentional, not an oversight."*
+- **The page is deliberately small and hand-rolled.** No React, no Babel, a 20-line `h()` DOM
+  helper, kept separate from `index.html` because that file is *"the wrong thing to hand a
+  phone on school wifi in a mechanical room."* **That sentence is the single most important
+  input to this decision** and §7.4 comes back to it.
+
+### 7.2 The thing to notice first: "public" is not the same question as "on the QR page"
+
+These feel like one decision and are two, and conflating them is the trap.
+
+Keeping photos off the panel page does **not** make them private. If the bucket serves open
+URLs, those URLs are public whether or not the QR page hands them out — the app just hands
+them only to signed-in users. That is security by unguessable URL, and a URL pasted into a
+text message, mailed to a contractor, caught in a screenshot or synced by a browser is
+leaked permanently, with no revocation short of deleting the object.
+
+So there are really two axes:
+
+| | **Bytes are openly served** | **Bytes need a signed, expiring URL** |
+|---|---|---|
+| **Photos on the QR page** | simplest; cacheable; a leaked URL is forever | works — the page already gets its data from `/exec`, so the backend can mint read URLs into that same payload |
+| **Photos app-only** | *feels* private, isn't | actually private |
+
+**The row that surprises people is the top right.** Signed reads are perfectly compatible
+with an anonymous page, because in both cases the URL comes from the backend, which is the
+thing deciding. Anonymity is not the obstacle to privacy here; it never was.
+
+### 7.3 If yes — the scoping falls out of the data model for free
+
+This is the part that makes the answer cheaper than it looks.
+
+`publicPanelPayload_` assembles exactly one panel, its breakers, and its circuits. Under the
+§3 model a photo carries `ownerType` + `ownerId`. So publishing photos on that page means
+publishing photos whose owner is *one of the things already on that page* — and **a photo of
+a laptop, a person, or a classroom is structurally unreachable**, not filtered out by a rule
+someone has to maintain. The blast radius is bounded by the payload that already exists.
+
+That reframes the question from "should photos be public" to the much narrower:
+
+> Is a photo of **this panel, its breakers and its circuits** something we are willing to
+> serve to whoever guesses a panel code?
+
+And against that, weigh what the page **already** serves to that same person: the panel's
+full slot layout, every breaker's amp rating, and every circuit's free-text notes describing
+what it feeds and which rooms it serves. Someone who guesses a code already learns more
+about the electrical system from the text than a photo would add.
+
+### 7.4 The real risk is an accident, not an adversary
+
+The threat model — someone enumerates panel codes *and* cares about a photo of a breaker box
+— is thin, and the existing text projection already doesn't defend against it.
+
+The realistic risk is different and worth naming: **a photo catches something that was never
+the subject.** A student walking past. A whiteboard. A screen with a roster on it. A
+contractor's paperwork on a table. Phone cameras have wide lenses and mechanical rooms are
+not always empty.
+
+Cryptography does not fix that — a signed URL to a photo of a student is still a photo of a
+student, just with an expiry. What fixes it is:
+
+1. **A per-photo "hide from public page" flag**, defaulted to visible for panel-owned photos.
+   One boolean column, one checkbox, and an escape hatch for the odd photo that caught
+   something.
+2. **A stated norm** that photos are of *things*, not of people or screens. Cheap, and it is
+   the control that actually matches the risk.
+3. **The canvas re-encode from §4**, which strips GPS EXIF before anything leaves the phone.
+
+### 7.5 Bandwidth is the constraint everyone forgets
+
+`panel.html` exists as a separate file *because* a heavy page is wrong for a phone on school
+wifi in a mechanical room. Dropping six full-size photos into it would undo the reason it
+was split out in the first place.
+
+So if photos go on this page, it is **thumbnails only, full size on tap** — non-negotiable,
+and a point in favour of Cloudinary (§2), where a thumbnail is a URL parameter rather than a
+second stored object and a second upload.
+
+It is also a small amount of real work in a file that has no framework: a gallery is
+hand-rolled `h()` calls, plus a lightbox, plus the `?sandbox=1` path that page already
+supports.
+
+### 7.6 The asymmetry — and why it does not settle this one
+
+The usual tiebreaker is reversibility, and it points at "no": you can add photos to the
+public page later cheaply, whereas un-publishing a URL that is already in the wild is not
+possible.
+
+**But deferring is not free here, and it is worth being honest about that.** An electrician
+standing at a panel with a phone is the single highest-value place a photo could appear in
+this entire application. Text says *"north wall outlets"*; a photo shows which wall. The QR
+sticker exists precisely to serve someone who is physically present and does not know the
+building. Deferring photos on that page defers most of the value of panel photos.
+
+The asymmetry is real but it is answered by the flag in §7.4, not by blanket deferral: a
+photo is published only if someone attached it to a panel, and any single photo can be
+pulled back out of the public projection without touching the others.
+
+### 7.7 Recommendation
+
+**Yes — publish panel-owned photos on the QR page.** Specifically:
+
+| Decision | Choice | Why |
+|---|---|---|
+| Scope | photos owned by the panel, its breakers, its circuits | falls out of the existing payload; nothing else is reachable |
+| Default | visible on the public page | this is the page where a panel photo is worth the most |
+| Escape hatch | per-photo "hide from public page" flag | matches the actual risk, which is an accidental subject |
+| Bytes | open, unguessable (UUID) object keys — **not** signed reads | signed URLs cost caching and bookmarking on a page built for bad wifi, to defend a threat the existing text projection already doesn't |
+| Size | thumbnails inline, full size on tap | the page was split out to stay light; do not undo that |
+| Projection | a `PUBLIC_PHOTO_FIELDS` whitelist, same pattern as the other four | the file's own rule: publish the fewest fields that answer the question |
+
+**What would change this recommendation:** if photos are ever wanted on a public page for
+*rooms, people or general assets*, the scoping argument in §7.3 disappears — that projection
+would not be bounded by a single panel — and signed reads become worth their cost. That is a
+different decision, and this one does not prejudge it.
+
+**One consequence to accept deliberately:** an open bucket means every photo in the system,
+public-page or not, is protected by URL unguessability rather than by access control. That is
+the right trade for photos of equipment. It would be the wrong trade for photos of documents
+or people, which is why §7.4's norm is part of the recommendation rather than an aside.
+
+---
+
+## 8. Decision 2 — Cloudinary or Cloudflare R2?
+
+Answered 2026-09-10. Free-tier figures below were **checked on the day**, not recalled;
+sources at the end of the section. Re-check before committing money — this is the kind of
+line that goes stale, exactly like the deploy-version lines this file keeps apologising for.
+
+### 8.1 The finding that decides it: R2 has no production-grade free URL
+
+§7 decided photos are served as plain, openly-fetchable URLs. So "how does a browser get
+the bytes" is now a load-bearing requirement, not a detail.
+
+R2's obvious answer is its `r2.dev` public bucket URL. **Cloudflare's own documentation says
+not to use it for this:**
+
+> "Public access through `r2.dev` subdomains is rate-limited and should only be used for
+> development purposes."
+
+and, of the workaround someone would reach for next:
+
+> "Avoid creating a CNAME record pointing to the `r2.dev` subdomain. This is an
+> **unsupported access path**, and we cannot guarantee consistent reliability or
+> performance."
+
+Production R2 wants a **custom domain**, and a custom domain on R2 requires the zone to be
+on Cloudflare. **`stama.tech` is not on Cloudflare** — verified by DNS lookup on
+2026-09-10: its nameservers are `ns-canada/ns-usa/ns-uk.topdns.com`, and `assets.stama.tech`
+is a CNAME to `mrpip914.github.io`.
+
+So choosing R2 means one of:
+
+| Path | Cost |
+|---|---|
+| Move `stama.tech`'s nameservers to Cloudflare | A DNS migration on the domain that serves the live app to two schools, to add photos. The blast radius of a mistake is the whole site, not the photos. |
+| Put a second, throwaway domain on Cloudflare | A domain to buy and renew, and a second thing to remember exists. |
+| Write a Worker on `*.workers.dev` to serve from an R2 binding | Free and it works — but it is a new deployable, with `wrangler` tooling, in a repo whose defining constraint is **no build step and no `node_modules`**, and a second deploy path beside the Apps Script one Eric already runs from his phone. |
+
+None is fatal. All three are a bigger change than the feature.
+
+### 8.2 The rest of the comparison
+
+| | **Cloudinary** | **Cloudflare R2** |
+|---|---|---|
+| Free tier | 25 credits/mo; 1 credit = 1GB storage **or** 1GB bandwidth **or** 1,000 transformations, pooled | 10GB storage, 1M Class A ops, 10M Class B ops, **zero egress** |
+| Overage behaviour | Soft limits — warnings from ~90%, no silent overage billing on the free plan | Pay-as-you-go past the free tier |
+| Serving | `res.cloudinary.com`, CDN, nothing to build | §8.1 |
+| Thumbnails | URL parameter (`w_200,c_fill`), generated and cached on demand | Build them client-side, store and upload a **second object per photo** |
+| EXIF / auto-orient | Server-side | Yours |
+| Signing in Apps Script | SHA-1 of sorted params + `api_secret`. `Utilities.computeDigest` — a few lines | AWS SigV4. ~40 lines of HMAC chaining. Well-trodden, but it is 40 lines of crypto in a file with no tests around it |
+| Bytes live | Cloudinary | Your bucket |
+
+**On sizing:** this app has ~160 assets. Even 1,000 photos at ~300KB (post-downscale, §4) is
+~0.3GB stored. Thumbnails are cached derived assets, so transformations are counted per
+*unique* transform, not per view. Both free tiers are comfortable; neither is close to being
+the deciding factor, which is why §8.1 is.
+
+### 8.3 The counter-argument, stated fairly
+
+R2 is the better *primitive*: cheaper at scale, zero egress, the bytes are yours, and no
+vendor sits between the app and its own images. If this were a project with an existing
+Cloudflare footprint and a build step, R2 would win.
+
+It isn't. It is a no-build-step static site whose backend is Apps Script and whose deploy
+story is one command from a phone. **R2 asks this project to grow a second deployable or
+migrate its DNS; Cloudinary asks it to store one more secret in Script Properties.**
+
+### 8.4 Lock-in is low by construction, which is what makes this safe to decide quickly
+
+§3 stores `url`, `thumbUrl` **and** `storageKey` per photo. `storageKey` is there precisely
+so a move is possible: copy the objects, rewrite one column. Nothing in the app's data model
+knows which vendor it is talking to, and the signing lives in one `doPost` branch.
+
+So this is a reversible decision wearing the costume of an irreversible one. That is the
+argument for taking the cheap path now rather than the architecturally purer one.
+
+### 8.5 Recommendation
+
+**Cloudinary.** Signed uploads only — the API secret in each tenant's **Script Properties**,
+never in `clients.js`, and never an unsigned upload preset: Cloudinary's own docs warn that
+a leaked preset name lets anyone upload into your account, and this repo is public.
+
+Two operational notes:
+
+- **One account, a folder per tenant** (`bca/`, `dev/`). Eric owns every tenant's script, so
+  a shared secret crosses no trust boundary that isn't already crossed. Per-tenant accounts
+  would be tidier and buy nothing.
+- **Deletion is an API call, not a URL**, so the orphan-sweeper question in §5 stays exactly
+  as described — and stays deferred.
+
+**What would change this:** if `stama.tech` ends up on Cloudflare for some other reason, or
+the project grows a build step, R2 becomes the better answer and §8.4 is the escape route.
+
+Sources (checked 2026-09-10): Cloudflare R2 public buckets documentation; Cloudinary pricing
+and credits documentation; Cloudinary client-side uploading security notes; DNS lookup of
+`stama.tech` NS and `assets.stama.tech` CNAME.
+
+---
+
+## 9. Decision 3 — assets only, or work items too?
+
+Answered 2026-09-10. **This section corrects the framing in §3 and §6**, which split phase 1
+as "assets only" vs "work items". That was the wrong cut.
+
+### 9.1 The line is "has a stable id", not "is an asset"
+
+Verified against the field lists in `AssetTrackerSync.gs`:
+
+| Entity | Stable id today? |
+|---|---|
+| Asset | **yes** — real `id` since v31/v32 |
+| Breaker | **yes** — `crypto.randomUUID()`, and a `groupId` |
+| Circuit | **yes** — `crypto.randomUUID()` |
+| Comment | no — `["assetLabel", "text", "at", "by"]` |
+| Change | no — `["assetLabel", "changeType", "vendor", "cost", "note", "at", "by"]` |
+| Maintenance item | no — `["assetLabel", "task", "frequencyLabel", "frequencyDays", "lastPerformed", "owner", "at", "by"]` |
+
+The frontend addresses all three of the bottom rows **by array index**:
+`editingMaintenanceIdx`, `startEditMaintenance(idx)`, `markMaintenanceDone(idx)`,
+`deleteMaintenanceItem(idx)`, `deleteComment(idx)`, `deleteChange(idx)`. Comments and Changes
+are add-and-delete only — there is no edit path for either.
+
+### 9.2 "Assets only" would quietly contradict decision 1
+
+§7 committed to publishing photos owned by **a panel, its breakers and its circuits** on the
+QR page. Under an assets-only phase 1, only the Panel asset could hold a photo — so the page
+would publish a picture of the panel as a whole, and there would be no way to photograph
+what circuit 12 actually feeds, which is the single thing an electrician at that panel most
+wants and the reason §7 was worth saying yes to.
+
+**And it would cost nothing to include, because breakers and circuits already have UUIDs.**
+
+**So the real phase 1 is: assets + breakers + circuits.** No schema work at all beyond the
+Photos tab itself. That is strictly better than what §6 proposed and is the main correction
+here.
+
+### 9.3 Giving the other three an id is cheap — and cheapest done NOW
+
+The instinct is to defer it as "a schema change, therefore a deploy". **That reasoning does
+not survive contact with the fact that photos need a deploy anyway.** The Photos tab and
+`rev_photos` are a new backend version regardless. Adding `id` to three more field lists in
+that *same* version is three names in three lists. Deferring it buys nothing and costs a
+whole extra deploy cycle across every tenant later, with all the version-check discipline
+that entails.
+
+Checked, because this codebase has been bitten here before: all three tabs are written with
+`writeTable_`, which clears and rewrites from the field list, so a new column is purely
+additive. **The tab where adding a column silently lost data was `AuditLog`** — it uses
+`appendNewRows_`, whose narrow-stored-header bug was fixed in v27. None of these three is
+that tab.
+
+**How the ids get minted, and why the obvious trick does not work here.** Phase 1 of the key
+refactor could adopt `id = a.id || a.label` because the fallback was already stable, stored
+data. These rows have no natural key — `<assetId>:<index>` looks like one and is a trap: it
+is stable until someone deletes an earlier item, at which point every later photo silently
+re-points to the wrong task. That is precisely the class of silent corruption this file
+keeps writing warnings about.
+
+The workable pattern is **mint a uuid on load, persist it on the next save** — and the
+reason it is safe is specific rather than hopeful:
+
+- Nothing references the ids until a photo is attached, and attaching a photo *is* a save.
+  So the photo row and the ids that give it meaning ride the **same snapshot write**, and
+  land or fail together.
+- The two-browsers-mint-different-uuids race is already handled: the loser's save is refused
+  by the existing revision check, that browser reloads, and it adopts the winner's ids. The
+  optimistic-concurrency machinery from v12 solves this for free.
+
+This is deliberately **not** the `convertUsersToAssets` button pattern. That needed a
+deliberate one-time click because it issued labels from `nextAssetNumber`, a shared counter
+several browsers would race for. A uuid is not contended, so nothing here needs a button.
+
+### 9.4 Side benefit worth noticing, not worth chasing
+
+Once these rows have ids, the index-based add/edit/delete handlers *could* address them by
+id instead. That is not a bug today — the sheet round-trips rows in array order, and the
+revision check already refuses a stale concurrent delete — so this is fragility, not a
+defect, and it is **out of scope**. Noted only so the next person sees why the ids make it
+possible.
+
+### 9.5 Recommendation
+
+**Add the `id` column to Comments, Changes and Maintenance in the same backend version as the
+Photos tab. Wire the photo UI in stages afterwards.**
+
+| Stage | Owners | Schema cost |
+|---|---|---|
+| **1 — ship together** | Asset, Breaker, Circuit | none; all three already have ids |
+| **2 — same deploy, UI later** | Change, Maintenance item | one column each, minted per §9.3 |
+| **3 — only if wanted** | Comment | one column; a comment with a picture is a nice-to-have, not a driver |
+
+Order the UI by value: an asset's own photos first, then the panel/breaker/circuit gallery
+that decision 1 already committed to, then a repair record's before/after and a maintenance
+item's evidence-of-completion. **Changes is the tab that most deserves the name "work item"** —
+it already carries vendor and cost, so a receipt or a before/after belongs there more
+naturally than anywhere else in the app.
+
+**What this does NOT include:** Allocations (a quantity per room — nothing to photograph) and
+AuditLog (append-only, machine-written, and the one tab with no rewrite path).
