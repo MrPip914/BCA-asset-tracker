@@ -15,6 +15,15 @@ he will ask, and asking is cheap. This is about the CHAT, not the work: keep inv
 as thoroughly as ever, and keep writing this file, `BUGS.md` and commit messages at their
 existing level of detail — those are records, where the reasoning is the point.
 
+**A FINISHED PIECE OF WORK IS A FEW LINES: what it now does, and anything he has to decide.**
+Reasserted 2026-09-11, when a "summary" of the type-labels rework still ran eight paragraphs
+with headings. The tell is a reply that explains WHY a decision was right — no deploy needed,
+old data still resolves, grouping had to go — none of which he asked for. That reasoning is
+already in the commit message and in this file, which is exactly why it does not belong in
+the chat as well. **Do not report verification unprompted either** (tests run, browser driven,
+mutation-checked): doing it is the job, and listing it is the same padding wearing a badge.
+He will ask.
+
 **A bug you find while doing something else goes in `BUGS.md`, not into the current
 session.** Log it, mention it in one line at the end of your response, and carry on with
 what was asked — Eric decides what gets fixed and when, and an unprioritized bug taking
