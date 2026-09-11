@@ -1880,7 +1880,7 @@ const FRONTEND_SCRIPT_VERSION = "v35";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-11.2";
+const APP_VERSION = "2026-09-11.3";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -2866,6 +2866,11 @@ function AssetTracker() {
   // snapshot write at the very end.
   const [photoBusy, setPhotoBusy] = useState(false);
   const [photoError, setPhotoError] = useState("");
+  // { done, total } while a multi-file upload is running, else null. Uploads are
+  // sequential rather than parallel: honest progress, one failure at a time to
+  // report, and parallel uploads competing on school wifi is the opposite of
+  // what this feature needs.
+  const [photoProgress, setPhotoProgress] = useState(null);
   // Which photo the lightbox is showing, or null.
   const [photoViewer, setPhotoViewer] = useState(null);
   // The caption being typed in the lightbox. Held separately from the photo so
@@ -4802,17 +4807,56 @@ function AssetTracker() {
   // the revision check strands bytes at the host rather than leaving a row whose
   // image 404s. An orphan is invisible and sweepable; a broken reference looks
   // like data loss to whoever took the photo. See PHOTOS_EVAL.md section 5.
-  async function attachPhoto(ownerType, ownerId, file) {
+  async function attachPhotos(ownerType, ownerId, files) {
     if (savingRef.current || photoBusy) return; // double-submit guard, see savingRef
-    if (!file || !ownerId) return;
+    const chosen = Array.from(files || []).filter(Boolean);
+    if (!chosen.length || !ownerId) return;
     if (!PHOTO_OWNER_TYPES.includes(ownerType)) return;
-    if (file.size > PHOTO_MAX_BYTES) {
-      setPhotoError("That file is too large. Pick a photo rather than a video or a RAW file.");
-      return;
-    }
     setPhotoError("");
     setPhotoBusy(true);
+    setPhotoProgress({ done: 0, total: chosen.length });
+    // Accumulated HERE and written ONCE at the end, which is the whole reason
+    // this is not a loop around the old single-file handler. `photos` is the
+    // state this render closed over and does not advance as we go, so a
+    // per-file persist would build every list from the ORIGINAL array and each
+    // save would drop the ones before it -- N saves, one photo surviving. It is
+    // also N full-snapshot round trips for one user action, and the queued
+    // writes would race the revision check against each other.
+    const added = [];
+    const failures = [];
     try {
+      for (let i = 0; i < chosen.length; i++) {
+        const file = chosen[i];
+        setPhotoProgress({ done: i, total: chosen.length });
+        try {
+          added.push(await preparePhotoRow(ownerType, ownerId, file));
+        } catch (err) {
+          // One bad file does not abandon the rest -- the others are already
+          // uploaded, and throwing away good work because the fourth photo was
+          // a screenshot of a video would be worse than reporting it.
+          failures.push((file.name || "A file") + ": " + ((err && err.message) || "could not be uploaded."));
+        }
+      }
+      if (added.length) await persist(assets, { photos: [...photos, ...added] });
+      if (failures.length) {
+        setPhotoError(failures.length === 1 ? failures[0]
+          : failures.length + " of " + chosen.length + " photos failed — " + failures.join("; "));
+      }
+    } finally {
+      setPhotoBusy(false);
+      setPhotoProgress(null);
+    }
+  }
+
+  // Prepares and uploads ONE file, returning the row to be written. Split out of
+  // attachPhotos so the per-file failure above has something to wrap, and so the
+  // accumulate-then-write-once rule cannot be broken by a future call site: this
+  // returns a row and writes nothing.
+  async function preparePhotoRow(ownerType, ownerId, file) {
+    if (file.size > PHOTO_MAX_BYTES) {
+      throw new Error("too large — pick a photo rather than a video or a RAW file.");
+    }
+    {
       const prepared = await downscalePhoto(file);
       let row;
       if (sandboxMode) {
@@ -4845,11 +4889,7 @@ function AssetTracker() {
           at: new Date().toISOString(), by: currentUser || "",
         };
       }
-      await persist(assets, { photos: [...photos, row] });
-    } catch (err) {
-      setPhotoError((err && err.message) || "That photo could not be uploaded.");
-    } finally {
-      setPhotoBusy(false);
+      return row;
     }
   }
 
@@ -7350,8 +7390,9 @@ function AssetTracker() {
                     photos={photosForOwner("change", changeDraft.id)}
                     canEdit={canEdit}
                     busy={photoBusy}
+                    progress={photoProgress}
                     error={photoError}
-                    onAdd={(file) => attachPhoto("change", changeDraft.id, file)}
+                    onAdd={(files) => attachPhotos("change", changeDraft.id, files)}
                     onDelete={deletePhoto}
                     onToggleHidden={setPhotoHiddenFromPublic}
                     onOpen={openPhotoViewer}
@@ -7430,8 +7471,9 @@ function AssetTracker() {
                     photos={photosForOwner("maintenance", maintenanceDraft.id)}
                     canEdit={canEdit}
                     busy={photoBusy}
+                    progress={photoProgress}
                     error={photoError}
-                    onAdd={(file) => attachPhoto("maintenance", maintenanceDraft.id, file)}
+                    onAdd={(files) => attachPhotos("maintenance", maintenanceDraft.id, files)}
                     onDelete={deletePhoto}
                     onToggleHidden={setPhotoHiddenFromPublic}
                     onOpen={openPhotoViewer}
@@ -8208,8 +8250,9 @@ function AssetTracker() {
                               photos={photosForOwner("maintenance", item.id)}
                               canEdit={canEdit}
                               busy={photoBusy}
+                              progress={photoProgress}
                               error={photoError}
-                              onAdd={(file) => attachPhoto("maintenance", item.id, file)}
+                              onAdd={(files) => attachPhotos("maintenance", item.id, files)}
                               onDelete={deletePhoto}
                               onToggleHidden={setPhotoHiddenFromPublic}
                               onOpen={openPhotoViewer}
@@ -8392,8 +8435,9 @@ function AssetTracker() {
                 photos={assetPhotos}
                 canEdit={canEdit}
                 busy={photoBusy}
+                progress={photoProgress}
                 error={photoError}
-                onAdd={(file) => attachPhoto("asset", selectedAsset.id, file)}
+                onAdd={(files) => attachPhotos("asset", selectedAsset.id, files)}
                 onDelete={deletePhoto}
                 onToggleHidden={setPhotoHiddenFromPublic}
                 onOpen={openPhotoViewer}
@@ -12921,23 +12965,26 @@ function circuitSummary(circuit, assets) {
 // top-level component taking only the props it touches -- the same extraction
 // BreakersTabContent proved out -- so the same gallery serves an asset, a
 // breaker and a circuit without any of them knowing about the others.
-function PhotoGallery({ photos, canEdit, busy, error, onAdd, onDelete, onToggleHidden, onOpen, emptyText }) {
+function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onDelete, onToggleHidden, onOpen, emptyText }) {
   const [confirmDelete, setConfirmDelete] = React.useState(null);
   const inputRef = React.useRef(null);
 
   function pick(e) {
-    const file = e.target.files && e.target.files[0];
+    // The whole FileList, not just [0] -- a phone's picker and a desktop file
+    // dialog both hand back several when `multiple` is set, and photographing a
+    // repair usually produces more than one.
+    const files = e.target.files ? Array.from(e.target.files) : [];
     // Cleared BEFORE the await so picking the same file twice in a row still
     // fires a change event the second time.
     e.target.value = "";
-    if (file) onAdd(file);
+    if (files.length) onAdd(files);
   }
 
   return (
     <div>
       {canEdit && (
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
-          <input ref={inputRef} type="file" accept="image/*" onChange={pick} style={{ display: "none" }} />
+          <input ref={inputRef} type="file" accept="image/*" multiple onChange={pick} style={{ display: "none" }} />
           <button
             onClick={() => inputRef.current && inputRef.current.click()}
             disabled={busy}
@@ -12949,10 +12996,17 @@ function PhotoGallery({ photos, canEdit, busy, error, onAdd, onDelete, onToggleH
             }}
           >
             {busy ? <Loader2 size={14} className="spin" /> : <ImagePlus size={14} />}
-            {busy ? "Uploading..." : "Add photo"}
+            {/* Counts through a batch rather than saying "Uploading..." for a
+                minute with nothing moving. Reads 1-based: the first file is
+                "1 of 5", not "0 of 5". */}
+            {busy
+              ? (progress && progress.total > 1
+                  ? "Uploading " + Math.min(progress.done + 1, progress.total) + " of " + progress.total + "…"
+                  : "Uploading…")
+              : "Add photos"}
           </button>
           <span style={{ fontSize: 11, color: C.muted }}>
-            Resized and stripped of location data before it leaves this device.
+            Pick several at once. Resized and stripped of location data before they leave this device.
           </span>
         </div>
       )}

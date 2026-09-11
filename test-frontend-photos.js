@@ -19,9 +19,14 @@ const fs = require('fs');
 const path = require('path');
 const src = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
 
+// Includes a leading `async ` when there is one. Slicing from `function` alone
+// drops it, and the body then has `await` inside a non-async function — which
+// fails as "missing ) after argument list", an error that names neither the
+// function nor the real cause.
 function grab(name) {
-  const i = src.indexOf(`function ${name}(`);
+  let i = src.indexOf(`function ${name}(`);
   if (i === -1) throw new Error(`${name} not found`);
+  if (src.slice(i - 6, i) === 'async ') i -= 6;
   let depth = 0;
   for (let k = src.indexOf('{', i); k < src.length; k++) {
     if (src[k] === '{') depth++;
@@ -180,9 +185,93 @@ eq('the Add task dialog mints the schedule id on open',
 eq('addMaintenanceItem writes an id rather than leaving it to the next load',
    /id: maintenanceDraft\.id \|\| crypto\.randomUUID\(\)/.test(src), true);
 eq('a maintenance schedule can own photos',
-   src.includes('attachPhoto("maintenance", item.id, file)'), true);
+   src.includes('attachPhotos("maintenance", item.id, files)'), true);
 eq('a work entry can own photos',
-   src.includes('attachPhoto("change", changeDraft.id, file)'), true);
+   src.includes('attachPhotos("change", changeDraft.id, files)'), true);
 
-console.log(`\n${pass} passed, ${fail} failed`);
-process.exit(fail ? 1 : 0);
+// ------------------------------------------------- multi-file upload
+// attachPhotos is EXECUTED here, not pattern-matched, because the rule that
+// matters cannot be seen by reading: `photos` is the state the render closed
+// over and does not advance during the loop, so persisting per file would build
+// every list from the ORIGINAL array and each save would drop the ones before
+// it — N writes, one photo surviving. That failure looks like "only the last
+// photo uploaded", which reads as a flaky network rather than a bug.
+function runAttach({ files, failOn = [] }) {
+  const calls = { persist: [], errors: [], progress: [], busy: [] };
+  const fn = new Function(
+    'savingRef', 'photoBusy', 'PHOTO_OWNER_TYPES', 'setPhotoError', 'setPhotoBusy',
+    'setPhotoProgress', 'preparePhotoRow', 'persist', 'photos', 'assets', 'module',
+    grab('attachPhotos') + '\nmodule.f = attachPhotos;'
+  );
+  const mod = {};
+  fn(
+    { current: false },
+    false,
+    ['asset', 'breaker', 'circuit', 'change', 'maintenance'],
+    (m) => calls.errors.push(m),
+    (b) => calls.busy.push(b),
+    (p) => calls.progress.push(p),
+    async (ownerType, ownerId, file) => {
+      if (failOn.includes(file.name)) throw new Error('nope');
+      return { id: 'row-' + file.name, ownerType, ownerId };
+    },
+    async (a, overrides) => { calls.persist.push(overrides.photos); },
+    [{ id: 'existing' }],
+    [],
+    mod
+  );
+  return mod.f('asset', 'owner-1', files).then(() => calls);
+}
+
+const F = (name) => ({ name, size: 1000 });
+
+runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg')] }).then(calls => {
+  eq('three files produce exactly ONE snapshot write', calls.persist.length, 1);
+  eq('that one write carries the existing photo plus all three new ones',
+     calls.persist[0].map(p => p.id), ['existing', 'row-a.jpg', 'row-b.jpg', 'row-c.jpg']);
+  eq('no error is reported when every file succeeds', calls.errors.filter(Boolean).length, 0);
+  eq('busy goes true then false', calls.busy, [true, false]);
+
+  // A partial failure keeps the good work. Throwing away two uploaded photos
+  // because the third was a video is worse than reporting the third.
+  return runAttach({ files: [F('a.jpg'), F('bad.mov'), F('c.jpg')], failOn: ['bad.mov'] });
+}).then(calls => {
+  eq('one bad file does not abandon the batch', calls.persist.length, 1);
+  eq('the two good files are still written',
+     calls.persist[0].map(p => p.id), ['existing', 'row-a.jpg', 'row-c.jpg']);
+  eq('the failure names the file', /bad\.mov/.test(calls.errors.join(' ')), true);
+
+  // Every file failing must write NOTHING — persisting an unchanged list would
+  // bump the photos revision for no reason and conflict with other clients.
+  return runAttach({ files: [F('bad1.mov'), F('bad2.mov')], failOn: ['bad1.mov', 'bad2.mov'] });
+}).then(calls => {
+  eq('all files failing writes nothing at all', calls.persist.length, 0);
+  eq('and still reports both failures', /2 of 2/.test(calls.errors.join(' ')), true);
+
+  return runAttach({ files: [] });
+}).then(calls => {
+  eq('an empty pick does nothing and never sets busy', calls.busy.length, 0);
+
+  // ---- the input and the wiring, which the execution above cannot see -------
+  eq('the file input accepts several at once',
+     /type="file" accept="image\/\*" multiple/.test(src), true);
+  eq('pick hands over the whole FileList rather than just the first',
+     /Array\.from\(e\.target\.files\)/.test(src), true);
+  // The split exists so a future call site cannot reintroduce a per-file write.
+  eq('preparePhotoRow writes nothing — it returns a row',
+     /persist\(/.test(grab('preparePhotoRow')), false);
+  eq('attachPhotos writes exactly once in its source too',
+     (grab('attachPhotos').match(/await persist\(/g) || []).length, 1);
+
+  console.log(`\n${pass} passed, ${fail} failed`);
+  process.exit(fail ? 1 : 0);
+}).catch(err => {
+  // A rejection here means attachPhotos let an error escape — which is exactly
+  // what happens if the per-file catch is removed and one bad file abandons the
+  // batch. Reported as a failure rather than a raw stack, so the cause is named.
+  console.log('FAIL  attachPhotos let an error escape instead of collecting it');
+  console.log('        ' + ((err && err.message) || err));
+  console.log(`\n${pass} passed, ${fail + 1} failed`);
+  process.exit(1);
+});
+
