@@ -1880,7 +1880,7 @@ const FRONTEND_SCRIPT_VERSION = "v35";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-10.15";
+const APP_VERSION = "2026-09-11.1";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -2868,6 +2868,10 @@ function AssetTracker() {
   const [photoError, setPhotoError] = useState("");
   // Which photo the lightbox is showing, or null.
   const [photoViewer, setPhotoViewer] = useState(null);
+  // The caption being typed in the lightbox. Held separately from the photo so
+  // an abandoned edit leaves nothing behind, and reseeded every time the viewer
+  // opens -- the same rule the work dialog and breaker edit mode follow.
+  const [photoCaptionDraft, setPhotoCaptionDraft] = useState("");
   const [showBreakerTypesManager, setShowBreakerTypesManager] = useState(false);
   const [breakerTypeDraft, setBreakerTypeDraft] = useState(null); // null = list view; else { id, name, slotSpan, members }
   const [currentMemberCells, setCurrentMemberCells] = useState([]);
@@ -4610,6 +4614,23 @@ function AssetTracker() {
     return null;
   }
 
+  // Every id that can own a photo and belongs to this asset: the asset itself,
+  // its work entries, its maintenance items, and (for a panel) its breakers and
+  // circuits. Deleting the asset destroys every one of those owners, so their
+  // photo rows have nothing left to point at.
+  function photoOwnerIdsOf(asset) {
+    if (!asset) return [];
+    const ids = [asset.id];
+    (asset.changes || []).forEach(c => { if (c && c.id) ids.push(c.id); });
+    (asset.maintenanceItems || []).forEach(m => { if (m && m.id) ids.push(m.id); });
+    (asset.breakers || []).forEach(b => {
+      if (b && b.id) ids.push(b.id);
+      (b.circuits || []).forEach(c => { if (c && c.id) ids.push(c.id); });
+    });
+    (asset.unassignedCircuits || []).forEach(c => { if (c && c.id) ids.push(c.id); });
+    return ids;
+  }
+
   async function doDelete(id) {
     if (savingRef.current) return; // double-submit guard, see savingRef
     const asset = assets.find(a => a.id === id);
@@ -4618,7 +4639,19 @@ function AssetTracker() {
       assetType: asset ? asset.type : "", action: "deleted",
       related: relate({ at: asset ? asset.parentId : "" }),
     };
-    await persist(assets.filter(a => a.id !== id), { auditLog: logAudit([deletedEntry]) });
+    // Photo rows cascade with the asset (Eric's call, 2026-09-11): they are
+    // worthless once their owner is gone, and the IMAGES survive at the host
+    // regardless, so nothing is actually destroyed by dropping the rows.
+    // Deliberately NOT a blocked delete -- permanent delete is already a rare,
+    // twice-confirmed action on an already-archived asset.
+    const doomedOwners = new Set(photoOwnerIdsOf(asset));
+    const keptPhotos = photos.filter(ph => !doomedOwners.has(ph.ownerId));
+    await persist(assets.filter(a => a.id !== id), {
+      auditLog: logAudit([deletedEntry]),
+      // Same reference when nothing matched, so persist's dirty check does not
+      // mark the photos domain changed on a delete that removed none.
+      photos: keptPhotos.length === photos.length ? photos : keptPhotos,
+    });
     setConfirmDelete(null);
     if (selectedId === id) closeDetail();
   }
@@ -4843,6 +4876,26 @@ function AssetTracker() {
     await persist(assets, { photos: photos.filter(ph => ph.id !== photoId) });
   }
 
+  // Opens the viewer AND reseeds the caption draft. Every gallery goes through
+  // this rather than setPhotoViewer directly, or the draft would carry the last
+  // photo's caption into the next one.
+  function openPhotoViewer(photo) {
+    setPhotoViewer(photo);
+    setPhotoCaptionDraft((photo && photo.caption) || "");
+  }
+
+  async function savePhotoCaption() {
+    if (savingRef.current || !photoViewer) return; // double-submit guard, see savingRef
+    const id = photoViewer.id;
+    const caption = photoCaptionDraft.trim();
+    // Keep the open viewer in step, so closing and reopening does not appear to
+    // discard what was just saved.
+    setPhotoViewer({ ...photoViewer, caption: caption });
+    await persist(assets, {
+      photos: photos.map(ph => (ph.id === id ? { ...ph, caption: caption } : ph)),
+    });
+  }
+
   async function setPhotoHiddenFromPublic(photoId, hidden) {
     if (savingRef.current) return; // double-submit guard, see savingRef
     await persist(assets, {
@@ -4874,7 +4927,20 @@ function AssetTracker() {
   // the next dialog -- the same reason entering breaker edit mode reseeds.
   function openChangeAdd(assetId) {
     setWorkDialogAssetId(assetId === undefined ? null : assetId);
-    setChangeDraft({ changeType: "", vendor: "", cost: "", note: "", maintenanceId: "", markPerformed: false, performedOn: localDateString() });
+    setChangeDraft({
+      // Minted HERE rather than in addChange, which is where it used to be
+      // (Eric's call, 2026-09-11). A photo names its owner, so the owner needs
+      // an identity before the entry exists -- otherwise a photo could only be
+      // attached by saving the entry and then reopening it to edit, which is how
+      // the photo does not get taken.
+      //
+      // The cost, accepted deliberately: bytes upload as soon as you pick a
+      // file, so cancelling the dialog afterwards strands them at the image
+      // host. That is the same failure this feature already chooses everywhere
+      // -- an invisible orphan rather than a row whose image 404s.
+      id: crypto.randomUUID(),
+      changeType: "", vendor: "", cost: "", note: "", maintenanceId: "", markPerformed: false, performedOn: localDateString(),
+    });
     setChangeModal({ mode: "add" });
   }
 
@@ -4883,6 +4949,9 @@ function AssetTracker() {
     const ch = (selectedAsset.changes || []).find(c => c && c.id === changeId);
     if (!ch) return;
     setChangeDraft({
+      // The entry's real id, so the photo gallery in this dialog addresses the
+      // same owner in edit mode as it does in add mode.
+      id: ch.id,
       changeType: ch.changeType || "",
       vendor: ch.vendor || "",
       cost: ch.cost || "",
@@ -4962,7 +5031,10 @@ function AssetTracker() {
     if (savingRef.current) return; // double-submit guard, see savingRef
     if (!changeDraft.changeType || !workTarget) return;
     const entry = {
-      id: crypto.randomUUID(),
+      // The id the dialog was OPENED with, so any photo attached while filling
+      // the form already names this entry. The fallback covers a draft seeded by
+      // some future call site that forgets to mint one.
+      id: changeDraft.id || crypto.randomUUID(),
       changeType: changeDraft.changeType,
       vendor: changeDraft.vendor.trim(),
       cost: changeDraft.cost.trim(),
@@ -7261,6 +7333,25 @@ function AssetTracker() {
                 {changeDraft.markPerformed && !changeDraft.performedOn && (
                   <div style={{ fontSize: 12, color: C.danger, marginTop: 8 }}>Pick the date it was performed.</div>
                 )}
+                {/* Photos attach to the ENTRY, addressed by the id the dialog was
+                    opened with -- so a receipt or a before/after can be added at
+                    the moment the work is written up rather than in a second
+                    visit. Uploads land immediately; the entry itself still saves
+                    on Save like every other field here. */}
+                <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 8 }}>Photos</div>
+                  <PhotoGallery
+                    photos={photosForOwner("change", changeDraft.id)}
+                    canEdit={canEdit}
+                    busy={photoBusy}
+                    error={photoError}
+                    onAdd={(file) => attachPhoto("change", changeDraft.id, file)}
+                    onDelete={deletePhoto}
+                    onToggleHidden={setPhotoHiddenFromPublic}
+                    onOpen={openPhotoViewer}
+                    emptyText="No photos on this entry."
+                  />
+                </div>
                 <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
                   <button onClick={() => setChangeModal(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                   <button
@@ -7341,6 +7432,62 @@ function AssetTracker() {
             </div>
           )}
 
+          {/* Full-size viewer, rendered from renderWorkDialogs so BOTH views
+              reach it -- the same reason the work dialogs live here. It was
+              inside the detail view first, which was wrong the moment the Log
+              work dialog grew a gallery: opening a photo from the site-wide
+              Maintenance tab set the state and rendered nothing.
+
+              The grid deliberately loads only thumbnails, so this is the one
+              place a full image is fetched at all, which is what keeps a gallery
+              usable on the wifi this feature is most needed on. */}
+          {photoViewer && (
+            <div
+              onClick={() => setPhotoViewer(null)}
+              style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.86)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}
+            >
+              <img
+                src={photoViewer.url}
+                alt={photoViewer.caption || "Photo"}
+                onClick={(e) => e.stopPropagation()}
+                style={{ maxWidth: "100%", maxHeight: "70vh", objectFit: "contain", borderRadius: 10, background: C.surface }}
+              />
+              {/* The caption is edited HERE rather than on the tile, because this
+                  is the moment you are actually looking at the photo and can say
+                  what it is. On a work entry that is the difference between a row
+                  of unlabelled thumbnails and "receipt" / "before" / "after". */}
+              {canEdit ? (
+                <div onClick={(e) => e.stopPropagation()} style={{ marginTop: 14, display: "flex", gap: 8, width: "100%", maxWidth: 520 }}>
+                  <input
+                    value={photoCaptionDraft}
+                    onChange={(e) => setPhotoCaptionDraft(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") savePhotoCaption(); }}
+                    placeholder="Describe this photo — receipt, before, after…"
+                    style={{ flex: 1, padding: "8px 10px", border: "1px solid rgba(255,255,255,0.35)", background: "rgba(255,255,255,0.10)", color: "#fff", borderRadius: 10, fontSize: 13 }}
+                  />
+                  <button
+                    onClick={savePhotoCaption}
+                    disabled={isSaving || photoCaptionDraft === (photoViewer.caption || "")}
+                    style={{ padding: "8px 14px", background: (isSaving || photoCaptionDraft === (photoViewer.caption || "")) ? "rgba(255,255,255,0.14)" : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13, cursor: "pointer" }}
+                  >
+                    {isSaving ? "Saving…" : "Save"}
+                  </button>
+                </div>
+              ) : photoViewer.caption ? (
+                <div style={{ marginTop: 12, color: "#fff", fontSize: 13, fontWeight: 600, textAlign: "center", maxWidth: 620 }}>{photoViewer.caption}</div>
+              ) : null}
+              <div style={{ marginTop: 10, color: "#fff", opacity: 0.75, fontSize: 11, textAlign: "center" }}>
+                {photoViewer.by ? photoViewer.by + " \u00b7 " : ""}{formatWhen(photoViewer.at)}
+                {photoViewer.hiddenFromPublic ? " \u00b7 hidden from the public page" : ""}
+              </div>
+              <button
+                onClick={() => setPhotoViewer(null)}
+                style={{ marginTop: 14, padding: "8px 16px", background: "rgba(255,255,255,0.14)", color: "#fff", border: "1px solid rgba(255,255,255,0.35)", borderRadius: 10, fontWeight: 600, fontSize: 13, cursor: "pointer" }}
+              >
+                Close
+              </button>
+            </div>
+          )}
       </>
     );
   }
@@ -8156,6 +8303,29 @@ function AssetTracker() {
                           {[ch.vendor, ch.cost && `$${parseFloat(ch.cost).toFixed(2)}`].filter(Boolean).join(" · ") || "—"}
                         </div>
                         {ch.note && <div style={{ fontSize: 14, color: C.ink, whiteSpace: "pre-wrap", marginBottom: 6 }}>{ch.note}</div>}
+                        {(() => {
+                          const shots = photosForOwner("change", ch.id);
+                          if (!shots.length) return null;
+                          return (
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+                              {shots.map(ph => (
+                                <button
+                                  key={ph.id}
+                                  onClick={() => openPhotoViewer(ph)}
+                                  title={ph.caption || "Open photo"}
+                                  style={{ width: 54, height: 54, padding: 0, border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden", background: C.hover, cursor: "pointer" }}
+                                >
+                                  <img
+                                    src={photoThumbUrl(ph)}
+                                    alt={ph.caption || "Photo"}
+                                    loading="lazy"
+                                    style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                                  />
+                                </button>
+                              ))}
+                            </div>
+                          );
+                        })()}
                         <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.placeholder }}>
                           {formatDateOnly(changePerformedOn(ch))}{ch.by ? ` · ${ch.by}` : ""}
                           {/* Only when it was written up on a different day than it
@@ -8182,7 +8352,7 @@ function AssetTracker() {
                 onAdd={(file) => attachPhoto("asset", selectedAsset.id, file)}
                 onDelete={deletePhoto}
                 onToggleHidden={setPhotoHiddenFromPublic}
-                onOpen={setPhotoViewer}
+                onOpen={openPhotoViewer}
                 emptyText={canEdit ? "No photos yet. Add one to show what this actually looks like." : "No photos yet."}
               />
             </div>
@@ -8336,36 +8506,6 @@ function AssetTracker() {
                 <button onClick={() => archiveAsset(confirmArchive)} disabled={isSaving} style={{ padding: "8px 14px", background: isSaving ? C.border : C.brandDark, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>{isSaving ? "Saving…" : "Archive"}</button>
               </div>
             </div>
-          </div>
-        )}
-
-        {/* Full-size viewer. The grid deliberately loads only thumbnails, so
-            this is the one place the full image is fetched at all -- which is
-            what keeps a gallery usable on school wifi. */}
-        {photoViewer && (
-          <div
-            onClick={() => setPhotoViewer(null)}
-            style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.86)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}
-          >
-            <img
-              src={photoViewer.url}
-              alt={photoViewer.caption || "Photo"}
-              onClick={(e) => e.stopPropagation()}
-              style={{ maxWidth: "100%", maxHeight: "80vh", objectFit: "contain", borderRadius: 10, background: C.surface }}
-            />
-            <div style={{ marginTop: 12, color: "#fff", fontSize: 13, textAlign: "center", maxWidth: 620 }}>
-              {photoViewer.caption && <div style={{ fontWeight: 600, marginBottom: 4 }}>{photoViewer.caption}</div>}
-              <div style={{ opacity: 0.75, fontSize: 11 }}>
-                {photoViewer.by ? photoViewer.by + " \u00b7 " : ""}{formatWhen(photoViewer.at)}
-                {photoViewer.hiddenFromPublic ? " \u00b7 hidden from the public page" : ""}
-              </div>
-            </div>
-            <button
-              onClick={() => setPhotoViewer(null)}
-              style={{ marginTop: 16, padding: "8px 16px", background: "rgba(255,255,255,0.14)", color: "#fff", border: "1px solid rgba(255,255,255,0.35)", borderRadius: 10, fontWeight: 600, fontSize: 13, cursor: "pointer" }}
-            >
-              Close
-            </button>
           </div>
         )}
 

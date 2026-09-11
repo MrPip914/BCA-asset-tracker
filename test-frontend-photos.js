@@ -124,5 +124,53 @@ eq('uploads are downscaled and re-encoded before leaving the browser',
 eq('orientation is applied before EXIF is discarded',
    /imageOrientation: "from-image"/.test(src), true);
 
+// ------------------------------------------------- cascade on asset delete
+// photoOwnerIdsOf collects every id an asset carries that can own a photo.
+// Miss one and that owner's photos survive the asset as invisible orphans.
+const cascadeMod = {};
+new Function('module', grab('photoOwnerIdsOf') + '\nmodule.f = photoOwnerIdsOf;')(cascadeMod);
+const ownerIds = cascadeMod.f;
+
+const RICH_ASSET = {
+  id: 'asset-1',
+  changes: [{ id: 'change-1' }, { id: 'change-2' }, null],
+  maintenanceItems: [{ id: 'maint-1' }, {}],
+  breakers: [{ id: 'brk-1', circuits: [{ id: 'cir-1' }, { id: 'cir-2' }] }, { id: 'brk-2' }],
+  unassignedCircuits: [{ id: 'cir-loose' }],
+};
+eq('every owner kind an asset carries is collected',
+   ownerIds(RICH_ASSET).sort(),
+   ['asset-1', 'brk-1', 'brk-2', 'change-1', 'change-2', 'cir-1', 'cir-2', 'cir-loose', 'maint-1']);
+// Real data has holes — a pre-v34 row with no id, a null from a bad edit. A
+// throw here would break the delete path entirely.
+eq('a bare asset yields just itself', ownerIds({ id: 'solo' }), ['solo']);
+eq('no asset yields nothing rather than throwing', ownerIds(null), []);
+eq('an id-less child is skipped, not pushed as undefined',
+   ownerIds({ id: 'a', changes: [{}, { id: 'c' }] }).sort(), ['a', 'c']);
+
+// ------------------------------------------------------------ wiring guards 2
+// The id has to exist when the dialog OPENS, or a photo has no owner to name
+// while the form is being filled in — which is the whole point of attaching one
+// there rather than after saving.
+// Sliced as a function body rather than matched in a character window: the
+// explanation above the mint is long, and a window wide enough to clear it
+// would also reach into whatever function comes next.
+eq('the Log work dialog mints the entry id on open',
+   /id: crypto\.randomUUID\(\)/.test(grab('openChangeAdd')), true);
+eq('addChange uses the id the draft was opened with',
+   /id: changeDraft\.id \|\| crypto\.randomUUID\(\)/.test(src), true);
+eq('deleting an asset cascades its photo rows',
+   /photoOwnerIdsOf\(asset\)/.test(src) && /keptPhotos/.test(src), true);
+// The lightbox must render from BOTH views: the Log work dialog opens from the
+// site-wide Maintenance tab too, and a viewer that only renders in the detail
+// view would set state and paint nothing.
+const rwAt = src.indexOf('function renderWorkDialogs');
+const lbAt = src.indexOf('{photoViewer && (');
+const detailAt = src.indexOf('if (view === "detail" && selectedAsset)');
+eq('the lightbox lives in renderWorkDialogs, not inside the detail view',
+   rwAt !== -1 && lbAt > rwAt && lbAt < detailAt, true);
+eq('every gallery opens through openPhotoViewer, which reseeds the caption draft',
+   src.includes('onOpen={setPhotoViewer}'), false);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
