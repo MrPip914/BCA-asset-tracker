@@ -172,5 +172,17 @@ eq('the lightbox lives in renderWorkDialogs, not inside the detail view',
 eq('every gallery opens through openPhotoViewer, which reseeds the caption draft',
    src.includes('onOpen={setPhotoViewer}'), false);
 
+// A schedule's id must exist at CREATE time, not only after a load-time
+// adoption fills it in — see BUGS.md. An id-less row cannot be addressed by any
+// handler, and with two of them the wrong one is edited.
+eq('the Add task dialog mints the schedule id on open',
+   /id: crypto\.randomUUID\(\)/.test(src.slice(src.indexOf('setShowMaintenanceAdd(true)') - 400, src.indexOf('setShowMaintenanceAdd(true)'))), true);
+eq('addMaintenanceItem writes an id rather than leaving it to the next load',
+   /id: maintenanceDraft\.id \|\| crypto\.randomUUID\(\)/.test(src), true);
+eq('a maintenance schedule can own photos',
+   src.includes('attachPhoto("maintenance", item.id, file)'), true);
+eq('a work entry can own photos',
+   src.includes('attachPhoto("change", changeDraft.id, file)'), true);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

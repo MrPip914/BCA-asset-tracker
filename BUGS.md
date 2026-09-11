@@ -264,6 +264,37 @@ user is least sure whether their click worked.
 
 ## Fixed
 
+### A newly added maintenance schedule had no `id` until the next load — fixed 2026-09-11
+**Found:** 2026-09-11, while wiring photos onto maintenance items — the photo needed an
+owner id and there wasn't one.
+**Needed a deploy:** no — `index.html` only.
+**Confirmed:** by reading `addMaintenanceItem`, which built the item with `task`,
+`frequencyLabel`, `frequencyDays`, `lastPerformed`, `owner`, `at`, `by` — and no `id`.
+
+v34 gave maintenance items a real `id` and moved every handler onto it
+(`startEditMaintenance`, `saveMaintenanceEdit`, `openMaintenanceComplete`,
+`deleteMaintenanceItem`), with the row's React key on it too. What it did not do was mint
+one at the point a schedule is CREATED. `adoptLegacyMaintenanceIds` filled the blank on
+the next load, which made it invisible in every normal test — add a task, reload, and it
+has an id like everything else.
+
+**The window is one session, and inside it the failure is silent and wrong-targeted.**
+`startEditMaintenance(undefined)` matches on `m.id === itemId`, so it finds the FIRST item
+with no id. With one freshly added schedule that is coincidentally the right one, which is
+why nobody hit it. Add TWO without reloading and editing, deleting or completing the second
+acts on the first. React also keys those rows on `undefined`.
+
+**Fixed as a by-product rather than deliberately**, which is worth noting: the id is now
+minted when the Add task dialog OPENS — needed so a photo can name the schedule while the
+form is still being filled in — and `addMaintenanceItem` uses it. Had photos not needed an
+owner id, this would still be sitting there.
+
+**The lesson generalises past this bug.** An adoption that fills a blank at LOAD makes the
+create path look correct, because the only cheap way to check is to reload. v34's work
+entries got this right (`addChange` minted its own); the schedule path did not, and the two
+were written in the same change. When a load-time adoption exists, check the create path
+separately — it is the one place the adoption cannot cover.
+
 ### `/deploy` printed the pre-2026-09-10 deploy instructions — fixed 2026-09-10
 **Found:** 2026-09-10, right after the block it produced was pasted in the wrong shape.
 **Needed a deploy:** no — `.claude/commands/deploy.md` only.

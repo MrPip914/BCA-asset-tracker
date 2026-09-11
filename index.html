@@ -1880,7 +1880,7 @@ const FRONTEND_SCRIPT_VERSION = "v35";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-11.1";
+const APP_VERSION = "2026-09-11.2";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -2940,7 +2940,7 @@ function AssetTracker() {
   const [newVendorName, setNewVendorName] = useState("");
   const [allocationDraft, setAllocationDraft] = useState({ roomId: "", quantity: "", error: "" });
   const [confirmAllocationRemove, setConfirmAllocationRemove] = useState(null);
-  const [maintenanceDraft, setMaintenanceDraft] = useState({ task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
+  const [maintenanceDraft, setMaintenanceDraft] = useState({ id: "", task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
   const [editingMaintenanceId, setEditingMaintenanceId] = useState(null);
   const [maintenanceEditDraft, setMaintenanceEditDraft] = useState(null);
   const [confirmMaintenanceDelete, setConfirmMaintenanceDelete] = useState(null);
@@ -4243,7 +4243,7 @@ function AssetTracker() {
     setConfirmArchive(null);
     setAllocationDraft({ roomId: "", quantity: "", error: "" });
     setConfirmAllocationRemove(null);
-    setMaintenanceDraft({ task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
+    setMaintenanceDraft({ id: crypto.randomUUID(), task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
     setEditingMaintenanceId(null);
     setMaintenanceEditDraft(null);
     setConfirmMaintenanceDelete(null);
@@ -5171,7 +5171,9 @@ function AssetTracker() {
   // gets the open asset; the site-wide tab passes the one just picked.
   function openMaintenanceAdd(assetId) {
     setWorkDialogAssetId(assetId === undefined ? null : assetId);
-    setMaintenanceDraft({ task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
+    // Minted on OPEN so a photo can name this schedule while the form is still
+    // being filled in -- the same rule openChangeAdd follows.
+    setMaintenanceDraft({ id: crypto.randomUUID(), task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
     setShowMaintenanceAdd(true);
   }
 
@@ -5180,6 +5182,10 @@ function AssetTracker() {
     if (!maintenanceDraft.task.trim() || !workTarget) return;
     const freq = MAINTENANCE_FREQUENCIES.find(f => f.label === maintenanceDraft.frequency) || MAINTENANCE_FREQUENCIES[1];
     const item = {
+      // Was absent entirely until 2026-09-11, which was a bug: rows key on
+      // item.id and every handler takes one, so an id-less row could not be
+      // addressed until a reload minted it. See BUGS.md.
+      id: maintenanceDraft.id || crypto.randomUUID(),
       task: maintenanceDraft.task.trim(),
       frequencyLabel: freq.label,
       frequencyDays: freq.days,
@@ -5190,7 +5196,7 @@ function AssetTracker() {
     };
     const next = assets.map(a => (a.id === workTargetId ? { ...a, maintenanceItems: [...(a.maintenanceItems || []), item] } : a));
     await persist(next, { columns });
-    setMaintenanceDraft({ task: "", frequency: freq.label, lastPerformed: "", owner: "" });
+    setMaintenanceDraft({ id: crypto.randomUUID(), task: "", frequency: freq.label, lastPerformed: "", owner: "" });
     setShowMaintenanceAdd(false);
   }
 
@@ -7418,6 +7424,20 @@ function AssetTracker() {
                     />
                   </label>
                 </div>
+                <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 8 }}>Photos</div>
+                  <PhotoGallery
+                    photos={photosForOwner("maintenance", maintenanceDraft.id)}
+                    canEdit={canEdit}
+                    busy={photoBusy}
+                    error={photoError}
+                    onAdd={(file) => attachPhoto("maintenance", maintenanceDraft.id, file)}
+                    onDelete={deletePhoto}
+                    onToggleHidden={setPhotoHiddenFromPublic}
+                    onOpen={openPhotoViewer}
+                    emptyText="No photos on this task."
+                  />
+                </div>
                 <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
                   <button onClick={() => setShowMaintenanceAdd(false)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                   <button
@@ -8173,6 +8193,30 @@ function AssetTracker() {
                           Last performed: {item.lastPerformed ? formatDateOnly(item.lastPerformed) : "Never"}
                           {due && <> · Next due: <span style={{ color: statusMeta.color, fontWeight: 600 }}>{formatDateOnly(localDateString(due))}</span></>}
                         </div>
+                        {/* A FULL gallery here, not the read-only strip a work
+                            entry gets. A work entry is written once and its
+                            photos belong to that moment, so they live in its
+                            dialog. A schedule is long-lived and its reference
+                            photos -- where the access panel is, what the filter
+                            looks like when it needs doing -- get added later,
+                            when someone is finally standing in front of the
+                            thing. So the add control has to be where the
+                            schedule is READ, not behind an edit form. */}
+                        {(canEdit || photosForOwner("maintenance", item.id).length > 0) && (
+                          <div style={{ marginBottom: 8 }}>
+                            <PhotoGallery
+                              photos={photosForOwner("maintenance", item.id)}
+                              canEdit={canEdit}
+                              busy={photoBusy}
+                              error={photoError}
+                              onAdd={(file) => attachPhoto("maintenance", item.id, file)}
+                              onDelete={deletePhoto}
+                              onToggleHidden={setPhotoHiddenFromPublic}
+                              onOpen={openPhotoViewer}
+                              emptyText=""
+                            />
+                          </div>
+                        )}
                         {(() => {
                           // The service history for THIS schedule, newest first.
                           // Read from the derived map -- the item holds no list
