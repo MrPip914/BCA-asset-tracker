@@ -484,6 +484,32 @@ onboard one.
     history walking itself is browser behaviour — push vs replace, Back landing on the
     previous asset, the depth guard — and was verified by driving the real page in Chromium,
     which is the only place `popstate` exists. Sandbox mode is where that was done.
+  - **Back and Home are two controls, and collapsing them would cost whichever lost**
+    (2026-09-11). Making the arrow a one-level pop removed something it used to guarantee:
+    a single tap out. Eric hit it immediately — nest a few levels and leaving meant tapping
+    back through every one. So the detail header carries a **home icon** beside the arrow:
+    Back means "the thing before this one", Home means "out".
+    - **It collapses the whole stack in ONE history move**, `history.go()` back to the list
+      entry, rather than switching the view directly. That is what returns the list exactly
+      as it was left, scroll included — rebuilding it in place would land on the top of an
+      unfiltered list, i.e. throw away the thing the history work was for.
+    - **`homeDepth` on each entry is what makes that one move possible.** It carries the
+      depth of the nearest list entry down the stack — set to the current depth when leaving
+      the LIST, inherited when leaving a detail page — so the jump is always one `go()`
+      however deep it went. **Depth 0 is NOT reliably the list**: a shared link opened cold
+      starts the trail at an asset, so that entry's `homeDepth` is null and Home builds a
+      list in place and lands at the top. That is the one case it cannot restore anything.
+    - **Home sits LEFTMOST and is a fixed width**, so the back arrow keeps a stable position
+      for the thumb even though the label beside it changes length — and it reads the way the
+      list's own breadcrumb does, with "all of it" at the left end.
+    - **Scroll on the home jump is left to the browser, like everywhere else.** A hand-rolled
+      restore was written for it first and then removed again when the mutation passed
+      without it: Chrome handles a multi-step `go()` as well as a single Back. See the scroll
+      entry below for the measurement trap that produced the wrong conclusion — it caught
+      this feature a SECOND time.
+    - The first history entry is seeded with a real list entry on mount, so "no state" stops
+      meaning "the initial list" by convention. Tidiness rather than a fix — `currentNavDepth`
+      already read null as 0 — but two things read these fields now, not one.
   - **Scroll position: the browser restores it, and the app only resets it** (2026-09-11).
     An asset opened from the list now starts at its own top, and so does a list reached by
     `closeDetail` replacing an entry (a deep-link arrival, an asset deleted underneath a
@@ -507,7 +533,12 @@ onboard one.
       Playwright scrolls an off-screen row into view before clicking it, which moved the
       very offset under test, so "going back lands at 361" was the robot's scroll, not the
       app's. **Click a row that is already on screen** when measuring this, or the number
-      is about Playwright. Do not re-add the manual approach on suspicion; if restoration
+      is about Playwright. **This trap has now produced a wrong conclusion twice** — the
+      second time on the home jump, where it made the browser look like it could not restore
+      scroll across a multi-step `go()` and nearly bought a hand-rolled replacement for the
+      second time. Scroll events coalesce per frame, so the robot's scroll never shows up in
+      an event log either. The tell is a scroll number that disagrees with a single-step
+      Back; when one appears, suspect the click before the code. Do not re-add the manual approach on suspicion; if restoration
       ever does prove flaky on a bigger sheet, that is the shape of the fallback.
   - **Deliberately NOT handled yet**, both because they widen the change rather than finish
     it: Back mid-edit still discards the draft silently (it always did, but a reflexive

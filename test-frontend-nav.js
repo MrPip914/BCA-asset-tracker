@@ -110,5 +110,20 @@ eq('a list entry has no backTo', list.backTo, null);
 eq('undefined is normalised to null, so popstate never sees a hole',
   historyEntry(1, 'BCA0001', undefined, undefined).tab, null);
 
+// homeDepth is what lets the home control collapse the stack in one move. It is
+// normalised rather than passed through because 0 is a MEANINGFUL value here --
+// the list is usually at depth 0 -- so a truthiness test would read the most
+// common case as "no list beneath" and send every home tap down the rebuild-in-
+// place path, landing on an unfiltered list at the top instead of the one the
+// user left.
+eq('a list at depth 0 is recorded as 0, not lost as falsy',
+  historyEntry(3, 'BCA0001', 'details', null, 0).homeDepth, 0);
+eq('a deeper list depth is kept as given',
+  historyEntry(5, 'BCA0001', 'details', null, 2).homeDepth, 2);
+eq('no list beneath (a link opened cold) is null',
+  historyEntry(0, 'BCA0001', 'details', null, null).homeDepth, null);
+eq('an omitted homeDepth is null rather than undefined',
+  historyEntry(0, 'BCA0001', 'details', null).homeDepth, null);
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

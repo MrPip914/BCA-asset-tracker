@@ -56,7 +56,7 @@ import {
   Monitor, Phone, Tv, Camera, HardDrive, HelpCircle, Columns3, Lock, Filter, Check, DoorOpen, Download,
   Wrench, UserCircle, Settings, History, Archive, ArchiveRestore, Building2, Package, Copy, Zap, Repeat, ArrowLeftRight, Menu,
   FlaskConical, RotateCcw, AlertTriangle, Loader2, Printer, MapPin, QrCode, Info, LogOut, Users,
-  ImagePlus, Eye, EyeOff,
+  ImagePlus, Eye, EyeOff, Home,
 } from "lucide-react";
 
 // Starter managed peripherals/users/bulk-item-type lists — empty until the school
@@ -1880,7 +1880,7 @@ const FRONTEND_SCRIPT_VERSION = "v35";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-11.5";
+const APP_VERSION = "2026-09-11.6";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -1914,12 +1914,30 @@ function navUrl(assetId, tab) {
 //   backTo   — the asset id the back control returns to, or null for the list.
 //              Stored because the History API deliberately does NOT expose the
 //              previous entry, and the control names where it goes.
-function historyEntry(navDepth, assetId, tab, backTo) {
-  return { navDepth, asset: assetId || null, tab: tab || null, backTo: backTo || null };
+//   homeDepth — the depth of the nearest LIST entry at or below this one, so the
+//              home control can collapse the whole stack in one move instead of
+//              popping a level at a time. null when there is no list beneath:
+//              a shared link opened cold starts the trail at an asset.
+function historyEntry(navDepth, assetId, tab, backTo, homeDepth) {
+  return {
+    navDepth,
+    asset: assetId || null,
+    tab: tab || null,
+    backTo: backTo || null,
+    homeDepth: typeof homeDepth === "number" ? homeDepth : null,
+  };
 }
 
 function currentNavDepth() {
   return (window.history.state && window.history.state.navDepth) || 0;
+}
+
+// Reads back the list's depth from the entry being stood on. An entry written
+// before this existed has no homeDepth, which reads as null and falls back to
+// building the list in place — the behaviour it had anyway.
+function currentHomeDepth() {
+  const st = window.history.state;
+  return st && typeof st.homeDepth === "number" ? st.homeDepth : null;
 }
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
@@ -3608,6 +3626,17 @@ function AssetTracker() {
     openDetail(target, params.get("tab") || undefined, { replaceHistory: true });
   }, [assets]);
 
+  // The entry the browser made on load has no state of its own, which left
+  // "null" meaning "the initial list" by convention. Seeding it makes every
+  // entry this app stands on carry the same shape, so navDepth and homeDepth
+  // are readable everywhere rather than inferred from an absence. A deep-link
+  // arrival replaces this a moment later with its own entry.
+  useEffect(() => {
+    if (!window.history.state) {
+      window.history.replaceState(historyEntry(0, null, null, null, 0), "");
+    }
+  }, []);
+
   // Restores the view when the browser moves through history — the Back/Forward
   // buttons, and the back gesture on a phone, which is where this is felt most.
   //
@@ -4369,6 +4398,10 @@ function AssetTracker() {
       if (!sameSpot) {
         const backTo = view === "detail" && selectedId && selectedId !== asset.id ? selectedId : null;
         const depth = currentNavDepth();
+        // Where the list sits, carried down the stack so it stays one move away
+        // however deep this goes. Leaving the LIST makes this entry the list;
+        // leaving a detail page inherits whatever that page knew.
+        const homeDepth = view === "list" ? depth : currentHomeDepth();
         if (opts.replaceHistory) {
           // Seeds this entry's STATE but leaves the URL exactly as it arrived,
           // and records the tab AS REQUESTED rather than as resolved. Both
@@ -4381,10 +4414,12 @@ function AssetTracker() {
           // outlive the layout that produced them -- that is why "changes" is
           // still accepted at all -- so the one entry that IS a link is the
           // last place to normalise it away.
-          window.history.replaceState(historyEntry(depth, asset.id, initialTab || wanted, null), "");
+          // homeDepth stays null: a link opened cold starts the trail at an
+          // asset, so there is no list entry beneath to go back to.
+          window.history.replaceState(historyEntry(depth, asset.id, initialTab || wanted, null, null), "");
           setBackToId(null);
         } else {
-          window.history.pushState(historyEntry(depth + 1, asset.id, wanted, backTo), "", navUrl(asset.id, wanted));
+          window.history.pushState(historyEntry(depth + 1, asset.id, wanted, backTo, homeDepth), "", navUrl(asset.id, wanted));
           setBackToId(backTo);
         }
         // An asset just opened starts at its OWN top. Nothing reset the scroll
@@ -4427,7 +4462,8 @@ function AssetTracker() {
     setDetailEditing(false);
     setBackToId(null);
     if (!opts.fromHistory) {
-      window.history.replaceState(historyEntry(currentNavDepth(), null, null, null), "", navUrl(null, null));
+      const listDepth = currentNavDepth();
+      window.history.replaceState(historyEntry(listDepth, null, null, null, listDepth), "", navUrl(null, null));
       // This path REPLACES the entry rather than returning to a stored one (a
       // deep-link arrival, or an asset deleted underneath a live entry), so
       // there is no position to come back to and the detail page's offset would
@@ -4443,6 +4479,33 @@ function AssetTracker() {
   // place rather than calling history.back(), which would leave the site.
   function goBack() {
     if (currentNavDepth() > 0) window.history.back();
+    else closeDetail();
+  }
+
+  // The escape hatch, and the reason it is a separate control rather than a
+  // smarter back arrow: Back means "the thing before this one" and Home means
+  // "out", and collapsing them would cost whichever one lost.
+  //
+  // It jumps the WHOLE stack in one history move rather than switching the view
+  // directly, which is what returns the list exactly as it was left — its scroll
+  // position included, restored by the browser for free. Rebuilding the view in
+  // place would land on an unfiltered list at the top, i.e. lose the thing the
+  // history work was for.
+  //
+  // With no list beneath (a shared link opened cold) there is nothing to go back
+  // to, so it builds one in place and lands at the top. That is the one case
+  // where this cannot restore anything, and it is unavoidable.
+  function goHome() {
+    const home = currentHomeDepth();
+    const depth = currentNavDepth();
+    // Scroll is left entirely to the browser here, like everywhere else. A
+    // hand-rolled restore was written for this path first, on a measurement
+    // that turned out to be the TEST scrolling the page (Playwright brings an
+    // off-screen row into view before clicking it); removing the restore again
+    // and re-running proved the browser handles a multi-step go() as well as it
+    // handles a single Back. Second time that trap has cost this feature a
+    // wrong conclusion — click a row already on screen when measuring scroll.
+    if (home !== null && home < depth) window.history.go(home - depth);
     else closeDetail();
   }
 
@@ -7883,6 +7946,26 @@ function AssetTracker() {
         {typesManagerModal}
         {breakerTypesManagerModal}
         <div style={{ borderBottom: `2px solid ${C.brand}`, padding: "12px 20px", position: "sticky", top: 0, background: C.bg, zIndex: 10, display: "flex", alignItems: "center", gap: 10 }}>
+          {/* Home sits LEFTMOST and is a fixed width, so neither control moves
+              as the back label changes length — the back arrow keeps a stable
+              position for the thumb even though what follows it does not. It
+              also reads the way the list's own breadcrumb does, with "all of
+              it" at the left end.
+
+              Labelled as a DESTINATION ("All assets"), not as another "Back
+              to ...". One level deep the two controls go to the same place, and
+              two buttons both announcing "Back to" — one to "list", one to "all
+              assets" — reads as though they differ when they do not. Naming the
+              destination says what it is instead of implying a direction. */}
+          <button
+            onClick={goHome}
+            className="icon-btn"
+            style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.muted, display: "flex", flexShrink: 0 }}
+            aria-label="All assets"
+            title="All assets"
+          >
+            <Home size={18} />
+          </button>
           <button
             onClick={goBack}
             className="icon-btn"
