@@ -2140,6 +2140,35 @@ evaluation and the three decisions behind it are in `PHOTOS_EVAL.md`.
 - **`storageKey` is stored alongside the URL** because it is NOT recoverable from a
   transformed delivery URL, and it is what a deletion or a change of host would need. It is
   why moving off Cloudinary stays a copy plus one column rewrite.
+- **A PHOTO ROW AND THE ID IT NAMES MUST BE WRITTEN IN THE SAME SAVE** (2026-09-11), and
+  the bug that taught it is the sharpest example in this file of what a load-time adoption
+  cannot cover. A work entry's and a schedule's id are adopted with
+  `c.id || crypto.randomUUID()`, so a row written before v34 has a blank id cell and is
+  handed a **fresh random id on every load**. Attaching a photo marks only the photos
+  domain dirty, so the row landed in the sheet naming an id the very next load replaced.
+  The photo was written, correct, and permanently unreachable — and the already-orphaned
+  rows cannot be repaired, because the id they name never existed anywhere but one
+  browser's memory.
+  - **The asymmetry is what made it look like a photos bug rather than an id bug.** Asset
+    photos survived, because an asset's id is adopted as `a.id || a.label` — deterministic,
+    so a blank cell yields the SAME id every load. Only the two randomly-adopted owner types
+    could orphan. Breakers and circuits mint theirs inside an asset save, so they are stored.
+  - `attachPhotos` therefore passes a NEW assets array (`assets.slice()`) for a `change` or
+    `maintenance` owner, which marks the assets domain dirty by reference and writes those
+    ids alongside the row that points at them. It deliberately does NOT for the other owner
+    types: rewriting five tabs and bumping the assets revision would conflict with anyone
+    mid-edit for no gain.
+  - **Generalize it:** wherever a reference is minted by a load-time adoption, the save that
+    writes the reference must also carry the domain holding the target. `saveChangeEdit`'s
+    "nothing changed, no write" path is the same trap from the other side — it is correct,
+    and it means the id can still be memory-only when that dialog closes.
+  - Covered by `test-frontend-photos.js`, which EXECUTES `attachPhotos` — the whole
+    mechanism is one array identity, so it cannot be read off the source.
+- **`adoptPhoto` never guesses a blank `ownerType`** (it defaulted to `"asset"` until
+  2026-09-11). A blank can only come from a hand edit, and defaulting files a work entry's
+  photo in its asset's gallery: the wrong photo shown confidently in the wrong place, which
+  is worse than one that cannot be found. Left blank it matches no owner and stays out of
+  every gallery until the cell is fixed.
 - **An id exists once something points at the record, and not before** — the rule work
   entries and maintenance items arrived at twice. Photos are what made a work entry need
   one. Comments still have none, deliberately: nothing references a comment.

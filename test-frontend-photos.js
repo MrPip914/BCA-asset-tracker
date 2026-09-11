@@ -65,7 +65,12 @@ eq('an existing id is left alone', adoptPhoto({ id: 'keep-me' }).id, 'keep-me');
 // Never invent a url: a row without one is broken, and should render as broken
 // rather than silently vanish from the grid.
 eq('a missing url stays empty rather than being invented', adoptPhoto({}).url, '');
-eq('ownerType defaults to asset', adoptPhoto({}).ownerType, 'asset');
+// Deliberately NOT defaulted to "asset", which it was until 2026-09-11. A blank
+// ownerType can only come from a hand edit, and guessing one files a work
+// entry's photo in its asset's gallery — the wrong photo shown confidently in
+// the wrong place, which is worse than one that cannot be found.
+eq('a blank ownerType is left blank, never guessed as "asset"', adoptPhoto({}).ownerType, '');
+eq('a real ownerType is untouched', adoptPhoto({ ownerType: 'change' }).ownerType, 'change');
 
 // ------------------------------------------------------------ photoThumbUrl
 const FULL = 'https://res.cloudinary.com/demo/image/upload/v1712345678/assets/abc.jpg';
@@ -196,8 +201,8 @@ eq('a work entry can own photos',
 // every list from the ORIGINAL array and each save would drop the ones before
 // it — N writes, one photo surviving. That failure looks like "only the last
 // photo uploaded", which reads as a flaky network rather than a bug.
-function runAttach({ files, failOn = [] }) {
-  const calls = { persist: [], errors: [], progress: [], busy: [] };
+function runAttach({ files, failOn = [], ownerType = 'asset' }) {
+  const calls = { persist: [], persistAssets: [], errors: [], progress: [], busy: [] };
   const fn = new Function(
     'savingRef', 'photoBusy', 'PHOTO_OWNER_TYPES', 'setPhotoError', 'setPhotoBusy',
     'setPhotoProgress', 'preparePhotoRow', 'persist', 'photos', 'assets', 'module',
@@ -215,13 +220,18 @@ function runAttach({ files, failOn = [] }) {
       if (failOn.includes(file.name)) throw new Error('nope');
       return { id: 'row-' + file.name, ownerType, ownerId };
     },
-    async (a, overrides) => { calls.persist.push(overrides.photos); },
+    async (a, overrides) => { calls.persist.push(overrides.photos); calls.persistAssets.push(a); },
     [{ id: 'existing' }],
-    [],
+    ASSETS,
     mod
   );
-  return mod.f('asset', 'owner-1', files).then(() => calls);
+  return mod.f(ownerType, 'owner-1', files).then(() => calls);
 }
+
+// The one array identity the assets-domain assertions below compare against.
+// persist() decides which tabs to rewrite by reference equality, so "did this
+// save carry the assets domain" is literally "is this a different array".
+const ASSETS = [{ id: 'a1' }];
 
 const F = (name) => ({ name, size: 1000 });
 
@@ -248,9 +258,49 @@ runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg')] }).then(calls => {
   eq('all files failing writes nothing at all', calls.persist.length, 0);
   eq('and still reports both failures', /2 of 2/.test(calls.errors.join(' ')), true);
 
+  // ---- the id a photo points at must be written in the SAME save -----------
+  // A work entry's and a schedule's id are adopted at load with a RANDOM uuid
+  // when the sheet's cell is blank, so an id that has never been saved is
+  // different on the next load and the photo row pointing at it is orphaned --
+  // written, correct, and unreachable. Marking the assets domain dirty is what
+  // puts the id in the sheet alongside the row that names it. This is executed
+  // rather than read because the whole mechanism is one array identity.
+  return runAttach({ files: [F('a.jpg')], ownerType: 'change' });
+}).then(calls => {
+  eq('a work-entry photo carries the assets domain, so the entry id is stored',
+     calls.persistAssets[0] !== ASSETS, true);
+  eq('and it carries the same assets CONTENT, not a rebuilt list',
+     calls.persistAssets[0], ASSETS);
+
+  return runAttach({ files: [F('a.jpg')], ownerType: 'maintenance' });
+}).then(calls => {
+  eq('a schedule photo carries the assets domain too',
+     calls.persistAssets[0] !== ASSETS, true);
+
+  return runAttach({ files: [F('a.jpg')], ownerType: 'asset' });
+}).then(calls => {
+  // An asset's id is adopted as `a.id || a.label` -- deterministic, so a blank
+  // cell yields the same id every load and there is nothing to rescue. Writing
+  // the assets domain anyway would rewrite five tabs and bump the assets
+  // revision, conflicting with anyone mid-edit, for no gain.
+  eq('an asset photo does NOT needlessly rewrite the assets domain',
+     calls.persistAssets[0], ASSETS);
+
+  return runAttach({ files: [F('a.jpg')], ownerType: 'breaker' });
+}).then(calls => {
+  eq('nor does a breaker photo — breaker ids are minted inside an asset save',
+     calls.persistAssets[0], ASSETS);
+
   return runAttach({ files: [] });
 }).then(calls => {
   eq('an empty pick does nothing and never sets busy', calls.busy.length, 0);
+
+  // A blank ownerType must not be guessed. Filing a work entry's photo in its
+  // asset's gallery is the wrong photo shown confidently in the wrong place.
+  eq('adoptPhoto never defaults a blank ownerType to "asset"',
+     /ownerType: p\.ownerType \|\| "asset"/.test(src), false);
+  eq('adoptPhoto leaves a blank ownerType blank',
+     /ownerType: p\.ownerType \|\| ""/.test(src), true);
 
   // ---- the input and the wiring, which the execution above cannot see -------
   eq('the file input accepts several at once',

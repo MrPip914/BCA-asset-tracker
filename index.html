@@ -1880,7 +1880,7 @@ const FRONTEND_SCRIPT_VERSION = "v35";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-11.3";
+const APP_VERSION = "2026-09-11.4";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -2092,7 +2092,12 @@ function adoptPhoto(p) {
   return {
     ...p,
     id: p.id || (crypto.randomUUID ? crypto.randomUUID() : String(Math.random())),
-    ownerType: p.ownerType || "asset",
+    // Never defaulted to "asset". A blank ownerType can only come from a hand
+    // edit, and guessing one would file a work entry's photo in its asset's
+    // gallery -- the wrong photo shown confidently in the wrong place, which is
+    // worse than one that cannot be found. Left blank it matches no owner and
+    // stays out of every gallery until someone fixes the cell.
+    ownerType: p.ownerType || "",
     ownerId: p.ownerId || "",
     url: p.url || "",
     thumbUrl: p.thumbUrl || "",
@@ -4837,7 +4842,29 @@ function AssetTracker() {
           failures.push((file.name || "A file") + ": " + ((err && err.message) || "could not be uploaded."));
         }
       }
-      if (added.length) await persist(assets, { photos: [...photos, ...added] });
+      // A work entry's or a schedule's id can exist ONLY IN MEMORY, and that is
+      // what orphaned the first batch of work-entry photos. Both are adopted at
+      // load with `c.id || crypto.randomUUID()`, so a row written before v34 has
+      // a blank id cell and gets a FRESH RANDOM one on every single load.
+      // Nothing writes that id until some unrelated asset edit happens to save —
+      // and attaching a photo is not one, because it marks only the photos
+      // domain dirty. So the photo row landed pointing at an id the very next
+      // load replaced, and the photo was in the sheet, correct, and unreachable.
+      //
+      // Passing a NEW array marks the assets domain dirty (persist compares by
+      // reference), which writes those ids into the sheet in the SAME save as
+      // the row that points at them. The rule this is an instance of: a
+      // reference and the id it names must be written together.
+      //
+      // Asset photos deliberately do not do this, and that asymmetry is exactly
+      // how the bug presented — an asset's id is adopted as `a.id || a.label`,
+      // which is DETERMINISTIC, so a blank cell yields the same id every load
+      // and its photos were never orphaned. Breakers and circuits mint their ids
+      // at creation inside an asset save, so theirs are stored too. Only these
+      // two owner types are adopted at random.
+      const ownerIdMayBeMemoryOnly = ownerType === "change" || ownerType === "maintenance";
+      const assetsToWrite = ownerIdMayBeMemoryOnly ? assets.slice() : assets;
+      if (added.length) await persist(assetsToWrite, { photos: [...photos, ...added] });
       if (failures.length) {
         setPhotoError(failures.length === 1 ? failures[0]
           : failures.length + " of " + chosen.length + " photos failed — " + failures.join("; "));
