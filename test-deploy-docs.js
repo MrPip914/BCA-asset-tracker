@@ -26,11 +26,21 @@ const read = (f) => fs.readFileSync(path.join(REPO, f), 'utf8');
 
 // Every file that tells anyone how to deploy. Adding a fifth is exactly the thing that
 // caused this, so a new one belongs in this list on the day it is written.
+//
+// docs/ is GLOBBED rather than listed, because that is the failure this whole file
+// exists to prevent: CLAUDE.md was split into docs/ on 2026-09-11, three of the new
+// files carried a `node deploy.mjs` line on day one, and a hand-maintained list would
+// have covered none of them. A doc that mentions no deploy command costs one read here
+// and asserts nothing, which is the right price for never having to remember.
 const DOCS = [
   'CLAUDE.md',
   'DEPLOY.md',
   'cloudshell-deploy.md',
   '.claude/commands/deploy.md',
+  ...(fs.existsSync(path.join(REPO, 'docs'))
+    ? fs.readdirSync(path.join(REPO, 'docs')).filter((f) => f.endsWith('.md')).sort()
+        .map((f) => path.join('docs', f))
+    : []),
 ];
 
 const DEPLOY_SRC = read('deploy.mjs');

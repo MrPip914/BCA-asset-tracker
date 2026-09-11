@@ -17,6 +17,7 @@
 const fs = require('fs');
 const path = require('path');
 const src = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+const mockSrc = fs.readFileSync(path.join(__dirname, 'mock-data.js'), 'utf8');
 
 // --- slice the pieces we need, so nothing is duplicated here ----------------
 function grabFn(name) {
@@ -29,14 +30,20 @@ function grabFn(name) {
   }
   throw new Error(`${name} not closed`);
 }
-function grabConst(decl) {
-  const i = src.indexOf(decl);
-  if (i === -1) throw new Error(`${decl} not found`);
-  const j = src.indexOf('\n};', i);
-  return src.slice(i, j + 3);
+function grabConst(decl, from = src) {
+  // Anchored to a line start so a COMMENT mentioning the declaration cannot win
+  // the match -- which is exactly what happened when mock-data.js's own header
+  // quoted it, and the fixture then evaluated as prose.
+  const i = from.indexOf('\n' + decl) + 1;
+  if (i === 0) throw new Error(`${decl} not found`);
+  const j = from.indexOf('\n};', i);
+  return from.slice(i, j + 3);
 }
 
-const fixtureSrc = grabConst('const MOCK_SNAPSHOT = {');
+// The fixture moved to mock-data.js on 2026-09-11; the functions it is evaluated
+// against are still index.html's. Both files are read as source text here, which
+// is why the declaration in mock-data.js has to stay `const MOCK_SNAPSHOT = {`.
+const fixtureSrc = grabConst('const MOCK_SNAPSHOT = {', mockSrc);
 const depthLine = src.match(/const MAX_PARENT_DEPTH = \d+;/);
 if (!depthLine) throw new Error('MAX_PARENT_DEPTH not found');
 

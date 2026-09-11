@@ -18,6 +18,9 @@
 const fs = require('fs');
 const path = require('path');
 const src = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+// The Sandbox fixture moved to mock-data.js on 2026-09-11. The wiring guards
+// below still read index.html; only the fixture slices read this.
+const mockSrc = fs.readFileSync(path.join(__dirname, 'mock-data.js'), 'utf8');
 
 // Includes a leading `async ` when there is one. Slicing from `function` alone
 // drops it, and the body then has `await` inside a non-async function — which
@@ -91,7 +94,10 @@ eq('an empty photo does not throw', photoThumbUrl({}), '');
 // MOCK_PHOTOS is Sandbox's only photo data, so its shape IS the shape this
 // feature gets exercised against. Read as source text rather than executed,
 // since the file it lives in is a browser module.
-const fixtureSrc = src.slice(src.indexOf('const MOCK_PHOTOS = ['), src.indexOf('];', src.indexOf('const MOCK_PHOTOS = [')) + 2);
+// Anchored to a line start so a comment naming the declaration cannot win the
+// match; see the header of mock-data.js for the time that bit.
+const photosAt = mockSrc.indexOf('\nconst MOCK_PHOTOS = [') + 1;
+const fixtureSrc = mockSrc.slice(photosAt, mockSrc.indexOf('];', photosAt) + 2);
 const ownerTypesUsed = [...fixtureSrc.matchAll(/ownerType: "([a-z]+)"/g)].map(m => m[1]);
 const ownerIdsUsed = [...fixtureSrc.matchAll(/ownerId: "([^"]+)"/g)].map(m => m[1]);
 
@@ -107,7 +113,7 @@ eq('at least one fixture photo is NOT hidden',
 
 // Every owner the fixture names has to actually exist in MOCK_SNAPSHOT, or the
 // gallery renders empty in Sandbox and the feature looks broken when it is not.
-const mockSnapshotSrc = src.slice(src.indexOf('const MOCK_SNAPSHOT = {'));
+const mockSnapshotSrc = mockSrc.slice(mockSrc.indexOf('\nconst MOCK_SNAPSHOT = {') + 1);
 const missing = ownerIdsUsed.filter(id => {
   // An asset is matched on `label:` or `id:`; a breaker/circuit on its own `id:`.
   return !(new RegExp('(id|label): "' + id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '"').test(mockSnapshotSrc));
