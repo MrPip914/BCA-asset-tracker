@@ -1,5 +1,13 @@
 # Type management: categories, required fields, field data types — plan
 
+> **SUPERSEDED IN PART, 2026-09-11: a type carries several LABELS, not one category.**
+> Everything below about *where* a category lives still holds — its own Config key, the id
+> rather than the name, a dangling id landing in the catch-all — and the key is still
+> `typeCategories` on the wire. What changed is that `typeSettings[id]` holds a
+> `categoryIds` ARRAY, and lists of types are alphabetical and filtered by label rather
+> than grouped under one heading. That rework needed no backend change. CLAUDE.md's
+> "A type carries any number of LABELS" section is the current record.
+
 Status: **all three BUILT, 2026-09-09.** Phases 1 and 2 (field data types, required
 fields) are frontend-only and need no deploy. Phase 3 (categories) is backend **v33** and is
 PENDING A DEPLOY — check with `node deploy.mjs --status`, never with this line.

@@ -877,35 +877,72 @@ parent, the same cascade the id migration removed for Rooms.
 - Names needn't be unique for correctness, but add and rename both refuse a duplicate: two
   types both reading "Printer" in the picker is a trap for whoever is choosing.
 
-**A type is filed under a CATEGORY, and every list of types groups by it** (backend v33).
-`typeCategories` is its own Config key holding `[{ id, name }]` with **array order as display
-order**; a type points at one through `typeSettings[id].categoryId`.
-- **Eric chose the key over the free version, knowing it cost a deploy.** The cheap version
-  was a category NAME on each type with the list derived from whoever names one — no backend
-  change at all. What it cannot do is the two things a category list is for: it can only be
-  ordered by something else (the order types happen to appear in), and it cannot hold a
-  category nobody has filed a type under yet, so you could never build the scheme and then
-  sort types into it. **The argument that made the cheap version tempting is still worth
-  keeping**, because it is reusable: the store-an-id rule is about names held in several
-  places written at several times, and a category has exactly one holder (`typeSettings`, one
-  blob rewritten atomically), so a name there would have been safe — just not capable.
-- **A built-in category's id IS its own name** ("Places"), the same trick `typesList` and the
+**A type carries any number of LABELS, and every list of types is A→Z and FILTERED by them**
+(2026-09-11; no backend change, see below). `typeSettings[id].categoryIds` is an array of
+label ids; the vocabulary is `[{ id, name }]` with **array order as display order**.
+- **This replaced one category per type, and several labels per type is what killed the
+  grouping.** A grouped list can only show a two-label type twice, once under each heading —
+  a list that lies about how many types there are, and "how many types do we have" stops
+  being answerable by counting. So the Type picker, the Type column filter and the type
+  manager all list every type alphabetically and offer the labels as a chip row that narrows
+  the list. Same information, no double-counting.
+- **THE CONFIG KEY IS STILL `typeCategories`, AND THAT IS DELIBERATE.** The per-type array
+  rides `typeSettings`, a blob the backend stringifies whole, so this whole change cost **no
+  backend version and no deploy** — but the vocabulary lives under a key of its own, and
+  `doPost` writes a FIXED key list and silently drops the rest, so renaming it would discard
+  every label list the new frontend saves until every tenant had been deployed. Rename what
+  people read, never the stored key — the trade `changeType`/"Work type" already takes. The
+  `.gs` comment beside that key still says `categoryId`; fix it on the next real backend
+  change rather than spending a deploy on a comment.
+- **A stored override is read AHEAD of the merged entry** (`typeLabelIdsOf`), which is the
+  one subtle line. `typeEntryFor` spreads the override over the shipped registry entry, and
+  the two now use different keys for the same fact — a v33 setting holds `categoryId`, the
+  registry ships `categoryIds` — so a merged object carries BOTH, and reading the array first
+  hands back the shipped labels while silently ignoring the school's own filing.
+- **v33's singular `categoryId` is READ as a list of one**, so a sheet written before this
+  resolves with no migration; the next save of that type rewrites it as an array. And an
+  explicitly EMPTY array now beats the shipped labels, which the singular key could not
+  express: clearing a built-in's category stored `undefined`, JSON dropped the key, and the
+  shipped value came back on the next load.
+- **A built-in label's id IS its own name** ("Places"), the same trick `typesList` and the
   asset key refactor used: every shipped registry entry already names a valid id, so this
-  needed no seeding step and no migration. `ensureShippedCategories()` tops a stored list up
-  with any category added in a later release, at its shipped position rather than appended —
-  the lesson `ensureLockedTypes` learned when User landed under `Other`.
-- **A DANGLING `categoryId` is not an error, it is Uncategorized.** Deleting a category does
-  not rewrite the types that named it, so deletion needs no in-use block — only a
-  confirmation naming how many types fall back. Same permissive-storage stance as `removeType`
-  and `parentageProblem`. **Renaming is a one-row edit** with nothing to keep in sync, which
-  is the entire point of storing the id.
-- **`Other` ships with no category on purpose** — the catch-all belongs in Uncategorized, and
-  it keeps that bucket exercised in the shipped state.
-- **`SelectionModal` and `ColumnFilterModal` take an OPTIONAL `groupForOption`** and render
-  flat when it's absent, which is every caller but the Type picker and the Type column filter.
-  Forking either into a grouped twin is how the app would end up with two dropdown behaviours
-  — the thing `SelectionModal` exists to prevent. Both callers must hand it options already
-  sorted into category runs, or one heading appears several times down the list.
+  needed no seeding step and no migration. `ensureShippedLabels()` tops a stored list up with
+  any label added in a later release, at its shipped position rather than appended — the
+  lesson `ensureLockedTypes` learned when User landed under `Other`.
+- **A DANGLING id is not an error, the type just carries one fewer label.** Deleting a label
+  does not rewrite the types that named it, so deletion needs no in-use block — only a count
+  saying how many types carry it. `typeLabelNamesOf` drops a dangling id rather than printing
+  a raw uuid. **Renaming is a one-row edit**, which is the entire point of storing the id.
+- **`Other` ships with no labels on purpose** — it keeps the Unlabeled bucket exercised in the
+  shipped state, and the filter grows an **Unlabeled** chip whenever something on screen has
+  none. Nothing ticked in the editor is a real answer, not a missing one.
+- **The filter is OR, never AND.** Picking Equipment and Facilities shows everything carrying
+  either, not the handful carrying both: intersecting two labels lands on an empty list often
+  enough that the control would read as broken.
+- **`SelectionModal` and `ColumnFilterModal` take an OPTIONAL `labelOptions`/`labelsForOption`**
+  and render exactly as before when absent, which is every caller but the Type picker and the
+  Type column filter. They replaced the optional `groupForOption` both took. One shared
+  `useLabelFilter` hook owns the chip row, the active set and the narrowing — a hook rather
+  than a component, because the caller still renders its own rows.
+  - **`labelsForOption` returning `null` means EXEMPT**, which is load-bearing for exactly one
+    row: "All types" is the option that CLEARS the column filter, so filtering it off screen
+    would be the one thing the control must not do.
+  - The chip row shows only labels something in THAT list carries, and only when there are at
+    least two — a chip whose only possible effect is to empty the list is a dead control.
+- **Covered by `test-frontend-type-labels.js`** (it replaced `test-frontend-categories.js`),
+  which runs the real registry and the real helpers. Verified by mutation that five silent
+  failures fail it: reading through the merge instead of the override, an empty array
+  ceasing to beat the shipped list, `ensureShippedLabels` replacing rather than topping up,
+  the filter turning into AND, and `null` ceasing to be exempt. `MOCK_SNAPSHOT` is
+  deliberately MIXED — Mini Split carries the v33 singular key (naming a DIFFERENT label than
+  the registry ships, or it would pass either way), Electrical Panel carries two, Stream Deck
+  carries an explicit empty list, everything else none — so Sandbox exercises all three read
+  paths rather than one. That is the `personIds` lesson, applied deliberately.
+- **Eric chose a config key over a name string per type back at v33, knowing it cost a
+  deploy**, and that reasoning survives the rework: a derived list can only be ordered by
+  something else, and cannot hold a label nobody has filed a type under yet, so you could
+  never build the scheme and then sort types into it. The rework kept the record and only
+  changed how many of them a type may name.
 
 **Per-type settings are a user-editable overlay on `TYPE_REGISTRY`** (the type editor,
 2026-08-25). The registry is the shipped default and is never written to; overrides live in
@@ -945,19 +982,21 @@ default" is just deleting it.
     `return`ed on both, so the button did nothing and said nothing.
 
 **Three things a type now decides that it didn't before** (backend **v33**, 2026-09-09 —
-see `TYPE_MANAGEMENT_PLAN.md`): which **category** it is filed under, which of its fields are
-**required**, and — a per-column question rather than a per-type one — what **kind of value**
-each field holds. Two of the three needed no backend change at all, and the exception is the
-one worth remembering.
+see `TYPE_MANAGEMENT_PLAN.md`): which **labels** it carries (one **category** until
+2026-09-11, see above), which of its fields are **required**, and — a per-column question
+rather than a per-type one — what **kind of value** each field holds. Two of the three needed
+no backend change at all, and the exception is the one worth remembering.
 
 - **A column's `dataType` and a type's `requiredFields` cost NOTHING to add**, because
   `doPost` stringifies the whole `columns` and `typeSettings` blobs and the only thing the
   backend reads inside a column object is `customColumnKeys_`, which touches `custom` and
   `key`. **A new Config KEY is the one thing that blob-freedom does not cover** — `doPost`
-  writes a fixed key list and silently drops the rest — which is exactly what categories
-  needed, and why that one phase cost a version bump and a deploy to every tenant. Reuse
+  writes a fixed key list and silently drops the rest — which is exactly what the category
+  list needed, and why that one phase cost a version bump and a deploy to every tenant. Reuse
   that test for any future per-field or per-type setting: a property on an existing blob is
-  free, a key of its own is a release.
+  free, a key of its own is a release. **The 2026-09-11 multi-label rework is that test
+  answered the other way**: several labels per type is a property on `typeSettings`, so it
+  cost nothing — which is also why it kept v33's key name rather than minting a better one.
 - **The data type is PER COLUMN, resolved at READ time** (`columnDataType()`): the column's
   own override, then `DEFAULT_COLUMN_DATA_TYPES`, then text. Per column because one key
   holding a date on Computers and a number on TVs breaks sorting, filtering and the export
