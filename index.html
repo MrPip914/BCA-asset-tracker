@@ -49,7 +49,7 @@
 import ReactDOM from "react-dom/client";
 import { createPortal } from "react-dom";
 
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import * as XLSX from "xlsx";
 import {
   Search, Plus, X, Pencil, Trash2, Save, ChevronRight, ChevronDown, ArrowLeft, MessageSquare,
@@ -1520,7 +1520,7 @@ const FRONTEND_SCRIPT_VERSION = "v32";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-10.1";
+const APP_VERSION = "2026-09-11.1";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -2372,6 +2372,10 @@ function AssetTracker() {
   // Mirrored here from the current history entry's `backTo` because the control
   // renders that asset's NAME, and writing history.state doesn't re-render.
   const [backToId, setBackToId] = useState(null);
+  // Set when a navigation should land at the top of the page, and consumed by
+  // the layout effect below. A ref, not state: it exists to be read during the
+  // render that has already been scheduled, and must not cause another one.
+  const scrollToTopRef = useRef(false);
   const [commentDraft, setCommentDraft] = useState("");
   const [changeDraft, setChangeDraft] = useState({ changeType: "", vendor: "", cost: "", note: "" });
   const [showChangeTypeManager, setShowChangeTypeManager] = useState(false);
@@ -2932,6 +2936,32 @@ function AssetTracker() {
     return () => window.removeEventListener("popstate", onPopState);
   }, [assets]);
 
+  // Puts the page at the top once React has laid the new view out. A LAYOUT
+  // effect, so it lands before the browser paints and no one sees the wrong
+  // offset first.
+  //
+  // Note what this deliberately does NOT do: restore the position when going
+  // BACK. The browser already does that correctly for same-document history
+  // navigation, and it only started working when this app began pushing entries
+  // at all — before that the tab held one entry and there was nothing to
+  // restore, which is where "it forgets where I was" came from. Measuring it
+  // rather than assuming is what settled this: a hand-rolled replacement
+  // (scrollRestoration = "manual", offsets stored per entry, a debounced scroll
+  // listener keeping them current) was built first, passed the same tests, and
+  // was thrown away for being ~70 lines reimplementing something already
+  // correct. If restoration ever does prove flaky on a bigger sheet, that is
+  // the shape of the fallback — but do not add it on suspicion.
+  //
+  // No dependency array on purpose: the navigation handlers set several states
+  // at once, and naming a subset would mean a navigation changing none of them
+  // silently skipped its reset. The ref clears itself, so every other render is
+  // one boolean test.
+  useLayoutEffect(() => {
+    if (!scrollToTopRef.current) return;
+    scrollToTopRef.current = false;
+    window.scrollTo(0, 0);
+  });
+
   function toggleSandboxMode() {
     const next = !sandboxMode;
     setSandboxMode(next);
@@ -3489,6 +3519,12 @@ function AssetTracker() {
           window.history.pushState(historyEntry(depth + 1, asset.id, wanted, backTo), "", navUrl(asset.id, wanted));
           setBackToId(backTo);
         }
+        // An asset just opened starts at its OWN top. Nothing reset the scroll
+        // before, so the list's offset simply carried over into a page that is
+        // usually shorter: scrolled 1200px down the list, opening an asset
+        // landed 103px into it, which reads as the app having jumped somewhere
+        // odd rather than as having opened anything.
+        scrollToTopRef.current = true;
       }
     }
 
@@ -3519,6 +3555,11 @@ function AssetTracker() {
     setBackToId(null);
     if (!opts.fromHistory) {
       window.history.replaceState(historyEntry(currentNavDepth(), null, null, null), "", navUrl(null, null));
+      // This path REPLACES the entry rather than returning to a stored one (a
+      // deep-link arrival, or an asset deleted underneath a live entry), so
+      // there is no position to come back to and the detail page's offset would
+      // otherwise carry into the list. The top is the only honest answer.
+      scrollToTopRef.current = true;
     }
   }
 

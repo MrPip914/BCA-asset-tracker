@@ -426,11 +426,35 @@ onboard one.
     history walking itself is browser behaviour — push vs replace, Back landing on the
     previous asset, the depth guard — and was verified by driving the real page in Chromium,
     which is the only place `popstate` exists. Sandbox mode is where that was done.
-  - **Deliberately NOT handled yet**, all three because they widen the change rather than
-    finish it: Back mid-edit still discards the draft silently (it always did, but a
-    reflexive gesture makes it likelier than a deliberate click did); Back with a modal open
-    navigates instead of closing the modal; and returning to the list still loses scroll
-    position, which is a different bug that reads as the same complaint.
+  - **Scroll position: the browser restores it, and the app only resets it** (2026-09-11).
+    An asset opened from the list now starts at its own top, and so does a list reached by
+    `closeDetail` replacing an entry (a deep-link arrival, an asset deleted underneath a
+    live entry) — both via one `useLayoutEffect` consuming a `scrollToTopRef`, so the
+    correction lands before paint rather than as a visible jump.
+    - **"Losing your place in the list" had already FIXED ITSELF** when this app started
+      pushing history entries, and that is the thing to know before touching this again.
+      The browser restores scroll for same-document history navigation on its own; with one
+      entry in the tab there was nothing to restore, which is where the complaint came
+      from. Verified by driving the committed build: Back returned to 1200, 400 and 900 px
+      exactly, unaided.
+    - **What was actually broken was the other direction.** Nothing reset the scroll when
+      OPENING an asset, so the list's offset carried into a shorter page and clamped —
+      1200px down the list put you 103px into an 806px detail page. That is the whole bug,
+      and `window.scrollTo(0, 0)` after layout is the whole fix.
+    - **A hand-rolled replacement was built first, passed, and was thrown away.**
+      `scrollRestoration = "manual"`, a `scrollY` on every history entry, `captureScroll()`
+      at each navigation point and a debounced scroll listener keeping the current entry
+      up to date — ~70 lines, all of it reimplementing something the browser already does
+      correctly. It was written on a measurement contaminated by the test harness:
+      Playwright scrolls an off-screen row into view before clicking it, which moved the
+      very offset under test, so "going back lands at 361" was the robot's scroll, not the
+      app's. **Click a row that is already on screen** when measuring this, or the number
+      is about Playwright. Do not re-add the manual approach on suspicion; if restoration
+      ever does prove flaky on a bigger sheet, that is the shape of the fallback.
+  - **Deliberately NOT handled yet**, both because they widen the change rather than finish
+    it: Back mid-edit still discards the draft silently (it always did, but a reflexive
+    gesture makes it likelier than a deliberate click did), and Back with a modal open
+    navigates instead of closing the modal.
 - **State**: the whole app is one component (`AssetTracker`, ~3700 lines) holding all
   state — assets, managed lists (change types, vendors, peripherals, users), audit log,
   column config. This is a known architectural weak point (see "Component size" below),
