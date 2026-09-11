@@ -47,6 +47,11 @@ const code = [
   // Same reasoning: the fixture references the seeded catalog, which this test
   // has no opinion about.
   'const SEEDED_BREAKER_TYPES = [];',
+  // And the photo fixture, for the same reason. Every constant MOCK_SNAPSHOT
+  // names has to be stubbed here, because this test EVALUATES the fixture as
+  // source text rather than importing it — adding a reference to MOCK_SNAPSHOT
+  // without a stub breaks this file with a bare ReferenceError.
+  'const MOCK_PHOTOS = [];',
   depthLine[0],
   // `relate` is real, not stubbed: the fixture's audit rows go through it, and
   // it is one of the things phase 2 now feeds ids rather than labels.

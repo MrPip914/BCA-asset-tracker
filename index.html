@@ -56,6 +56,7 @@ import {
   Monitor, Phone, Tv, Camera, HardDrive, HelpCircle, Columns3, Lock, Filter, Check, DoorOpen, Download,
   Wrench, UserCircle, Settings, History, Archive, ArchiveRestore, Building2, Package, Copy, Zap, Repeat, ArrowLeftRight, Menu,
   FlaskConical, RotateCcw, AlertTriangle, Loader2, Printer, MapPin, QrCode, Info, LogOut, Users,
+  ImagePlus, Eye, EyeOff,
 } from "lucide-react";
 
 // Starter managed peripherals/users/bulk-item-type lists — empty until the school
@@ -526,7 +527,11 @@ function availableTabsFor(type) {
     "details",
     ...(isPlaceType(type) ? ["contents"] : []),
     ...modulesFor(type),
-    "maintenance", "comments", "audit",
+    // A common tab, deliberately NOT a module: a module is something only some
+    // types own (a panel's breakers, a bulk item's allocations), and anything
+    // can be photographed. Declaring it per type would mean remembering to add
+    // it to every new one.
+    "maintenance", "photos", "comments", "audit",
   ];
 }
 // What this asset is *called*. ONE optional field on every asset, falling back
@@ -1857,7 +1862,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v34";
+const FRONTEND_SCRIPT_VERSION = "v35";
 // The version of THIS file — shown in About (the account menu), so "is my browser
 // actually running the build I just deployed, or a cached one?" is answerable in
 // two clicks instead of by reading view-source.
@@ -1875,7 +1880,7 @@ const FRONTEND_SCRIPT_VERSION = "v34";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-10.14";
+const APP_VERSION = "2026-09-11.4";
 // Seeds a blank draft with one key per column, so every input is controlled from
 // the first keystroke. The `parent` COLUMN is the one whose key isn't the field
 // name — it displays a resolved name but stores an id, so the asset's field is
@@ -1898,13 +1903,14 @@ const emptyDraftFrom = columns => Object.fromEntries(
 // than merging or retrying (either could destroy one of the two changes).
 // Per-domain, not one global counter, so two people editing unrelated things —
 // a managed list vs an asset — don't produce a false conflict.
-const REVISION_DOMAINS = ["assets", "config", "breakerTypes"];
-const EMPTY_REVISIONS = { assets: 0, config: 0, breakerTypes: 0 };
+const REVISION_DOMAINS = ["assets", "config", "breakerTypes", "photos"];
+const EMPTY_REVISIONS = { assets: 0, config: 0, breakerTypes: 0, photos: 0 };
 // Human-readable name per domain, for the conflict message.
 const REVISION_DOMAIN_LABELS = {
   assets: "asset data",
   config: "lists and columns",
   breakerTypes: "breaker types",
+  photos: "photos",
 };
 // Anything missing/garbage reads as 0 — the same value the backend reads for a
 // Config tab with no revision rows yet (an existing sheet, or one last written
@@ -2057,6 +2063,182 @@ const SANDBOX_DATA_KEY = CLIENT.storageKey("asset-tracker-sandbox-data");
 // roomsServedIds, an allocation and two audit rows; BCA0001 is a leaf device whose
 // only referrers are its own audit history; BCA0084 is a sub-panel that is the
 // target of a feedsPanelLabel and the owner of 21 breaker panelLabels.
+// --- Photos ------------------------------------------------------------------
+// A photo is a REFERENCE. The bytes live at an image host (Cloudinary); the
+// Sheet stores a row saying which owner it belongs to and where to fetch it.
+// See PHOTOS_EVAL.md, and the Photos section of CLAUDE.md.
+
+// Long edge, in pixels, that an upload is downscaled to before it leaves the
+// browser, and the JPEG quality it is re-encoded at. ~1600px at q0.8 turns a
+// typical 4MB phone photo into ~300KB, which is the difference between a usable
+// gallery on school wifi and an unusable one.
+const PHOTO_MAX_EDGE = 1600;
+const PHOTO_JPEG_QUALITY = 0.8;
+// Refused before any work is done. Well above what a re-encoded phone photo
+// produces; this is a guard against someone picking a RAW file or a video.
+const PHOTO_MAX_BYTES = 25 * 1024 * 1024;
+
+// Owner kinds a photo can attach to. Every one of these has a stable id --
+// assets since the key refactor, breakers and circuits always, work entries and
+// maintenance items since v34. Comments are deliberately absent: nothing
+// references a comment, so it has no id to attach to.
+const EMPTY_PHOTO_LIST = [];
+const PHOTO_OWNER_TYPES = ["asset", "breaker", "circuit", "change", "maintenance"];
+
+// Fills the blanks a row can arrive with -- from a pre-v35 sheet, a hand edit,
+// or the fixture. Never invents a url: a row without one is broken and should
+// render as broken rather than silently vanish.
+function adoptPhoto(p) {
+  return {
+    ...p,
+    id: p.id || (crypto.randomUUID ? crypto.randomUUID() : String(Math.random())),
+    // Never defaulted to "asset". A blank ownerType can only come from a hand
+    // edit, and guessing one would file a work entry's photo in its asset's
+    // gallery -- the wrong photo shown confidently in the wrong place, which is
+    // worse than one that cannot be found. Left blank it matches no owner and
+    // stays out of every gallery until someone fixes the cell.
+    ownerType: p.ownerType || "",
+    ownerId: p.ownerId || "",
+    url: p.url || "",
+    thumbUrl: p.thumbUrl || "",
+    caption: p.caption || "",
+    // The sheet stores the string "true"; doGet already converts, but a fixture
+    // or a hand-edited row can still arrive either way.
+    hiddenFromPublic: p.hiddenFromPublic === true || String(p.hiddenFromPublic) === "true",
+  };
+}
+
+// A thumbnail URL, preferring the one stored at upload time and DERIVING one
+// from a Cloudinary delivery URL when it is missing. The stored value is what
+// makes a move to a different host a copy plus one column rewrite; the derive
+// is only a fallback for a row written before it was stored, or by hand.
+function photoThumbUrl(photo) {
+  if (photo.thumbUrl) return photo.thumbUrl;
+  const url = photo.url || "";
+  const marker = "/image/upload/";
+  const at = url.indexOf(marker);
+  if (at === -1) return url;
+  return url.slice(0, at + marker.length) + "w_400,h_400,c_fill,q_auto,f_auto/" + url.slice(at + marker.length);
+}
+
+// Downscales and re-encodes on a canvas before upload. Three things happen here
+// and all of them matter:
+//   1. Size -- see PHOTO_MAX_EDGE.
+//   2. EXIF is DROPPED, including GPS. Phones geotag, and photos of a school's
+//      rooms carrying its coordinates to a third party is a thing to decide
+//      deliberately rather than discover. Re-encoding decides it for free.
+//   3. Orientation is BAKED IN. createImageBitmap's "from-image" applies the
+//      EXIF orientation flag before drawing, so a portrait phone photo does not
+//      land sideways once the flag it depended on is gone with the rest of EXIF.
+async function downscalePhoto(file) {
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+  } catch (err) {
+    // Older Safari has createImageBitmap but not the options argument, so a
+    // straight retry is worth one attempt before falling back to an <img>,
+    // which applies orientation itself in every current browser.
+    try {
+      bitmap = await createImageBitmap(file);
+    } catch (err2) {
+      bitmap = await new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error("That file could not be read as an image."));
+        img.src = URL.createObjectURL(file);
+      });
+    }
+  }
+  const w = bitmap.width || bitmap.naturalWidth;
+  const h = bitmap.height || bitmap.naturalHeight;
+  if (!w || !h) throw new Error("That file could not be read as an image.");
+  const scale = Math.min(1, PHOTO_MAX_EDGE / Math.max(w, h));
+  const outW = Math.max(1, Math.round(w * scale));
+  const outH = Math.max(1, Math.round(h * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = outW;
+  canvas.height = outH;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(bitmap, 0, 0, outW, outH);
+  if (bitmap.close) bitmap.close();
+  const blob = await new Promise(res => canvas.toBlob(res, "image/jpeg", PHOTO_JPEG_QUALITY));
+  if (!blob) throw new Error("That photo could not be prepared for upload.");
+  return { blob, width: outW, height: outH };
+}
+
+// Posts the prepared bytes straight to Cloudinary with a signature the backend
+// minted. The file never passes through Apps Script -- see handlePhotoSign_ in
+// AssetTrackerSync.gs for why that shape was chosen.
+//
+// Only the parameters the backend SIGNED are sent, read from its own
+// signedParams list rather than restated here: Cloudinary rejects the upload if
+// the posted set differs from the signed set by even one entry, and says only
+// that the signature is invalid.
+async function uploadPhotoToCloudinary(blob, sig) {
+  const form = new FormData();
+  form.append("file", blob);
+  form.append("api_key", sig.apiKey);
+  form.append("signature", sig.signature);
+  (sig.signedParams || ["folder", "public_id", "timestamp"]).forEach(k => {
+    const value = k === "public_id" ? sig.publicId : sig[k];
+    if (value !== undefined && value !== null && value !== "") form.append(k, value);
+  });
+  const res = await fetch("https://api.cloudinary.com/v1_1/" + encodeURIComponent(sig.cloudName) + "/image/upload", {
+    method: "POST",
+    body: form,
+  });
+  const data = await res.json().catch(() => null);
+  if (!res.ok || !data || !data.secure_url) {
+    const detail = data && data.error && data.error.message ? data.error.message : "HTTP " + res.status;
+    throw new Error("The image host refused the upload: " + detail);
+  }
+  return data;
+}
+
+// Sandbox fixture. Deliberately MIXED, the same way the asset ids and the work
+// entry ids are: an asset photo, a breaker photo, a circuit photo, one hidden
+// from the public page, and one with NO thumbUrl so photoThumbUrl's derive
+// fallback is exercised rather than only its stored-value path. A fixture that
+// was all one shape would exercise half the code.
+//
+// The images are inline data URIs, not links: a fixture that needs the network
+// is one that renders as broken the day the network is not there, and Sandbox's
+// whole point is making no request at all.
+const MOCK_PHOTO_IMG_A = "data:image/svg+xml;utf8," + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300"><rect width="400" height="300" fill="#4b5d73"/><text x="200" y="160" font-family="sans-serif" font-size="28" fill="#fff" text-anchor="middle">Panel</text></svg>');
+const MOCK_PHOTO_IMG_B = "data:image/svg+xml;utf8," + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300"><rect width="400" height="300" fill="#7a5d3f"/><text x="200" y="160" font-family="sans-serif" font-size="28" fill="#fff" text-anchor="middle">Breaker</text></svg>');
+const MOCK_PHOTO_IMG_C = "data:image/svg+xml;utf8," + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300"><rect width="400" height="300" fill="#3f6b52"/><text x="200" y="160" font-family="sans-serif" font-size="26" fill="#fff" text-anchor="middle">Circuit</text></svg>');
+
+const MOCK_PHOTOS = [
+  {
+    id: "photo-1", ownerType: "asset", ownerId: "BCA0082",
+    url: MOCK_PHOTO_IMG_A, thumbUrl: MOCK_PHOTO_IMG_A, storageKey: "sandbox/panel-front",
+    caption: "Panel front, door closed", width: 400, height: 300, bytes: 4096,
+    hiddenFromPublic: false, at: "2026-09-01T17:20:00.000Z", by: "Eric Stamage",
+  },
+  {
+    id: "photo-2", ownerType: "breaker", ownerId: "b82-1",
+    url: MOCK_PHOTO_IMG_B, thumbUrl: "", storageKey: "sandbox/breaker-1a",
+    caption: "20A double-pole, slot 1", width: 400, height: 300, bytes: 4096,
+    hiddenFromPublic: false, at: "2026-09-01T17:24:00.000Z", by: "Eric Stamage",
+  },
+  {
+    id: "photo-3", ownerType: "circuit", ownerId: "c82-1",
+    url: MOCK_PHOTO_IMG_C, thumbUrl: MOCK_PHOTO_IMG_C, storageKey: "sandbox/circuit-outlets",
+    caption: "North wall outlet run", width: 400, height: 300, bytes: 4096,
+    hiddenFromPublic: false, at: "2026-09-01T17:26:00.000Z", by: "Eric Stamage",
+  },
+  {
+    id: "photo-4", ownerType: "asset", ownerId: "BCA0082",
+    url: MOCK_PHOTO_IMG_A, thumbUrl: MOCK_PHOTO_IMG_A, storageKey: "sandbox/panel-open",
+    caption: "Interior — withheld from the QR page",
+    width: 400, height: 300, bytes: 4096,
+    hiddenFromPublic: true, at: "2026-09-01T17:28:00.000Z", by: "Eric Stamage",
+  },
+];
+
 const MOCK_SNAPSHOT = {
   scriptVersion: FRONTEND_SCRIPT_VERSION,
   // The type list in the OLD pre-id shape — a plain array of name strings, which
@@ -2609,6 +2791,20 @@ const MOCK_SNAPSHOT = {
     },
   ],
   breakerTypes: SEEDED_BREAKER_TYPES,
+  // Deliberately MIXED, the same way the asset ids and the work-entry ids are:
+  // one photo on an asset, one on a breaker, one on a circuit, one hidden from
+  // the public page, and one carrying no thumbUrl so the derive-a-thumbnail
+  // fallback is exercised. A fixture that was all one shape would exercise half
+  // the code -- the personIds lesson, applied deliberately.
+  //
+  // The urls point at a real, tiny, publicly-fetchable placeholder so the render
+  // path actually paints something in Sandbox. Nothing here reaches Cloudinary.
+  // NOTE: every constant MOCK_SNAPSHOT names must be stubbed in the tests that
+  // evaluate this fixture as source text (test-frontend-assetid.js does, and
+  // stubs FRONTEND_SCRIPT_VERSION and SEEDED_BREAKER_TYPES for the same reason).
+  // Adding a reference here without adding the stub there fails with a bare
+  // ReferenceError that names the constant but not why.
+  photos: MOCK_PHOTOS,
   // Enough history to exercise BOTH audit sections without a backend, since the
   // whole point of Sandbox is building this before a redeploy. Deliberately
   // covers the three shapes that behave differently:
@@ -2665,6 +2861,27 @@ function AssetTracker() {
   const [showTypesManager, setShowTypesManager] = useState(false);
   const [newTypeName, setNewTypeName] = useState("");
   const [breakerTypes, setBreakerTypes] = useState(SEEDED_BREAKER_TYPES);
+  // Every photo in the tenant, flat, keyed by ownerType+ownerId rather than
+  // nested on an asset -- an owner may be a breaker, a circuit or a work entry,
+  // none of which are assets. Indexed for lookup by photosByOwner below.
+  const [photos, setPhotos] = useState([]);
+  // Upload is the one write here that is slow for a reason unrelated to the
+  // backend -- resizing, then a second round trip to the image host -- so it
+  // carries its own busy flag rather than riding isSaving, which only covers the
+  // snapshot write at the very end.
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const [photoError, setPhotoError] = useState("");
+  // { done, total } while a multi-file upload is running, else null. Uploads are
+  // sequential rather than parallel: honest progress, one failure at a time to
+  // report, and parallel uploads competing on school wifi is the opposite of
+  // what this feature needs.
+  const [photoProgress, setPhotoProgress] = useState(null);
+  // Which photo the lightbox is showing, or null.
+  const [photoViewer, setPhotoViewer] = useState(null);
+  // The caption being typed in the lightbox. Held separately from the photo so
+  // an abandoned edit leaves nothing behind, and reseeded every time the viewer
+  // opens -- the same rule the work dialog and breaker edit mode follow.
+  const [photoCaptionDraft, setPhotoCaptionDraft] = useState("");
   const [showBreakerTypesManager, setShowBreakerTypesManager] = useState(false);
   const [breakerTypeDraft, setBreakerTypeDraft] = useState(null); // null = list view; else { id, name, slotSpan, members }
   const [currentMemberCells, setCurrentMemberCells] = useState([]);
@@ -2733,7 +2950,7 @@ function AssetTracker() {
   const [newVendorName, setNewVendorName] = useState("");
   const [allocationDraft, setAllocationDraft] = useState({ roomId: "", quantity: "", error: "" });
   const [confirmAllocationRemove, setConfirmAllocationRemove] = useState(null);
-  const [maintenanceDraft, setMaintenanceDraft] = useState({ task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
+  const [maintenanceDraft, setMaintenanceDraft] = useState({ id: "", task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
   const [editingMaintenanceId, setEditingMaintenanceId] = useState(null);
   const [maintenanceEditDraft, setMaintenanceEditDraft] = useState(null);
   const [confirmMaintenanceDelete, setConfirmMaintenanceDelete] = useState(null);
@@ -3083,8 +3300,8 @@ function AssetTracker() {
           // the inventory together, so signing in stays one round trip. Every
           // load after that presents the session instead.
           body: JSON.stringify(authIdToken
-            ? { op: "signin", idToken: authIdToken, _dirty: { assets: false, config: false, breakerTypes: false } }
-            : { op: "read", sessionId: sessionId, _dirty: { assets: false, config: false, breakerTypes: false } }),
+            ? { op: "signin", idToken: authIdToken, _dirty: { assets: false, config: false, breakerTypes: false, photos: false } }
+            : { op: "read", sessionId: sessionId, _dirty: { assets: false, config: false, breakerTypes: false, photos: false } }),
           cache: "no-store",
         });
         if (!res.ok) throw new Error("HTTP " + res.status);
@@ -3287,6 +3504,9 @@ function AssetTracker() {
       const storedNextNumber = Number(data.nextAssetNumber);
       setNextAssetNumber(Number.isFinite(storedNextNumber) && storedNextNumber > 0 ? storedNextNumber : null);
       setBreakerTypes(Array.isArray(data.breakerTypes) && data.breakerTypes.length ? data.breakerTypes : SEEDED_BREAKER_TYPES);
+      // Absent on a pre-v35 backend, which is a normal state and not an error:
+      // an empty list simply means no photo has been attached yet.
+      setPhotos(Array.isArray(data.photos) ? data.photos.map(adoptPhoto) : []);
       if (Array.isArray(data.usersList) && data.usersList.length) {
         setUsersList(data.usersList);
       } else {
@@ -3446,6 +3666,7 @@ function AssetTracker() {
       typeSettings: nextTypeSettings = typeSettings,
       typeCategories: nextTypeCategories = typeCategories,
       breakerTypes: nextBreakerTypes = breakerTypes,
+      photos: nextPhotos = photos,
       nextAssetNumber: nextNumberToIssue = nextAssetNumber,
       // Defaults to undefined, NOT to the current list, which is the opposite of
       // every other domain here and deliberate. The backend treats an absent
@@ -3483,6 +3704,10 @@ function AssetTracker() {
         || nextNumberToIssue !== nextAssetNumber
         || nextAuthUsers !== undefined,
       breakerTypes: nextBreakerTypes !== breakerTypes,
+      // Its own domain, not folded into assets: a photo can belong to a breaker
+      // or a work entry, so sharing the assets counter would make attaching one
+      // conflict with anyone editing any asset anywhere.
+      photos: nextPhotos !== photos,
     };
     // Set before the first await and cleared in the finally below, so it always
     // clears — on success, on a network/backend failure, and on the conflict
@@ -3507,6 +3732,7 @@ function AssetTracker() {
       setTypeSettings(nextTypeSettings);
       setTypeCategories(nextTypeCategories);
       setBreakerTypes(nextBreakerTypes);
+      setPhotos(nextPhotos);
       setNextAssetNumber(nextNumberToIssue);
       if (nextAuthUsers !== undefined) setAccessUsers(nextAuthUsers);
       const payload = {
@@ -3515,6 +3741,7 @@ function AssetTracker() {
         bulkItemTypes: nextBulkItemTypes, typesList: nextTypesList,
         typeSettings: nextTypeSettings, typeCategories: nextTypeCategories,
         breakerTypes: nextBreakerTypes,
+        photos: nextPhotos,
         nextAssetNumber: nextNumberToIssue, _dirty: dirty,
         // Spread conditionally so the key is genuinely ABSENT on an ordinary
         // save, not present-but-undefined — JSON.stringify drops undefined
@@ -4026,7 +4253,7 @@ function AssetTracker() {
     setConfirmArchive(null);
     setAllocationDraft({ roomId: "", quantity: "", error: "" });
     setConfirmAllocationRemove(null);
-    setMaintenanceDraft({ task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
+    setMaintenanceDraft({ id: crypto.randomUUID(), task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
     setEditingMaintenanceId(null);
     setMaintenanceEditDraft(null);
     setConfirmMaintenanceDelete(null);
@@ -4397,6 +4624,23 @@ function AssetTracker() {
     return null;
   }
 
+  // Every id that can own a photo and belongs to this asset: the asset itself,
+  // its work entries, its maintenance items, and (for a panel) its breakers and
+  // circuits. Deleting the asset destroys every one of those owners, so their
+  // photo rows have nothing left to point at.
+  function photoOwnerIdsOf(asset) {
+    if (!asset) return [];
+    const ids = [asset.id];
+    (asset.changes || []).forEach(c => { if (c && c.id) ids.push(c.id); });
+    (asset.maintenanceItems || []).forEach(m => { if (m && m.id) ids.push(m.id); });
+    (asset.breakers || []).forEach(b => {
+      if (b && b.id) ids.push(b.id);
+      (b.circuits || []).forEach(c => { if (c && c.id) ids.push(c.id); });
+    });
+    (asset.unassignedCircuits || []).forEach(c => { if (c && c.id) ids.push(c.id); });
+    return ids;
+  }
+
   async function doDelete(id) {
     if (savingRef.current) return; // double-submit guard, see savingRef
     const asset = assets.find(a => a.id === id);
@@ -4405,7 +4649,19 @@ function AssetTracker() {
       assetType: asset ? asset.type : "", action: "deleted",
       related: relate({ at: asset ? asset.parentId : "" }),
     };
-    await persist(assets.filter(a => a.id !== id), { auditLog: logAudit([deletedEntry]) });
+    // Photo rows cascade with the asset (Eric's call, 2026-09-11): they are
+    // worthless once their owner is gone, and the IMAGES survive at the host
+    // regardless, so nothing is actually destroyed by dropping the rows.
+    // Deliberately NOT a blocked delete -- permanent delete is already a rare,
+    // twice-confirmed action on an already-archived asset.
+    const doomedOwners = new Set(photoOwnerIdsOf(asset));
+    const keptPhotos = photos.filter(ph => !doomedOwners.has(ph.ownerId));
+    await persist(assets.filter(a => a.id !== id), {
+      auditLog: logAudit([deletedEntry]),
+      // Same reference when nothing matched, so persist's dirty check does not
+      // mark the photos domain changed on a delete that removed none.
+      photos: keptPhotos.length === photos.length ? photos : keptPhotos,
+    });
     setConfirmDelete(null);
     if (selectedId === id) closeDetail();
   }
@@ -4532,6 +4788,188 @@ function AssetTracker() {
     setMoveTarget("");
   }
 
+  // ---------- PHOTOS ----------
+  // Which photos belong to what, indexed once per photos change rather than
+  // filtered per render -- a gallery lives in the detail view's render body, so
+  // an unindexed filter would re-scan the whole list on every keystroke in the
+  // edit form. Same reasoning as auditIndex.
+  const photosByOwner = React.useMemo(() => {
+    const map = new Map();
+    (photos || []).forEach(ph => {
+      const key = ph.ownerType + " " + ph.ownerId;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(ph);
+    });
+    return map;
+  }, [photos]);
+  function photosForOwner(ownerType, ownerId) {
+    if (!ownerId) return EMPTY_PHOTO_LIST;
+    return photosByOwner.get(ownerType + " " + ownerId) || EMPTY_PHOTO_LIST;
+  }
+
+  // Uploads one file and attaches it. The ORDER here is the whole failure story:
+  // the bytes go up FIRST and the row is written second, so a save rejected by
+  // the revision check strands bytes at the host rather than leaving a row whose
+  // image 404s. An orphan is invisible and sweepable; a broken reference looks
+  // like data loss to whoever took the photo. See PHOTOS_EVAL.md section 5.
+  async function attachPhotos(ownerType, ownerId, files) {
+    if (savingRef.current || photoBusy) return; // double-submit guard, see savingRef
+    const chosen = Array.from(files || []).filter(Boolean);
+    if (!chosen.length || !ownerId) return;
+    if (!PHOTO_OWNER_TYPES.includes(ownerType)) return;
+    setPhotoError("");
+    setPhotoBusy(true);
+    setPhotoProgress({ done: 0, total: chosen.length });
+    // Accumulated HERE and written ONCE at the end, which is the whole reason
+    // this is not a loop around the old single-file handler. `photos` is the
+    // state this render closed over and does not advance as we go, so a
+    // per-file persist would build every list from the ORIGINAL array and each
+    // save would drop the ones before it -- N saves, one photo surviving. It is
+    // also N full-snapshot round trips for one user action, and the queued
+    // writes would race the revision check against each other.
+    const added = [];
+    const failures = [];
+    try {
+      for (let i = 0; i < chosen.length; i++) {
+        const file = chosen[i];
+        setPhotoProgress({ done: i, total: chosen.length });
+        try {
+          added.push(await preparePhotoRow(ownerType, ownerId, file));
+        } catch (err) {
+          // One bad file does not abandon the rest -- the others are already
+          // uploaded, and throwing away good work because the fourth photo was
+          // a screenshot of a video would be worse than reporting it.
+          failures.push((file.name || "A file") + ": " + ((err && err.message) || "could not be uploaded."));
+        }
+      }
+      // A work entry's or a schedule's id can exist ONLY IN MEMORY, and that is
+      // what orphaned the first batch of work-entry photos. Both are adopted at
+      // load with `c.id || crypto.randomUUID()`, so a row written before v34 has
+      // a blank id cell and gets a FRESH RANDOM one on every single load.
+      // Nothing writes that id until some unrelated asset edit happens to save —
+      // and attaching a photo is not one, because it marks only the photos
+      // domain dirty. So the photo row landed pointing at an id the very next
+      // load replaced, and the photo was in the sheet, correct, and unreachable.
+      //
+      // Passing a NEW array marks the assets domain dirty (persist compares by
+      // reference), which writes those ids into the sheet in the SAME save as
+      // the row that points at them. The rule this is an instance of: a
+      // reference and the id it names must be written together.
+      //
+      // Asset photos deliberately do not do this, and that asymmetry is exactly
+      // how the bug presented — an asset's id is adopted as `a.id || a.label`,
+      // which is DETERMINISTIC, so a blank cell yields the same id every load
+      // and its photos were never orphaned. Breakers and circuits mint their ids
+      // at creation inside an asset save, so theirs are stored too. Only these
+      // two owner types are adopted at random.
+      const ownerIdMayBeMemoryOnly = ownerType === "change" || ownerType === "maintenance";
+      const assetsToWrite = ownerIdMayBeMemoryOnly ? assets.slice() : assets;
+      if (added.length) await persist(assetsToWrite, { photos: [...photos, ...added] });
+      if (failures.length) {
+        setPhotoError(failures.length === 1 ? failures[0]
+          : failures.length + " of " + chosen.length + " photos failed — " + failures.join("; "));
+      }
+    } finally {
+      setPhotoBusy(false);
+      setPhotoProgress(null);
+    }
+  }
+
+  // Prepares and uploads ONE file, returning the row to be written. Split out of
+  // attachPhotos so the per-file failure above has something to wrap, and so the
+  // accumulate-then-write-once rule cannot be broken by a future call site: this
+  // returns a row and writes nothing.
+  async function preparePhotoRow(ownerType, ownerId, file) {
+    if (file.size > PHOTO_MAX_BYTES) {
+      throw new Error("too large — pick a photo rather than a video or a RAW file.");
+    }
+    {
+      const prepared = await downscalePhoto(file);
+      let row;
+      if (sandboxMode) {
+        // Sandbox makes NO network call, here as everywhere. The object URL
+        // lives for this page load only and is deliberately not persisted: one
+        // data URI would eat the whole ~5MB localStorage budget.
+        row = {
+          id: crypto.randomUUID(), ownerType: ownerType, ownerId: ownerId,
+          url: URL.createObjectURL(prepared.blob), thumbUrl: "",
+          storageKey: "sandbox/" + crypto.randomUUID(),
+          caption: "", width: prepared.width, height: prepared.height, bytes: prepared.blob.size,
+          hiddenFromPublic: false,
+          at: new Date().toISOString(), by: currentUser || "",
+        };
+      } else {
+        const sig = await signPhotoUpload();
+        const uploaded = await uploadPhotoToCloudinary(prepared.blob, sig);
+        row = {
+          id: crypto.randomUUID(), ownerType: ownerType, ownerId: ownerId,
+          url: uploaded.secure_url,
+          // Stored rather than derived, so a later move to a different host is a
+          // copy plus one column rewrite instead of a code change.
+          thumbUrl: photoThumbUrl({ url: uploaded.secure_url, thumbUrl: "" }),
+          storageKey: uploaded.public_id || sig.publicId,
+          caption: "",
+          width: uploaded.width || prepared.width,
+          height: uploaded.height || prepared.height,
+          bytes: uploaded.bytes || prepared.blob.size,
+          hiddenFromPublic: false,
+          at: new Date().toISOString(), by: currentUser || "",
+        };
+      }
+      return row;
+    }
+  }
+
+  // Asks the backend to sign one upload. It refuses loudly when a tenant has no
+  // Cloudinary credentials in its Script Properties and NAMES the missing keys:
+  // that is a per-tenant setup step, easy to forget on a newly onboarded school,
+  // and the symptom otherwise looks like a broken feature.
+  async function signPhotoUpload() {
+    const res = await fetch(SHEET_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ op: "photoSign", sessionId: sessionId }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!data || !data.ok) throw new Error((data && data.error) || "Could not get permission to upload.");
+    return data;
+  }
+
+  // Removes the ROW. The image itself stays at the host -- see PHOTOS_EVAL.md
+  // section 5 on why the sweeper is the dangerous half and stays deferred.
+  async function deletePhoto(photoId) {
+    if (savingRef.current) return; // double-submit guard, see savingRef
+    setPhotoViewer(null);
+    await persist(assets, { photos: photos.filter(ph => ph.id !== photoId) });
+  }
+
+  // Opens the viewer AND reseeds the caption draft. Every gallery goes through
+  // this rather than setPhotoViewer directly, or the draft would carry the last
+  // photo's caption into the next one.
+  function openPhotoViewer(photo) {
+    setPhotoViewer(photo);
+    setPhotoCaptionDraft((photo && photo.caption) || "");
+  }
+
+  async function savePhotoCaption() {
+    if (savingRef.current || !photoViewer) return; // double-submit guard, see savingRef
+    const id = photoViewer.id;
+    const caption = photoCaptionDraft.trim();
+    // Keep the open viewer in step, so closing and reopening does not appear to
+    // discard what was just saved.
+    setPhotoViewer({ ...photoViewer, caption: caption });
+    await persist(assets, {
+      photos: photos.map(ph => (ph.id === id ? { ...ph, caption: caption } : ph)),
+    });
+  }
+
+  async function setPhotoHiddenFromPublic(photoId, hidden) {
+    if (savingRef.current) return; // double-submit guard, see savingRef
+    await persist(assets, {
+      photos: photos.map(ph => (ph.id === photoId ? { ...ph, hiddenFromPublic: hidden } : ph)),
+    });
+  }
+
   async function addComment() {
     if (savingRef.current) return; // double-submit guard, see savingRef
     if (!commentDraft.trim() || !selectedAsset) return;
@@ -4556,7 +4994,20 @@ function AssetTracker() {
   // the next dialog -- the same reason entering breaker edit mode reseeds.
   function openChangeAdd(assetId) {
     setWorkDialogAssetId(assetId === undefined ? null : assetId);
-    setChangeDraft({ changeType: "", vendor: "", cost: "", note: "", maintenanceId: "", markPerformed: false, performedOn: localDateString() });
+    setChangeDraft({
+      // Minted HERE rather than in addChange, which is where it used to be
+      // (Eric's call, 2026-09-11). A photo names its owner, so the owner needs
+      // an identity before the entry exists -- otherwise a photo could only be
+      // attached by saving the entry and then reopening it to edit, which is how
+      // the photo does not get taken.
+      //
+      // The cost, accepted deliberately: bytes upload as soon as you pick a
+      // file, so cancelling the dialog afterwards strands them at the image
+      // host. That is the same failure this feature already chooses everywhere
+      // -- an invisible orphan rather than a row whose image 404s.
+      id: crypto.randomUUID(),
+      changeType: "", vendor: "", cost: "", note: "", maintenanceId: "", markPerformed: false, performedOn: localDateString(),
+    });
     setChangeModal({ mode: "add" });
   }
 
@@ -4565,6 +5016,9 @@ function AssetTracker() {
     const ch = (selectedAsset.changes || []).find(c => c && c.id === changeId);
     if (!ch) return;
     setChangeDraft({
+      // The entry's real id, so the photo gallery in this dialog addresses the
+      // same owner in edit mode as it does in add mode.
+      id: ch.id,
       changeType: ch.changeType || "",
       vendor: ch.vendor || "",
       cost: ch.cost || "",
@@ -4644,7 +5098,10 @@ function AssetTracker() {
     if (savingRef.current) return; // double-submit guard, see savingRef
     if (!changeDraft.changeType || !workTarget) return;
     const entry = {
-      id: crypto.randomUUID(),
+      // The id the dialog was OPENED with, so any photo attached while filling
+      // the form already names this entry. The fallback covers a draft seeded by
+      // some future call site that forgets to mint one.
+      id: changeDraft.id || crypto.randomUUID(),
       changeType: changeDraft.changeType,
       vendor: changeDraft.vendor.trim(),
       cost: changeDraft.cost.trim(),
@@ -4781,7 +5238,9 @@ function AssetTracker() {
   // gets the open asset; the site-wide tab passes the one just picked.
   function openMaintenanceAdd(assetId) {
     setWorkDialogAssetId(assetId === undefined ? null : assetId);
-    setMaintenanceDraft({ task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
+    // Minted on OPEN so a photo can name this schedule while the form is still
+    // being filled in -- the same rule openChangeAdd follows.
+    setMaintenanceDraft({ id: crypto.randomUUID(), task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
     setShowMaintenanceAdd(true);
   }
 
@@ -4790,6 +5249,10 @@ function AssetTracker() {
     if (!maintenanceDraft.task.trim() || !workTarget) return;
     const freq = MAINTENANCE_FREQUENCIES.find(f => f.label === maintenanceDraft.frequency) || MAINTENANCE_FREQUENCIES[1];
     const item = {
+      // Was absent entirely until 2026-09-11, which was a bug: rows key on
+      // item.id and every handler takes one, so an id-less row could not be
+      // addressed until a reload minted it. See BUGS.md.
+      id: maintenanceDraft.id || crypto.randomUUID(),
       task: maintenanceDraft.task.trim(),
       frequencyLabel: freq.label,
       frequencyDays: freq.days,
@@ -4800,7 +5263,7 @@ function AssetTracker() {
     };
     const next = assets.map(a => (a.id === workTargetId ? { ...a, maintenanceItems: [...(a.maintenanceItems || []), item] } : a));
     await persist(next, { columns });
-    setMaintenanceDraft({ task: "", frequency: freq.label, lastPerformed: "", owner: "" });
+    setMaintenanceDraft({ id: crypto.randomUUID(), task: "", frequency: freq.label, lastPerformed: "", owner: "" });
     setShowMaintenanceAdd(false);
   }
 
@@ -6943,6 +7406,26 @@ function AssetTracker() {
                 {changeDraft.markPerformed && !changeDraft.performedOn && (
                   <div style={{ fontSize: 12, color: C.danger, marginTop: 8 }}>Pick the date it was performed.</div>
                 )}
+                {/* Photos attach to the ENTRY, addressed by the id the dialog was
+                    opened with -- so a receipt or a before/after can be added at
+                    the moment the work is written up rather than in a second
+                    visit. Uploads land immediately; the entry itself still saves
+                    on Save like every other field here. */}
+                <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 8 }}>Photos</div>
+                  <PhotoGallery
+                    photos={photosForOwner("change", changeDraft.id)}
+                    canEdit={canEdit}
+                    busy={photoBusy}
+                    progress={photoProgress}
+                    error={photoError}
+                    onAdd={(files) => attachPhotos("change", changeDraft.id, files)}
+                    onDelete={deletePhoto}
+                    onToggleHidden={setPhotoHiddenFromPublic}
+                    onOpen={openPhotoViewer}
+                    emptyText="No photos on this entry."
+                  />
+                </div>
                 <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
                   <button onClick={() => setChangeModal(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                   <button
@@ -7009,6 +7492,21 @@ function AssetTracker() {
                     />
                   </label>
                 </div>
+                <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 8 }}>Photos</div>
+                  <PhotoGallery
+                    photos={photosForOwner("maintenance", maintenanceDraft.id)}
+                    canEdit={canEdit}
+                    busy={photoBusy}
+                    progress={photoProgress}
+                    error={photoError}
+                    onAdd={(files) => attachPhotos("maintenance", maintenanceDraft.id, files)}
+                    onDelete={deletePhoto}
+                    onToggleHidden={setPhotoHiddenFromPublic}
+                    onOpen={openPhotoViewer}
+                    emptyText="No photos on this task."
+                  />
+                </div>
                 <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
                   <button onClick={() => setShowMaintenanceAdd(false)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                   <button
@@ -7023,6 +7521,62 @@ function AssetTracker() {
             </div>
           )}
 
+          {/* Full-size viewer, rendered from renderWorkDialogs so BOTH views
+              reach it -- the same reason the work dialogs live here. It was
+              inside the detail view first, which was wrong the moment the Log
+              work dialog grew a gallery: opening a photo from the site-wide
+              Maintenance tab set the state and rendered nothing.
+
+              The grid deliberately loads only thumbnails, so this is the one
+              place a full image is fetched at all, which is what keeps a gallery
+              usable on the wifi this feature is most needed on. */}
+          {photoViewer && (
+            <div
+              onClick={() => setPhotoViewer(null)}
+              style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.86)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}
+            >
+              <img
+                src={photoViewer.url}
+                alt={photoViewer.caption || "Photo"}
+                onClick={(e) => e.stopPropagation()}
+                style={{ maxWidth: "100%", maxHeight: "70vh", objectFit: "contain", borderRadius: 10, background: C.surface }}
+              />
+              {/* The caption is edited HERE rather than on the tile, because this
+                  is the moment you are actually looking at the photo and can say
+                  what it is. On a work entry that is the difference between a row
+                  of unlabelled thumbnails and "receipt" / "before" / "after". */}
+              {canEdit ? (
+                <div onClick={(e) => e.stopPropagation()} style={{ marginTop: 14, display: "flex", gap: 8, width: "100%", maxWidth: 520 }}>
+                  <input
+                    value={photoCaptionDraft}
+                    onChange={(e) => setPhotoCaptionDraft(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") savePhotoCaption(); }}
+                    placeholder="Describe this photo — receipt, before, after…"
+                    style={{ flex: 1, padding: "8px 10px", border: "1px solid rgba(255,255,255,0.35)", background: "rgba(255,255,255,0.10)", color: "#fff", borderRadius: 10, fontSize: 13 }}
+                  />
+                  <button
+                    onClick={savePhotoCaption}
+                    disabled={isSaving || photoCaptionDraft === (photoViewer.caption || "")}
+                    style={{ padding: "8px 14px", background: (isSaving || photoCaptionDraft === (photoViewer.caption || "")) ? "rgba(255,255,255,0.14)" : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13, cursor: "pointer" }}
+                  >
+                    {isSaving ? "Saving…" : "Save"}
+                  </button>
+                </div>
+              ) : photoViewer.caption ? (
+                <div style={{ marginTop: 12, color: "#fff", fontSize: 13, fontWeight: 600, textAlign: "center", maxWidth: 620 }}>{photoViewer.caption}</div>
+              ) : null}
+              <div style={{ marginTop: 10, color: "#fff", opacity: 0.75, fontSize: 11, textAlign: "center" }}>
+                {photoViewer.by ? photoViewer.by + " \u00b7 " : ""}{formatWhen(photoViewer.at)}
+                {photoViewer.hiddenFromPublic ? " \u00b7 hidden from the public page" : ""}
+              </div>
+              <button
+                onClick={() => setPhotoViewer(null)}
+                style={{ marginTop: 14, padding: "8px 16px", background: "rgba(255,255,255,0.14)", color: "#fff", border: "1px solid rgba(255,255,255,0.35)", borderRadius: 10, fontWeight: 600, fontSize: 13, cursor: "pointer" }}
+              >
+                Close
+              </button>
+            </div>
+          )}
       </>
     );
   }
@@ -7030,6 +7584,10 @@ function AssetTracker() {
   if (view === "detail" && selectedAsset) {
     const Icon = iconFor(selectedAsset.type);
     const comments = [...(selectedAsset.comments || [])].reverse();
+    // This asset's own photos. Photos owned by its breakers and circuits are
+    // NOT here -- those render on the Layout tab beside what they are of, which
+    // is the only place they mean anything.
+    const assetPhotos = photosForOwner("asset", selectedAsset.id);
     const changeEntries = [...(selectedAsset.changes || [])].reverse();
     const totalLoggedCost = (selectedAsset.changes || []).reduce((sum, c) => sum + (parseFloat(c.cost) || 0), 0);
     // THIS asset's own history: entries stamped with it, plus every entry that
@@ -7154,6 +7712,7 @@ function AssetTracker() {
               details: { label: "Details" },
               contents: { label: "Contents", count: contentsCount },
               maintenance: { label: "Maintenance", count: maintenanceItems.length, urgent: overdueMaintenanceCount > 0 },
+              photos: { label: "Photos", count: assetPhotos.length },
               comments: { label: "Comments", count: comments.length },
               audit: { label: "Audit", count: assetAuditEntries.length },
             }[key] || { label: ASSET_MODULES[key].label, count: ASSET_MODULES[key].count(selectedAsset) };
@@ -7703,6 +8262,31 @@ function AssetTracker() {
                           Last performed: {item.lastPerformed ? formatDateOnly(item.lastPerformed) : "Never"}
                           {due && <> · Next due: <span style={{ color: statusMeta.color, fontWeight: 600 }}>{formatDateOnly(localDateString(due))}</span></>}
                         </div>
+                        {/* A FULL gallery here, not the read-only strip a work
+                            entry gets. A work entry is written once and its
+                            photos belong to that moment, so they live in its
+                            dialog. A schedule is long-lived and its reference
+                            photos -- where the access panel is, what the filter
+                            looks like when it needs doing -- get added later,
+                            when someone is finally standing in front of the
+                            thing. So the add control has to be where the
+                            schedule is READ, not behind an edit form. */}
+                        {(canEdit || photosForOwner("maintenance", item.id).length > 0) && (
+                          <div style={{ marginBottom: 8 }}>
+                            <PhotoGallery
+                              photos={photosForOwner("maintenance", item.id)}
+                              canEdit={canEdit}
+                              busy={photoBusy}
+                              progress={photoProgress}
+                              error={photoError}
+                              onAdd={(files) => attachPhotos("maintenance", item.id, files)}
+                              onDelete={deletePhoto}
+                              onToggleHidden={setPhotoHiddenFromPublic}
+                              onOpen={openPhotoViewer}
+                              emptyText=""
+                            />
+                          </div>
+                        )}
                         {(() => {
                           // The service history for THIS schedule, newest first.
                           // Read from the derived map -- the item holds no list
@@ -7833,6 +8417,29 @@ function AssetTracker() {
                           {[ch.vendor, ch.cost && `$${parseFloat(ch.cost).toFixed(2)}`].filter(Boolean).join(" · ") || "—"}
                         </div>
                         {ch.note && <div style={{ fontSize: 14, color: C.ink, whiteSpace: "pre-wrap", marginBottom: 6 }}>{ch.note}</div>}
+                        {(() => {
+                          const shots = photosForOwner("change", ch.id);
+                          if (!shots.length) return null;
+                          return (
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+                              {shots.map(ph => (
+                                <button
+                                  key={ph.id}
+                                  onClick={() => openPhotoViewer(ph)}
+                                  title={ph.caption || "Open photo"}
+                                  style={{ width: 54, height: 54, padding: 0, border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden", background: C.hover, cursor: "pointer" }}
+                                >
+                                  <img
+                                    src={photoThumbUrl(ph)}
+                                    alt={ph.caption || "Photo"}
+                                    loading="lazy"
+                                    style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                                  />
+                                </button>
+                              ))}
+                            </div>
+                          );
+                        })()}
                         <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.placeholder }}>
                           {formatDateOnly(changePerformedOn(ch))}{ch.by ? ` · ${ch.by}` : ""}
                           {/* Only when it was written up on a different day than it
@@ -7847,6 +8454,23 @@ function AssetTracker() {
                 </div>
               )}
             </>
+          )}
+
+          {detailTab === "photos" && (
+            <div style={{ padding: "16px 20px 28px" }}>
+              <PhotoGallery
+                photos={assetPhotos}
+                canEdit={canEdit}
+                busy={photoBusy}
+                progress={photoProgress}
+                error={photoError}
+                onAdd={(files) => attachPhotos("asset", selectedAsset.id, files)}
+                onDelete={deletePhoto}
+                onToggleHidden={setPhotoHiddenFromPublic}
+                onOpen={openPhotoViewer}
+                emptyText={canEdit ? "No photos yet. Add one to show what this actually looks like." : "No photos yet."}
+              />
+            </div>
           )}
 
           {detailTab === "comments" && (
@@ -12364,6 +12988,140 @@ function circuitSummary(circuit, assets) {
 // onAdd/onSave/onDelete. Actions that aren't a generic field edit (Swap
 // Breaker, Move Circuit) live outside this component via customRowActions,
 // which the caller uses to open its own dedicated modal.
+// A grid of photos for one owner, plus the control that adds one. Built as a
+// top-level component taking only the props it touches -- the same extraction
+// BreakersTabContent proved out -- so the same gallery serves an asset, a
+// breaker and a circuit without any of them knowing about the others.
+function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onDelete, onToggleHidden, onOpen, emptyText }) {
+  const [confirmDelete, setConfirmDelete] = React.useState(null);
+  const inputRef = React.useRef(null);
+
+  function pick(e) {
+    // The whole FileList, not just [0] -- a phone's picker and a desktop file
+    // dialog both hand back several when `multiple` is set, and photographing a
+    // repair usually produces more than one.
+    const files = e.target.files ? Array.from(e.target.files) : [];
+    // Cleared BEFORE the await so picking the same file twice in a row still
+    // fires a change event the second time.
+    e.target.value = "";
+    if (files.length) onAdd(files);
+  }
+
+  return (
+    <div>
+      {canEdit && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+          <input ref={inputRef} type="file" accept="image/*" multiple onChange={pick} style={{ display: "none" }} />
+          <button
+            onClick={() => inputRef.current && inputRef.current.click()}
+            disabled={busy}
+            style={{
+              display: "flex", alignItems: "center", gap: 6, padding: "8px 14px",
+              background: busy ? C.border : C.brand, color: busy ? C.muted : "#fff",
+              border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13,
+              cursor: busy ? "default" : "pointer",
+            }}
+          >
+            {busy ? <Loader2 size={14} className="spin" /> : <ImagePlus size={14} />}
+            {/* Counts through a batch rather than saying "Uploading..." for a
+                minute with nothing moving. Reads 1-based: the first file is
+                "1 of 5", not "0 of 5". */}
+            {busy
+              ? (progress && progress.total > 1
+                  ? "Uploading " + Math.min(progress.done + 1, progress.total) + " of " + progress.total + "…"
+                  : "Uploading…")
+              : "Add photos"}
+          </button>
+          <span style={{ fontSize: 11, color: C.muted }}>
+            Pick several at once. Resized and stripped of location data before they leave this device.
+          </span>
+        </div>
+      )}
+
+      {error && (
+        <div style={{ marginBottom: 12, padding: "8px 12px", background: "#FBEAE7", border: `1px solid ${C.danger}`, borderRadius: 8, color: C.danger, fontSize: 12 }}>
+          {error}
+        </div>
+      )}
+
+      {photos.length === 0 ? (
+        <div style={{ padding: "24px 0", color: C.empty, fontSize: 13 }}>{emptyText || "No photos yet."}</div>
+      ) : (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", gap: 10 }}>
+          {photos.map(ph => (
+            <div key={ph.id} style={{ position: "relative", borderRadius: 10, overflow: "hidden", border: `1px solid ${C.border}`, background: C.surface }}>
+              <button
+                onClick={() => onOpen(ph)}
+                title={ph.caption || "Open photo"}
+                style={{ display: "block", width: "100%", aspectRatio: "1 / 1", padding: 0, border: "none", background: C.hover, cursor: "pointer" }}
+              >
+                <img
+                  src={photoThumbUrl(ph)}
+                  alt={ph.caption || "Photo"}
+                  loading="lazy"
+                  style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                />
+              </button>
+              {ph.hiddenFromPublic && (
+                <div
+                  title="Hidden from the public QR page"
+                  style={{ position: "absolute", top: 6, left: 6, display: "flex", alignItems: "center", gap: 4, padding: "2px 6px", borderRadius: 6, background: "rgba(42,52,57,0.78)", color: "#fff", fontSize: 10, fontWeight: 600 }}
+                >
+                  <EyeOff size={11} /> Hidden
+                </div>
+              )}
+              {canEdit && (
+                <div style={{ position: "absolute", top: 6, right: 6, display: "flex", gap: 4 }}>
+                  <button
+                    onClick={() => onToggleHidden(ph.id, !ph.hiddenFromPublic)}
+                    aria-label={ph.hiddenFromPublic ? "Show on the public page" : "Hide from the public page"}
+                    title={ph.hiddenFromPublic ? "Show on the public QR page" : "Hide from the public QR page"}
+                    style={{ display: "flex", padding: 5, borderRadius: 6, border: "none", background: "rgba(42,52,57,0.78)", color: "#fff", cursor: "pointer" }}
+                  >
+                    {ph.hiddenFromPublic ? <EyeOff size={12} /> : <Eye size={12} />}
+                  </button>
+                  <button
+                    onClick={() => setConfirmDelete(ph.id)}
+                    aria-label="Delete photo"
+                    style={{ display: "flex", padding: 5, borderRadius: 6, border: "none", background: "rgba(42,52,57,0.78)", color: "#fff", cursor: "pointer" }}
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              )}
+              {ph.caption && (
+                <div style={{ padding: "6px 8px", fontSize: 11, color: C.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {ph.caption}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {confirmDelete && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20 }}>
+          <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 340 }}>
+            <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Delete this photo?</div>
+            <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>
+              The record is removed from the sheet. The image itself stays at the image host.
+            </div>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button onClick={() => setConfirmDelete(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+              <button
+                onClick={() => { const id = confirmDelete; setConfirmDelete(null); onDelete(id); }}
+                style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ChildEntityTable({
   items, fields, onAdd, onSave, onDelete, initialDraft,
   renderCustomFields, renderSummary, renderExpanded, customRowActions,

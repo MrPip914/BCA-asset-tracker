@@ -264,6 +264,62 @@ user is least sure whether their click worked.
 
 ## Fixed
 
+### A newly added maintenance schedule had no `id` until the next load — fixed 2026-09-11
+**Found:** 2026-09-11, while wiring photos onto maintenance items — the photo needed an
+owner id and there wasn't one.
+**Needed a deploy:** no — `index.html` only.
+**Confirmed:** by reading `addMaintenanceItem`, which built the item with `task`,
+`frequencyLabel`, `frequencyDays`, `lastPerformed`, `owner`, `at`, `by` — and no `id`.
+
+v34 gave maintenance items a real `id` and moved every handler onto it
+(`startEditMaintenance`, `saveMaintenanceEdit`, `openMaintenanceComplete`,
+`deleteMaintenanceItem`), with the row's React key on it too. What it did not do was mint
+one at the point a schedule is CREATED. `adoptLegacyMaintenanceIds` filled the blank on
+the next load, which made it invisible in every normal test — add a task, reload, and it
+has an id like everything else.
+
+**The window is one session, and inside it the failure is silent and wrong-targeted.**
+`startEditMaintenance(undefined)` matches on `m.id === itemId`, so it finds the FIRST item
+with no id. With one freshly added schedule that is coincidentally the right one, which is
+why nobody hit it. Add TWO without reloading and editing, deleting or completing the second
+acts on the first. React also keys those rows on `undefined`.
+
+**Fixed as a by-product rather than deliberately**, which is worth noting: the id is now
+minted when the Add task dialog OPENS — needed so a photo can name the schedule while the
+form is still being filled in — and `addMaintenanceItem` uses it. Had photos not needed an
+owner id, this would still be sitting there.
+
+**The lesson generalises past this bug.** An adoption that fills a blank at LOAD makes the
+create path look correct, because the only cheap way to check is to reload. v34's work
+entries got this right (`addChange` minted its own); the schedule path did not, and the two
+were written in the same change. When a load-time adoption exists, check the create path
+separately — it is the one place the adoption cannot cover.
+
+### `/deploy` printed the pre-2026-09-10 deploy instructions — fixed 2026-09-10
+**Found:** 2026-09-10, right after the block it produced was pasted in the wrong shape.
+**Needed a deploy:** no — `.claude/commands/deploy.md` only.
+**Fixed by** `b29cdf5` ("Give the deploy procedure one home, and a test that keeps it
+there"), on `main`, in a separate session — not by the session that logged it.
+
+`CLAUDE.md` advertised `/deploy` as the safe alternative to retyping the deploy block from
+memory, while `8cc1603` had rewritten the instructions in `CLAUDE.md` and
+`cloudshell-deploy.md` without touching the command file. So the escape hatch someone
+reaches for *because* they do not trust their memory would have handed back the superseded
+procedure — missing the ask-which-branch/send-one-block rule that the rewrite existed to
+add. Both copies still said roughly the right thing, which is what made the drift invisible:
+the same shape as the v18 `SCRIPT_VERSION` drift, where two copies of one string differed by
+one word.
+
+**The fix went further than the entry asked for, and the extra part is the durable bit.**
+The entry proposed either quoting `CLAUDE.md` or deleting the command. The actual fix did
+the first — `/deploy` now carries no deploy text of its own and quotes the three sources
+that own it — and then added `test-deploy-docs.js`, which fails if a fifth copy of the
+procedure appears, if a doc names a tenant `clients.js` does not have, if a doc tells you
+to watch for a success line `deploy.mjs` never prints, or if a live-version claim
+reappears in prose. **A convention nothing checks is a convention that drifts**, which is
+the whole lesson: the earlier rewrite was correct and still could not stop the next copy
+going stale.
+
 ### `test-backend-maintenance-link.js` never ran on an LF checkout — fixed 2026-09-10
 **Found:** 2026-09-10 while auditing the deploy docs; the whole file exited non-zero on
 `Error: end marker not found` before a single assertion ran.
