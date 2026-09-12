@@ -56,7 +56,7 @@ import {
   Monitor, Phone, Tv, Camera, HardDrive, HelpCircle, Columns3, Lock, Filter, Check, DoorOpen, Download,
   Wrench, UserCircle, Settings, History, Archive, ArchiveRestore, Building2, Package, Copy, Zap, Repeat, ArrowLeftRight, Menu,
   FlaskConical, RotateCcw, AlertTriangle, Loader2, Printer, MapPin, QrCode, Info, LogOut, Users,
-  ImagePlus, Eye, EyeOff, Home,
+  ImagePlus, Eye, EyeOff, Home, ArrowUpDown,
 } from "lucide-react";
 
 // Starter managed peripherals/users/bulk-item-type lists — empty until the school
@@ -197,8 +197,18 @@ const TYPE_REGISTRY = {
   // Locked because personIds now reference it structurally.
   User: {
     locked: true, icon: UserCircle, categoryIds: ["People"], parentTypes: [],
+    // A PERSON TYPE is named by its own key rather than by a type-name test at
+    // the render sites that care, exactly as `locked` and `modules` are. What it
+    // buys: nameOf() composes this type's name from its parts, adoptLegacyNames
+    // leaves it alone, and the Name column offers a first/last sort. A second
+    // person-shaped type (a Student, say) gets all of that by declaring one key.
+    personType: true,
+    // The two halves of a person's name are the SOURCE OF TRUTH for what this
+    // type is called; `name` is composed from them at render and is excluded
+    // here so no form offers a third, competing field. See composePersonName.
+    onlyFields: ["firstName", "lastName"],
     excludedFields: [
-      "tag",
+      "tag", "name",
       "brand", "model", "serial", "peripherals", "hostname", "screenSize",
       "purchaseDate", "warrantyUntil", "person", "subType", "totalQuantity",
     ],
@@ -380,7 +390,7 @@ function adoptLegacyTypesList(list) {
 let TYPE_SETTINGS = {};
 // The two app-wide sets derived from every entry at once. Recomputed when the
 // settings change rather than on every call, since fieldAppliesTo runs per cell.
-let DERIVED_TYPE_SETS = { restrictedFields: new Set(), placeTypes: new Set() };
+let DERIVED_TYPE_SETS = { restrictedFields: new Set(), placeTypes: new Set(), personTypes: new Set() };
 // The column list, mirrored here for the same reason TYPE_SETTINGS is: a custom
 // column created AS a per-type field carries `restricted: true`, and
 // fieldAppliesTo has to know that without being handed the columns at every one
@@ -390,17 +400,19 @@ function recomputeDerivedTypeSets() {
   const ids = new Set([...Object.keys(TYPE_REGISTRY), ...Object.keys(TYPE_SETTINGS)]);
   const restricted = new Set();
   const places = new Set();
+  const people = new Set();
   ids.forEach(id => {
     const entry = typeEntryFor(id) || {};
     (entry.onlyFields || []).forEach(k => restricted.add(k));
     (entry.parentTypes || []).forEach(t => places.add(t));
+    if (entry.personType) people.add(id);
   });
   // A per-type field is restricted by a flag on the COLUMN, not by whoever
   // currently claims it in onlyFields. Otherwise unticking it from its last
   // owner would make it an ordinary common field and it would appear on every
   // type at once — the opposite of what "field for this type" means.
   TYPE_FIELD_COLUMNS.forEach(c => { if (c && c.restricted && c.key) restricted.add(c.key); });
-  DERIVED_TYPE_SETS = { restrictedFields: restricted, placeTypes: places };
+  DERIVED_TYPE_SETS = { restrictedFields: restricted, placeTypes: places, personTypes: people };
 }
 function applyTypeSettings(next, columns) {
   TYPE_SETTINGS = next && typeof next === "object" ? next : {};
@@ -507,6 +519,14 @@ function canBeParentOf(parentType, childType) {
 // type able to hold something turns that something into a place immediately.
 function isPlaceType(type) {
   return DERIVED_TYPE_SETS.placeTypes.has(type);
+}
+
+// Whether this type's name is a PERSON's name — two parts, composed for display
+// rather than typed as one string. Declared by `personType` in the registry and
+// derived here for the same reason isPlaceType is: every render site asks the
+// registry, never `type === "User"`.
+function isPersonType(type) {
+  return DERIVED_TYPE_SETS.personTypes.has(type);
 }
 
 // What each sub-item module IS — its tab label and how to count what's in it.
@@ -628,7 +648,140 @@ function personTextOf(asset, assets) {
   return personNamesOf(asset, assets).join(", ");
 }
 
+// ---------- A PERSON'S NAME ----------
+// A person type stores `firstName` and `lastName` and has no `name` of its own
+// (it is in User's excludedFields). The one string everything displays is
+// COMPOSED here, which is what lets the same record read "John Smith" or
+// "Smith, John" without anything being rewritten.
+//
+// WHY THE ORDER IS A MODULE-LEVEL VARIABLE. nameOf() is called from something
+// like a hundred sites — the list, every picker, the detail header, every audit
+// sentence, personNamesOf, the export — and most are plain functions with no
+// access to React state. Threading a format argument through all of them is the
+// same enormous, behaviour-free diff that TYPE_SETTINGS exists to avoid.
+//
+// The hazard TYPE_SETTINGS carries does NOT apply here, and the difference is
+// worth stating because the two look alike. TYPE_SETTINGS is safe only because
+// every write happens to be followed by a setState; this is derived directly
+// FROM state that already re-renders the app — the assets list's own sortConfig
+// — and applyPersonNameOrder() is called at the top of AssetTracker's render
+// body, before any child of it renders. So a rendered frame can never read a
+// stale order. Anything that sets this from outside that render would break
+// that guarantee; don't add one.
+const PERSON_NAME_ORDERS = { firstLast: "firstLast", lastFirst: "lastFirst" };
+let PERSON_NAME_ORDER = PERSON_NAME_ORDERS.firstLast;
+function applyPersonNameOrder(order) {
+  PERSON_NAME_ORDER = order === PERSON_NAME_ORDERS.lastFirst
+    ? PERSON_NAME_ORDERS.lastFirst
+    : PERSON_NAME_ORDERS.firstLast;
+}
+
+// Split a single written name into parts, for a record authored before this
+// existed. The LAST whitespace-separated token is the surname and everything
+// before it is the first name, so "Mary Jo Vasquez" keeps "Mary Jo" together.
+//
+// It is a guess and it will be wrong for a two-word surname ("Van Der Berg"),
+// for a suffix ("John Smith Jr"), and for a name written surname-first. That is
+// accepted rather than solved: the split runs only where BOTH parts are empty,
+// it never touches the stored `name` it read, and the parts are editable on the
+// record — so a wrong guess costs a retype and destroys nothing. Deterministic,
+// which is what makes it safe as a load-time adoption (see adoptPersonNames).
+function splitPersonName(full) {
+  const raw = String(full || "").trim();
+  // "Smith, John" first, because this app now WRITES that spelling: a name
+  // captured while the list was sorted by surname -- a filter value, a picker
+  // choice, an audit row -- comes back through here, and splitting it on the
+  // last space would make the surname "Smith," and never match the person it
+  // names. It is also how someone would type a name into a legacy free-text
+  // field, so reading it costs nothing and is right more often than not.
+  // The FIRST comma splits: anything after it (a suffix, a middle name) belongs
+  // with the given name, which is the same choice the space form makes.
+  const comma = raw.indexOf(",");
+  if (comma !== -1) {
+    const last = raw.slice(0, comma).trim();
+    const first = raw.slice(comma + 1).trim().replace(/\s+/g, " ");
+    if (last && first) return { firstName: first, lastName: last };
+  }
+  const parts = raw.split(/\s+/).filter(Boolean);
+  if (!parts.length) return { firstName: "", lastName: "" };
+  if (parts.length === 1) return { firstName: parts[0], lastName: "" };
+  return { firstName: parts.slice(0, -1).join(" "), lastName: parts[parts.length - 1] };
+}
+
+// The stored parts, falling back to a split of the ride-along `name` for a row
+// that has not been through adoptPersonNames yet (an in-session draft, or a
+// fixture written by hand). Never invents a part that is not derivable.
+function personNamePartsOf(asset) {
+  const first = String(asset?.firstName || "").trim();
+  const last = String(asset?.lastName || "").trim();
+  if (first || last) return { firstName: first, lastName: last };
+  return splitPersonName(asset?.name);
+}
+
+// "John Smith" or "Smith, John". One part alone renders as itself in either
+// order — a comma before nothing, or after nothing, reads as a mistake.
+function composePersonName(firstName, lastName, order) {
+  const first = String(firstName || "").trim();
+  const last = String(lastName || "").trim();
+  if (!first) return last;
+  if (!last) return first;
+  return (order || PERSON_NAME_ORDER) === PERSON_NAME_ORDERS.lastFirst
+    ? `${last}, ${first}`
+    : `${first} ${last}`;
+}
+
+// Both spellings of one person's name. Needed wherever stored TEXT has to be
+// matched back to a person: an audit row holds whatever nameOf produced at the
+// moment it was written, so a row written in one order must still resolve when
+// the app is being read in the other.
+function personNameVariants(asset) {
+  const { firstName, lastName } = personNamePartsOf(asset);
+  return [...new Set([
+    composePersonName(firstName, lastName, PERSON_NAME_ORDERS.firstLast),
+    composePersonName(firstName, lastName, PERSON_NAME_ORDERS.lastFirst),
+  ].filter(Boolean))];
+}
+
+// An ORDER-INDEPENDENT key for "is this the same person". Anything comparing a
+// person to a name must go through this rather than through nameOf, or it
+// silently starts failing the moment someone sorts by last name — which is
+// exactly how convertUsersToAssets would have created a second copy of everyone.
+function personMatchKey(nameOrParts) {
+  const { firstName, lastName } = typeof nameOrParts === "string"
+    ? splitPersonName(nameOrParts)
+    : personNamePartsOf(nameOrParts);
+  return `${firstName} ${lastName}`.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+// The Name column sorts two ways, and picking one is how the display order gets
+// chosen — there is no separate format control, because two controls that can
+// disagree would let the list be sorted by surname while reading "John Smith".
+// The KEY doubles as the Last Name column's own key on purpose: sorting that
+// column means the same thing, so the two controls cannot contradict each other.
+const NAME_SORT_KEYS = [
+  { key: "name", label: "First name" },
+  { key: "lastName", label: "Last name" },
+];
+// Keyed by column, carrying the column's own label so the modal can title
+// itself without being handed the column list as well.
+const COLUMN_SORT_KEYS = { name: { label: "Name", keys: NAME_SORT_KEYS } };
+function personNameOrderForSort(sortConfig) {
+  return sortConfig && sortConfig.key === "lastName"
+    ? PERSON_NAME_ORDERS.lastFirst
+    : PERSON_NAME_ORDERS.firstLast;
+}
+
 function nameOf(asset, typesList) {
+  // A person is called by their parts, composed in whichever order the app is
+  // currently reading in. Checked FIRST and never falling back to a stored
+  // `name` while a part exists: a User's `name` cell still holds the pre-split
+  // string and rides along untouched (the same way `label` rides under `tag`),
+  // so preferring it would show the old spelling forever.
+  if (isPersonType(asset?.type)) {
+    const { firstName, lastName } = personNamePartsOf(asset);
+    const composed = composePersonName(firstName, lastName);
+    if (composed) return composed;
+  }
   const name = (asset?.name || "").trim();
   if (name) return name;
   // The tag second, which is what `label` used to serve as here.
@@ -797,8 +950,36 @@ function nameFromFieldOf(a) {
 // cannot be reconstructed, and any name still wrong is now just a name someone
 // has to retype. That is why the removal waited until a save had written every
 // repaired name into the sheet.
+// Gives every person saved before firstName/lastName existed the two parts,
+// split from the single `name` they were written with. A load-time READ that
+// fills a blank -- never a rewrite: `name` is left exactly as it was, so this
+// is reversible and a bad split costs a retype (see splitPersonName).
+//
+// Safe as an adoption because the split is DETERMINISTIC: two browsers loading
+// the same row compute the same parts, so the copy that saves second writes
+// what the first already wrote. That is the line between this and the randomly
+// minted ids that stranded photos -- `a.id || a.label` is fine here for the same
+// reason, `c.id || crypto.randomUUID()` is not.
+//
+// Only when BOTH parts are empty, so a deliberate one-part name ("Cher", or a
+// surname nobody has a first name for) is never overwritten by a re-split of the
+// stale string beside it.
+function adoptPersonNames(list) {
+  return list.map(a => {
+    if (!isPersonType(a.type)) return a;
+    if (String(a.firstName || "").trim() || String(a.lastName || "").trim()) return a;
+    const { firstName, lastName } = splitPersonName(a.name);
+    if (!firstName && !lastName) return a;
+    return { ...a, firstName, lastName };
+  });
+}
+
 function adoptLegacyNames(list, typesList) {
-  const stillBlank = a => !(a.name || "").trim();
+  // A person type is skipped outright: its name is composed from its parts, and
+  // giving it a stored `name` here would write "User BCA0090" into the sheet for
+  // every person -- invisible while nameOf prefers the parts, and waiting to
+  // surface the day anything reads the column directly.
+  const stillBlank = a => !isPersonType(a.type) && !(a.name || "").trim();
   // 1. A Bulk Item with no name of its own takes a copy of its sub-type
   //    ("Chairs"), which is what it was called before Sub-Type went back to
   //    being purely a category.
@@ -819,6 +1000,16 @@ const DEFAULT_COLUMNS = [
   // it's what you scan for; Type answers "what kind of thing is this", which is
   // a narrower question and no longer doubles as the name (see nameOf).
   { key: "name", label: "Name", width: 200 },
+  // The two halves of a person's name, restricted to person types by User's
+  // `onlyFields` — so they are the Name field's replacement on that form and
+  // appear nowhere else. HIDDEN by default in the list: Name already shows them
+  // composed, and a column that is empty on every device, room and building
+  // would be two mostly-blank columns bought for nothing. Sorting by surname
+  // does NOT need them shown — that is the Name column's own sort (see
+  // NAME_SORT_KEYS) — so switching them on is for reading or exporting the raw
+  // parts, not for ordering the list.
+  { key: "firstName", label: "First Name", width: 140 },
+  { key: "lastName", label: "Last Name", width: 140 },
   { key: "type", label: "Type", width: 140 },
   { key: "subType", label: "Sub-Type", width: 150 },
   { key: "screenSize", label: "Screen Size", width: 110 },
@@ -1437,7 +1628,10 @@ function auditSegments(entry, viewerLabel, assets, typesList) {
     [entry.from, entry.to].forEach(side => {
       String(side || "").split(",").map(n => n.trim()).filter(Boolean).forEach(n => {
         if (links.some(l => l.text === n)) return;
-        const hits = people.filter(u => nameOf(u) === n);
+        // Either spelling: an audit row holds whatever nameOf produced when it
+        // was WRITTEN, so a row written as "Jen Kramer" must still resolve while
+        // the app is being read as "Kramer, Jen". Ambiguity is still left plain.
+        const hits = people.filter(u => personNameVariants(u).includes(n));
         if (hits.length === 1) add(n, hits[0].id);
       });
     });
@@ -1730,7 +1924,7 @@ function validateParentChoice(childId, childType, parentId, assets, typesList) {
 // one flat list. Any column not named here (custom user-added columns) falls
 // into a trailing "Custom Fields" group rather than being dropped.
 const DETAIL_FIELD_GROUPS = [
-  { title: "Overview", keys: ["name", "type", "subType", "screenSize", "totalQuantity", "tag", "status"] },
+  { title: "Overview", keys: ["name", "firstName", "lastName", "type", "subType", "screenSize", "totalQuantity", "tag", "status"] },
   // Path is the whole of "where is it" now — the Campus/Building/Room columns
   // that used to sit beside it here are gone, along with the filter that kept
   // them out of the editable form. A key naming a column that no longer exists
@@ -1905,7 +2099,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v35";
+const FRONTEND_SCRIPT_VERSION = "v36";
 // The version of THIS file — shown in About (the account menu), so "is my browser
 // actually running the build I just deployed, or a cached one?" is answerable in
 // two clicks instead of by reading view-source.
@@ -1923,7 +2117,7 @@ const FRONTEND_SCRIPT_VERSION = "v35";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-11.7";
+const APP_VERSION = "2026-09-12.1";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -2419,25 +2613,47 @@ const MOCK_SNAPSHOT = {
     { label: "BCB0002", type: "Building", name: "Building 200", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
     { label: "BCB0003", type: "Building", name: "Building 300", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
     { label: "BCB0004", type: "Building", name: "Building 400", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
-    { id: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", label: "BCR0006", type: "Room", name: "Room 102", parentId: "BCB0001", person: "Jen Kramer", notes: "", status: "Active" },
-    { label: "BCR0008", type: "Room", name: "Room 200", parentId: "BCB0002", person: "Aaron Cantrell", notes: "", status: "Active" },
-    { label: "BCR0011", type: "Room", name: "Room 300", parentId: "BCB0003", person: "Denise Sloan", notes: "", status: "Active" },
-    { label: "BCR0014", type: "Room", name: "Room 400", parentId: "BCB0004", person: "Kelly Mackinga", notes: "", status: "Active" },
-    { label: "BCR0002", type: "Room", name: "Kitchen", parentId: "BCB0001", person: "Multiple teachers", notes: "", status: "Active" },
+    // ---- People. A User is an asset (v28) and its name is TWO FIELDS (v36):
+    // firstName/lastName are the source of truth, `name` is composed at render.
+    //
+    // Deliberately MIXED across all four shapes, because a fixture that is all
+    // one shape exercises one read path and hides the rest -- the personIds
+    // lesson, applied on purpose:
+    //   * parts only, never written any other way (Aaron, Kelly).
+    //   * `name` only, written before v36 and split by adoptPersonNames on load
+    //     (Jen, Denise, and James -- the one-token case, who has no surname and
+    //     must therefore read as "James" in BOTH orders, with no stray comma).
+    //   * both, an adopted row that has since been saved back (Dillon).
+    //   * both, where the parts DISAGREE with a naive split: Ana's surname is
+    //     two words, so the stored parts have to win or she reads as
+    //     "Ruiz, Ana Vega". That is the whole reason a part can be overridden.
+    // Ana is also the one person nothing is assigned to, which is ordinary.
+    { label: "BCA0110", type: "User", firstName: "Aaron", lastName: "Cantrell", status: "Active" },
+    { label: "BCA0111", type: "User", firstName: "Kelly", lastName: "Mackinga", status: "Active" },
+    { id: "9c1d7e42-5b83-4a06-8f21-3ad60be9c714", label: "BCA0112", type: "User", name: "Jen Kramer", status: "Active" },
+    { label: "BCA0113", type: "User", name: "Denise Sloan", status: "Active" },
+    { id: "27b4f0a9-6c31-4d8e-95af-1e7208cb3d56", label: "BCA0114", type: "User", name: "Dillon Jacobsma", firstName: "Dillon", lastName: "Jacobsma", status: "Active" },
+    { label: "BCA0115", type: "User", name: "James", status: "Active" },
+    { label: "BCA0116", type: "User", name: "Ana Vega Ruiz", firstName: "Ana", lastName: "Vega Ruiz", status: "Active" },
+    { id: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", label: "BCR0006", type: "Room", name: "Room 102", parentId: "BCB0001", person: "Jen Kramer", personIds: ["9c1d7e42-5b83-4a06-8f21-3ad60be9c714"], notes: "", status: "Active" },
+    { label: "BCR0008", type: "Room", name: "Room 200", parentId: "BCB0002", person: "Aaron Cantrell", personIds: ["BCA0110"], notes: "", status: "Active" },
+    { label: "BCR0011", type: "Room", name: "Room 300", parentId: "BCB0003", person: "Denise Sloan", personIds: ["BCA0113"], notes: "", status: "Active" },
+    { label: "BCR0014", type: "Room", name: "Room 400", parentId: "BCB0004", person: "Kelly Mackinga", personIds: ["BCA0111"], notes: "", status: "Active" },
+    { label: "BCR0002", type: "Room", name: "Kitchen", parentId: "BCB0001", person: "", notes: "A shared room -- deliberately assigned to nobody. It read \"Multiple teachers\" while the User field was a free string; there is no such person, and one legacy name with no User record behind it holds the WHOLE fixture in pre-v28 name mode.", status: "Active" },
     { label: "BCR0018", type: "Room", name: "Storage Room", parentId: "BCB0001", person: "", notes: "", status: "Active" },
-    { label: "BCR0020", type: "Room", name: "Room 101", parentId: "BCB0001", person: "Dillon Jacobsma", notes: "", status: "Active" },
+    { label: "BCR0020", type: "Room", name: "Room 101", parentId: "BCB0001", person: "Dillon Jacobsma", personIds: ["27b4f0a9-6c31-4d8e-95af-1e7208cb3d56"], notes: "", status: "Active" },
     // Deliberately PRE-conversion: every assignment is still a legacy `person`
     // name and there are no User records. That is the state a real sheet is in
     // the moment v28 ships, so the sandbox exercises the conversion button
     // rather than starting past it -- the same reasoning as the stored column
     // config carrying retired keys.
-    { id: "b81c60de-2f47-4a93-8e15-0d7c39ab6215", label: "BCA0001", type: "Computer", parentId: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", brand: "Dell", model: "OptiPlex 7010", serial: "MOCK-CMP-001", person: "Jen Kramer", peripherals: "Keyboard, Mouse", notes: "", status: "Active" },
-    { label: "BCA0002", type: "Monitor", parentId: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", brand: "Dell", model: "P2419H", serial: "MOCK-MON-001", person: "Jen Kramer", notes: "", status: "Active" },
-    { label: "BCA0003", type: "Phone", parentId: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", brand: "Cisco", model: "8841", serial: "MOCK-PHN-001", person: "Jen Kramer", notes: "", status: "Active" },
-    { label: "BCA0011", type: "Phone", parentId: "BCR0008", brand: "Cisco", model: "8841", serial: "MOCK-PHN-002", person: "Aaron Cantrell", notes: "", status: "Active" },
-    { label: "BCA0015", type: "Stream Deck", parentId: "BCR0008", brand: "Elgato", model: "Stream Deck MK.2", serial: "MOCK-SD-001", person: "Aaron Cantrell", notes: "", status: "Active" },
-    { label: "BCA0024", type: "TV", parentId: "BCR0011", brand: "Samsung", model: "55\" QLED", serial: "MOCK-TV-001", person: "Denise Sloan", notes: "", status: "Active" },
-    { label: "BCA0054", type: "DocuCam", parentId: "BCR0020", brand: "IPEVO", model: "V4K", serial: "MOCK-DC-001", person: "Dillon Jacobsma", notes: "", status: "Active" },
+    { id: "b81c60de-2f47-4a93-8e15-0d7c39ab6215", label: "BCA0001", type: "Computer", parentId: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", brand: "Dell", model: "OptiPlex 7010", serial: "MOCK-CMP-001", person: "Jen Kramer", personIds: ["9c1d7e42-5b83-4a06-8f21-3ad60be9c714"], peripherals: "Keyboard, Mouse", notes: "", status: "Active" },
+    { label: "BCA0002", type: "Monitor", parentId: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", brand: "Dell", model: "P2419H", serial: "MOCK-MON-001", person: "Jen Kramer", personIds: ["9c1d7e42-5b83-4a06-8f21-3ad60be9c714"], notes: "", status: "Active" },
+    { label: "BCA0003", type: "Phone", parentId: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", brand: "Cisco", model: "8841", serial: "MOCK-PHN-001", person: "Jen Kramer", personIds: ["9c1d7e42-5b83-4a06-8f21-3ad60be9c714"], notes: "", status: "Active" },
+    { label: "BCA0011", type: "Phone", parentId: "BCR0008", brand: "Cisco", model: "8841", serial: "MOCK-PHN-002", person: "Aaron Cantrell", personIds: ["BCA0110"], notes: "", status: "Active" },
+    { label: "BCA0015", type: "Stream Deck", parentId: "BCR0008", brand: "Elgato", model: "Stream Deck MK.2", serial: "MOCK-SD-001", person: "Aaron Cantrell", personIds: ["BCA0110"], notes: "", status: "Active" },
+    { label: "BCA0024", type: "TV", parentId: "BCR0011", brand: "Samsung", model: "55\" QLED", serial: "MOCK-TV-001", person: "Denise Sloan", personIds: ["BCA0113"], notes: "", status: "Active" },
+    { label: "BCA0054", type: "DocuCam", parentId: "BCR0020", brand: "IPEVO", model: "V4K", serial: "MOCK-DC-001", person: "Dillon Jacobsma", personIds: ["27b4f0a9-6c31-4d8e-95af-1e7208cb3d56"], notes: "", status: "Active" },
     // No `name` of its own, so it exercises the one naming rule left: a Bulk Item
     // is called by its sub-type. The stale room/roomId/itemName this used to carry
     // went with the columns themselves in v25 — there is no legacy shape left for
@@ -2839,7 +3055,7 @@ const MOCK_SNAPSHOT = {
     { label: "BCR0022", type: "Room", name: "Dining Room (Upstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
     { label: "BCR0023", type: "Room", name: "Living Room (Upstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
     { label: "BCR0024", type: "Room", name: "Bathroom (Upstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
-    { label: "BCR0025", type: "Room", name: "James's Room (Downstairs)", parentId: "BCB0005", person: "James", notes: "", status: "Active" },
+    { label: "BCR0025", type: "Room", name: "James's Room (Downstairs)", parentId: "BCB0005", person: "James", personIds: ["BCA0115"], notes: "", status: "Active" },
     { label: "BCR0026", type: "Room", name: "Living Room (Downstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
     { label: "BCR0027", type: "Room", name: "Office (Downstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
     { label: "BCR0028", type: "Room", name: "Utility Room (Downstairs)", parentId: "BCB0005", person: "", notes: "", status: "Active" },
@@ -3192,6 +3408,19 @@ function AssetTracker() {
   const [userFilter, setUserFilter] = useState("All users");
   const [statusFilter, setStatusFilter] = useState("Active");
   const [sortConfig, setSortConfig] = useState(null); // { key, dir: "asc" | "desc" }
+  // Sorting the list by last name is ALSO what flips every person's name to
+  // "Smith, John", app-wide and at once — the list, the pickers, the assignment
+  // chips, the detail header, the audit sentences. One choice rather than two,
+  // because a sort order and a name order that can disagree means reading a
+  // column that is not sorted the way it is written.
+  //
+  // Applied HERE, at the top of the render body, so it lands before this
+  // component's own memos and before any child renders. Everything downstream
+  // reads it through nameOf(); the memos that COMPOSE a name take it as a
+  // dependency, since they would otherwise hand back the previous order's
+  // strings until their real inputs changed.
+  const personNameOrder = personNameOrderForSort(sortConfig);
+  applyPersonNameOrder(personNameOrder);
   const [maintenanceQuery, setMaintenanceQuery] = useState("");
   const [maintenanceStatusFilter, setMaintenanceStatusFilter] = useState("All statuses");
   const [maintenanceFrequencyFilter, setMaintenanceFrequencyFilter] = useState("All frequencies");
@@ -3594,7 +3823,11 @@ function AssetTracker() {
       // suggestion for fixed equipment reads the chain above the asset ("Room 102
       // Mini Split") — running it inside the first map would walk a list whose
       // parentIds were still half-adopted.
-      const loadedAssets = adoptLegacyNames(parented, loadedTypes);
+      // People are split into parts BEFORE adoptLegacyNames, which skips them —
+      // so a person whose parts are adopted here is already excluded from the
+      // "fill in a blank name" pass, and there is no window in which a person
+      // could pick up a generated "User BCA0090".
+      const loadedAssets = adoptLegacyNames(adoptPersonNames(parented), loadedTypes);
       setAssets(loadedAssets);
       // No scriptVersion at all means an old backend that predates this check entirely —
       // still a real mismatch, not a "nothing to compare" case. In sandbox mode the
@@ -4065,11 +4298,18 @@ function AssetTracker() {
   // Every name the app knows that has no User record yet -- what the conversion
   // would create, and zero once it has finished.
   const unconvertedUserNames = useMemo(() => {
-    const known = new Set((assets || []).filter(a => a.type === "User").map(nameOf));
+    // Matched on personMatchKey, NOT on nameOf. nameOf composes in whatever order
+    // the app is currently reading in, so comparing a legacy "Jen Kramer" against
+    // it would find nothing the moment someone sorted by last name -- every
+    // already-converted person would read as unconverted, usersAreAssets would
+    // flip false, and the app would drop to legacy name mode with assignments
+    // stored as ids. The next save then writes those away. An order-independent
+    // key is the whole defence, and it is why one exists.
+    const known = new Set((assets || []).filter(a => a.type === "User").map(personMatchKey));
     return [...new Set([
       ...usersList,
       ...(assets || []).flatMap(a => String(a.person || "").split("/").map(x => x.trim())),
-    ].filter(Boolean))].filter(n => !known.has(n));
+    ].filter(Boolean))].filter(n => !known.has(personMatchKey(n)));
   }, [assets, usersList]);
 
   // "Users are records" means the conversion is COMPLETE, not that some User
@@ -4084,9 +4324,12 @@ function AssetTracker() {
   );
 
   // Names for the pick lists and the User filter, from whichever shape is live.
+  // Sorted on the COMPOSED string, so the pick lists reorder themselves by
+  // surname the moment the list is sorted that way -- "Smith, John" sorts under
+  // S without a second sort key to keep in step with the first.
   const userNames = useMemo(() => (
-    usersAreAssets ? userAssets.map(nameOf).sort((a, b) => a.localeCompare(b)) : usersList
-  ), [usersAreAssets, userAssets, usersList]);
+    usersAreAssets ? userAssets.map(a => nameOf(a)).sort((a, b) => a.localeCompare(b)) : usersList
+  ), [usersAreAssets, userAssets, usersList, personNameOrder]);
 
   const users = useMemo(() => ["All users", ...userNames], [userNames]);
 
@@ -4101,7 +4344,11 @@ function AssetTracker() {
       // (it's also what made the bulk move-to-room drag the room along).
       if (scopeId && !ancestorsOf(a, assets).some(p => p.id === scopeId)) return false;
       if (typeFilter !== "All types" && (a.type || "Other") !== typeFilter) return false;
-      if (userFilter !== "All users" && !personNamesOf(a, assets).includes(userFilter)) return false;
+      // Compared as match keys, not as display strings: the filter holds the name
+      // as it was spelled when it was picked, so flipping the sort to last-name
+      // order would otherwise stop it matching anything and empty the list.
+      if (userFilter !== "All users"
+        && !personNamesOf(a, assets).some(n => personMatchKey(n) === personMatchKey(userFilter))) return false;
       if (statusFilter !== "All statuses" && (a.status || "Active") !== statusFilter) return false;
       if (!q) return true;
       // Searching matches the whole chain above an asset, so typing a building
@@ -4111,6 +4358,11 @@ function AssetTracker() {
       // The type by NAME. The raw scan below sees a.type, which is an id — so a
       // user-created type was findable only by typing its uuid.
       if (typeNameOf(a.type, typesList).toLowerCase().includes(q)) return true;
+      // The composed name, because a person's is not stored as one string: the
+      // raw scan below sees "Jen" and "Kramer" in separate fields, so typing a
+      // full name -- the obvious thing to type -- would find nobody. Both
+      // spellings, so the search does not depend on how the list is sorted.
+      if (isPersonType(a.type) && personNameVariants(a).some(n => n.toLowerCase().includes(q))) return true;
       return Object.values(a).some(v => typeof v === "string" && v.toLowerCase().includes(q));
     });
     if (sortConfig) {
@@ -4123,8 +4375,15 @@ function AssetTracker() {
       // then one blank or one `24-27"` silently drops the whole column back to
       // string ordering mid-list, which reads as the sort being broken.
       const col = columns.find(c => c.key === key);
-      const kind = key === "parent" ? "text" : columnDataType(col);
+      const isNameSort = NAME_SORT_KEYS.some(k => k.key === key);
+      const kind = key === "parent" || isNameSort ? "text" : columnDataType(col);
       const sortValue = x => {
+        // Both name sorts read the COMPOSED name, which is already spelled in
+        // the order this sort selected -- "Smith, John" under a last-name sort.
+        // So one comparison serves both, and an asset with no person name (a
+        // room, a laptop) sorts by what it is actually called rather than by a
+        // blank surname it was never going to have.
+        if (isNameSort) return nameOf(x, typesList);
         // Sorting the Path column on the full outermost-first string groups a
         // building's contents together and orders rooms within it, which is what
         // sorting by location is for. Sorting on the immediate parent's name
@@ -4152,7 +4411,7 @@ function AssetTracker() {
       });
     }
     return list;
-  }, [assets, query, scopeId, typeFilter, userFilter, statusFilter, sortConfig, columns]);
+  }, [assets, query, scopeId, typeFilter, userFilter, statusFilter, sortConfig, columns, typesList, personNameOrder]);
 
   // Which of the filtered assets the bulk "Move filtered to room" action can
   // actually touch: only types that are allowed to sit inside a Room. Asking the
@@ -4199,7 +4458,9 @@ function AssetTracker() {
       });
     });
     return rows;
-  }, [assets]);
+    // personNameOrder: assetName is composed, so a person's row would keep the
+    // previous order's spelling until `assets` itself changed.
+  }, [assets, personNameOrder]);
   const maintenanceOverdueTotal = allMaintenanceRows.filter(r => r.status === "overdue").length;
 
   // The History table's rows: every change entry on every active asset,
@@ -4221,7 +4482,7 @@ function AssetTracker() {
       });
     });
     return rows;
-  }, [assets]);
+  }, [assets, personNameOrder]);
   const workTypeOptions = useMemo(() => (
     ["All work types", ...Array.from(new Set(allWorkRows.map(r => r.change.changeType).filter(Boolean))).sort()]
   ), [allWorkRows]);
@@ -5045,12 +5306,12 @@ function AssetTracker() {
     // raw name, and both paths write `person` so the sheet stays readable either
     // way. `related` names the people involved, which is what puts the change in
     // THEIR audit history as well as the asset's.
-    const toUser = usersAreAssets ? userAssets.find(u => nameOf(u) === newUser) : null;
+    const toUser = usersAreAssets ? userAssets.find(u => personMatchKey(u) === personMatchKey(newUser)) : null;
     const entries = [];
     const next = assets.map(a => {
       if (!targets.has(a.id)) return a;
       const fromNames = personNamesOf(a, assets);
-      if (fromNames.length === 1 && fromNames[0] === newUser) return a;
+      if (fromNames.length === 1 && personMatchKey(fromNames[0]) === personMatchKey(newUser)) return a;
       const fromIds = personLabelsOf(a);
       entries.push({
         at: new Date().toISOString(), by: currentUser || "", assetLabel: a.id,
@@ -6236,18 +6497,29 @@ function AssetTracker() {
 
     // name -> KEY, because that is what personIds holds. A label would be wrong
     // for any User created after v31, whose id is not its label.
-    const byName = new Map((assets || []).filter(a => a.type === "User").map(u => [nameOf(u), u.id]));
+    //
+    // Keyed on personMatchKey rather than nameOf: a legacy string is always
+    // written "Jen Kramer", while nameOf spells an existing person whichever way
+    // the app is currently reading. Matching on the display string would find
+    // nobody while sorted by last name and create a SECOND record for everyone.
+    const byName = new Map((assets || []).filter(a => a.type === "User").map(u => [personMatchKey(u), u.id]));
     let counter = peekAssetNumber();
     const created = [];
     wanted.forEach(name => {
-      if (byName.has(name)) return;
+      const key = personMatchKey(name);
+      if (byName.has(key)) return;
       // A label is still issued from the counter (it is what people read), but
       // the id is what the assignment below actually points at.
       const label = assetTagForNumber(counter++);
       const id = crypto.randomUUID();
-      byName.set(name, id);
+      byName.set(key, id);
+      // Created with PARTS, not with the string. A person type has no stored
+      // `name` (it is excluded), so writing one here would leave a record the
+      // sheet describes one way and the app another. The split is the same
+      // deterministic one adoptPersonNames uses -- one helper, or the two
+      // paths drift and a converted name stops matching an adopted one.
       created.push({
-        id, label, type: "User", name, status: "Active",
+        id, label, type: "User", ...splitPersonName(name), status: "Active",
         comments: [], changes: [], allocations: [],
       });
     });
@@ -6261,7 +6533,7 @@ function AssetTracker() {
       if (personLabelsOf(a).length) return a;              // already by id
       const names = String(a.person || "").split("/").map(x => x.trim()).filter(Boolean);
       if (!names.length) return a;
-      const ids = names.map(n => byName.get(n)).filter(Boolean);
+      const ids = names.map(n => byName.get(personMatchKey(n))).filter(Boolean);
       if (!ids.length) return a;
       // Deliberately NOT audited per asset. Nobody's assignment changed here --
       // the same people are on the same things; only the way it is stored moved
@@ -6594,6 +6866,10 @@ function AssetTracker() {
           writePlaceColumns(row, a);
           return;
         }
+        // Name is resolved, and BEFORE the fieldAppliesTo gate: a person type
+        // has no stored `name`, so the gate would export an empty Name column
+        // for every person while the list showed them all correctly.
+        if (c.key === "name") { row[c.label] = nameOf(a, typesList); return; }
         if (!fieldAppliesTo(c.key, a.type)) { row[c.label] = ""; return; }
         row[c.label] = c.key === "person" ? personTextOf(a, assets)
           : c.key === "type" ? typeNameOf(a.type, typesList)
@@ -10039,6 +10315,7 @@ function AssetTracker() {
                     filterConfigs={filterConfigs}
                     sortConfig={sortConfig}
                     setSortConfig={setSortConfig}
+                    sortKeys={COLUMN_SORT_KEYS}
                     onOpenFilter={setActiveFilterCol}
                   />
                 );
@@ -10095,6 +10372,13 @@ function AssetTracker() {
                         // Stored as ids since v28; the names are resolved now, so
                         // renaming a person updates every row at once.
                         applies ? (personTextOf(a, assets) || "—") : ""
+                      ) : c.key === "name" ? (
+                        // Read through nameOf, NOT off the row, and deliberately
+                        // not gated on `applies`: a person type excludes `name`
+                        // because it has no stored one, and reading the raw field
+                        // would leave every person's Name cell blank in the one
+                        // column the list is scanned by.
+                        nameOf(a, typesList) || "—"
                       ) : (
                         applies ? (a[c.key] || "—") : ""
                       )}
@@ -10306,6 +10590,7 @@ function AssetTracker() {
         filterConfigs={filterConfigs}
         sortConfig={sortConfig}
         setSortConfig={setSortConfig}
+        sortKeys={COLUMN_SORT_KEYS}
         onClose={() => setActiveFilterCol(null)}
       />
       <ColumnFilterModal
@@ -12145,14 +12430,22 @@ function DevBuildBadge() {
   );
 }
 
-function ColumnHeaderCell({ label, colKey, sticky, filterConfigs, sortConfig, setSortConfig, onOpenFilter }) {
+// `sortKeys` is optional and every existing caller omits it. A column that
+// declares one sorts SEVERAL ways (Name: by first name or by last), so its
+// header opens the modal to choose rather than cycling asc/desc in place —
+// there is no gesture on a header cell that can express four states.
+function ColumnHeaderCell({ label, colKey, sticky, filterConfigs, sortConfig, setSortConfig, sortKeys, onOpenFilter }) {
   const cfg = filterConfigs[colKey];
+  const sortSpec = (sortKeys && sortKeys[colKey]) || null;
+  const keys = sortSpec && sortSpec.keys;
   const isFiltered = cfg && cfg.value !== cfg.options[0];
-  const sortedHere = sortConfig && sortConfig.key === colKey;
+  // Sorted "here" includes sorting by any of this column's other keys — the Name
+  // column is what a last-name sort belongs to, so that is where the arrow goes.
+  const sortedHere = !!sortConfig && (sortConfig.key === colKey || !!(keys && keys.some(k => k.key === sortConfig.key)));
   const sortArrow = sortedHere ? (sortConfig.dir === "asc" ? " ↑" : " ↓") : "";
   return (
     <div style={{ position: sticky ? "sticky" : "static", left: sticky ? 0 : undefined, background: C.brandDark, zIndex: sticky ? 2 : 1, display: "flex", alignItems: "center" }}>
-      {cfg ? (
+      {cfg || keys ? (
         <button
           onClick={() => onOpenFilter(colKey)}
           style={{
@@ -12163,7 +12456,10 @@ function ColumnHeaderCell({ label, colKey, sticky, filterConfigs, sortConfig, se
           }}
         >
           {label}{sortArrow}
-          <Filter size={11} style={{ flexShrink: 0 }} />
+          {/* The funnel means "there are options behind this". A sort-only
+              column gets the sort glyph instead, or the header would promise a
+              filter it does not have. */}
+          {cfg ? <Filter size={11} style={{ flexShrink: 0 }} /> : <ArrowUpDown size={11} style={{ flexShrink: 0 }} />}
         </button>
       ) : (
         <button
@@ -12201,12 +12497,17 @@ function ColumnHeaderCell({ label, colKey, sticky, filterConfigs, sortConfig, se
 // optional cfg.labelForOption for columns whose stored value isn't the display
 // text, e.g. Maintenance's Status filter storing "due-soon" but showing "Due
 // soon") plus Sort A→Z / Z→A for that column.
-function ColumnFilterModal({ activeCol, filterConfigs, sortConfig, setSortConfig, onClose }) {
+function ColumnFilterModal({ activeCol, filterConfigs, sortConfig, setSortConfig, sortKeys, onClose }) {
   // Resolved WITHOUT returning early, because the label filter below is a hook:
   // an early return above it would make that hook conditional, and React counts
   // hooks per render — opening the modal after it had rendered as null would
   // throw. The bail-out is one line further down instead.
   const cfg = (activeCol && filterConfigs[activeCol]) || null;
+  // A column may open this modal for its SORT alone (Name, which sorts by first
+  // or last name). Then there is no option list and no filter — just the sort
+  // section, which every column already had at the bottom.
+  const sortSpec = (activeCol && sortKeys && sortKeys[activeCol]) || null;
+  const sortRows = (sortSpec && sortSpec.keys) || [{ key: activeCol, label: "" }];
   const getLabel = (cfg && cfg.labelForOption) || (o => o);
   // Filtered by label when the config supplies a vocabulary, untouched
   // otherwise — the same optional shape SelectionModal takes, so the Type column
@@ -12214,7 +12515,7 @@ function ColumnFilterModal({ activeCol, filterConfigs, sortConfig, setSortConfig
   const { options: shown, bar } = useLabelFilter(
     cfg ? cfg.options : [], cfg && cfg.labelOptions, cfg && cfg.labelsForOption
   );
-  if (!cfg) return null;
+  if (!cfg && !sortSpec) return null;
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
       {/* The CARD is a flex column that never scrolls; only the option list
@@ -12225,11 +12526,12 @@ function ColumnFilterModal({ activeCol, filterConfigs, sortConfig, setSortConfig
       <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth:300, maxHeight: "80vh", display: "flex", flexDirection: "column", minHeight: 0 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexShrink: 0 }}>
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>
-            Filter by {cfg.label}
+            {cfg ? `Filter by ${cfg.label}` : `Sort by ${sortSpec.label}`}
           </div>
           <button onClick={onClose} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
         </div>
-        {bar}
+        {cfg && bar}
+        {cfg && (
         <div style={{ display: "flex", flexDirection: "column", gap: 2, overflowY: "auto", minHeight: 0, flex: 1 }}>
           {shown.map(opt => {
             const isSelected = opt === cfg.value;
@@ -12252,19 +12554,32 @@ function ColumnFilterModal({ activeCol, filterConfigs, sortConfig, setSortConfig
             <div style={{ fontSize: 13, color: C.empty, padding: "8px 2px" }}>Nothing carries that label.</div>
           )}
         </div>
-        <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 12, paddingTop: 12, display: "flex", gap: 6, flexShrink: 0 }}>
-          {[["asc", "Sort A → Z"], ["desc", "Sort Z → A"]].map(([dir, lbl]) => {
-            const active = sortConfig && sortConfig.key === activeCol && sortConfig.dir === dir;
-            return (
-              <button
-                key={dir}
-                onClick={() => { setSortConfig(active ? null : { key: activeCol, dir }); onClose(); }}
-                style={{ flex: 1, padding: "7px 10px", background: active ? C.brand : "transparent", color: active ? "#fff" : C.ink, border: `1.5px solid ${active ? C.brand : C.border}`, borderRadius: 10, fontSize: 13, fontWeight: 600 }}
-              >
-                {lbl}
-              </button>
-            );
-          })}
+        )}
+        {/* One A→Z / Z→A pair per sort key. A column with a single key (every
+            column but Name) renders exactly the row it always had, unlabelled,
+            so nothing about it changed. */}
+        <div style={{ borderTop: cfg ? `1px solid ${C.border}` : "none", marginTop: cfg ? 12 : 0, paddingTop: cfg ? 12 : 0, display: "flex", flexDirection: "column", gap: 8, flexShrink: 0 }}>
+          {sortRows.map(row => (
+            <div key={row.key}>
+              {row.label && (
+                <div style={{ fontSize: 12, color: C.muted, marginBottom: 4, fontWeight: 600 }}>{row.label}</div>
+              )}
+              <div style={{ display: "flex", gap: 6 }}>
+                {[["asc", "A → Z"], ["desc", "Z → A"]].map(([dir, lbl]) => {
+                  const active = sortConfig && sortConfig.key === row.key && sortConfig.dir === dir;
+                  return (
+                    <button
+                      key={dir}
+                      onClick={() => { setSortConfig(active ? null : { key: row.key, dir }); onClose(); }}
+                      style={{ flex: 1, padding: "7px 10px", background: active ? C.brand : "transparent", color: active ? "#fff" : C.ink, border: `1.5px solid ${active ? C.brand : C.border}`, borderRadius: 10, fontSize: 13, fontWeight: 600 }}
+                    >
+                      {row.label ? lbl : `Sort ${lbl}`}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     </div>

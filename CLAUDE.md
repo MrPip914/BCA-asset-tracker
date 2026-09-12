@@ -1534,6 +1534,87 @@ rediscover them:
   mirroring a relationship the other side already records — it's just a second copy to keep
   in sync, and the one that goes stale.
 
+**A person's name is TWO FIELDS, and the display order follows the SORT (backend v36).**
+`firstName`/`lastName` are the source of truth for what a person type is called; the single
+`name` string everything displays is COMPOSED at render by `nameOf()`, in whichever order
+the list is currently sorted by. Sorting the Name column by *Last name* is what makes every
+person read "Smith, John" — app-wide and at once, not just in the sorted column.
+
+- **This is option C of three, chosen knowing it was the expensive one.** Composing on save
+  and keeping `name` stored (option B) would have been a much smaller diff and left every
+  reader untouched. It cannot express this feature: a stored string has one spelling, and
+  the whole request was that the spelling follow the sort. So the parts had to become the
+  truth and every site that read a person's `name` had to learn to ask `nameOf()`.
+- **`name` is EXCLUDED for a person type** (User's `excludedFields`), so no form offers a
+  third field competing with the two parts. Two render sites therefore read `nameOf()`
+  BEFORE the `fieldAppliesTo` gate rather than after it — the list's Name cell and the
+  Excel export — or every person's Name would be blank in the one column the list is
+  scanned by. **Any new site that shows a name must do the same**; the gate is about
+  whether the field is EDITABLE, and a person's name is displayable without being stored.
+- **A person's old `name` cell rides along untouched, exactly as `label` rides under `tag`.**
+  It is what the parts were split from, so it is the way back if the split is judged wrong.
+  Nothing writes it, and `nameOf` never falls back to it while a part exists — preferring it
+  would show the pre-split spelling forever.
+- **THE ORDER IS A MODULE-LEVEL VARIABLE, and the hazard TYPE_SETTINGS carries does NOT
+  apply to it.** `nameOf` is called from ~100 sites, most of them plain functions, so
+  threading a format argument is the same behaviour-free diff `TYPE_SETTINGS` exists to
+  avoid. The difference: `TYPE_SETTINGS` is safe only because every write happens to be
+  followed by a `setState`, while `PERSON_NAME_ORDER` is derived FROM state that already
+  re-renders — the list's own `sortConfig` — and is applied at the top of `AssetTracker`'s
+  render body, before any child renders. A rendered frame cannot read a stale order.
+  **What it DOES require: a `useMemo` that composes a name must take the order as a
+  dependency**, or it hands back the previous spelling until its real inputs change.
+- **`personMatchKey` is order-independent, and that is a data-loss guard rather than
+  tidiness.** `unconvertedUserNames` compares a legacy `person` string against existing
+  people; through `nameOf` that comparison finds nobody while sorted by last name, so every
+  converted person reads as unconverted, `usersAreAssets` flips false, and — per the v28
+  entry below — the next save writes id-stored assignments away. `convertUsersToAssets`
+  would separately create a second record for everyone. **Never compare a person to a name
+  through the display string.**
+- **An audit row holds whatever spelling was current when it was WRITTEN**, so the audit
+  log's name-matching (the one place it resolves a person by name rather than by id) tries
+  BOTH spellings via `personNameVariants`. The stored text is history and is never rewritten.
+- **The split is a load-time READ that fills a blank** (`adoptPersonNames`), never a
+  rewrite: last whitespace token is the surname, only when BOTH parts are empty, and `name`
+  is left byte-for-byte alone. Safe as an adoption because it is DETERMINISTIC — two
+  browsers compute the same parts, which is the line between this and the randomly minted
+  ids that stranded photos. A wrong guess ("Van Der Berg", a suffix) costs a retype and
+  destroys nothing, and stored parts always beat a re-split.
+- **`personType` in the registry is what makes a type a person**, alongside `locked` and
+  `modules` — never a `type === "User"` test. A second person-shaped type gets the
+  composition, the adoption skip and the sort by declaring one key.
+- **The four sort options live in the Name column's own popup**, which is why
+  `ColumnHeaderCell`/`ColumnFilterModal` grew an optional `sortKeys`: a header cell has no
+  gesture that can express four states. A column with no filter options now opens the same
+  modal for its sort alone. The `lastName` sort key is deliberately the Last Name column's
+  own key, so the two controls cannot contradict each other. **Both name sorts compare the
+  COMPOSED string** — under a last-name sort that string already reads "Smith, John", so
+  one comparison serves both and a non-person still sorts by what it is called.
+- **`splitPersonName` reads "Smith, John" as well as "John Smith", and that is required
+  rather than generous.** The app now WRITES the comma spelling, so a name captured off the
+  screen while sorted by surname — a user filter's value, a bulk-reassign target, an audit
+  row — comes back through the splitter, and splitting it on the last space makes the
+  surname "Smith," and matches nobody. Found by driving it: a live User filter emptied the
+  list the moment the sort was flipped underneath it.
+- **The search matches both spellings**, because a person's name is not stored as one
+  string and the raw field scan would never match a full name typed in.
+- Covered by `test-frontend-personname.js`, which runs the real registry and the real
+  helpers. Verified by mutation that six silent failures fail it: reading `name` ahead of
+  the parts, an adoption that rewrites `name` (caught by a fixture row with irregular
+  whitespace — recomposing tidies it, which is how "left alone" is told apart from "wrote
+  back something that matches"), an adoption that declines only when BOTH parts are set,
+  `personMatchKey` composing in the live order, an unconditional comma in the composition,
+  and `adoptLegacyNames` ceasing to skip people.
+- **`MOCK_SNAPSHOT` now carries People, and it is the fixture's first id-mode data.** It was
+  wholly pre-v28 name mode, which meant no User assets existed to render at all — so this
+  feature was unexercisable in Sandbox, the only place it can be tried without a deploy.
+  Seven people in FOUR shapes deliberately: parts only, `name` only (adopted on load), both
+  after a save, and both where the parts DISAGREE with a naive split (Ana Vega Ruiz, a
+  two-word surname). James is the one-token case, who must read as "James" in both orders
+  with no stray comma. The Kitchen's `person: "Multiple teachers"` had to go: it names
+  nobody, and one legacy string with no User record behind it holds the WHOLE fixture in
+  name mode.
+
 **Users are assets (backend v28).** A person has a record, a detail page, and an audit
 history, and an asset points AT one by id (`personIds`, an array of User labels) instead
 of storing a name string. This is the app's **first many-to-many between assets** — one

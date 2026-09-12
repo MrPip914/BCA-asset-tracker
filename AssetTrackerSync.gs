@@ -49,7 +49,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v35";
+const SCRIPT_VERSION = "v36";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -124,7 +124,19 @@ const ASSET_FIELDS = [
   // it, destroying the very thing being kept as the way back. Nothing in the UI
   // writes `label` any more -- it rides along untouched until phase 4 drops it.
   "tag",
-  "label", "name", "type", "subType", "screenSize", "hostname", "parentId",
+  "label", "name",
+  // `firstName`/`lastName` (v36) are a PERSON's name, held as two fields because
+  // a school sorts its people by surname. They belong to person types only (the
+  // frontend restricts them through User's onlyFields) and they are the SOURCE
+  // OF TRUTH for what such a record is called: `name` is composed from them at
+  // render, in whichever order the reader has chosen, and is not written for a
+  // person at all.
+  //
+  // A person's existing `name` cell rides along untouched, exactly as `label`
+  // rides under `tag`: it is what the parts were split FROM, so keeping it is
+  // the way back if the split is ever judged wrong. Nothing writes it.
+  "firstName", "lastName",
+  "type", "subType", "screenSize", "hostname", "parentId",
   // `personIds` (v28) is the assignment: comma-joined labels of User assets, the
   // app's first many-to-many between assets. `person` is the pre-v28 slash-joined
   // list of NAMES, kept and still written so the change stays reversible and an

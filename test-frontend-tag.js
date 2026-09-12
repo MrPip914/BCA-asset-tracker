@@ -60,6 +60,15 @@ const code = [
   grabFn('typeTakesParent'),
   grabFn('restrictedFields'),
   grabFn('fieldAppliesTo'),
+  // nameOf composes a person's name from its parts now, so its own helpers come
+  // with it. Real, not stubbed: a stub would let this test keep passing while
+  // the app's actual naming changed underneath it.
+  grabBlock('const PERSON_NAME_ORDERS = {', 'lastFirst" };'),
+  'let PERSON_NAME_ORDER = PERSON_NAME_ORDERS.firstLast;',
+  grabFn('isPersonType'),
+  grabFn('splitPersonName'),
+  grabFn('personNamePartsOf'),
+  grabFn('composePersonName'),
   grabFn('nameOf'),
   'module.exports = { fieldAppliesTo, nameOf, typeNameOf, TYPE_REGISTRY };',
 ].join('\n');

@@ -16,6 +16,35 @@ version that fixed them.
 
 ## Open
 
+### An add-form draft keeps its Asset ID after switching to a type that has none
+**Found:** 2026-09-12, while adding a person to test the first/last name work.
+**Needs a deploy:** no — `index.html` only.
+**Confirmed:** in a browser against Sandbox. Add asset (defaults to Computer, which
+suggests an Asset ID), switch Type to User, Save.
+
+`startAdd` seeds the draft with a suggested Asset ID because the default type carries
+one. Switching the type to one whose registry entry EXCLUDES `tag` — User, Room,
+Building, Campus — removes the field from the form but leaves the value on the draft.
+Two consequences, in order of how much they matter:
+
+- **The save can be refused by a field that is not on screen.** `findTagConflict` still
+  runs against the carried value, so a collision reports `Asset ID "BCA0001" is already
+  in use (Computer)` on a form with no Asset ID field to correct. Same shape as the Bulk
+  Item parentId bug in CLAUDE.md: an error about a control the type does not have.
+- **Otherwise it saves a hidden tag** onto a type that is meant to have none, and burns
+  an asset number doing it.
+
+**Sandbox shows it every time; a real sheet mostly hides it.** `MOCK_SNAPSHOT` carries no
+`nextAssetNumber`, so `peekAssetNumber()` returns 1 and the suggested ID is `BCA0001`,
+which the fixture's own first Computer already holds. On a live sheet the counter is real,
+so the suggestion is unused and the save goes through — quietly writing the hidden tag.
+
+**The fix is one line in the shape the codebase already uses**: clear `tag` when the
+draft's type stops accepting one, the way the edit path clears `parentId` for a type that
+takes no parent — a repair rather than a refusal, since no tag is that type's only correct
+value. Worth checking at the same time whether any other excluded field survives a type
+change on a draft.
+
 ### A value that doesn't match its field's kind shows as BLANK, then refuses the save
 **Found:** 2026-09-10. **Mostly closed the same day** — see below.
 **Needs a deploy:** no — `index.html` only.
