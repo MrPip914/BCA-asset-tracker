@@ -16,6 +16,23 @@ version that fixed them.
 
 ## Open
 
+### Sorting the Type column orders user-created types by their raw UUID
+**Found:** 2026-09-12, while fixing the User column's sort.
+**Needs a deploy:** no — `index.html` only.
+**Confirmed:** by reading `sortValue`; not reproduced on screen, since it needs a
+user-created type and the effect is only visible among several of them.
+
+The Type cell renders `typeNameOf(a.type, typesList)` — the type's NAME — while the sort
+falls through to the generic `x[key]` path and compares `a.type`, which is the type's ID.
+For a built-in type the id IS its original name, so the two agree and the column looks
+correct; a type created at runtime has a generated UUID, so it sorts by that instead of by
+what the cell shows. It lands in an arbitrary position with no way to tell why.
+
+Same class as the User column bug fixed the same day, and the fix is the same shape: give
+`type` its own branch in `sortValue` returning `typeNameOf(x.type, typesList)`. Left alone
+here only because it is a different column from the one that was reported, and it bites
+just the school with a user-created type (CLAUDE.md notes there is at least one).
+
 ### An add-form draft keeps its Asset ID after switching to a type that has none
 **Found:** 2026-09-12, while adding a person to test the first/last name work.
 **Needs a deploy:** no — `index.html` only.

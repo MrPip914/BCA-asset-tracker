@@ -1566,6 +1566,15 @@ once: the list, the pickers, the assignment chips, the detail header, the audit 
 - **So the sort VALUE is spelled**, which is why `filtered` takes `personNameOrder` as a
   dependency. It is also why the Name column cannot use the generic `x[key]` sort path: a
   person has no stored `name` to compare.
+- **EVERY column whose cell resolves a name must sort on the resolved string**, and this is
+  the one that shipped broken. The **User** column displays `personTextOf` but sorted the
+  stored `person` field, so its cells read "Cantrell, Aaron" while the order ran Aaron,
+  Denise, Dillon — which is exactly how the setting looked ignored. That field is the legacy
+  slash-joined copy written FROM the ids, so it was both a shadow of what was on screen and
+  permanently spelled first-name-first: no setting could ever have moved it. The mismatch has
+  now happened twice (`name` when people gained parts, `person` when the setting shipped), so
+  `test-frontend-personname.js` reads `sortValue` as SOURCE and fails if `name`, `person` or
+  `parent` loses its branch — a column falling through to `x[key]` is the regression.
 - **The setting is PER-DEVICE `localStorage`, the same class as column visibility** — it
   changes nothing that is stored, so it needs no backend version, no deploy, and cannot lose
   a race with someone else's save. Namespaced by tenant like every other key here. Offered

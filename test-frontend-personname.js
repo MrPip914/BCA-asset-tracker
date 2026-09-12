@@ -80,6 +80,9 @@ const code = [
   grabFn('personMatchKey'),
   grabBlock('const NAME_ORDER_OPTIONS = [', '];'),
   grabFn('nameOf'),
+  grabFn('personLabelsOf'),
+  grabFn('personNamesOf'),
+  grabFn('personTextOf'),
   grabFn('adoptPersonNames'),
   // adoptLegacyNames needs the suggestion machinery it calls; all real.
   grabBlock('const FIXED_IN_PLACE_TYPES', ');'),
@@ -92,7 +95,7 @@ const code = [
   grabFn('adoptLegacyNames'),
   `module.exports = {
      nameOf, adoptPersonNames, adoptLegacyNames, splitPersonName, personMatchKey,
-     personNameVariants, composePersonName, applyPersonNameOrder,
+     personNameVariants, composePersonName, applyPersonNameOrder, personTextOf,
      PERSON_NAME_ORDERS, NAME_ORDER_OPTIONS, fieldAppliesTo,
    };`,
 ].join('\n');
@@ -106,7 +109,7 @@ try {
 }
 const {
   nameOf, adoptPersonNames, adoptLegacyNames, splitPersonName, personMatchKey,
-  personNameVariants, composePersonName, applyPersonNameOrder,
+  personNameVariants, composePersonName, applyPersonNameOrder, personTextOf,
   PERSON_NAME_ORDERS, NAME_ORDER_OPTIONS, fieldAppliesTo,
 } = mod.exports;
 
@@ -287,6 +290,57 @@ check('personNameVariants offers both spellings',
   variants.includes('Jen Kramer') && variants.includes('Kramer, Jen'), JSON.stringify(variants));
 check('a one-part person has a single variant',
   personNameVariants({ type: 'User', firstName: 'James', lastName: '' }).length === 1);
+
+// ---------- the ASSIGNMENT column orders by what it shows ----------
+// Rule 8, and the one that actually shipped broken: the User column resolves
+// personIds to names for display but sorted the stored `person` string, so the
+// cells read "Cantrell, Aaron" while the order ran Aaron, Denise, Dillon. That
+// string is the legacy slash-joined copy written FROM the ids, so it is both a
+// shadow of what is on screen and permanently spelled first-name-first --
+// changing the setting could not move it.
+const people = [
+  { id: 'u1', type: 'User', firstName: 'Aaron', lastName: 'Cantrell' },
+  { id: 'u2', type: 'User', firstName: 'Denise', lastName: 'Sloan' },
+  { id: 'u3', type: 'User', firstName: 'Dillon', lastName: 'Jacobsma' },
+];
+const devices = [
+  { id: 'd1', type: 'Computer', personIds: ['u1'], person: 'Aaron Cantrell' },
+  { id: 'd2', type: 'Computer', personIds: ['u2'], person: 'Denise Sloan' },
+  { id: 'd3', type: 'Computer', personIds: ['u3'], person: 'Dillon Jacobsma' },
+];
+const all = [...people, ...devices];
+const byUserCol = () => devices
+  .map(d => [d.id, personTextOf(d, all)])
+  .sort((x, y) => x[1].localeCompare(y[1])).map(x => x[0]).join(',');
+firstLast();
+check('the User column orders by first name under "First Last"',
+  byUserCol() === 'd1,d2,d3', byUserCol());
+lastFirst();
+check('the User column orders by SURNAME under "Last, First"',
+  byUserCol() === 'd1,d3,d2', byUserCol());
+// The stored string is what it must NOT be sorting on.
+check('sorting the stored `person` string would have ignored the setting',
+  devices.map(d => d.person).sort().join(',') === 'Aaron Cantrell,Denise Sloan,Dillon Jacobsma');
+firstLast();
+
+// The contract itself, read off the source: a column whose CELL resolves a name
+// must have its own branch in the sort, or the two disagree. This exact
+// mismatch has now happened twice -- `name` when people gained parts, `person`
+// when the setting shipped -- so it is checked rather than remembered.
+const sortValueSrc = (() => {
+  const i = src.indexOf('const sortValue = x => {');
+  let depth = 0;
+  for (let k = src.indexOf('{', i); k < src.length; k++) {
+    if (src[k] === '{') depth++;
+    else if (src[k] === '}' && --depth === 0) return src.slice(i, k + 1);
+  }
+  throw new Error('sortValue not closed');
+})();
+for (const key of ['name', 'person', 'parent']) {
+  check(`the list sort resolves the "${key}" column rather than reading it raw`,
+    sortValueSrc.includes(`key === "${key}"`),
+    'no branch for it in sortValue -- it would fall through to x[key]');
+}
 
 // ---------- the field rules ----------
 check('firstName belongs to a person type', fieldAppliesTo('firstName', 'User'));
