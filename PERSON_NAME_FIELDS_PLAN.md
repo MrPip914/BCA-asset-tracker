@@ -136,6 +136,22 @@ assumes first/last.
   the place a record is born, which is the lesson `addMaintenanceItem` taught.
 - **Display format ("Smith, John") is deferred.** One composition, one order.
 
+## What was actually built (2026-09-12)
+
+Option C, plus the display format that the "deferred" line above ruled out — it was the
+point of choosing C rather than a follow-on. Two corrections to the plan as written:
+
+- **The format is a SETTING in the account menu, per-device**, not a consequence of the
+  sort. It shipped sort-driven first and was rejected on sight: a sort order and a name
+  order are two questions, and coupling them makes "sort by surname, write names normally"
+  unexpressible. The Name column still sorts by first or last; it just no longer spells
+  anything.
+- **`splitPersonName` had to learn "Smith, John"**, which the plan did not foresee. Once the
+  app writes that spelling, a name captured off the screen comes back through the splitter.
+
+Both are recorded in CLAUDE.md, which is where the rules live; this file is the decision
+record and stops here.
+
 ## Coverage
 
 `test-frontend-personname.js`, driven by mutation:

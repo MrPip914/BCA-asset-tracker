@@ -753,9 +753,13 @@ function personMatchKey(nameOrParts) {
   return `${firstName} ${lastName}`.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-// The Name column sorts two ways, and picking one is how the display order gets
-// chosen — there is no separate format control, because two controls that can
-// disagree would let the list be sorted by surname while reading "John Smith".
+// The Name column sorts two ways. It does NOT decide how names are WRITTEN —
+// that is a setting in the account menu (see NAME_ORDER_STORAGE_KEY). How you
+// want a list ORDERED and how you want it READ are two questions, and only one
+// of them is a preference: sorting by surname while reading "John Smith" is an
+// ordinary thing to want, and the first version of this feature could not
+// express it because the sort was the format control.
+//
 // The KEY doubles as the Last Name column's own key on purpose: sorting that
 // column means the same thing, so the two controls cannot contradict each other.
 const NAME_SORT_KEYS = [
@@ -765,10 +769,33 @@ const NAME_SORT_KEYS = [
 // Keyed by column, carrying the column's own label so the modal can title
 // itself without being handed the column list as well.
 const COLUMN_SORT_KEYS = { name: { label: "Name", keys: NAME_SORT_KEYS } };
-function personNameOrderForSort(sortConfig) {
-  return sortConfig && sortConfig.key === "lastName"
-    ? PERSON_NAME_ORDERS.lastFirst
-    : PERSON_NAME_ORDERS.firstLast;
+
+// What a name sort COMPARES: canonical, never the displayed string. A sort has
+// to mean the same thing whichever way names are being read, or changing a
+// display preference silently reorders the list under someone. A non-person has
+// no parts, so under either key it sorts by what it is actually called.
+function nameSortValue(asset, key, typesList) {
+  if (!isPersonType(asset?.type)) return nameOf(asset, typesList);
+  const { firstName, lastName } = personNamePartsOf(asset);
+  return composePersonName(firstName, lastName,
+    key === "lastName" ? PERSON_NAME_ORDERS.lastFirst : PERSON_NAME_ORDERS.firstLast);
+}
+
+// The setting's two choices, with a worked example rather than a name for the
+// format: "Last, First" is not what most people call it, but everyone can read
+// "Smith, John" and know which one they want.
+const NAME_ORDER_OPTIONS = [
+  { value: PERSON_NAME_ORDERS.firstLast, label: "First Last", example: "John Smith" },
+  { value: PERSON_NAME_ORDERS.lastFirst, label: "Last, First", example: "Smith, John" },
+];
+function readStoredNameOrder() {
+  try {
+    return localStorage.getItem(NAME_ORDER_STORAGE_KEY) === PERSON_NAME_ORDERS.lastFirst
+      ? PERSON_NAME_ORDERS.lastFirst
+      : PERSON_NAME_ORDERS.firstLast;
+  } catch (e) {
+    return PERSON_NAME_ORDERS.firstLast; // private window, blocked storage — a default is fine
+  }
 }
 
 function nameOf(asset, typesList) {
@@ -1985,6 +2012,12 @@ const USER_STORAGE_KEY = CLIENT.storageKey("asset-tracker-user"); // localStorag
 // so one person's view preference stops overriding everyone else's, and toggling
 // needs no server round-trip.
 const COLUMN_VISIBILITY_STORAGE_KEY = CLIENT.storageKey("asset-tracker-column-visibility");
+// How a person's name reads — "John Smith" or "Smith, John". PER-DEVICE, in the
+// same class as column visibility and for the same reasons: it changes nothing
+// that is stored, it is a preference of whoever is looking rather than a fact
+// about the school, and keeping it out of Config means it needs no backend
+// version, no deploy, and cannot lose a race with someone else's save.
+const NAME_ORDER_STORAGE_KEY = CLIENT.storageKey("asset-tracker-name-order");
 // This tenant's deployed Apps Script Web App URL, from clients.js. Redeploy with
 // `node deploy.mjs` any time you change AssetTrackerSync.gs — and note that each
 // tenant has its OWN deployment, so a backend change has to reach all of them.
@@ -2117,7 +2150,7 @@ const FRONTEND_SCRIPT_VERSION = "v36";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-12.1";
+const APP_VERSION = "2026-09-12.2";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -3408,19 +3441,27 @@ function AssetTracker() {
   const [userFilter, setUserFilter] = useState("All users");
   const [statusFilter, setStatusFilter] = useState("Active");
   const [sortConfig, setSortConfig] = useState(null); // { key, dir: "asc" | "desc" }
-  // Sorting the list by last name is ALSO what flips every person's name to
-  // "Smith, John", app-wide and at once — the list, the pickers, the assignment
-  // chips, the detail header, the audit sentences. One choice rather than two,
-  // because a sort order and a name order that can disagree means reading a
-  // column that is not sorted the way it is written.
+  // How people's names read, app-wide and at once — the list, the pickers, the
+  // assignment chips, the detail header, the audit sentences. A per-device
+  // setting in the account menu, NOT a consequence of the sort: that was the
+  // first version and it conflated "how do I want this ordered" with "how do I
+  // want this written", so you could not sort by surname and still read
+  // "John Smith".
   //
   // Applied HERE, at the top of the render body, so it lands before this
   // component's own memos and before any child renders. Everything downstream
   // reads it through nameOf(); the memos that COMPOSE a name take it as a
   // dependency, since they would otherwise hand back the previous order's
   // strings until their real inputs changed.
-  const personNameOrder = personNameOrderForSort(sortConfig);
+  const [personNameOrder, setPersonNameOrder] = useState(readStoredNameOrder);
+  const [showNameOrderPicker, setShowNameOrderPicker] = useState(false);
   applyPersonNameOrder(personNameOrder);
+  function chooseNameOrder(order) {
+    setPersonNameOrder(order);
+    // Per-device, like column visibility: never persisted through persist(), so
+    // changing it writes nothing to the Sheet and cannot conflict with anyone.
+    try { localStorage.setItem(NAME_ORDER_STORAGE_KEY, order); } catch (e) { /* non-fatal — just won't remember across reloads */ }
+  }
   const [maintenanceQuery, setMaintenanceQuery] = useState("");
   const [maintenanceStatusFilter, setMaintenanceStatusFilter] = useState("All statuses");
   const [maintenanceFrequencyFilter, setMaintenanceFrequencyFilter] = useState("All frequencies");
@@ -4378,12 +4419,9 @@ function AssetTracker() {
       const isNameSort = NAME_SORT_KEYS.some(k => k.key === key);
       const kind = key === "parent" || isNameSort ? "text" : columnDataType(col);
       const sortValue = x => {
-        // Both name sorts read the COMPOSED name, which is already spelled in
-        // the order this sort selected -- "Smith, John" under a last-name sort.
-        // So one comparison serves both, and an asset with no person name (a
-        // room, a laptop) sorts by what it is actually called rather than by a
-        // blank surname it was never going to have.
-        if (isNameSort) return nameOf(x, typesList);
+        // Canonical for both name sorts, so the order does not move when the
+        // display setting does -- see nameSortValue.
+        if (isNameSort) return nameSortValue(x, key, typesList);
         // Sorting the Path column on the full outermost-first string groups a
         // building's contents together and orders rooms within it, which is what
         // sorting by location is for. Sorting on the immediate parent's name
@@ -4411,7 +4449,11 @@ function AssetTracker() {
       });
     }
     return list;
-  }, [assets, query, scopeId, typeFilter, userFilter, statusFilter, sortConfig, columns, typesList, personNameOrder]);
+    // No personNameOrder dependency, deliberately: nothing this memo produces is
+    // spelled. The search matches both spellings and the sort is canonical, so
+    // the filtered, ordered list is the same list either way -- only the CELLS
+    // that render it are composed, and those re-render on their own.
+  }, [assets, query, scopeId, typeFilter, userFilter, statusFilter, sortConfig, columns, typesList]);
 
   // Which of the filtered assets the bulk "Move filtered to room" action can
   // actually touch: only types that are allowed to sit inside a Room. Asking the
@@ -7348,6 +7390,21 @@ function AssetTracker() {
                 <Users size={15} /> Access
               </button>
             )}
+            {/* Offered to VIEWERS too, and in Sandbox: it changes nothing that is
+                stored, only how this browser reads what is already there. Shows
+                the current choice on the row, so the menu answers "which way am
+                I reading?" without being opened twice. */}
+            <button
+              onClick={() => { setShowAccountMenu(false); setShowNameOrderPicker(true); }}
+              className="icon-btn"
+              style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
+            >
+              <ArrowLeftRight size={15} />
+              <span style={{ flex: 1 }}>Name format</span>
+              <span style={{ fontSize: 12, color: C.muted }}>
+                {(NAME_ORDER_OPTIONS.find(o => o.value === personNameOrder) || NAME_ORDER_OPTIONS[0]).label}
+              </span>
+            </button>
             <button
               onClick={() => { setShowAccountMenu(false); setShowAbout(true); }}
               className="icon-btn"
@@ -7368,6 +7425,24 @@ function AssetTracker() {
         </>
       )}
     </div>
+  );
+
+  // The one picker in the app that chooses a SETTING rather than a value on a
+  // record — but it goes through SelectionModal like every other single-select,
+  // because "no native <select> anywhere" is about the app having one dropdown
+  // behaviour, not about what is being picked.
+  const nameOrderModal = showNameOrderPicker && (
+    <SelectionModal
+      title="How names read"
+      options={NAME_ORDER_OPTIONS.map(o => o.value)}
+      value={personNameOrder}
+      labelForOption={v => {
+        const o = NAME_ORDER_OPTIONS.find(x => x.value === v);
+        return o ? `${o.label} — ${o.example}` : v;
+      }}
+      onChange={v => { chooseNameOrder(v); setShowNameOrderPicker(false); }}
+      onClose={() => setShowNameOrderPicker(false)}
+    />
   );
 
   const nameModal = showNamePrompt && (
@@ -8286,6 +8361,7 @@ function AssetTracker() {
         {globalStyle}
         {conflictModal}
         {nameModal}
+        {nameOrderModal}
         {peripheralsManagerModal}
         {usersManagerModal}
         {accessManagerModal}
@@ -9886,6 +9962,7 @@ function AssetTracker() {
       {globalStyle}
       {conflictModal}
       {nameModal}
+      {nameOrderModal}
       {peripheralsManagerModal}
       {usersManagerModal}
         {accessManagerModal}

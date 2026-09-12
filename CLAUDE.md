@@ -1583,13 +1583,12 @@ person read "Smith, John" — app-wide and at once, not just in the sorted colum
 - **`personType` in the registry is what makes a type a person**, alongside `locked` and
   `modules` — never a `type === "User"` test. A second person-shaped type gets the
   composition, the adoption skip and the sort by declaring one key.
-- **The four sort options live in the Name column's own popup**, which is why
-  `ColumnHeaderCell`/`ColumnFilterModal` grew an optional `sortKeys`: a header cell has no
-  gesture that can express four states. A column with no filter options now opens the same
-  modal for its sort alone. The `lastName` sort key is deliberately the Last Name column's
-  own key, so the two controls cannot contradict each other. **Both name sorts compare the
-  COMPOSED string** — under a last-name sort that string already reads "Smith, John", so
-  one comparison serves both and a non-person still sorts by what it is called.
+- **The two sort options live in the Name column's own popup**, which is why
+  `ColumnHeaderCell`/`ColumnFilterModal` grew an optional `sortKeys`: a header cell's
+  click-to-cycle cannot express four states (two keys x two directions). A column with no
+  filter options now opens the same modal for its sort alone. The `lastName` sort key is
+  deliberately the Last Name column's own key, so the two controls cannot contradict each
+  other.
 - **`splitPersonName` reads "Smith, John" as well as "John Smith", and that is required
   rather than generous.** The app now WRITES the comma spelling, so a name captured off the
   screen while sorted by surname — a user filter's value, a bulk-reassign target, an audit
@@ -1599,12 +1598,16 @@ person read "Smith, John" — app-wide and at once, not just in the sorted colum
 - **The search matches both spellings**, because a person's name is not stored as one
   string and the raw field scan would never match a full name typed in.
 - Covered by `test-frontend-personname.js`, which runs the real registry and the real
-  helpers. Verified by mutation that six silent failures fail it: reading `name` ahead of
+  helpers -- including that the sort does not move when the display setting does, which is
+  the regression that would quietly restore the rejected design. Whether the setting
+  survives a reload is browser state and was checked by driving the page. Verified by
+  mutation that seven silent failures fail it: reading `name` ahead of
   the parts, an adoption that rewrites `name` (caught by a fixture row with irregular
   whitespace — recomposing tidies it, which is how "left alone" is told apart from "wrote
   back something that matches"), an adoption that declines only when BOTH parts are set,
   `personMatchKey` composing in the live order, an unconditional comma in the composition,
-  and `adoptLegacyNames` ceasing to skip people.
+  `adoptLegacyNames` ceasing to skip people, and a name sort that compares the displayed
+  string again.
 - **`MOCK_SNAPSHOT` now carries People, and it is the fixture's first id-mode data.** It was
   wholly pre-v28 name mode, which meant no User assets existed to render at all — so this
   feature was unexercisable in Sandbox, the only place it can be tried without a deploy.

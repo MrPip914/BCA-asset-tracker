@@ -79,8 +79,9 @@ const code = [
   grabFn('personNameVariants'),
   grabFn('personMatchKey'),
   grabBlock('const NAME_SORT_KEYS = [', '];'),
-  grabFn('personNameOrderForSort'),
+  grabBlock('const NAME_ORDER_OPTIONS = [', '];'),
   grabFn('nameOf'),
+  grabFn('nameSortValue'),
   grabFn('adoptPersonNames'),
   // adoptLegacyNames needs the suggestion machinery it calls; all real.
   grabBlock('const FIXED_IN_PLACE_TYPES', ');'),
@@ -93,8 +94,8 @@ const code = [
   grabFn('adoptLegacyNames'),
   `module.exports = {
      nameOf, adoptPersonNames, adoptLegacyNames, splitPersonName, personMatchKey,
-     personNameVariants, composePersonName, personNameOrderForSort,
-     applyPersonNameOrder, PERSON_NAME_ORDERS, NAME_SORT_KEYS, fieldAppliesTo,
+     personNameVariants, composePersonName, nameSortValue, applyPersonNameOrder,
+     PERSON_NAME_ORDERS, NAME_SORT_KEYS, NAME_ORDER_OPTIONS, fieldAppliesTo,
    };`,
 ].join('\n');
 
@@ -107,8 +108,8 @@ try {
 }
 const {
   nameOf, adoptPersonNames, adoptLegacyNames, splitPersonName, personMatchKey,
-  personNameVariants, composePersonName, personNameOrderForSort,
-  applyPersonNameOrder, PERSON_NAME_ORDERS, NAME_SORT_KEYS, fieldAppliesTo,
+  personNameVariants, composePersonName, nameSortValue, applyPersonNameOrder,
+  PERSON_NAME_ORDERS, NAME_SORT_KEYS, NAME_ORDER_OPTIONS, fieldAppliesTo,
 } = mod.exports;
 
 let pass = 0, fail = 0;
@@ -177,17 +178,41 @@ const nameless = { id: 'u3', type: 'User', tag: 'BCA0110' };
 check('a person with nothing at all still falls through to the old rungs',
   nameOf(nameless) === 'BCA0110', nameOf(nameless));
 
-// ---------- the sort drives the order ----------
-check('no sort means first-last',
-  personNameOrderForSort(null) === PERSON_NAME_ORDERS.firstLast);
-check('sorting by name means first-last',
-  personNameOrderForSort({ key: 'name', dir: 'asc' }) === PERSON_NAME_ORDERS.firstLast);
-check('sorting by lastName means last-first',
-  personNameOrderForSort({ key: 'lastName', dir: 'asc' }) === PERSON_NAME_ORDERS.lastFirst);
-check('sorting by an unrelated column means first-last',
-  personNameOrderForSort({ key: 'serial', dir: 'desc' }) === PERSON_NAME_ORDERS.firstLast);
+// ---------- the sort is INDEPENDENT of the display setting ----------
+// Rule 7: the sort must compare the same thing whichever way names are being
+// read. Comparing the DISPLAYED string (which is what the first version of this
+// feature did) means changing a display preference silently reorders the list.
 check('both name sort keys are offered',
   NAME_SORT_KEYS.length === 2 && NAME_SORT_KEYS.some(k => k.key === 'name') && NAME_SORT_KEYS.some(k => k.key === 'lastName'));
+check('the setting offers exactly the two orders',
+  NAME_ORDER_OPTIONS.length === 2
+  && NAME_ORDER_OPTIONS.some(o => o.value === PERSON_NAME_ORDERS.firstLast)
+  && NAME_ORDER_OPTIONS.some(o => o.value === PERSON_NAME_ORDERS.lastFirst));
+check('every option carries a worked example, which is what the menu shows',
+  NAME_ORDER_OPTIONS.every(o => o.label && o.example));
+
+const sortPeople = [
+  { id: 'p1', type: 'User', firstName: 'Zoe', lastName: 'Adams' },
+  { id: 'p2', type: 'User', firstName: 'Adam', lastName: 'Zeller' },
+  { id: 'p3', type: 'Room', name: 'Kitchen' },
+];
+const ordered = (key) => sortPeople
+  .map(a => [a.id, nameSortValue(a, key)])
+  .sort((x, y) => x[1].localeCompare(y[1])).map(x => x[0]).join(',');
+firstLast();
+const byFirstA = ordered('name'), byLastA = ordered('lastName');
+lastFirst();
+const byFirstB = ordered('name'), byLastB = ordered('lastName');
+check('a first-name sort does not move when the display setting changes',
+  byFirstA === byFirstB, `${byFirstA} vs ${byFirstB}`);
+check('a last-name sort does not move either',
+  byLastA === byLastB, `${byLastA} vs ${byLastB}`);
+check('the two sorts genuinely differ', byFirstA !== byLastA, `${byFirstA} / ${byLastA}`);
+check('a first-name sort really is by first name', byFirstA === 'p2,p3,p1', byFirstA);
+check('a last-name sort really is by surname', byLastA === 'p1,p3,p2', byLastA);
+firstLast();
+check('a non-person sorts by what it is called, under either key',
+  nameSortValue(sortPeople[2], 'lastName') === 'Kitchen');
 
 // ---------- adoption ----------
 // Rule 2 and 3.
