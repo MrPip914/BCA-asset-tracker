@@ -347,6 +347,11 @@ with it.
 Option D buys it with an OAuth app and an anonymous endpoint. There is a much cheaper way,
 and it is worth building *with* Option B rather than after it.
 
+**And it has to be the app that notices, because Todoist cannot ask.** Nothing in Todoist
+fires on completion — no custom fields, no completion form, no native rules engine, and the
+official extension platform is invoked by hand and does not run on mobile. See §12, which
+was written after this section and settles it.
+
 **Poll completed tasks and OFFER them, rather than pushing and writing them.** On load (or
 behind a button), the backend calls `GET /tasks/completed/by_completion_date` for the
 tenant's project over a recent window — the endpoint requires `since` and `until`, so a
@@ -435,9 +440,11 @@ as the answer if §5's account question has no good answer.
 
 1. **One Todoist account, or per-user?** (§5) One account is the cheap path and means app
    users see that account's tasks. Everything else in this document assumes one.
-2. **Does a task completed in Todoist need to become a work-history entry?** (§2, §7) This
-   is the biggest cost driver. §7 says "as a one-click prompt"; the alternatives are
-   "by hand, as today" and "automatically, at Option D's price".
+2. **Does a task completed in Todoist need to become a work-history entry?** (§2, §7, §12)
+   This is the biggest cost driver. §7 says "as a one-click prompt"; the alternatives are
+   "by hand, as today" and "automatically, at Option D's price". **Todoist cannot ask for
+   the detail itself** (§12) — so the realistic choices are a description template the task
+   already carries (§12.6), a follow-up task the app creates (§12.5), or nothing.
 3. **Do recurring maintenance schedules stay in the app?** Recommendation: **yes, stay.**
    They are tied to `lastPerformed`, to work history, and to the overdue badge — moving them
    to Todoist would trade a working feature for a dependency. Todoist takes the one-time
@@ -445,3 +452,179 @@ as the answer if §5's account question has no good answer.
 4. **Do other staff need to see or complete these?** If yes, that is a shared Todoist
    project and eventually per-user OAuth, and it should be known before the first token is
    pasted.
+
+---
+
+## 12. Can Todoist itself ask for the detail when a task is completed?
+
+Asked 2026-09-12, as a follow-up to §7: instead of the app noticing a completion after the
+fact, can Todoist prompt for cost/vendor/notes at the moment the checkbox is tapped —
+natively, or via an extension?
+
+**Short answer: no. Nothing in Todoist fires on completion, and the one official
+extensibility platform is invoked by hand and does not run on mobile.** The detail below
+matters because two of the near-misses look like they would work and do not.
+
+### 12.1 There is no native mechanism, in three separate places
+
+- **No custom fields and no completion form.** A task has `content`, `description`,
+  labels, priority, dates, assignee — that is the whole vocabulary (§6). There is nowhere
+  to put a cost or a vendor, and no form shown when a task is closed.
+- **No automation or rules engine.** Todoist has no native "when a task is completed, do
+  X" builder. Everything of that shape in the ecosystem is a third party (§12.4).
+- **No completion event available to anything you host yourself** except the webhook, which
+  is Option D and carries Option D's price (an OAuth app to get a client secret to verify
+  the HMAC, plus an anonymous `doPost` branch).
+
+### 12.2 The obvious zero-cost workaround does not work
+
+The instinct is a **sub-task**: hang "Log cost + vendor in the tracker" under every task, so
+closing the parent leaves the reminder behind.
+
+**It does not survive.** Completing a parent task in Todoist **completes its open
+sub-tasks along with it** — including ones deliberately made uncompletable. So the
+reminder is swept away by the very action meant to trigger it, silently. Worth recording
+because it costs nothing to try and looks like it works until you check whether the
+sub-task is still there.
+
+### 12.3 UI Extensions — the official answer, and why it is not the answer here
+
+Todoist does have a real extension platform (`developer.todoist.com/ui-extensions`), and
+it is more capable than expected:
+
+- **Three surfaces**: task/project **context menu**, **composer** (while adding a task,
+  sub-task or comment), and **settings** (one per integration).
+- **Real forms.** The UI is a "Doist Card" — adaptive-card JSON with text blocks, **input
+  fields**, toggles, columns and action buttons, supporting `Action.Submit`, which posts
+  the user's input back as `{"inputId": "inputValue"}`.
+- **Your own HTTPS endpoint** receives a POST (`extensionType`, `context`, `action`) and
+  answers with a `card` and/or `bridges` (client-side actions: notifications, text
+  insertion, sync triggers). Turn-based: the client renders, the user interacts, it posts
+  again.
+- **Verified by HMAC**, `x-todoist-hmac-sha256` over the whole payload keyed on a
+  verification token from the App Management Console — a real auth mechanism, and notably
+  **no full OAuth client is needed for the extension itself**. An optional short-lived
+  token (`x-todoist-apptoken`) can be requested with scopes for API calls during the
+  extension's lifecycle.
+- **Available on all plan tiers** (Beginner, Pro, Business).
+
+So the shape Eric is imagining is buildable: a task context-menu item — *"Log work in Asset
+Tracker"* — opening a modal with Work type, Vendor, Cost and Notes, submitting straight
+into the Sheet. **Two things disqualify it for this particular job:**
+
+1. **It is invoked manually, never by an event.** It is a menu item, not a hook. Completing
+   a task does not open it, and nothing can make it. So it does not prompt — it is a place
+   to type the detail *if you remember to go there*, which is the same problem §7 already
+   solves without it.
+2. **Web and desktop only. Not mobile** (Todoist says support is planned). Eric works from
+   a phone, and completing a task on a phone is the exact moment in question. This is close
+   to fatal on its own.
+
+And one further cost, found by testing rather than reading: **the app's Apps Script backend
+is a poor integration service.** A POST to `/exec` answers **302** to
+`script.googleusercontent.com/macros/echo?…` — the client has to follow the redirect (and
+switch to GET) to collect the body, which is why the browser works and why a plain
+`curl -L --data …` gets a **405** instead. Whether Todoist's caller does that is unknown
+and would have to be tested; on top of that, Apps Script cold starts take seconds, in front
+of a modal a user is waiting on. Making this robust would mean a small separate service — a
+Worker or a serverless function — which is a new moving part this project has deliberately
+gone without (no build step, no `npm install`, nothing to keep running).
+
+**Where UI Extensions WOULD earn their keep**, if desktop-only is acceptable later: a
+**composer** extension that inserts the correct asset link while a task is being written.
+That fixes the one real weakness of the recommended join key (§4) — a hand-typed or
+hand-pasted link — at the point the task is created, on the machine where most tasks get
+typed. Worth remembering, not worth building first.
+
+### 12.4 What *can* be triggered by a completion (all third parties, all polling)
+
+| Tool | Completion trigger | Can it prompt? |
+|---|---|---|
+| **Zapier** | Yes — "new completed task" | Yes: it can create a Todoist task, or POST a webhook |
+| **Make / IFTTT** | Yes | Same shape as Zapier |
+| **Doify** (Todoist-specific) | Yes — "task completed" | **No.** Its actions are Todoist-internal only — move, reschedule, add/remove label. No webhook, no task creation, no comment |
+
+Two things to note. **Doify is the one that looks purpose-built and cannot do the job** —
+it can label a completed task `@needs-writeup`, which is a Todoist-side filter view and
+nothing the app's own poll doesn't already know. And **none of these are instant**: they
+poll on the order of minutes (5+ typically, longer on free tiers), so even the best case is
+"a few minutes after you tick it", not "as you tick it".
+
+Each also adds an account, a subscription, and a third party holding a Todoist grant —
+against a design whose whole appeal is that it needs no new moving parts.
+
+### 12.5 The mechanism that actually reaches a phone: let the app create a follow-up task
+
+**A Todoist task is Todoist's own prompt mechanism.** It appears in Today, it can carry a
+due date and a reminder, and it works on every platform including the phone. So the prompt
+does not need an extension or a webhook — it needs something to create a task.
+
+**The app can do that itself.** §7's poller already reads completions with a token it
+already holds; creating a task is one more call on the same credential (Option C's write
+op). On finding a completed task with no matching work entry, it creates:
+
+> **Log work: Room 104 mini split** — cost, vendor, notes → *(link to the prefilled Log
+> work form)*
+
+No third party, no OAuth app, no extension, no anonymous endpoint. It reaches the phone
+because it is a Todoist task like any other.
+
+**Three costs to name honestly:**
+
+- **Idempotency needs one durable fact.** "Have I already asked about this completion?"
+  cannot be answered from nothing, and a poller that forgets will recreate the prompt every
+  cycle — the most annoying possible failure. The prompt task itself can hold the completed
+  task's id and be searched for, which covers the normal case; what it does not cover is a
+  prompt Eric completes *without* logging work. That is the point at which §7's optional
+  column — the completed Todoist task id recorded on the work entry it produced, one
+  optional `CHANGE_FIELDS` entry — stops being optional. It is still the cheapest storage
+  this whole evaluation asks for.
+- **The write-up tasks must be excluded from the app's own read filter**, or they show up as
+  open work against the asset and the app is reporting its own reminders back to itself. A
+  dedicated label the filter excludes handles it.
+- **Their completion must not spawn another prompt.** Same label, checked before creating.
+
+### 12.6 The reframe: completion is the wrong moment to ask
+
+Worth saying plainly, because it changes what "good" looks like here.
+
+**The cost and the vendor are usually not known when the task is completed.** The filter is
+changed on Tuesday; the invoice arrives a fortnight later. A modal at the moment of the tap
+would frequently be answered "don't know yet" — and the app already encodes exactly this
+belief: `at` (when the entry was typed) and `performedOn` (when the work happened) are
+deliberately different fields, so that "a job can be written up days later and still be
+dated honestly".
+
+So a hard prompt at completion is not merely unavailable — it is the wrong instrument. The
+two things that fit the real timing:
+
+1. **Put the fields where the eye already is.** When the app creates the task (Option C), it
+   seeds the description with a template:
+
+       Asset: Room 104 Mini Split (BCA0117)
+       <link back to the app>
+       --- fill in when known ---
+       Cost:
+       Vendor:
+       Notes:
+
+   Those lines are **on screen in the task detail view at the moment the checkbox is
+   tapped**, on mobile, with no extension and no moving parts — which is the closest thing
+   to the prompt Eric asked about that actually exists. The poller parses whatever was
+   filled in into the prefilled Log work form; blank lines parse to nothing and lose
+   nothing.
+2. **A follow-up task (§12.5) for the ones that matter** — where a cost is expected — so the
+   reminder survives until the invoice lands, which a modal never could.
+
+### 12.7 Recommendation
+
+**Do not chase a completion-time prompt.** It does not exist natively, the sub-task
+workaround is silently swept away, UI Extensions are manual and desktop-only, and every
+event-driven route is either a third-party poller or Option D's OAuth app.
+
+**Build §12.6's description template with Option C, and §12.5's follow-up task only if the
+template alone proves too easy to ignore.** Both ride the token and the poll that Options B
+and C already need, neither needs a new service, and both work on a phone.
+
+Revisit UI Extensions if and when they reach mobile — at which point a *composer* extension
+that inserts the asset link (§12.3) is the more valuable of the two anyway.
