@@ -448,7 +448,9 @@ as the answer if §5's account question has no good answer.
 3. **Do recurring maintenance schedules stay in the app?** Recommendation: **yes, stay.**
    They are tied to `lastPerformed`, to work history, and to the overdue badge — moving them
    to Todoist would trade a working feature for a dependency. Todoist takes the one-time
-   work the app cannot express.
+   work the app cannot express. **§13 is the follow-on question**: if they stay, how they
+   appear in Todoist and how a completion gets back — answerable, and the only part of this
+   document that asks the app to grow a writer of its own.
 4. **Do other staff need to see or complete these?** If yes, that is a shared Todoist
    project and eventually per-user OAuth, and it should be known before the first token is
    pasted.
@@ -628,3 +630,187 @@ and C already need, neither needs a new service, and both work on a phone.
 
 Revisit UI Extensions if and when they reach mobile — at which point a *composer* extension
 that inserts the asset link (§12.3) is the more valuable of the two anyway.
+
+---
+
+## 13. If schedules stay in the app: how Todoist shows them, and how a completion gets back
+
+Asked 2026-09-12. §11's decision 3 recommends recurring maintenance stays in the app. This
+section is what that costs, because "stays in the app" is not the same as "stays out of
+Todoist" — the whole point is that they show up in the list Eric actually works from.
+
+**Two directions, and the hard part is not Todoist.** Pushing a due schedule into Todoist
+and reading a completion back are both a handful of API calls. What makes this the most
+expensive thing in this document is that **nothing in this app writes anything unless a
+browser asks it to** (§13.5). That is an architectural fact about the app, not a limitation
+of the integration.
+
+### 13.1 The one property that makes this tractable
+
+**A schedule's entire mutable state is one date.** `nextMaintenanceDue()` is
+`lastPerformed + frequencyDays`; `maintenanceStatusOf()` reads nothing else. `task`,
+`frequencyLabel`, `frequencyDays` and `owner` are edited by hand in the app and are not
+things a completion touches.
+
+So the sync surface is **one date per schedule** — not a record with fields that can each
+change on either side. That is what keeps this from being the sync engine §2 refuses, and
+it is the reason this is worth considering at all.
+
+### 13.2 Push: one open one-shot task per schedule — never a Todoist recurring task
+
+**The trap to avoid first.** The obvious move is a Todoist *recurring* task
+(`due_string: "every 30 days"`). It is wrong, and it is wrong in a way that only shows up
+weeks later: **Todoist advances its own due date on completion**, so the app computes
+next-due from `lastPerformed + frequencyDays` and Todoist computes it from its recurrence
+rule. They agree until the first completion logged late, the first manual reschedule, or
+the first frequency change in the app — and then there are two answers to "when is this
+due" with no way to say which is right. Two schedulers is the failure; recurrence is how
+you get one by accident.
+
+**The rule: Todoist holds at most ONE OPEN TASK per schedule, and it is a plain dated
+one-shot. Todoist never computes a date.** When a completion is recorded, the app sets
+`lastPerformed`, derives the next due date, and creates the *next* one-shot. This is
+exactly the shape the app already uses internally — store the completion, derive the due
+date — projected onto Todoist.
+
+What the task carries:
+
+| | |
+|---|---|
+| `content` | `Monthly filter clean — Room 104 Mini Split` |
+| `due_date` | The app's computed next-due |
+| `labels` | One marker label, so the app's read filter can find them and so §12.5's write-up tasks stay distinguishable |
+| `description` | The app deep link, plus the **schedule id** — the join key, same convention as §4 |
+| `priority` | Optional, from `maintenanceStatusOf()` — overdue → p1. Cheap, and it makes Todoist's own sorting useful |
+
+Three details that are not obvious:
+
+- **Nothing new is stored on the app side.** The reconciler already fetches the project's
+  open tasks for the display in §8, so "which task belongs to this schedule" is answered by
+  parsing the schedule id out of descriptions **in memory** — no `todoistTaskId` column, and
+  no reliance on Todoist's `search:` semantics matching description text.
+- **A schedule that has never been performed has no computable due date** — that is what
+  `"never"` means. Create the task with **no due date** rather than inventing one: it sits
+  in the project waiting to be dated, which mirrors the app pinning those to the top of
+  Scheduled. A faked due date would make an unknown look like a commitment.
+- **Never `close` a task to cancel it — `DELETE` it.** Both endpoints exist
+  (`POST /tasks/{id}/close`, `DELETE /tasks/{id}`, both verified). A *closed* task is
+  indistinguishable from a completion to the poller in §13.4, so cancelling a stale
+  occurrence by closing it would write a **false `lastPerformed`** and silently push the
+  next service out by a full interval. This is the single easiest way to corrupt data in
+  this whole design.
+
+The reconciler is then small and idempotent: for each schedule, ensure exactly one open
+task with the right content; delete open tasks whose schedule no longer exists.
+
+### 13.3 The reschedule conflict — the one genuine UX collision
+
+Someone drags the task to next week in Todoist. What should happen?
+
+A strict reconciler snaps it back to the app's date, which reads as the integration
+fighting the user — the worst possible impression, and unfixable from inside Todoist.
+Three resolutions:
+
+| | |
+|---|---|
+| **(a) App wins, snap back** | Correct by the ownership rule, and feels broken |
+| **(b) Todoist wins** | Needs a stored "deferred until" on the schedule — a new column, a backend release, and a second date competing with `lastPerformed + frequencyDays` |
+| **(c) Set the date at creation and never re-date an open task** *(recommended)* | A manual reschedule sticks. The app simply does not know about it |
+
+**(c) is the cheap and honest one.** The app only ever *creates* and *deletes* tasks; it
+never edits a date it has already written. The consequence, which has to be said out loud
+rather than discovered: **the app's next-due and Todoist's date can disagree, and the
+overdue badge uses the app's.** A task deferred in Todoist still reads overdue in the app.
+That is the correct reading — deferring is not doing — but it will look like a bug to
+anyone who does not know the rule.
+
+### 13.4 Pull: getting the completion date back
+
+`GET /tasks/completed/by_completion_date` — **requires `since` and `until`** (verified by
+the API's own missing-argument error), and **accepts `project_id` and `filter_query`** for
+scoping (verified: a junk `project_id` is rejected as a malformed id rather than as an
+unknown parameter). Read the schedule id out of each completed task's description, set
+`lastPerformed` to the completion date.
+
+- **Idempotency is free, and this is the nicest property in the design.** `lastPerformed`
+  **is** the applied-marker: if it is already on or after the completion date, the
+  completion has been applied and is skipped. No cursor, no stored sync state, nothing new
+  in the Sheet — and it converges no matter how many times it runs or in which order.
+- **The date is when it was TICKED, not when the work happened.** Same limitation the app's
+  own completion default has, and editable afterwards for the same reason. Do not dress it
+  up as more than it is.
+- **A completion should write `lastPerformed` and nothing else.** Whether it also becomes a
+  cost-bearing work-history entry is §7's separate prompt — the app's own convention is
+  that a change entry is a deliberate act with a vendor and a cost, and a checkbox tapped
+  on a phone is not that.
+
+### 13.5 The actual hard part: this app has no server-side writer
+
+Every write in this app is a browser posting the whole snapshot through `doPost` with a
+session. There is no component that writes on its own. So "how does the date get updated"
+has three possible answers, and choosing among them is the real decision:
+
+**A — On page load, in the browser.** *(cheapest, no new machinery)* The app polls Todoist
+during load, applies any completions, and `persist()`s.
+
+- **What it costs:** nothing moves until someone opens the app. The overdue badge stays
+  wrong until then — and the *push* direction has the same dependency, so a newly-due
+  schedule does not appear in Todoist until someone loads the page either. For a one-person
+  IT shop who opens the app regularly this may genuinely be enough, and it self-corrects at
+  exactly the moment anyone looks.
+- **Two hazards to respect:** this would be the app's **first automatic `persist()` on
+  load**, which it has never done — and two browsers loading at once both compute the same
+  completion, so the second one's write is rejected and a user gets the blocking "your
+  change wasn't saved" modal **for a change they never made**. So: write only when
+  something actually changed, and treat a conflict on this path as "reload and drop it"
+  rather than as a user-facing failure.
+
+**B — A time-driven Apps Script trigger.** *(hourly; correct while nobody is looking)* Both
+directions run unattended.
+
+- **This is the app's first unattended writer, and that is a bigger step than the Todoist
+  work itself.** It must take the same `LockService` lock as `doPost`, and it must **bump
+  `rev_assets`** so a browser left open does not overwrite what it just wrote — the exact
+  discipline `sheet.mjs` documents and calls "not optional".
+- It also writes **with no session behind it**, in a file where every write rule hangs off
+  `authorizeSession_`. That needs a deliberate decision about what "who did this" means on
+  the resulting audit rows.
+- **Quota is not the constraint.** Consumer accounts get ~90 minutes of trigger runtime per
+  day, 6 minutes per execution, up to 20 triggers per script; intervals go down to a minute
+  (imprecisely). An hourly poll of one project is seconds.
+
+**C — Webhook.** Instant, and **strictly worse than B unless instant matters**: it is still
+a server-side write, so it inherits every concern in B, *and* adds Option D's OAuth app and
+anonymous `doPost` branch on top.
+
+**Recommendation: A to prove the whole loop works, B if being correct between visits turns
+out to matter.** The good news is that A and B share all the logic — the same reconcile
+function, called from a different place — so starting with A does not throw work away.
+
+### 13.6 What stays broken, stated plainly
+
+- **`owner` cannot become a Todoist assignee.** It is freeform text; an assignee is a
+  collaborator id. Mapping them is the same unsolved question as §5's multi-user problem,
+  so leave assignment out.
+- **There is a gap after every completion**: the next occurrence's task does not exist until
+  the next writer pass — under an hour with a trigger, "until someone opens the app"
+  without one.
+- **Todoist becomes a place a schedule APPEARS, not a place it can be EDITED.** Frequency,
+  task name and owner still change in the app only. Editing the task's text in Todoist
+  changes nothing and will be silently reverted the next time the task is recreated —
+  which is a reasonable rule and a surprising one.
+- **Deleting the marker label or moving the task out of the project** takes it out of
+  the reconciler's view, so the app will create a second one. Same class of fragility as
+  §4's editable description, and the same acceptable failure direction: a duplicate task,
+  not lost data.
+
+### 13.7 Recommendation
+
+**Viable, and it is the second-biggest thing in this document after the account question.**
+The design that works is narrow and worth stating in one sentence: *the app owns the
+schedule and every date; Todoist holds one dated one-shot task per schedule as a view;
+completion flows back as a single date whose own value makes the operation idempotent.*
+
+Do it **after** Options B and C are working, not with them. It needs the read token, the
+write op, the project convention and the description-parsing that those already build — and
+it is the only part of this evaluation that asks the app to grow a writer of its own.
