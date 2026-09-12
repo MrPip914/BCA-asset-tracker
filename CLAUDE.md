@@ -1534,17 +1534,42 @@ rediscover them:
   mirroring a relationship the other side already records — it's just a second copy to keep
   in sync, and the one that goes stale.
 
-**A person's name is TWO FIELDS, and the display order follows the SORT (backend v36).**
+**A person's name is TWO FIELDS, and how it reads is a SETTING (backend v36).**
 `firstName`/`lastName` are the source of truth for what a person type is called; the single
-`name` string everything displays is COMPOSED at render by `nameOf()`, in whichever order
-the list is currently sorted by. Sorting the Name column by *Last name* is what makes every
-person read "Smith, John" — app-wide and at once, not just in the sorted column.
+`name` string everything displays is COMPOSED at render by `nameOf()`, in the order chosen
+by **Name format** in the account menu — "John Smith" or "Smith, John", app-wide and at
+once: the list, the pickers, the assignment chips, the detail header, the audit sentences.
 
 - **This is option C of three, chosen knowing it was the expensive one.** Composing on save
   and keeping `name` stored (option B) would have been a much smaller diff and left every
-  reader untouched. It cannot express this feature: a stored string has one spelling, and
-  the whole request was that the spelling follow the sort. So the parts had to become the
-  truth and every site that read a person's `name` had to learn to ask `nameOf()`.
+  reader untouched. It cannot express this feature: a stored string has ONE spelling, and
+  the whole point is that a person reads differently depending on how you have asked to see
+  them. So the parts had to become the truth and every site that read a person's `name` had
+  to learn to ask `nameOf()`.
+- **THE NAME COLUMN HAS ONE SORT — A→Z / Z→A, like every other column — and the SETTING is
+  what makes it a surname sort.** It compares `nameOf()`, the name as written, so under
+  "Last, First" the string already begins with the surname. One control, and the list is
+  always ordered the way it reads.
+- **Two earlier shapes were tried, and both are worth keeping written down**, because each
+  looked right and the second is the one that would get reinvented:
+  1. **The sort chose the FORMAT** — four options in the Name column's popup, where picking
+     *Last name* also flipped every name to "Smith, John". Rejected on sight. It conflates
+     how you want a list ORDERED with how you want it READ.
+  2. **The two were split apart** — the setting spelled names, and the column kept both sort
+     keys comparing a canonical string, so a sort could not be moved by a preference. That
+     fixed (1) and bought something subtler: the Name column became the only column in the
+     app whose header did not simply sort itself, and the list could be ordered in a way its
+     own rows did not read.
+  The one sort that follows the setting is what both were reaching for. **The cost, stated
+  plainly:** you cannot sort by surname while reading "John Smith" — that is one choice now,
+  not two, and Eric's call was that a single control is worth more than that combination.
+- **So the sort VALUE is spelled**, which is why `filtered` takes `personNameOrder` as a
+  dependency. It is also why the Name column cannot use the generic `x[key]` sort path: a
+  person has no stored `name` to compare.
+- **The setting is PER-DEVICE `localStorage`, the same class as column visibility** — it
+  changes nothing that is stored, so it needs no backend version, no deploy, and cannot lose
+  a race with someone else's save. Namespaced by tenant like every other key here. Offered
+  to viewers and in Sandbox, since it is about reading rather than editing.
 - **`name` is EXCLUDED for a person type** (User's `excludedFields`), so no form offers a
   third field competing with the two parts. Two render sites therefore read `nameOf()`
   BEFORE the `fieldAppliesTo` gate rather than after it — the list's Name cell and the
@@ -1559,9 +1584,10 @@ person read "Smith, John" — app-wide and at once, not just in the sorted colum
   apply to it.** `nameOf` is called from ~100 sites, most of them plain functions, so
   threading a format argument is the same behaviour-free diff `TYPE_SETTINGS` exists to
   avoid. The difference: `TYPE_SETTINGS` is safe only because every write happens to be
-  followed by a `setState`, while `PERSON_NAME_ORDER` is derived FROM state that already
-  re-renders — the list's own `sortConfig` — and is applied at the top of `AssetTracker`'s
-  render body, before any child renders. A rendered frame cannot read a stale order.
+  followed by a `setState`, while `PERSON_NAME_ORDER` is mirrored FROM React state that
+  re-renders by definition — the Name format setting — and is applied at the top of
+  `AssetTracker`'s render body, before any child renders. A rendered frame cannot read a
+  stale order.
   **What it DOES require: a `useMemo` that composes a name must take the order as a
   dependency**, or it hands back the previous spelling until its real inputs change.
 - **`personMatchKey` is order-independent, and that is a data-loss guard rather than
@@ -1583,31 +1609,29 @@ person read "Smith, John" — app-wide and at once, not just in the sorted colum
 - **`personType` in the registry is what makes a type a person**, alongside `locked` and
   `modules` — never a `type === "User"` test. A second person-shaped type gets the
   composition, the adoption skip and the sort by declaring one key.
-- **The two sort options live in the Name column's own popup**, which is why
-  `ColumnHeaderCell`/`ColumnFilterModal` grew an optional `sortKeys`: a header cell's
-  click-to-cycle cannot express four states (two keys x two directions). A column with no
-  filter options now opens the same modal for its sort alone. The `lastName` sort key is
-  deliberately the Last Name column's own key, so the two controls cannot contradict each
-  other.
+- **`ColumnHeaderCell` and `ColumnFilterModal` are UNTOUCHED by this feature**, and that is
+  the tell that the final shape is the right one. Shape (2) had grown them an optional
+  `sortKeys` so one column could offer several sorts; collapsing to a single sort put both
+  back byte-for-byte, so the Name header is the app's ordinary click-to-cycle control and
+  there is no per-column sort configuration to maintain.
 - **`splitPersonName` reads "Smith, John" as well as "John Smith", and that is required
   rather than generous.** The app now WRITES the comma spelling, so a name captured off the
-  screen while sorted by surname — a user filter's value, a bulk-reassign target, an audit
-  row — comes back through the splitter, and splitting it on the last space makes the
-  surname "Smith," and matches nobody. Found by driving it: a live User filter emptied the
-  list the moment the sort was flipped underneath it.
+  screen under that setting — a user filter's value, a bulk-reassign target, an audit row —
+  comes back through the splitter, and splitting it on the last space makes the surname
+  "Smith," and matches nobody. Found by driving it: a live User filter emptied the list the
+  moment the format was changed underneath it.
 - **The search matches both spellings**, because a person's name is not stored as one
   string and the raw field scan would never match a full name typed in.
 - Covered by `test-frontend-personname.js`, which runs the real registry and the real
-  helpers -- including that the sort does not move when the display setting does, which is
-  the regression that would quietly restore the rejected design. Whether the setting
-  survives a reload is browser state and was checked by driving the page. Verified by
-  mutation that seven silent failures fail it: reading `name` ahead of
+  helpers, including that composed names ORDER correctly under both settings. **The sort
+  wiring itself is one call site inside a memo and is browser-verified, not unit-tested** —
+  as is whether the setting survives a reload. Verified by
+  mutation that six silent failures fail it: reading `name` ahead of
   the parts, an adoption that rewrites `name` (caught by a fixture row with irregular
   whitespace — recomposing tidies it, which is how "left alone" is told apart from "wrote
   back something that matches"), an adoption that declines only when BOTH parts are set,
   `personMatchKey` composing in the live order, an unconditional comma in the composition,
-  `adoptLegacyNames` ceasing to skip people, and a name sort that compares the displayed
-  string again.
+  and `adoptLegacyNames` ceasing to skip people.
 - **`MOCK_SNAPSHOT` now carries People, and it is the fixture's first id-mode data.** It was
   wholly pre-v28 name mode, which meant no User assets existed to render at all — so this
   feature was unexercisable in Sandbox, the only place it can be tried without a deploy.

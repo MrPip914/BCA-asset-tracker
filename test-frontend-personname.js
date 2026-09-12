@@ -78,10 +78,8 @@ const code = [
   grabFn('composePersonName'),
   grabFn('personNameVariants'),
   grabFn('personMatchKey'),
-  grabBlock('const NAME_SORT_KEYS = [', '];'),
   grabBlock('const NAME_ORDER_OPTIONS = [', '];'),
   grabFn('nameOf'),
-  grabFn('nameSortValue'),
   grabFn('adoptPersonNames'),
   // adoptLegacyNames needs the suggestion machinery it calls; all real.
   grabBlock('const FIXED_IN_PLACE_TYPES', ');'),
@@ -94,8 +92,8 @@ const code = [
   grabFn('adoptLegacyNames'),
   `module.exports = {
      nameOf, adoptPersonNames, adoptLegacyNames, splitPersonName, personMatchKey,
-     personNameVariants, composePersonName, nameSortValue, applyPersonNameOrder,
-     PERSON_NAME_ORDERS, NAME_SORT_KEYS, NAME_ORDER_OPTIONS, fieldAppliesTo,
+     personNameVariants, composePersonName, applyPersonNameOrder,
+     PERSON_NAME_ORDERS, NAME_ORDER_OPTIONS, fieldAppliesTo,
    };`,
 ].join('\n');
 
@@ -108,8 +106,8 @@ try {
 }
 const {
   nameOf, adoptPersonNames, adoptLegacyNames, splitPersonName, personMatchKey,
-  personNameVariants, composePersonName, nameSortValue, applyPersonNameOrder,
-  PERSON_NAME_ORDERS, NAME_SORT_KEYS, NAME_ORDER_OPTIONS, fieldAppliesTo,
+  personNameVariants, composePersonName, applyPersonNameOrder,
+  PERSON_NAME_ORDERS, NAME_ORDER_OPTIONS, fieldAppliesTo,
 } = mod.exports;
 
 let pass = 0, fail = 0;
@@ -178,12 +176,12 @@ const nameless = { id: 'u3', type: 'User', tag: 'BCA0110' };
 check('a person with nothing at all still falls through to the old rungs',
   nameOf(nameless) === 'BCA0110', nameOf(nameless));
 
-// ---------- the sort is INDEPENDENT of the display setting ----------
-// Rule 7: the sort must compare the same thing whichever way names are being
-// read. Comparing the DISPLAYED string (which is what the first version of this
-// feature did) means changing a display preference silently reorders the list.
-check('both name sort keys are offered',
-  NAME_SORT_KEYS.length === 2 && NAME_SORT_KEYS.some(k => k.key === 'name') && NAME_SORT_KEYS.some(k => k.key === 'lastName'));
+// ---------- the setting is what orders the list ----------
+// Rule 7: the Name column has ONE sort, and it compares the name as written, so
+// the setting decides whether A->Z means by first name or by surname. The list
+// is sorted the way it reads; there is no second control. This is what the
+// helpers below have to make true -- the sort itself is `nameOf` at one call
+// site, so what is worth testing is that the composed strings order correctly.
 check('the setting offers exactly the two orders',
   NAME_ORDER_OPTIONS.length === 2
   && NAME_ORDER_OPTIONS.some(o => o.value === PERSON_NAME_ORDERS.firstLast)
@@ -196,23 +194,24 @@ const sortPeople = [
   { id: 'p2', type: 'User', firstName: 'Adam', lastName: 'Zeller' },
   { id: 'p3', type: 'Room', name: 'Kitchen' },
 ];
-const ordered = (key) => sortPeople
-  .map(a => [a.id, nameSortValue(a, key)])
+// Exactly what the list does: sort on nameOf, which is the displayed string.
+const ordered = () => sortPeople
+  .map(a => [a.id, nameOf(a)])
   .sort((x, y) => x[1].localeCompare(y[1])).map(x => x[0]).join(',');
 firstLast();
-const byFirstA = ordered('name'), byLastA = ordered('lastName');
+const byFirst = ordered();
 lastFirst();
-const byFirstB = ordered('name'), byLastB = ordered('lastName');
-check('a first-name sort does not move when the display setting changes',
-  byFirstA === byFirstB, `${byFirstA} vs ${byFirstB}`);
-check('a last-name sort does not move either',
-  byLastA === byLastB, `${byLastA} vs ${byLastB}`);
-check('the two sorts genuinely differ', byFirstA !== byLastA, `${byFirstA} / ${byLastA}`);
-check('a first-name sort really is by first name', byFirstA === 'p2,p3,p1', byFirstA);
-check('a last-name sort really is by surname', byLastA === 'p1,p3,p2', byLastA);
+const byLast = ordered();
+check('A->Z under "First Last" orders by first name', byFirst === 'p2,p3,p1', byFirst);
+check('A->Z under "Last, First" orders by surname', byLast === 'p1,p3,p2', byLast);
+check('so the setting genuinely changes the order', byFirst !== byLast);
+// The non-person is the control in both: "Kitchen" sorts between Adam/Adams and
+// Zeller/Zoe either way, which is only true because it keeps its own name.
 firstLast();
-check('a non-person sorts by what it is called, under either key',
-  nameSortValue(sortPeople[2], 'lastName') === 'Kitchen');
+check('a non-person sorts by what it is called, whatever the setting',
+  nameOf(sortPeople[2]) === 'Kitchen');
+lastFirst();
+check('...and still does in the other order', nameOf(sortPeople[2]) === 'Kitchen');
 
 // ---------- adoption ----------
 // Rule 2 and 3.

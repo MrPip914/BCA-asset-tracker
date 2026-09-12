@@ -56,7 +56,7 @@ import {
   Monitor, Phone, Tv, Camera, HardDrive, HelpCircle, Columns3, Lock, Filter, Check, DoorOpen, Download,
   Wrench, UserCircle, Settings, History, Archive, ArchiveRestore, Building2, Package, Copy, Zap, Repeat, ArrowLeftRight, Menu,
   FlaskConical, RotateCcw, AlertTriangle, Loader2, Printer, MapPin, QrCode, Info, LogOut, Users,
-  ImagePlus, Eye, EyeOff, Home, ArrowUpDown,
+  ImagePlus, Eye, EyeOff, Home,
 } from "lucide-react";
 
 // Starter managed peripherals/users/bulk-item-type lists — empty until the school
@@ -753,33 +753,22 @@ function personMatchKey(nameOrParts) {
   return `${firstName} ${lastName}`.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-// The Name column sorts two ways. It does NOT decide how names are WRITTEN —
-// that is a setting in the account menu (see NAME_ORDER_STORAGE_KEY). How you
-// want a list ORDERED and how you want it READ are two questions, and only one
-// of them is a preference: sorting by surname while reading "John Smith" is an
-// ordinary thing to want, and the first version of this feature could not
-// express it because the sort was the format control.
+// THE NAME COLUMN HAS ONE SORT, A -> Z / Z -> A like every other column, and it
+// sorts on the name AS WRITTEN — so the account menu's Name format setting is
+// what decides whether that means by first name or by surname. Under
+// "Last, First" the string being compared already begins with the surname.
 //
-// The KEY doubles as the Last Name column's own key on purpose: sorting that
-// column means the same thing, so the two controls cannot contradict each other.
-const NAME_SORT_KEYS = [
-  { key: "name", label: "First name" },
-  { key: "lastName", label: "Last name" },
-];
-// Keyed by column, carrying the column's own label so the modal can title
-// itself without being handed the column list as well.
-const COLUMN_SORT_KEYS = { name: { label: "Name", keys: NAME_SORT_KEYS } };
-
-// What a name sort COMPARES: canonical, never the displayed string. A sort has
-// to mean the same thing whichever way names are being read, or changing a
-// display preference silently reorders the list under someone. A non-person has
-// no parts, so under either key it sorts by what it is actually called.
-function nameSortValue(asset, key, typesList) {
-  if (!isPersonType(asset?.type)) return nameOf(asset, typesList);
-  const { firstName, lastName } = personNamePartsOf(asset);
-  return composePersonName(firstName, lastName,
-    key === "lastName" ? PERSON_NAME_ORDERS.lastFirst : PERSON_NAME_ORDERS.firstLast);
-}
+// Two earlier shapes were tried and both are worth remembering. First the sort
+// chose the FORMAT (four options in this column's popup), which conflated
+// ordering with spelling. Then the two were split apart, which fixed that and
+// bought a second, subtler problem: a column offering "First name" and
+// "Last name" is the only column in the app whose header does not simply sort
+// itself, and it left the list orderable in a way its own rows did not read.
+// One sort that follows the setting is what both of those were reaching for:
+// the list is ordered the way it is written, and there is one control.
+//
+// The knock-on is that the sort VALUE is spelled, so `filtered` depends on the
+// setting -- see the note on its dependency list.
 
 // The setting's two choices, with a worked example rather than a name for the
 // format: "Last, First" is not what most people call it, but everyone can read
@@ -1032,8 +1021,8 @@ const DEFAULT_COLUMNS = [
   // appear nowhere else. HIDDEN by default in the list: Name already shows them
   // composed, and a column that is empty on every device, room and building
   // would be two mostly-blank columns bought for nothing. Sorting by surname
-  // does NOT need them shown — that is the Name column's own sort (see
-  // NAME_SORT_KEYS) — so switching them on is for reading or exporting the raw
+  // does NOT need them shown -- set Name format to "Last, First" and sort the
+  // Name column -- so switching these on is for reading or exporting the raw
   // parts, not for ordering the list.
   { key: "firstName", label: "First Name", width: 140 },
   { key: "lastName", label: "Last Name", width: 140 },
@@ -2150,7 +2139,7 @@ const FRONTEND_SCRIPT_VERSION = "v36";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-12.2";
+const APP_VERSION = "2026-09-12.3";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -4416,12 +4405,15 @@ function AssetTracker() {
       // then one blank or one `24-27"` silently drops the whole column back to
       // string ordering mid-list, which reads as the sort being broken.
       const col = columns.find(c => c.key === key);
-      const isNameSort = NAME_SORT_KEYS.some(k => k.key === key);
+      const isNameSort = key === "name";
       const kind = key === "parent" || isNameSort ? "text" : columnDataType(col);
       const sortValue = x => {
-        // Canonical for both name sorts, so the order does not move when the
-        // display setting does -- see nameSortValue.
-        if (isNameSort) return nameSortValue(x, key, typesList);
+        // The name AS WRITTEN, so the order follows the Name format setting:
+        // under "Last, First" the composed string starts with the surname and
+        // an A -> Z sort is a sort by surname, with no second control for it.
+        // A person has no stored `name` to read here, which is the other half
+        // of why this cannot be the generic x[key] path below.
+        if (isNameSort) return nameOf(x, typesList);
         // Sorting the Path column on the full outermost-first string groups a
         // building's contents together and orders rooms within it, which is what
         // sorting by location is for. Sorting on the immediate parent's name
@@ -4449,11 +4441,10 @@ function AssetTracker() {
       });
     }
     return list;
-    // No personNameOrder dependency, deliberately: nothing this memo produces is
-    // spelled. The search matches both spellings and the sort is canonical, so
-    // the filtered, ordered list is the same list either way -- only the CELLS
-    // that render it are composed, and those re-render on their own.
-  }, [assets, query, scopeId, typeFilter, userFilter, statusFilter, sortConfig, columns, typesList]);
+    // personNameOrder IS a dependency: the name sort compares the composed
+    // string, so changing the setting genuinely reorders this list. (The
+    // search does not need it -- that matches both spellings either way.)
+  }, [assets, query, scopeId, typeFilter, userFilter, statusFilter, sortConfig, columns, typesList, personNameOrder]);
 
   // Which of the filtered assets the bulk "Move filtered to room" action can
   // actually touch: only types that are allowed to sit inside a Room. Asking the
@@ -10392,7 +10383,6 @@ function AssetTracker() {
                     filterConfigs={filterConfigs}
                     sortConfig={sortConfig}
                     setSortConfig={setSortConfig}
-                    sortKeys={COLUMN_SORT_KEYS}
                     onOpenFilter={setActiveFilterCol}
                   />
                 );
@@ -10667,7 +10657,6 @@ function AssetTracker() {
         filterConfigs={filterConfigs}
         sortConfig={sortConfig}
         setSortConfig={setSortConfig}
-        sortKeys={COLUMN_SORT_KEYS}
         onClose={() => setActiveFilterCol(null)}
       />
       <ColumnFilterModal
@@ -12507,22 +12496,14 @@ function DevBuildBadge() {
   );
 }
 
-// `sortKeys` is optional and every existing caller omits it. A column that
-// declares one sorts SEVERAL ways (Name: by first name or by last), so its
-// header opens the modal to choose rather than cycling asc/desc in place —
-// there is no gesture on a header cell that can express four states.
-function ColumnHeaderCell({ label, colKey, sticky, filterConfigs, sortConfig, setSortConfig, sortKeys, onOpenFilter }) {
+function ColumnHeaderCell({ label, colKey, sticky, filterConfigs, sortConfig, setSortConfig, onOpenFilter }) {
   const cfg = filterConfigs[colKey];
-  const sortSpec = (sortKeys && sortKeys[colKey]) || null;
-  const keys = sortSpec && sortSpec.keys;
   const isFiltered = cfg && cfg.value !== cfg.options[0];
-  // Sorted "here" includes sorting by any of this column's other keys — the Name
-  // column is what a last-name sort belongs to, so that is where the arrow goes.
-  const sortedHere = !!sortConfig && (sortConfig.key === colKey || !!(keys && keys.some(k => k.key === sortConfig.key)));
+  const sortedHere = sortConfig && sortConfig.key === colKey;
   const sortArrow = sortedHere ? (sortConfig.dir === "asc" ? " ↑" : " ↓") : "";
   return (
     <div style={{ position: sticky ? "sticky" : "static", left: sticky ? 0 : undefined, background: C.brandDark, zIndex: sticky ? 2 : 1, display: "flex", alignItems: "center" }}>
-      {cfg || keys ? (
+      {cfg ? (
         <button
           onClick={() => onOpenFilter(colKey)}
           style={{
@@ -12533,10 +12514,7 @@ function ColumnHeaderCell({ label, colKey, sticky, filterConfigs, sortConfig, se
           }}
         >
           {label}{sortArrow}
-          {/* The funnel means "there are options behind this". A sort-only
-              column gets the sort glyph instead, or the header would promise a
-              filter it does not have. */}
-          {cfg ? <Filter size={11} style={{ flexShrink: 0 }} /> : <ArrowUpDown size={11} style={{ flexShrink: 0 }} />}
+          <Filter size={11} style={{ flexShrink: 0 }} />
         </button>
       ) : (
         <button
@@ -12574,17 +12552,12 @@ function ColumnHeaderCell({ label, colKey, sticky, filterConfigs, sortConfig, se
 // optional cfg.labelForOption for columns whose stored value isn't the display
 // text, e.g. Maintenance's Status filter storing "due-soon" but showing "Due
 // soon") plus Sort A→Z / Z→A for that column.
-function ColumnFilterModal({ activeCol, filterConfigs, sortConfig, setSortConfig, sortKeys, onClose }) {
+function ColumnFilterModal({ activeCol, filterConfigs, sortConfig, setSortConfig, onClose }) {
   // Resolved WITHOUT returning early, because the label filter below is a hook:
   // an early return above it would make that hook conditional, and React counts
   // hooks per render — opening the modal after it had rendered as null would
   // throw. The bail-out is one line further down instead.
   const cfg = (activeCol && filterConfigs[activeCol]) || null;
-  // A column may open this modal for its SORT alone (Name, which sorts by first
-  // or last name). Then there is no option list and no filter — just the sort
-  // section, which every column already had at the bottom.
-  const sortSpec = (activeCol && sortKeys && sortKeys[activeCol]) || null;
-  const sortRows = (sortSpec && sortSpec.keys) || [{ key: activeCol, label: "" }];
   const getLabel = (cfg && cfg.labelForOption) || (o => o);
   // Filtered by label when the config supplies a vocabulary, untouched
   // otherwise — the same optional shape SelectionModal takes, so the Type column
@@ -12592,7 +12565,7 @@ function ColumnFilterModal({ activeCol, filterConfigs, sortConfig, setSortConfig
   const { options: shown, bar } = useLabelFilter(
     cfg ? cfg.options : [], cfg && cfg.labelOptions, cfg && cfg.labelsForOption
   );
-  if (!cfg && !sortSpec) return null;
+  if (!cfg) return null;
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
       {/* The CARD is a flex column that never scrolls; only the option list
@@ -12603,12 +12576,11 @@ function ColumnFilterModal({ activeCol, filterConfigs, sortConfig, setSortConfig
       <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth:300, maxHeight: "80vh", display: "flex", flexDirection: "column", minHeight: 0 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexShrink: 0 }}>
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>
-            {cfg ? `Filter by ${cfg.label}` : `Sort by ${sortSpec.label}`}
+            Filter by {cfg.label}
           </div>
           <button onClick={onClose} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
         </div>
-        {cfg && bar}
-        {cfg && (
+        {bar}
         <div style={{ display: "flex", flexDirection: "column", gap: 2, overflowY: "auto", minHeight: 0, flex: 1 }}>
           {shown.map(opt => {
             const isSelected = opt === cfg.value;
@@ -12631,32 +12603,19 @@ function ColumnFilterModal({ activeCol, filterConfigs, sortConfig, setSortConfig
             <div style={{ fontSize: 13, color: C.empty, padding: "8px 2px" }}>Nothing carries that label.</div>
           )}
         </div>
-        )}
-        {/* One A→Z / Z→A pair per sort key. A column with a single key (every
-            column but Name) renders exactly the row it always had, unlabelled,
-            so nothing about it changed. */}
-        <div style={{ borderTop: cfg ? `1px solid ${C.border}` : "none", marginTop: cfg ? 12 : 0, paddingTop: cfg ? 12 : 0, display: "flex", flexDirection: "column", gap: 8, flexShrink: 0 }}>
-          {sortRows.map(row => (
-            <div key={row.key}>
-              {row.label && (
-                <div style={{ fontSize: 12, color: C.muted, marginBottom: 4, fontWeight: 600 }}>{row.label}</div>
-              )}
-              <div style={{ display: "flex", gap: 6 }}>
-                {[["asc", "A → Z"], ["desc", "Z → A"]].map(([dir, lbl]) => {
-                  const active = sortConfig && sortConfig.key === row.key && sortConfig.dir === dir;
-                  return (
-                    <button
-                      key={dir}
-                      onClick={() => { setSortConfig(active ? null : { key: row.key, dir }); onClose(); }}
-                      style={{ flex: 1, padding: "7px 10px", background: active ? C.brand : "transparent", color: active ? "#fff" : C.ink, border: `1.5px solid ${active ? C.brand : C.border}`, borderRadius: 10, fontSize: 13, fontWeight: 600 }}
-                    >
-                      {row.label ? lbl : `Sort ${lbl}`}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
+        <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 12, paddingTop: 12, display: "flex", gap: 6, flexShrink: 0 }}>
+          {[["asc", "Sort A → Z"], ["desc", "Sort Z → A"]].map(([dir, lbl]) => {
+            const active = sortConfig && sortConfig.key === activeCol && sortConfig.dir === dir;
+            return (
+              <button
+                key={dir}
+                onClick={() => { setSortConfig(active ? null : { key: activeCol, dir }); onClose(); }}
+                style={{ flex: 1, padding: "7px 10px", background: active ? C.brand : "transparent", color: active ? "#fff" : C.ink, border: `1.5px solid ${active ? C.brand : C.border}`, borderRadius: 10, fontSize: 13, fontWeight: 600 }}
+              >
+                {lbl}
+              </button>
+            );
+          })}
         </div>
       </div>
     </div>
