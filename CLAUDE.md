@@ -807,13 +807,23 @@ onboard one.
   another tab's content next time that tab needs real changes, rather than a dedicated
   refactor pass.
 - **Main-page toolbar is intentionally minimal, on both top-level tabs**: on Assets,
-  Columns/Export/Add Asset live in a hamburger menu (`showToolbarMenu`) anchored top-right of
+  Columns/Export live in a hamburger menu (`showToolbarMenu`) anchored top-right of
   the Assets/Maintenance tab row rather than as always-visible buttons; on Maintenance, the
   same hamburger (shared state — only one tab's content is mounted at a time, so no conflict)
-  holds just Export, since there's no per-tab Columns or an "Add" equivalent there. On both,
+  holds just Export, since there's no per-tab Columns there. On both,
   the search box collapses to an icon (`searchOpen`) and expands on click — bound to `query` on
   Assets, `maintenanceQuery` on Maintenance — staying expanded whenever its query is non-empty
-  so an active search is never hidden. Neither tab has a "Showing X of Y" count line: on Assets,
+  so an active search is never hidden.
+  - **Add asset came back OUT of that menu** (2026-09-12) and is a right-aligned button below
+    the breadcrumb, the same shape and position as Maintenance's Add task / Log work. The
+    hamburger is for things you reach for occasionally; the one thing you come to a tab to
+    CREATE is not one of them, and having it hidden on Assets while Maintenance showed its
+    two openers made the same class of action live in two different places. The menu now
+    holds no everyday write at all — Columns and Export are both viewer-safe reads, which is
+    why the `canEdit` gate moved out with the button.
+  - **It is hidden while the add form is open**, because `startAdd()` reseeds the draft: a
+    second press with the form already open would silently discard whatever was half-typed
+    in it. The form has its own header and × to close, so nothing is lost by hiding it. Neither tab has a "Showing X of Y" count line: on Assets,
   the one thing that lived there besides the count (clearing an active sort) moved to a small ×
   chip next to the sort arrow on the sorted column's own header; on Maintenance, the overdue
   count that lived there is now a standalone badge above the table.
@@ -1699,8 +1709,7 @@ collapse and got its own phase.
   is reversible and an un-migrated row still resolves. `personNamesOf()` reads ids first and
   falls back to it; **nothing outside `personLabelsOf`/`personNamesOf` should read either
   field.**
-- **The conversion is offered in the LIST TOOLBAR menu** (next to Columns/Export/Add
-  asset), shown only while `unconvertedUserNames` is non-empty so it surfaces itself once
+- **The conversion is offered in the LIST TOOLBAR menu** (next to Columns/Export), shown only while `unconvertedUserNames` is non-empty so it surfaces itself once
   and then retires. It first lived only behind the gear on the User field — which is inside
   the *edit form* — i.e. a one-time setup action reachable only by opening an asset and
   clicking Edit, which nobody had a reason to do. It is still in the users manager too.
