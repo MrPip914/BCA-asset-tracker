@@ -16,23 +16,6 @@ version that fixed them.
 
 ## Open
 
-### Sorting the Type column orders user-created types by their raw UUID
-**Found:** 2026-09-12, while fixing the User column's sort.
-**Needs a deploy:** no — `index.html` only.
-**Confirmed:** by reading `sortValue`; not reproduced on screen, since it needs a
-user-created type and the effect is only visible among several of them.
-
-The Type cell renders `typeNameOf(a.type, typesList)` — the type's NAME — while the sort
-falls through to the generic `x[key]` path and compares `a.type`, which is the type's ID.
-For a built-in type the id IS its original name, so the two agree and the column looks
-correct; a type created at runtime has a generated UUID, so it sorts by that instead of by
-what the cell shows. It lands in an arbitrary position with no way to tell why.
-
-Same class as the User column bug fixed the same day, and the fix is the same shape: give
-`type` its own branch in `sortValue` returning `typeNameOf(x.type, typesList)`. Left alone
-here only because it is a different column from the one that was reported, and it bites
-just the school with a user-created type (CLAUDE.md notes there is at least one).
-
 ### An add-form draft keeps its Asset ID after switching to a type that has none
 **Found:** 2026-09-12, while adding a person to test the first/last name work.
 **Needs a deploy:** no — `index.html` only.
@@ -309,6 +292,29 @@ user is least sure whether their click worked.
 ---
 
 ## Fixed
+
+### Sorting the Type column ordered user-created types by their raw UUID — fixed 2026-09-12
+**Found:** 2026-09-12, while fixing the User column's sort — the same mismatch, one column over.
+**Needed a deploy:** no — `index.html` only.
+**Confirmed:** in a browser against Sandbox, once the fixture carried a user-created type at
+all (it did not, which is why nothing had ever shown this). Before the fix "Access Point"
+sorted between "Electrical Panel" and "Mini Split", where `f47ac10b…` falls alphabetically.
+
+The Type cell renders `typeNameOf(a.type, typesList)` — the type's NAME — while the sort fell
+through to the generic `x[key]` path and compared `a.type`, the type's ID. **A built-in type's
+id IS its original name**, so the two strings are identical for everything the app ships with
+and the column looked correct forever; only a type created at runtime, whose id is a generated
+UUID, sorted somewhere its name does not explain.
+
+Fixed by giving `type` its own branch in `sortValue`, the same shape as `name`, `person` and
+`parent`. `test-frontend-personname.js` now reads `sortValue` as source and fails if any of
+those four columns loses its branch.
+
+**The fixture is the other half of the fix.** `MOCK_SNAPSHOT.typesList` was entirely legacy
+strings, so every id equalled its name and Sandbox could not express the bug. It now carries
+one user-created type (a UUID id named "Access Point") with an asset using it — the
+`personIds` lesson: a fixture whose shape is uniform where production's is mixed hides exactly
+what it exists to catch.
 
 ### A newly added maintenance schedule had no `id` until the next load — fixed 2026-09-11
 **Found:** 2026-09-11, while wiring photos onto maintenance items — the photo needed an

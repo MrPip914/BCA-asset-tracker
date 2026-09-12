@@ -2139,7 +2139,7 @@ const FRONTEND_SCRIPT_VERSION = "v36";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-12.4";
+const APP_VERSION = "2026-09-12.5";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -2563,9 +2563,17 @@ const MOCK_SNAPSHOT = {
   // adoptLegacyTypesList rather than falling through to DEFAULT_TYPES, which is
   // already in the new shape and so proves nothing. Same reasoning as the stored
   // column config below.
+  // MIXED on purpose, two ways. The plain strings are the pre-id shape, adopted
+  // by adoptLegacyTypesList into { id, name } where the NAME becomes the id --
+  // which is why every built-in type's id reads like a name. "Access Point" is a
+  // USER-CREATED type: a generated UUID id with a name that has nothing to do
+  // with it, which is the only shape that can tell "sorting the Type column"
+  // apart from "sorting the stored ids". A fixture of built-ins alone cannot,
+  // since for those the two strings are identical -- the personIds lesson again.
   typesList: [
     "Computer", "Monitor", "Phone", "TV", "DocuCam", "Stream Deck", "Mini Split",
     "Condenser", "Room", "Building", "Campus", "Bulk Item", "Electrical Panel", "Other",
+    { id: "f47ac10b-58cc-4372-a567-0e02b2c3d479", name: "Access Point" },
   ],
   // A STORED label list that is deliberately INCOMPLETE and RE-ORDERED: it omits
   // "People" (a shipped label) and puts Facilities before Equipment. So the
@@ -2676,6 +2684,10 @@ const MOCK_SNAPSHOT = {
     { label: "BCA0015", type: "Stream Deck", parentId: "BCR0008", brand: "Elgato", model: "Stream Deck MK.2", serial: "MOCK-SD-001", person: "Aaron Cantrell", personIds: ["BCA0110"], notes: "", status: "Active" },
     { label: "BCA0024", type: "TV", parentId: "BCR0011", brand: "Samsung", model: "55\" QLED", serial: "MOCK-TV-001", person: "Denise Sloan", personIds: ["BCA0113"], notes: "", status: "Active" },
     { label: "BCA0054", type: "DocuCam", parentId: "BCR0020", brand: "IPEVO", model: "V4K", serial: "MOCK-DC-001", person: "Dillon Jacobsma", personIds: ["27b4f0a9-6c31-4d8e-95af-1e7208cb3d56"], notes: "", status: "Active" },
+    // The user-created type in use. Its stored `type` is a UUID and its cell
+    // reads "Access Point", so a Type sort that compared the raw value would
+    // file it under "f4..." -- the whole point of it being here.
+    { label: "BCA0060", type: "f47ac10b-58cc-4372-a567-0e02b2c3d479", parentId: "BCR0020", brand: "Ubiquiti", model: "U6-Pro", serial: "MOCK-AP-001", notes: "Ceiling mount above the door.", status: "Active" },
     // No `name` of its own, so it exercises the one naming rule left: a Bulk Item
     // is called by its sub-type. The stale room/roomId/itemName this used to carry
     // went with the columns themselves in v25 — there is no legacy shape left for
@@ -4411,7 +4423,7 @@ function AssetTracker() {
       // "Cantrell, Aaron" while the order ran Aaron, Denise, Dillon -- surnames
       // on screen, first names in the ordering.
       const isNameSort = key === "name" || key === "person";
-      const kind = key === "parent" || isNameSort ? "text" : columnDataType(col);
+      const kind = key === "parent" || key === "type" || isNameSort ? "text" : columnDataType(col);
       const sortValue = x => {
         // The name AS WRITTEN, so the order follows the Name format setting:
         // under "Last, First" the composed string starts with the surname and
@@ -4424,6 +4436,11 @@ function AssetTracker() {
         // slash-joined copy written FROM the ids, so it is both a shadow of what
         // is on screen and permanently spelled first-name-first.
         if (key === "person") return personTextOf(x, assets);
+        // The type's NAME, which is what the cell shows. The stored value is the
+        // type's ID, and a built-in type's id IS its original name -- so reading
+        // it raw looked correct for every shipped type and put a user-created
+        // one, whose id is a generated UUID, at an arbitrary place in the list.
+        if (key === "type") return typeNameOf(x.type, typesList);
         // Sorting the Path column on the full outermost-first string groups a
         // building's contents together and orders rooms within it, which is what
         // sorting by location is for. Sorting on the immediate parent's name

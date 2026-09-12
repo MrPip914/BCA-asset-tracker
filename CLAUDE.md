@@ -1573,8 +1573,14 @@ once: the list, the pickers, the assignment chips, the detail header, the audit 
   slash-joined copy written FROM the ids, so it was both a shadow of what was on screen and
   permanently spelled first-name-first: no setting could ever have moved it. The mismatch has
   now happened twice (`name` when people gained parts, `person` when the setting shipped), so
-  `test-frontend-personname.js` reads `sortValue` as SOURCE and fails if `name`, `person` or
-  `parent` loses its branch — a column falling through to `x[key]` is the regression.
+  `test-frontend-personname.js` reads `sortValue` as SOURCE and fails if `name`, `person`,
+  `parent` or `type` loses its branch — a column falling through to `x[key]` is the regression.
+- **`type` was the same bug in its quietest form** (fixed 2026-09-12). Its cell shows
+  `typeNameOf` while the sort read the stored id, and **a built-in type's id IS its original
+  name** — so the column was correct for everything shipped and wrong only for a type created
+  at runtime, which sorts by a UUID nothing on screen explains. `MOCK_SNAPSHOT` now carries
+  one such type ("Access Point"), because a fixture of built-ins alone cannot tell the two
+  strings apart and so could never have shown this.
 - **The setting is PER-DEVICE `localStorage`, the same class as column visibility** — it
   changes nothing that is stored, so it needs no backend version, no deploy, and cannot lose
   a race with someone else's save. Namespaced by tenant like every other key here. Offered

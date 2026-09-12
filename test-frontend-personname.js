@@ -336,7 +336,7 @@ const sortValueSrc = (() => {
   }
   throw new Error('sortValue not closed');
 })();
-for (const key of ['name', 'person', 'parent']) {
+for (const key of ['name', 'person', 'parent', 'type']) {
   check(`the list sort resolves the "${key}" column rather than reading it raw`,
     sortValueSrc.includes(`key === "${key}"`),
     'no branch for it in sortValue -- it would fall through to x[key]');
