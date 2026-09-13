@@ -1214,3 +1214,108 @@ with the task.
 
 And **use `duration` for a time estimate if one is ever wanted.** It is typed, it is real,
 and it is the only numeric field on a task that means what it says.
+
+---
+
+## 17. Searching the asset list from inside Todoist and linking it to a task
+
+Asked 2026-09-12. **Yes — a composer UI extension does exactly this, and it is the single
+best fit for UI Extensions anywhere in this document** (§12.3 and §14.2 both flagged it
+while rejecting extensions for other jobs). But it needs a service to host it, and **three
+cheaper options solve most of the same problem on mobile, where the extension cannot go.**
+
+### 17.1 How the extension would work
+
+The mechanism is confirmed: **`composer.append`** is a Todoist *bridge* — a client-side
+action the extension asks the client to perform — with the shape
+`{"bridgeActionType": "composer.append", "text": "…"}`. An extension may return several
+bridges and the client runs them in order.
+
+So the flow is:
+
+1. Start adding a task in Todoist (web or desktop), open the **composer extensions menu**,
+   pick *BCA Asset Tracker*.
+2. The extension service returns a Doist Card with a **text input** and a submit action.
+3. Type "room 104" → submit → the service searches the app's assets → returns a card
+   listing the matches, each row an `Action.Submit` carrying that asset's id.
+4. Pick one → the service answers with `composer.append`, inserting
+   `Room 104 Mini Split (BCA0117) <deep link>` into the task being composed.
+5. Todoist creates the task normally, with the join key already correct.
+
+**It fixes the weakest part of the §4 design** — a link that otherwise has to be typed or
+pasted by hand — at the exact moment the task is written.
+
+**Two properties make it simpler than the other extension ideas:**
+
+- **It needs no Todoist API scopes.** It never calls Todoist; it reads the app's own data
+  and hands back text. Registration is still required, but there is no token to hold, no
+  OAuth grant, and nothing that can write to the account. (Contrast the published
+  lorem-ipsum example, which needs `task:add` because it actually creates tasks.)
+- **It is read-only against the app**, so the authorization question stays small: the worst
+  a compromised request could do is read asset names.
+
+### 17.2 What it costs
+
+- **A real HTTPS service, which this project does not have.** Apps Script is a poor host
+  for it (§14.2: `/exec` answers a POST with a 302 the caller must follow and convert to
+  GET, plus multi-second cold starts in front of a search box). So this means a Worker or a
+  serverless function — the new moving part this repo has deliberately avoided. Inbound
+  requests are verified by HMAC-SHA256 against a verification token from the App Management
+  Console.
+- **Registration in the App Management Console** — create an app, add a UI extension (name,
+  type, context, data-exchange endpoint URL, minimum card version), then *Install for me*.
+  No public listing or review needed for personal use. Local development needs a tunnel
+  (ngrok, Cloudflare Tunnel), which is itself a statement about the hosting requirement.
+- **Web and desktop only. Not mobile.**
+
+**Two things to confirm before building**, neither verified here: whether the *task*
+composer (as opposed to the comment composer) accepts this extension type — Todoist's help
+text says composer extensions cover "tasks, sub-tasks, or comments", but the published
+example uses the comment composer — and whether the request `context` carries anything
+identifying enough to authorize against `authUsers`, if authorization is ever wanted.
+
+### 17.3 The mobile gap matters far less here — and that changes the answer
+
+In §12 the mobile limitation was close to fatal, because the moment in question *was* the
+phone. Here it is not, for one reason: **the failure is graceful.** A task created without a
+link is still a perfectly good task — it simply does not appear under an asset until it is
+linked. Nothing is lost and nothing is wrong; the link can be added later.
+
+That opens up three options the extension does not compete with so much as complete:
+
+**(a) Just type the tag.** Make the reconciler accept a bare asset tag or id appearing
+anywhere in `content` as well as `description`. Type *"Replace filter BCA0117"* on a phone
+and the app links it. **This costs one regex, needs no service, and works on every
+platform** — and it is the same id-or-tag resolution the app already performs permanently
+for `?asset=` links and printed stickers. Its only weakness is that you have to know the
+tag.
+
+**(b) An "Unlinked tasks" list in the app.** Everything in the project with no resolvable
+asset shows in one place, each row with the app's **existing** asset picker
+(`AssetPickerField` over `HierarchyBrowserModal`, built for the work dialogs). Pick the
+asset and the app writes the link into the task's description through the write op it
+already needs. **Zero new infrastructure, works for tasks created anywhere, on any
+platform, and reuses a component that exists.**
+
+**(c) The app creates the task** (Option C). The link is correct by construction. This is
+already the primary path — the extension is only for tasks that *start* in Todoist.
+
+### 17.4 What the extension uniquely buys
+
+Stated precisely, so it can be weighed against a Worker: **searching by name, at the moment
+of writing, without knowing the tag.** (a) needs the tag; (b) defers the linking to later;
+(c) means starting in the app. Only the extension lets someone type "room 104" inside
+Todoist and get the right asset. That is a real convenience and it is not nothing — it is
+just not worth a new service until (a) and (b) have been tried.
+
+### 17.5 Recommendation
+
+**Build (a) and (b) first — they are cheap, they work on a phone, and together they cover
+the whole problem.** (a) is a regex on a parser that has to exist anyway; (b) is one list
+view over a picker the app already has, and it doubles as the place where a broken or
+hand-edited link gets repaired.
+
+**Then build the composer extension if searching by name inside Todoist still feels
+missing.** It is the one UI Extension use case in this document that is worth the hosting —
+and the one to revisit first if extensions reach mobile, since at that point it beats (a)
+outright.
