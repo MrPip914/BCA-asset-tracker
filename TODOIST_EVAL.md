@@ -444,7 +444,9 @@ as the answer if §5's account question has no good answer.
    This is the biggest cost driver. §7 says "as a one-click prompt"; the alternatives are
    "by hand, as today" and "automatically, at Option D's price". **Todoist cannot ask for
    the detail itself** (§12) — so the realistic choices are a description template the task
-   already carries (§12.6), a follow-up task the app creates (§12.5), or nothing.
+   already carries (§12.6), a follow-up task the app creates (§12.5), or nothing. **§14 is
+   the stronger answer**: the app can refuse to complete a task without the detail, and
+   Todoist can be made to offer no checkbox of its own.
 3. **Do recurring maintenance schedules stay in the app?** Recommendation: **yes, stay.**
    They are tied to `lastPerformed`, to work history, and to the overdue badge — moving them
    to Todoist would trade a working feature for a dependency. Todoist takes the one-time
@@ -631,6 +633,10 @@ and C already need, neither needs a new service, and both work on a phone.
 Revisit UI Extensions if and when they reach mobile — at which point a *composer* extension
 that inserts the asset link (§12.3) is the more valuable of the two anyway.
 
+**§14 answers this from the other side and supersedes the framing above.** Todoist cannot
+be made to ask — but the app can, if the app owns the button, and Todoist supports removing
+its own checkbox so that it is the only button. Read §14 before acting on this section.
+
 ---
 
 ## 13. If schedules stay in the app: how Todoist shows them, and how a completion gets back
@@ -814,3 +820,176 @@ completion flows back as a single date whose own value makes the operation idemp
 Do it **after** Options B and C are working, not with them. It needs the read token, the
 write op, the project convention and the description-parsing that those already build — and
 it is the only part of this evaluation that asks the app to grow a writer of its own.
+
+---
+
+## 14. A wrapper: showing Todoist items in the app, and gating completion on detail
+
+Asked 2026-09-12: wrap Todoist, show its items inside the app, and make the app **require
+the detail before a task can be completed**.
+
+**The short version: the gate is possible and is the best idea in this document — but it
+only binds where the checkbox is, so the real question is whether to take Todoist's own
+checkbox away.** There is a supported way to do exactly that (§14.4), and it turns out to
+simplify the rest of the design rather than complicate it.
+
+### 14.1 Two different ideas wearing one word
+
+"Wrapper" can mean either of these, and they have nothing in common:
+
+- **Embed Todoist's own UI** in an iframe inside the app. (§14.2 — no.)
+- **Render Todoist's DATA with the app's own components.** (§14.3 — yes, and it is already
+  most of Options B and C.)
+
+### 14.2 Embedding Todoist in an iframe: not blocked, and still wrong
+
+Worth checking rather than assuming, and the check is interesting: **`app.todoist.com` sends
+no `X-Frame-Options` and no CSP `frame-ancestors` directive** (verified — its CSP carries
+`frame-src`, which governs what Todoist may embed, not who may embed Todoist). So the
+browser would not refuse to frame it.
+
+It is still the wrong answer, for three reasons that get worse in order:
+
+1. **A cross-origin iframe is opaque.** The app cannot read its DOM, cannot intercept a
+   click, and cannot be told a task was completed. So it delivers *a picture of Todoist that
+   cannot be instrumented* — which fails the one thing this whole idea is for.
+2. **It probably cannot even sign in.** An embedded `app.todoist.com` is a third-party
+   context; Safari blocks third-party cookies outright and Chrome restricts them. The
+   likeliest outcome on a phone is a login screen that can never be got past.
+3. **If it did work it would be actively harmful.** Todoist's own checkbox would sit
+   *inside* the app's chrome, bypassing every rule the app is trying to enforce — and
+   looking, to a user, like the app endorsed that bypass. Two navigation models and two
+   visual languages in one screen is the cosmetic half of the same problem.
+
+### 14.3 Rendering the data is the real wrapper — and it is where the gate becomes possible
+
+The app fetches the tenant's open tasks (Option B), groups them by asset (§4), and renders
+them with its own components — the Tasks sub-tab from §8, using the same
+`ColumnHeaderCell` / `ColumnFilterModal` pattern every other table here uses, and the same
+`HierarchyNav` scope. Nothing new architecturally; it is the display half of Options B and
+C, given a full page instead of a strip.
+
+**And because the app draws the row, the app owns the button on it.** That is the whole
+mechanism:
+
+> The app's Complete control opens the Log work form, applies whatever "required" rule is
+> configured, and only calls `POST /tasks/{id}/close` once the form is valid.
+
+There is nothing clever here and nothing to negotiate with Todoist about. A gate is simply
+a button that refuses. **Gating is not an API capability — it is a consequence of owning
+the surface.**
+
+### 14.4 The gate binds only where the checkbox is — so remove the checkbox
+
+The obvious hole: Todoist's own apps still show a checkbox, so anyone can tick the task on
+their phone and walk straight past the form. That makes the gate **best-effort**, which is
+the same posture as the app's existing note that hiding edit controls "is a courtesy, not
+the control" — except here there is no server-side backstop, because Todoist will happily
+accept a completion from its own client and is right to.
+
+**Unless the task has no checkbox.** Todoist supports **uncompletable tasks**: a task whose
+content begins with `* ` (asterisk, space) renders **without the completion circle**. It
+still takes dates, comments, attachments and assignees — it simply cannot be ticked. It is
+documented, it is available on every plan tier (Beginner, Pro, Business), and it is
+reversible by removing the prefix.
+
+That gives two coherent postures, and they are a genuine choice rather than a
+better-and-worse:
+
+| | **Soft gate** — ordinary tasks | **Hard gate** — `* ` uncompletable tasks |
+|---|---|---|
+| Complete in Todoist | Yes, one tap, anywhere | **Impossible — no checkbox** |
+| Complete in the app | Gated on the form | The only way |
+| Detail enforced? | Best-effort; bypassed by a tap | **Actually enforced** |
+| Bypass handling | Poller catches it → §12.5 follow-up prompt | Nothing to catch |
+| Todoist's role | The doing surface | A list and a reminder surface |
+
+**The consequence that makes the hard gate cheaper than it looks:** under it, *completion
+only ever happens in the app*, so **the entire pull direction disappears**. No polling
+completed tasks, no `since`/`until` windows, no idempotency question, no reconciling a
+completion date written by someone else — §13.4 and most of §12 simply stop being needed.
+The app records the completion it just took, then **deletes** the Todoist task (which is
+the only way to clear an uncompletable one, and is already the rule from §13.2). One
+direction of data flow instead of two is a large simplification, and it arrives by
+subtraction.
+
+Two caveats on the mechanism, both worth verifying before relying on it:
+
+- **Creating one via the API is a content-string convention** — post `content: "* Monthly
+  filter clean — Room 104"` — which should work because the prefix is parsed by the client,
+  but Todoist's help page does not document API behaviour, so test it before building on it.
+- **The `* ` is visible in the task title.** Cosmetic, and there is no way around it.
+- A completed parent still completes an uncompletable **sub-task** (the §12.2 finding
+  again), so these should be top-level tasks in their own project, never sub-tasks.
+
+### 14.5 What the hard gate costs, stated plainly
+
+**You give up ticking a task on your phone.** That was half the appeal of using Todoist at
+all. What you get back is that a completion can never exist without a cost, a vendor and a
+note — which is the entire reason for the integration, since the durable record is the
+app's whole contribution (§2).
+
+**It is reversible and it can be per-task**, which is what makes it safe to try: the prefix
+is a string. Routine work that will never carry a cost can stay ordinary and tickable;
+anything where a vendor or an invoice is expected goes out uncompletable. That is probably
+the right long-term shape, and it means the soft and hard postures are not a fork in the
+road — the app can choose per task when it creates it.
+
+### 14.6 Four implementation rules that are not optional
+
+- **Log the work entry in the app FIRST, then close or delete the Todoist task.** If the
+  second call fails you are left with a correct record and a task still sitting in Todoist —
+  visible, and fixed by one tap. The reverse order leaves a task that is gone and work that
+  was never recorded, which is the data-loss direction. **Same principle as photos** —
+  "upload the bytes first, write the reference second, so a rejected save strands bytes
+  rather than leaving a row whose image 404s" — met again with different artifacts.
+- **Never block `loadData()` on Todoist.** Apps Script cold starts take seconds, and the
+  token lives behind the backend (§5), so every list fetch is a round trip. Render the app's
+  own data immediately and fill the task rows in asynchronously; cache the list in
+  `CacheService` per tenant (§6). A task list that takes four seconds to appear will be read
+  as the app being slow, not as Todoist being slow.
+- **The required-detail rule is a NEW rule surface — do not overload `requiredFields`.**
+  That mechanism is per *type*, about *asset* fields, and enforced in the asset form. "What
+  must be filled in to complete a task" is a different question about a different record,
+  and folding it into the same setting would make both harder to reason about.
+- **Editor-gated in the backend**, like every other write. Viewers see the list and cannot
+  complete anything.
+
+### 14.7 The question this raises about the whole plan
+
+Stacking the sections is worth doing once, because the picture changes: if the app renders
+the task list (§14.3), owns every schedule and date (§13), and owns completion (§14.4) —
+**what is Todoist still doing?**
+
+The honest answer is that it keeps four things the app will not have:
+
+1. **Capture from anywhere** — share sheet, voice, email-to-project, offline.
+2. **Notifications and reminders.** The app has none and would need real push infrastructure
+   to get them.
+3. **Natural-language dates**, which are better than anything this app will grow.
+4. **One Today view across his whole life**, not a school-only list. An in-app task page
+   cannot do this by construction.
+
+Those are real and they are most of why anyone uses Todoist. But it is worth saying the
+price out loud: under the full wrapper, **Option 0 (§3 — build one-time tasks natively) is
+doing most of the same work**, and the integration is buying items 1–4 rather than buying
+task tracking. That is a fair trade and quite possibly the right one — it is just a
+different trade than "Todoist saves us building a to-do list", and it should be chosen
+knowingly.
+
+### 14.8 Recommendation
+
+**Build the wrapper view; make the gate per-task rather than global; start soft.**
+
+1. Render the tasks in the app (§14.3) — it is the display half of Option B, and it is what
+   makes every later decision reversible, since the gate is just a button on a row the app
+   already draws.
+2. **Ship the gate soft first.** Ordinary tickable tasks, an in-app "Complete with details"
+   that enforces the form, and §12.5's follow-up prompt catching anything ticked in Todoist.
+   Nothing is lost if the gate is bypassed, and you learn how often it actually is.
+3. **Turn on `* ` uncompletable for the tasks where a cost is expected** once that answer is
+   known. It is a per-task string, so it needs no new decision infrastructure — and it takes
+   the completion-sync problem off the table for exactly those tasks.
+
+**Do not iframe Todoist.** It is the one option here that costs real work and cannot do the
+thing it was suggested for.
