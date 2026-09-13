@@ -898,6 +898,9 @@ There is nothing clever here and nothing to negotiate with Todoist about. A gate
 a button that refuses. **Gating is not an API capability — it is a consequence of owning
 the surface.**
 
+**§15 covers what "render them with the app's own components" resolves to** — the exact
+fields that come back, and the fork between rendering live and mirroring into the Sheet.
+
 ### 14.4 The gate binds only where the checkbox is — so remove the checkbox
 
 The obvious hole: Todoist's own apps still show a checkbox, so anyone can tick the task on
@@ -1012,3 +1015,114 @@ knowingly.
 
 **Do not iframe Todoist.** It is the one option here that costs real work and cannot do the
 thing it was suggested for.
+
+---
+
+## 15. Reproducing Todoist items in the app: render, don't mirror
+
+Asked 2026-09-12, as the affirmative half of §14: read the items over the API and reproduce
+them in the app. **Yes — this is the recommendation, and §14.3 is where the gate comes
+from.** This section covers what "reproduce" actually resolves to, because the word hides a
+fork that decides the whole design.
+
+### 15.1 The fork: a live render, or a stored mirror
+
+**Render** — fetch on load, hold in React state, draw the rows, store nothing in the Sheet.
+**Mirror** — copy the tasks into the Sheet as rows so they live alongside the assets.
+
+Mirroring is genuinely tempting, and it is worth writing down what it would buy before
+rejecting it: the tasks would appear in the **Excel export**, they could feed the
+**overdue badge**, they would survive **Todoist being down**, they would work **offline**,
+and there would be exactly **one place to query** rather than two.
+
+**It is still the wrong call, and it is the same rule as §2.** A mirror is a second copy of
+state whose master is elsewhere, so:
+
+- **It needs a writer to stay fresh** — which is §13.5's problem, i.e. the app's first
+  unattended writer, dragged in here for a display convenience rather than for a feature.
+- **It goes stale between refreshes, and a stale task list is worse than none.** A live
+  render that fails shows an error; a mirror that is a day old shows four tasks that were
+  finished yesterday, confidently, with no way for the reader to tell.
+- **It looks editable and is not.** A row rendered in the app's own table invites an edit,
+  and the next sync either overwrites it silently or doesn't — and then the two disagree
+  permanently. This is the specific failure mode the whole "one owner per fact" rule exists
+  to prevent.
+
+**The one place a snapshot is legitimate is the Excel export**, and even there it is an
+**export-time fetch**, not a stored mirror — the export already builds resolved columns of
+its own rather than walking `columns`, so pulling the current tasks at the moment the button
+is pressed fits the pattern the export already follows.
+
+### 15.2 What actually comes back
+
+Taken from Todoist's own OpenAPI document rather than from prose (`ItemSyncView`), so this
+is the real field list:
+
+| Field | Notes |
+|---|---|
+| `id`, `project_id`, `section_id`, `parent_id` | Identity and placement |
+| `content` | The title |
+| `description` | **Where the asset link and join key live** (§4) |
+| `labels` | Array — the marker label the read filter selects on |
+| `due` | Object or null — `{ date, string, is_recurring, lang }` |
+| `deadline` | Object or null — **separate from `due`** |
+| `duration` | `{ amount, unit }` |
+| `priority` | 1–4 |
+| `checked`, `completed_at`, `completed_by_uid` | Exactly what §13.4's pull needs |
+| `responsible_uid`, `added_by_uid`, `assigned_by_uid` | Assignment, as **uids** |
+| `added_at`, `updated_at` | |
+| `note_count` | Number of comments |
+| `child_order`, `day_order`, `order_key` | Ordering |
+| `is_deleted`, `is_collapsed`, `completed_count`, `postponed_count` | |
+
+**Four of these are more useful than they look:**
+
+- **`postponed_count`** — how many times the task has been pushed. This is the honest answer
+  to §13.3's reschedule collision: rather than the app fighting a deferral or silently
+  ignoring it, it can **show** that a task has been postponed six times. A schedule quietly
+  drifting is exactly the thing an asset tracker should surface, and Todoist has been
+  counting it all along.
+- **`deadline` is not `due`.** Todoist separates "when I plan to do this" from "when it is
+  actually due". Maintenance occurrences should use `due`; `deadline` is the right home for
+  a genuine hard date — an inspection, a warranty expiry — instead of overloading `due` and
+  losing the distinction.
+- **`note_count`** — a comment indicator on the row without a second API call for comments
+  nobody asked to read.
+- **`updated_at`** — cheap change detection, so a re-render can tell what actually moved
+  rather than diffing whole objects.
+
+**`completed_by_uid` means attribution is possible but not yet available**: it is a Todoist
+uid, and mapping one to a `User` asset is the same unsolved question as §5's multi-user
+problem and §13.6's assignee note. Three places now want that mapping, which is worth
+noticing — it is the thing that would unlock all three at once.
+
+### 15.3 What cannot be reproduced, and why that is fine
+
+A reproduced item is a **projection, deliberately read-mostly**. These stay in Todoist:
+
+- **Natural-language dates.** "first Tuesday of every month" is parsed by Todoist and the
+  app will never do it as well.
+- **Reminders and notifications.** The app has none and would need real push infrastructure.
+- **Todoist's own recurrence engine** — which §13.2 argues the app should not use anyway.
+- **One list across his whole life.** School tasks sitting beside everything else is
+  something an in-app page cannot do by construction.
+
+So the app's copy shows the task, groups it by asset, and offers exactly one action the
+app is better placed to own: **completing it with the detail attached** (§14.3). Editing
+text, moving dates and setting reminders stay where they are good. That division is what
+keeps this a wrapper rather than a fork of Todoist.
+
+### 15.4 Rules that carry over
+
+Nothing new — these are already established and apply unchanged: one filter call per load,
+cached per tenant (§6); never block `loadData()` on it (§14.6); the write path is
+editor-gated in the backend (§5); Sandbox makes no network call at all (§5); and the
+grouping key is parsed from `description` in memory with nothing stored (§4).
+
+### 15.5 Recommendation
+
+**Render live; store nothing; treat the rows as read-mostly with one write action.** Mirror
+into the Sheet only if an offline task list ever becomes a real requirement — and treat that
+as its own decision with §13.5's writer problem attached, not as an implementation detail of
+this one. Surface `postponed_count` when the rows are built; it is free, and it turns the
+one unresolved UX collision in §13 into information instead of a conflict.
