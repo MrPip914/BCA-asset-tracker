@@ -1126,3 +1126,91 @@ into the Sheet only if an offline task list ever becomes a real requirement — 
 as its own decision with §13.5's writer problem attached, not as an implementation detail of
 this one. Surface `postponed_count` when the rows are built; it is free, and it turns the
 one unresolved UX collision in §13 into information instead of a conflict.
+
+---
+
+## 16. Metadata on a task — a cost estimate that lives with the work
+
+Asked 2026-09-12: can something like a cost estimate be attached to a Todoist task, so the
+information travels with the task rather than sitting only in the app?
+
+### 16.1 There are no custom fields. This is now checked, not inferred
+
+Todoist's full OpenAPI document was searched: **`custom_field`, `customField`,
+`custom_data` and `user_data` appear zero times.** `extra_data` exists on exactly one
+schema — `ActivityEvents`, the read-only activity log — and `metadata` never appears as a
+property name at all (its occurrences are prose about OAuth metadata documents). The task
+object is the fixed field list in §15.2 and nothing else.
+
+**So metadata has to ride a field that already exists.** There are five real options and
+they are not interchangeable.
+
+### 16.2 Where it can actually live
+
+| Home | Good for | The catch |
+|---|---|---|
+| **`description`** *(recommended)* | Any number of arbitrary values — `Est: $450`, `Quote ref`, `PO#` | Free text: unvalidated, user-editable, invisible to Todoist's own filters |
+| **`labels`** | **Filtering and grouping inside Todoist** — the one thing description text cannot do | A global per-account namespace, so one label per exact value explodes the list (§4's rejected idea). Only works **bucketed**: `@est-under-100`, `@est-100-500`, `@est-over-500` |
+| **Comments** | A quote PDF, a photo of a nameplate — real entities with `file_attachment` and `posted_at` | **Not in the task payload** — only `note_count` is. Reading them costs one API call *per task*, which rules them out for anything shown in a list |
+| **`duration`** | A **labour-time** estimate — the one genuinely typed numeric field on a task (`{amount, unit}`) | It means time. Putting money in it makes Todoist render a 450-minute block on the calendar. Do not abuse it |
+| **`section_id`** | Coarse **workflow state** — *Awaiting quote* → *Approved* → *Scheduled* | Not per-task data, but it is the only "metadata" Todoist renders as first-class draggable UI |
+
+`priority` (1–4) and `deadline` are already meaningful in their own right; overloading
+either buys nothing and costs the meaning they have.
+
+### 16.3 The split that actually resolves this: an estimate is not a cost
+
+The reason this question has a clean answer rather than a workaround is that **an estimate
+and an actual are different facts with different owners** — the same rule as everywhere else
+in this document.
+
+- **The estimate is PLANNING data.** It is used while deciding what to do, in the place
+  where that deciding happens. It is provisional by nature, so "free text someone can edit"
+  is not a defect — it is an accurate representation of what an estimate is. And crucially:
+  **it has no home in the app today at all.** `changes` is past tense and `maintenanceItems`
+  is a recurrence; there is no "planned work" record anywhere. So Todoist holding it is not
+  a workaround around a missing feature — it is the only place it can live without a schema
+  change.
+- **The actual is a RECORD.** It belongs in the app's work entry, in a real field, validated
+  and exported. That is the app's entire contribution (§2), and nothing about this changes
+  it.
+
+**And the estimate earns its keep at exactly the moment the two meet.** §14.3's gated
+completion form reads the estimate out of the description and **pre-fills the Cost field**
+with it, for a human to confirm or correct. That turns the metadata from something merely
+stored into the default answer in the form — which is also what makes it worth keeping
+accurate, since anything stale gets corrected the next time the task is completed.
+
+So the answer is: **yes, put the estimate on the task; no, do not try to make Todoist hold
+the actual.**
+
+### 16.4 Format rules, if a block is written into `description`
+
+- **`Key: value` lines under a marker line**, tolerant on the way back in: a missing key is
+  absent, an unparseable value is ignored and reported as "couldn't read the estimate"
+  rather than silently treated as zero. Never let a bad parse write a number.
+- **The app must preserve everything it did not write.** When it rewrites a description it
+  must copy through unknown lines untouched — the same rule `adminWriteConfig_` follows for
+  config keys it was not asked to change, and `doPost` for `authUsers`. Met twice in this
+  project already; a description is the third place, and the failure is the same: someone's
+  own notes deleted by a write that only meant to update one value.
+- **Parsed values are proposals, never facts.** Nothing derived from a description should
+  reach a cost total, an export, or a report without a human having confirmed it in the
+  form. The app's own data is what those read.
+- **`content` has a declared 15,000-character limit**; the spec declares no limit for
+  `description`, so do not design against a specific number.
+
+### 16.5 Recommendation
+
+**Put the estimate in `description`, as `Key: value` lines in the same block that already
+carries the asset link** (§4, §12.6) — one block, one parser, one thing to preserve. **Add
+a bucketed `@est-…` label only if sorting by size inside Todoist turns out to matter**; it
+is the one capability the description genuinely cannot provide, and it costs three labels
+rather than three hundred.
+
+Use **comments for attachments** — a quote PDF belongs there and nowhere else — but never
+for a value the app wants to display in a list, because `note_count` is all that arrives
+with the task.
+
+And **use `duration` for a time estimate if one is ever wanted.** It is typed, it is real,
+and it is the only numeric field on a task that means what it says.
