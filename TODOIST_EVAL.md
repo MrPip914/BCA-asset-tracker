@@ -843,16 +843,35 @@ simplify the rest of the design rather than complicate it.
 
 ### 14.2 Embedding Todoist in an iframe: not blocked, and still wrong
 
-Worth checking rather than assuming, and the check is interesting: **`app.todoist.com` sends
-no `X-Frame-Options` and no CSP `frame-ancestors` directive** (verified — its CSP carries
-`frame-src`, which governs what Todoist may embed, not who may embed Todoist). So the
-browser would not refuse to frame it.
+**What was actually tested, and what was not** — because the difference matters here.
 
-It is still the wrong answer, for three reasons that get worse in order:
+*Tested:* `app.todoist.com` sends **no `X-Frame-Options` header and no CSP
+`frame-ancestors` directive**. Those two are the only mechanisms a site has for refusing
+to be framed, so on the header evidence a browser would not block the embed. (Its CSP does
+carry `frame-src`, which governs what Todoist may embed — not who may embed Todoist. Easy
+to misread as the same thing.)
 
-1. **A cross-origin iframe is opaque.** The app cannot read its DOM, cannot intercept a
-   click, and cannot be told a task was completed. So it delivers *a picture of Todoist that
-   cannot be instrumented* — which fails the one thing this whole idea is for.
+*Not tested:* **whether it actually renders in a frame.** Driving a real Chromium at it was
+attempted and failed for an environment reason, not a Todoist one — this sandbox's proxy
+passes no browser traffic at all, and `example.com` fails identically. So one real
+possibility remains open: **frame-busting JavaScript** (`if (window.top !== window.self)
+…`) is common in SPAs, would not appear in any header, and would defeat the embed on its
+own. Anyone acting on this section should spend the two minutes to check it in a browser
+first.
+
+*Also not tested:* whether an embedded Todoist could **sign in**. That needs a real Todoist
+session in a real browser, and is a genuine doubt rather than a formality (below).
+
+**None of that changes the answer, because the decisive objection needs no test at all.**
+Three reasons, in increasing order of severity:
+
+1. **A cross-origin iframe is opaque, and this is the one that settles it.** The
+   same-origin policy — not a Todoist decision, and not something a header could relax —
+   means the host page cannot read the frame's DOM, cannot intercept a click, cannot inject
+   a form, and cannot be told a task was completed. `contentDocument` is simply `null`.
+   **So embedding can at best deliver a picture of Todoist that cannot be instrumented,
+   which fails the exact thing it was suggested for.** Whether it renders is therefore
+   moot: rendering was never the requirement.
 2. **It probably cannot even sign in.** An embedded `app.todoist.com` is a third-party
    context; Safari blocks third-party cookies outright and Chrome restricts them. The
    likeliest outcome on a phone is a login screen that can never be got past.
