@@ -16,6 +16,46 @@ version that fixed them.
 
 ## Open
 
+### The admin import hardcodes the BCA prefix, so a new tenant's counter starts at 1
+**Found:** 2026-09-15, while working out the asset prefix for a second client.
+**Needs a deploy:** YES — `AssetTrackerSync.gs` (`adminParseAssetCsv_`), so a version bump
+and a deploy to every tenant.
+**Confirmed:** by reading the source. Not reproduced against a live import — there is no
+second tenant with data yet, which is exactly why it has never bitten.
+
+`adminParseAssetCsv_` works out what `nextAssetNumber` should be by matching each imported
+row's label against a literal `/^BCA(\d+)$/i`. Every other per-school value moved into
+`clients.js` a while ago; this one is a regex inside the backend, where **there is no tenant
+id at all** (see "The backend needed no change" in `CLAUDE.md`) — so it cannot read the
+prefix, and it is the one place the backend knows a school's initials.
+
+For Brookside it matches and is correct. For any other tenant nothing matches, `highest`
+stays 0, and the import sets the counter to **1**.
+
+**What that costs, in order:**
+- It only bites when the imported file already carries that school's own tags (`3C0001`).
+  A file with no tags at all lands on 1 correctly, which is the right answer — so a church
+  with no existing asset IDs would never see this.
+- When it does bite, the app then offers `3C0001` for the next new asset, and **the tag
+  conflict check refuses it** because the import already created one. So it is a wall, not
+  silent corruption: whoever adds the first asset has to type a free number by hand.
+- `peekAssetNumber()`'s old `Math.max(counter, derived)` guard would have absorbed this, and
+  it was deliberately **deleted** in the tag refactor for good reasons (a reused label is no
+  longer a reused key). So nothing re-derives the counter from the assets any more.
+
+**The fix is not "read the prefix from somewhere"** — the backend has nowhere to read it
+from, and giving it a tenant id to hold would undo the property that makes one .gs file
+deploy unchanged to every school. Two honest options:
+- Count anything shaped like `^[A-Za-z0-9]*[A-Za-z](\d+)$`, i.e. trust the FILE's own
+  prefix rather than naming one. Wrong if a file mixes two prefixes, which is not a real
+  case here.
+- Have the import take the highest number it sees per distinct prefix and use the one that
+  matches the most rows.
+
+**Blocks:** nothing yet. It blocks only the specific case of importing a second school's
+inventory that already carries their own asset tags — worth fixing before that import
+rather than after, since the counter is written once and then lived with.
+
 ### An add-form draft keeps its Asset ID after switching to a type that has none
 **Found:** 2026-09-12, while adding a person to test the first/last name work.
 **Needs a deploy:** no — `index.html` only.

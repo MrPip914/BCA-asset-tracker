@@ -173,5 +173,34 @@ const adoptTag = a => {
         structural);
 }
 
+// --- 6. the tag regex is built from the tenant's prefix, and escapes it -----
+// A tenant's prefix may hold digits (3C, for Carlsbad Community Church), and a
+// hand-edited clients.js can hold anything at all. Both failures are quiet: an
+// UNESCAPED metacharacter either matches tags that are not this tenant's or
+// throws at module scope, before the app exists to report it. Runs the SHIPPED
+// expression rather than a copy of it, or this would only be testing itself.
+{
+  const expr = (src.match(/const ASSET_TAG_RE = new RegExp\(\s*([\s\S]*?)\);/) || [])[1];
+  if (!expr) {
+    check('the ASSET_TAG_RE construction is still findable', false,
+          'the regex is no longer built with `new RegExp(...)` — update this test');
+  } else {
+    const re = prefix => new Function('ASSET_LABEL_PREFIX', `return new RegExp(${expr});`)(prefix);
+    const num = (prefix, tag) => (re(prefix).exec(tag) || [])[1] || null;
+
+    check('a digit-bearing prefix still reads its own numbers', num('3C', '3C0007') === '0007',
+          `3C0007 parsed as ${num('3C', '3C0007')}`);
+    check('...case-insensitively, like a hand-typed tag', num('3C', '3c0007') === '0007');
+    check('the shipped prefix is unaffected', num('BCA', 'BCA0082') === '0082');
+    check('a metacharacter in the prefix is ESCAPED, not honoured',
+          num('C.C', 'CXC0001') === null && num('C.C', 'C.C0001') === '0001',
+          'an unescaped "." matches any character, so CXC0001 would count as this tenant\'s');
+    let threw = null;
+    try { re('A('); } catch (e) { threw = e.message; }
+    check('an unbalanced prefix does not throw at module scope', threw === null,
+          `building the regex threw: ${threw}`);
+  }
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

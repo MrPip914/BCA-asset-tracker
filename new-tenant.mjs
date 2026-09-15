@@ -67,11 +67,25 @@ if (!id || !appName || !orgName || !prefix) {
   );
 }
 if (!/^[a-z0-9-]+$/.test(id)) die(`--id must be lowercase letters, digits or hyphens. Got "${id}".`);
-// Letters only because clients.js builds ASSET_LABEL_RE from this without escaping, and
-// because a prefix with a digit in it would make the label's number ambiguous.
-if (!/^[A-Za-z]+$/.test(prefix)) die(`--prefix must be letters only. Got "${prefix}".`);
+// Letters and digits, never ENDING in a digit (2026-09-15, for "3C").
+//
+// The old rule was letters only, for two stated reasons. The first — that index.html
+// built its tag regex from this without escaping — was real and is now fixed there,
+// where it belongs: a rule enforced in this file protects nothing against a
+// hand-edited clients.js. The second, that a digit makes the label's number
+// ambiguous, is only true at the END: the regex anchors a FIXED prefix and then
+// captures digits, so "3C0007" can only parse one way, while "C30001" reads as
+// either C3-0001 or C-30001 to whoever is holding the sticker.
+if (!/^[A-Za-z0-9]*[A-Za-z]$/.test(prefix)) {
+  die(`--prefix must be letters and digits, and must not end in a digit. Got "${prefix}".`);
+}
 
-if (fs.readFileSync(path.join(REPO, "clients.js"), "utf8").includes(`\n    ${id}: {`)) {
+// The key may be QUOTED — an id starting with a digit ("3c") is not a legal bare
+// identifier, so clients.js writes `"3c": {`. Matching only the bare form would let
+// this create a SECOND Sheet and deployment for a tenant that already exists.
+if (new RegExp(`\\n\\s*"?${id.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&")}"?\\s*:\\s*\\{`).test(
+  fs.readFileSync(path.join(REPO, "clients.js"), "utf8")
+)) {
   die(`clients.js already has a tenant called "${id}".`);
 }
 
