@@ -153,6 +153,45 @@
       // a client sees. The Dev badge already answers "which build am I on", and
       // it answers it without changing anything the app renders.
     },
+
+    // Carlsbad Community Church, who go by "3C" (onboarded 2026-09-15).
+    //
+    // THE KEY IS QUOTED because it starts with a digit, which is not a legal
+    // bare identifier — `3c: {` is a syntax error that would take clients.js
+    // down, and with it every page, since all three load this first.
+    "3c": {
+      // Lifted from carlsbadcommunitychurch.org, which is one steel-blue family
+      // and neutral greys — no warm accent anywhere on the site. So `danger`,
+      // `success` and `dangerSurface` are deliberately NOT named: they have no
+      // brand red or green, and a warning colour is semantic rather than
+      // theirs. Those three fall through to DEFAULT_THEME.
+      theme: {
+        bg: "#F4F7F7",
+        ink: "#1F1F1F",
+        brand: "#416280",
+        brandDark: "#30485E",
+        accent: "#527CA2",
+        border: "#D6E2E2",
+        // Between their bg and their border, since the site has no hover state
+        // to lift one from. The only value here that is derived rather than
+        // sampled.
+        hover: "#E5EDED",
+        muted: "#5F5F5F",
+        placeholder: "#999999",
+        empty: "#808080",
+        scrollThumb: "#B9CCCC",
+        // Brookside's pair is a cream and a warm gold on a dark teal. This
+        // palette has no second hue to spend, so the ACTIVE state is the
+        // brighter of the two instead: every table header reads in their pale
+        // blue-grey, and the sorted or filtered column goes white.
+        onBrand: "#D6E2E2",
+        onBrandActive: "#FFFFFF",
+      },
+      appName: "3C Asset Tracker",
+      orgName: "Carlsbad Community Church",
+      labelPrefix: "3C",
+      apiUrl: "https://script.google.com/macros/s/AKfycbxRVmaXDnIvEauIRXhotJwMC6TgFsRRWDBzfQzGfVdvm0aidrvb2V1geLkh3vpy7ZUh/exec",
+    },
   };
 
   // A bare https://assets.stama.tech is Brookside. That is what keeps every
