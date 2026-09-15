@@ -1,14 +1,18 @@
 # Multi-client deployment
 
-**Status: Phase 0 shipped; the rest is still a proposal.** This is the plan for running the app
+**Status: phases 0–2 have shipped. What is left is onboarding a real second client
+(phase 3) and the non-technical calls at the bottom.** This is the plan for running the app
 for several schools at once, with a development instance to work against instead of testing
-on a live client. Ownership and hosting are now decided (see Decisions made); the remaining
-open questions are at the bottom.
+on a live client. Ownership and hosting are decided (see Decisions made).
 
-The hosting half is done and live: Brookside runs at `https://assets.stama.tech` as of
-2026-09-04. Phase 0 landed the same day, so the app now resolves a tenant from `?client=`
-and reads every per-school value from `clients.js` — but only one tenant exists, so nothing
-about Brookside's behaviour changed. Phase 1 (a dev tenant) is the next thing that would.
+The hosting half went live 2026-09-04: Brookside runs at `https://assets.stama.tech`, and
+phase 0 landed the same day, so the app resolves a tenant from `?client=` and reads every
+per-school value from `clients.js`. The **dev tenant** and the multi-tenant deploy tooling
+followed on 2026-09-08, which is what retired testing backend changes on the school.
+
+**Which tenant is on which backend version is not written down here, deliberately** —
+`node deploy.mjs --status` answers it in one command and cannot go stale. `CLAUDE.md` has
+the longer version of why that rule exists.
 
 ## The finding that makes this small
 
@@ -54,13 +58,24 @@ sign-in rather than obscurity.
 
 Frontend (`index.html`, `panel.html`, `panel-qr-sheet.html`):
 
-| Thing | Today | Becomes |
+| Thing | Was | Is now |
 |---|---|---|
 | `SHEET_API_URL` | hardcoded, duplicated across 3 files | `apiUrl` in the client config |
 | `ASSET_LABEL_PREFIX` | `"BCA"` | `labelPrefix` — each client wants their own initials |
 | App title, sign-in card, header | "BCA Asset Tracker" / "Brookside Christian Academy" | `appName` / `orgName` |
 | `localStorage` keys | one global set | **namespaced per client — see below** |
-| Accent palette | one palette | optional `theme`, later |
+| `panel.html`'s footer | "Read-only view · Brookside Christian Academy" | `CLIENT.orgName` |
+| The Excel export's filename | `brookside-asset-inventory.xlsx` | `<tenant>-asset-inventory.xlsx` |
+| Accent palette | one palette | optional `theme`, later — still deferred |
+
+**The last two were missed by phase 0 and found on 2026-09-15**, which is the lesson this
+table is for: phase 0 swept the values the app *reads at startup* and stopped there. Both
+survivors were string literals sitting in output — one in a footer, one in a filename — and
+neither would have failed anything. A second school's panel page would simply have carried
+Brookside's name, on the one page in this app that gets printed onto a sticker and taped
+inside a door. **When adding a tenant-shaped value, ask what the app PRINTS, not only what
+it configures.** `test-frontend-export.js` now fails on a hardcoded export filename, since
+that one is invisible until someone opens their downloads folder.
 
 Backend: **nothing.** Same file, different script project. Only the "BCA Admin" menu name
 and the header comment are cosmetic and can read from a constant or just stay generic.
@@ -118,11 +133,11 @@ data. That is the whole answer, and it is worth being precise about what it buys
 the app already has Sandbox mode and this is not a duplicate of it.
 
 Sandbox never contacts Apps Script at all. That is its point and also its ceiling: it
-**structurally cannot exercise a backend write path**, which is why every backend change so
-far has been tested by deploying a branch to the school's production `/exec`. `CLAUDE.md`
-is explicit that this is testing in production and supported on purpose. With paying clients
-that stops being an acceptable trade — and a dev tenant retires the problem entirely rather
-than managing it.
+**structurally cannot exercise a backend write path**, which is why every backend change up
+to 2026-09-08 was tested by deploying a branch to the school's production `/exec`. With
+paying clients that stops being an acceptable trade — so the dev tenant retired the problem
+rather than managing it, and `CLAUDE.md` now describes testing on a school's tenant as a
+deliberate exception instead of the normal case.
 
 Three tiers, each with a job the others cannot do:
 
@@ -131,8 +146,13 @@ Three tiers, each with a job the others cannot do:
    changes, the admin import, conflict handling. Deploy any branch at it, any time.
 3. **Client tenants** — production. Only ever gets `main`, only after the dev tenant has run it.
 
-Seed the dev Sheet from `MOCK_SNAPSHOT` via the existing **BCA Admin > Import inventory**
-menu, so it starts with data already in the current schema and no real names in it.
+Seed it with **`node sheet.mjs copy bca dev --scrub`**, which takes a real Sheet's exact
+structure — every label, parent, assignment and breaker group — and replaces the identifying
+strings. Production-shaped data is the point: the bugs a dev copy exists to reproduce live
+in the shape of the data, not in what the names say. (That is also why the `dev` tenant's
+`labelPrefix` is `BCA` and not `DEV`; `clients.js` explains it at the entry.) Importing
+`MOCK_SNAPSHOT` through **BCA Admin > Import inventory** still works and is the fallback
+when there is no Sheet to copy from.
 
 For frontend work there is a published dev build at **`https://assets.stama.tech/dev/`**,
 served from the `dev` branch by `.github/workflows/pages.yml` (see "Where the site is
@@ -156,16 +176,22 @@ state, where a field the frontend sends is silently dropped on write. Today that
 one deploy long; with N clients it lasts until the slowest client is done, so the order is
 what keeps it from mattering.
 
-The full sequence:
+The full sequence — **and the merge is step 3, not step 2**:
 
 1. Build and verify at `assets.stama.tech/dev/`, with the branch deployed to the **dev
    tenant** (`node deploy.mjs dev`).
-2. Merge `dev` into `main`.
-3. `node deploy.mjs --all` — backend to every tenant, each verified against its own `/exec`.
-4. `node deploy.mjs --status` — confirm every tenant reports the new version.
-5. Frontend is already live from `main`; a hard refresh picks it up.
+2. Deploy that same branch to every client tenant — `node deploy.mjs <id>` each, or
+   `node deploy.mjs --all` — each verified against its own `/exec`. Every school shows the
+   "Backend outdated" banner from here until step 4, which is correct.
+3. `node deploy.mjs --status` — confirm every tenant reports the new version before merging.
+4. Merge to `main`. The frontend goes live to every client at once; a hard refresh picks it
+   up, and the banner clears.
 
-Step 4 earns its place. `CLAUDE.md`'s most-repeated warning is that a written-down "the live
+An earlier version of this list merged at step 2, which contradicted the rule directly above
+it: merging first is exactly what puts a new frontend writing new columns in front of a
+school whose backend still drops them. Written, then silently gone.
+
+Step 3 earns its place. `CLAUDE.md`'s most-repeated warning is that a written-down "the live
 backend is vN" line goes stale the moment someone deploys, and that has cost real sessions
 twice — **check, don't read**. With N clients that failure multiplies by N. `--status` should
 fetch every tenant's `/exec` and print a table of tenant / live version / expected version,
@@ -179,22 +205,28 @@ client, not all of them.
 
 ## Onboarding a new client
 
-Roughly 30 minutes, most of it Google's UI:
+Steps 1–3 were hand-work when this was written and are `new-tenant.mjs` now:
 
-1. Copy the Sheet template (empty tabs; the script creates what it needs).
-2. Extensions > Apps Script on the new Sheet — this creates the bound project.
-3. Deploy as Web App: execute as **me**, access **anyone**. Record the `/exec` URL,
-   the Script ID and the deployment id.
-4. Add the tenant to `clients.js` — URL, name, org, label prefix.
-5. `node deploy.mjs --client <id>` — first real deploy, verified.
+1. **`node new-tenant.mjs <id>`** — creates the Sheet, the bound script project, pushes the
+   backend and creates the deployment, then prints the `/exec` URL and the ids.
+   `deploy.mjs` cannot do this: it expects an existing copy of the backend to overwrite and
+   an existing deployment to repoint, and an empty project has neither.
+2. **Open that project's script editor once and run `forceAuthorizeExternalRequests`**,
+   approving the prompt. This is the one step that cannot be scripted — it is a consent
+   screen — and until it is done every request to that tenant fails, because the web app
+   executes as its owner.
+3. **`node set-tenant.mjs <id> <SCRIPT_ID> [DEPLOYMENT_ID]`** — records the ids in Cloud
+   Shell's `$HOME` so later deploys are one command.
+4. Add the tenant to `clients.js` — `apiUrl`, `appName`, `orgName`, `labelPrefix`.
+5. `node deploy.mjs <id>` — first real deploy, verified against that tenant's own `/exec`.
 6. Sign in once as owner; add the client's staff to the allowlist via Access.
 7. Load their inventory: paste their CSV into an **Import** tab, then BCA Admin >
    Import inventory. The data never leaves the document, which is why it reads a tab
    rather than a URL — the repo is public.
 8. Print panel QR stickers from `panel-qr-sheet.html` with their `c=` in the base URL.
 
-Worth turning into `ONBOARDING.md` with the exact clicks once the first one is done for
-real, rather than writing it from imagination now.
+**Write `ONBOARDING.md` from what actually happens the first time**, with the exact clicks
+— not from this list, which is written from the tooling rather than from having done it.
 
 ## Decisions made
 
@@ -261,15 +293,16 @@ worth moving until someone actually asks for it.
 | Phase | Work | Result |
 |---|---|---|
 | 0 | **DONE** (2026-09-04) — `clients.js`, namespaced `localStorage` with a one-time adoption of the old keys, config threaded through all 3 HTML files, tenant carried on every built URL | No behaviour change for Brookside. Verified in a headless browser: renders, sandbox loads, About names the tenant, a second tenant gets its own branding/keys/prefix, an unknown id falls back, and the old storage keys migrate for the default tenant only. |
-| 1 | **NEXT** — Dev tenant: Sheet, script, a `dev` entry in `clients.js`, seed from `MOCK_SNAPSHOT` | Stop testing backend changes on the school. |
+| 1 | **DONE** (2026-09-08) — Dev tenant: its own Sheet, script and deployment, a `dev` entry in `clients.js`, seeded by `sheet.mjs copy bca dev --scrub` | Backend changes stopped being tested on the school. |
 | 2 | **DONE** (2026-09-08) — `deploy.mjs <tenant>/--all/--status`, per-tenant config via `set-tenant.mjs`, and `new-tenant.mjs` to bootstrap a tenant | One command to deploy or audit every backend. Pulled forward from after phase 1, because adding a second tenant to `clients.js` is what makes the old single-target deploy refuse — the two are not separable. |
-| 3 | First real client onboarded; write `ONBOARDING.md` from what actually happened | Two live clients. |
+| 3 | **NEXT** — first real client onboarded; write `ONBOARDING.md` from what actually happened | Two live clients. |
 | 4 | Optional, only if wanted: per-client theming, pinned frontend releases, Cloudflare Pages | Staged rollout, custom domains, per-branch previews. |
 
 Out of order but done: the **published dev build** at `/dev/` (2026-09-04), which started
 life as part of phase 4's "staging" and was pulled forward once it was clear that testing
 happens from a phone, so an unpublished branch is untestable in practice.
 
-Phase 0 is the only one with any risk of regressing the school's app, and it is entirely
-mechanical — worth doing on its own branch, verified against BCA in Sandbox and then live,
-before phase 1 gives it somewhere safer to be tested.
+Phase 0 was the only one with any risk of regressing the school's app, and it was entirely
+mechanical — done on its own branch, verified against BCA in Sandbox and then live. Its two
+stragglers (the panel footer and the export filename) were swept on 2026-09-15; see the
+per-client surface table above for what they teach about finding the next one.

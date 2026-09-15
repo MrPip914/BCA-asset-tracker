@@ -94,5 +94,16 @@ check('displayRoom (deleted in b4a7ed1) is not called anywhere',
         `found ${roomCols}, expected at least 2 (comments + changes)`);
 }
 
+// The workbook's filename names the TENANT, not the school this app was built
+// for. A hardcoded name is the quietest possible multi-tenant failure: Export
+// works perfectly, the file is correct, and it lands in a downloads folder
+// calling itself another client's inventory. Nothing on screen says so.
+{
+  const call = (fn.match(/XLSX\.writeFile\([^)]*\)/) || [])[0] || '';
+  check('the export filename is built from the tenant, not hardcoded',
+        /CLIENT\.(id|appName|orgName)/.test(call),
+        `XLSX.writeFile call does not mention CLIENT: ${call || '(not found)'}`);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
