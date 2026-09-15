@@ -1683,6 +1683,154 @@ function auditSegments(entry, viewerLabel, assets, typesList) {
   if (buf) out.push(buf);
   return out;
 }
+
+// ---------- THE MASTER AUDIT (the site-wide Audit tab) ----------
+// An asset's own Audit tab answers "what happened to this?". The master tab
+// answers "what happened?" -- one table over the whole auditLog, filtered and
+// sorted like every other table in this app.
+//
+// Three things it deliberately does NOT do that the site-wide Maintenance tab
+// does, because an audit is a different kind of question:
+//   - It does not drop ARCHIVED assets. allMaintenanceRows does, to match the
+//     Assets tab's default Active view -- but "who archived this, and when" is
+//     exactly what someone opens an audit for.
+//   - It does not drop entries whose asset is GONE. Audit entries outlive the
+//     assets they describe (that is why describeAuditFor has a dead-asset
+//     fallback at all), and a permanently deleted asset's history is the one
+//     thing no other screen can show.
+//   - It does not re-derive anything per render. Every helper below is pure and
+//     called from one memo; walking the whole log in a render body is the cost
+//     auditIndex was introduced to remove, and this table walks it in full.
+
+// Sentinels for "no filter". Strings rather than null because ColumnFilterModal
+// treats options[0] as the unfiltered state and compares by value.
+const AUDIT_ALL_ACTIONS = "All actions";
+const AUDIT_ALL_USERS = "All users";
+const AUDIT_ALL_TYPES = "All types";
+const AUDIT_ALL_TIME = "All time";
+
+// How many rows the master Audit table paints before offering "Show more". The
+// log is append-only and never pruned (pruning is on the deferred list), so this
+// table is the one place in the app whose row count grows without bound -- a
+// school two years in has tens of thousands of entries, and rendering them all
+// costs a visibly frozen tab for a screen nobody scrolls past the top of. The
+// filters are the real answer; this is what keeps the unfiltered view usable.
+const AUDIT_PAGE_SIZE = 100;
+
+// An action is stored snake_case (`maintenance_completed`, `circuit_reassigned`)
+// and there is no map of them anywhere -- deliberately. A map would be a second
+// list to keep in step with every logAudit() call site, and the failure mode is
+// silent: a new action would simply be missing from the filter. Prettifying the
+// stored string instead means a new action shows up in the filter the first time
+// one is written, named after itself.
+function auditActionLabel(action) {
+  const s = String(action || "").replace(/_/g, " ").trim();
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : "—";
+}
+
+// The Date column's filter. Rolling windows rather than a date-range picker:
+// "what changed this week" is the question an audit gets asked, and a pair of
+// date inputs is a lot of control for it.
+const AUDIT_PERIOD_OPTIONS = [
+  { value: AUDIT_ALL_TIME, label: "All time" },
+  { value: "today", label: "Today" },
+  { value: "7", label: "Last 7 days" },
+  { value: "30", label: "Last 30 days" },
+  { value: "90", label: "Last 90 days" },
+  { value: "365", label: "Last 12 months" },
+];
+
+// `now` is passed in rather than read here so the whole filter stays pure and
+// testable. An entry whose `at` will not parse is EXCLUDED once a window is
+// chosen -- it cannot be shown to fall inside one -- and is always shown under
+// "All time", which is the default, so nothing is hidden unless a window was
+// asked for.
+function withinAuditPeriod(iso, period, now) {
+  if (!period || period === AUDIT_ALL_TIME) return true;
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return false;
+  if (period === "today") {
+    const start = new Date(now);
+    start.setHours(0, 0, 0, 0);
+    return t >= start.getTime();
+  }
+  const days = parseFloat(period);
+  if (!Number.isFinite(days)) return true;
+  return t >= now - days * 86400000;
+}
+
+// One row's comparable value for a sortable column. Every column here resolves
+// something for display -- a name, a type name, a whole sentence -- so every one
+// of them sorts on the RESOLVED string, which is the rule the User column
+// shipped broken (see "A person's name is TWO FIELDS" in CLAUDE.md): a cell
+// reading "Kramer, Jen" must not sort under the stored field behind it.
+// `at` is the exception and sorts on the raw ISO string, which is already
+// lexicographically chronological.
+function auditSortValue(row, key, typesList) {
+  const e = row.entry;
+  switch (key) {
+    case "at": return e.at || "";
+    case "asset": return (row.assetName || "").toLowerCase();
+    case "type": return (row.typeName || "").toLowerCase();
+    case "action": return auditActionLabel(e.action).toLowerCase();
+    case "by": return (e.by || "").toLowerCase();
+    case "detail": return describeAudit(e).toLowerCase();
+    default: return "";
+  }
+}
+
+// Sorted with the rows DECORATED first, not with the resolver called from the
+// comparator. A comparator runs O(n log n) times and `detail` builds a whole
+// sentence per call, so the obvious version makes the one sort nobody expects
+// to be expensive the most expensive thing on the page.
+//
+// No explicit sort means NEWEST FIRST, by position and not by timestamp: the log
+// is append-only, so its append order IS its chronological order -- the same
+// fact auditIndex relies on when it stores positions rather than entries. It is
+// also the tiebreak inside every explicit sort, so equal values stay in a
+// defined order instead of shuffling between renders.
+function sortAuditRows(rows, sortConfig, typesList) {
+  if (!sortConfig) return [...rows].sort((a, b) => b.idx - a.idx);
+  const mult = sortConfig.dir === "desc" ? -1 : 1;
+  const decorated = rows.map(r => ({ r, v: auditSortValue(r, sortConfig.key, typesList) }));
+  decorated.sort((a, b) => {
+    if (a.v === b.v) return b.r.idx - a.r.idx;
+    return a.v < b.v ? -mult : mult;
+  });
+  return decorated.map(d => d.r);
+}
+
+// The filter half. `inScope` is passed as a predicate rather than resolved here
+// so this stays free of the parent chain; the caller hands it the same
+// ancestorsOf() test the Assets and Maintenance tabs use, which is what keeps
+// one scope meaning one thing across all three.
+//
+// An entry whose asset is gone is dropped only while a SCOPE is active: it has
+// no place in the hierarchy, so "inside Building 100" cannot be true of it. With
+// no scope it stays, which is the whole point of this table.
+//
+// The search deliberately reads the entry's RAW fields (field/from/to/note) plus
+// the resolved names, not describeAudit()'s sentence: the sentence is built per
+// row and typing a character would rebuild every one of them.
+function filterAuditRows(rows, f) {
+  const q = String(f.query || "").trim().toLowerCase();
+  return rows.filter(r => {
+    const e = r.entry;
+    if (f.action !== AUDIT_ALL_ACTIONS && e.action !== f.action) return false;
+    if (f.by !== AUDIT_ALL_USERS && (e.by || "") !== f.by) return false;
+    if (f.type !== AUDIT_ALL_TYPES && r.typeId !== f.type) return false;
+    if (!withinAuditPeriod(e.at, f.period, f.now)) return false;
+    if (f.scopeId) {
+      if (!r.asset) return false;
+      if (!f.inScope(r.asset)) return false;
+    }
+    if (!q) return true;
+    return [
+      r.assetName, r.typeName, r.asset && r.asset.tag, e.assetLabel,
+      auditActionLabel(e.action), e.by, e.field, e.from, e.to, e.note, e.room,
+    ].some(v => String(v == null ? "" : v).toLowerCase().includes(q));
+  });
+}
 // Every asset already has a stable, unique `label` — Room/Building references
 // elsewhere in the app store that label (an id), not the mutable display
 // name, so renaming a Room/Building is a normal single-asset edit with
@@ -2139,7 +2287,7 @@ const FRONTEND_SCRIPT_VERSION = "v36";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-12.5";
+const APP_VERSION = "2026-09-15.1";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -3203,6 +3351,25 @@ const MOCK_SNAPSHOT = {
       action: "edited", field: "Parent", from: "Unassigned", to: "Room 102",
       related: relate({ to: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80" }),
     },
+    // The last two exist for the site-wide Audit tab, and are the shapes a
+    // fixture of live-asset edits alone cannot produce. Same reasoning as the
+    // mixed id/label and personIds fixtures: a uniform fixture exercises half
+    // the code.
+    //   - An entry whose asset is GONE. Audit entries outlive their assets, so
+    //     this is the ordinary case for a `deleted` row, and it is the one row
+    //     that has no name to resolve, no type to look up and nowhere to click.
+    {
+      at: "2026-08-27T21:05:00.000Z", by: "Eric", assetLabel: "BCA0007", assetType: "Phone",
+      action: "deleted", related: relate({ at: "BCR0008" }),
+    },
+    //   - A snake_case action and a second author, so the Action and User
+    //     filters both have something to choose between and the prettified
+    //     label ("Maintenance completed") is on screen rather than only in a
+    //     unit test.
+    {
+      at: "2026-09-02T16:30:00.000Z", by: "Jen Kramer", assetLabel: "BCA0002", assetType: "Monitor",
+      action: "maintenance_completed", field: "Annual clean", to: "2026-09-02", related: "",
+    },
   ],
 };
 
@@ -3310,7 +3477,7 @@ function AssetTracker() {
     setRevisions(next);
   }
 
-  const [mainTab, setMainTab] = useState("assets"); // "assets" | "maintenance" — top-level page tab
+  const [mainTab, setMainTab] = useState("assets"); // "assets" | "maintenance" | "audit" — top-level page tab
   const [view, setView] = useState("list"); // "list" | "detail"
   const [selectedId, setSelectedId] = useState(null);
   const [detailEditing, setDetailEditing] = useState(false);
@@ -3478,6 +3645,19 @@ function AssetTracker() {
   const [workVendorFilter, setWorkVendorFilter] = useState("All vendors");
   const [workSortConfig, setWorkSortConfig] = useState(null); // null = newest performed first
   const [activeWorkFilterCol, setActiveWorkFilterCol] = useState(null);
+  // The site-wide Audit tab. Its own query/filters/sort, like every other tab:
+  // carrying the Assets tab's search into it would silently narrow a table whose
+  // whole job is to show everything. The SCOPE is shared (scopeId), for the same
+  // reason Maintenance shares it -- narrowing to a building should narrow every
+  // view, or there would be no way to tell which scope was in force.
+  const [auditQuery, setAuditQuery] = useState("");
+  const [auditActionFilter, setAuditActionFilter] = useState(AUDIT_ALL_ACTIONS);
+  const [auditUserFilter, setAuditUserFilter] = useState(AUDIT_ALL_USERS);
+  const [auditTypeFilter, setAuditTypeFilter] = useState(AUDIT_ALL_TYPES);
+  const [auditPeriodFilter, setAuditPeriodFilter] = useState(AUDIT_ALL_TIME);
+  const [auditSortConfig, setAuditSortConfig] = useState(null); // null = newest first
+  const [activeAuditFilterCol, setActiveAuditFilterCol] = useState(null);
+  const [auditVisibleCount, setAuditVisibleCount] = useState(AUDIT_PAGE_SIZE);
   const [reassignTarget, setReassignTarget] = useState("");
   const [moveTarget, setMoveTarget] = useState("");
   const [activeFilterCol, setActiveFilterCol] = useState(null);
@@ -4648,6 +4828,88 @@ function AssetTracker() {
     }
     return list;
   }, [allMaintenanceRows, assets, scopeId, maintenanceQuery, maintenanceStatusFilter, maintenanceFrequencyFilter, maintenanceOwnerFilter, maintenanceSortConfig]);
+
+  // ---- the site-wide Audit tab ----
+  // One row per auditLog entry, with its subject resolved once. `assets.find`
+  // per row would make this quadratic against a log that only ever grows, which
+  // is the one table here where that actually bites.
+  const allAuditRows = useMemo(() => {
+    const byId = new Map((assets || []).map(a => [a.id, a]));
+    return auditLog.map((entry, idx) => {
+      const asset = byId.get(entry.assetLabel) || null;
+      // The entry's OWN stored type wins over the live asset's, and that is the
+      // point of it being stored: it is the type the thing was when this
+      // happened, and for a deleted asset it is the only type left. The live
+      // asset is the fallback for rows written before assetType existed.
+      const typeId = entry.assetType || (asset ? asset.type : "");
+      return {
+        idx, entry, asset, typeId,
+        typeName: typeNameOf(typeId, typesList),
+        // Named the way describeAuditFor names a subject: nameOf() while the
+        // asset is alive, "<type> <label>" once it is gone -- which is the
+        // ordinary case for a `deleted` row here, not an edge case.
+        assetName: asset ? nameOf(asset) : `${typeNameOf(typeId, typesList)} ${entry.assetLabel}`.trim(),
+      };
+    });
+    // personNameOrder: assetName is composed for a person, so their rows would
+    // keep the previous order's spelling until `assets` itself changed.
+  }, [auditLog, assets, typesList, personNameOrder]);
+
+  // Every filter's vocabulary comes from the log itself rather than a declared
+  // list -- so an action or a user that only exists in history still filters,
+  // and a new action needs nothing added here.
+  const auditActionOptions = useMemo(() => (
+    [AUDIT_ALL_ACTIONS, ...Array.from(new Set(allAuditRows.map(r => r.entry.action).filter(Boolean)))
+      .sort((a, b) => auditActionLabel(a).localeCompare(auditActionLabel(b)))]
+  ), [allAuditRows]);
+  const auditUserOptions = useMemo(() => (
+    [AUDIT_ALL_USERS, ...Array.from(new Set(allAuditRows.map(r => r.entry.by).filter(Boolean))).sort()]
+  ), [allAuditRows]);
+  // Type ids, ordered by the name they currently show -- the same shape the
+  // Assets tab's Type filter uses, for the same reason: the id is what is
+  // stored, the name is what is read.
+  const auditTypeOptions = useMemo(() => (
+    [AUDIT_ALL_TYPES, ...sortTypesByName(
+      Array.from(new Set(allAuditRows.map(r => r.typeId).filter(Boolean)))
+        .map(id => ({ id, name: typeNameOf(id, typesList) }))
+    ).map(t => t.id)]
+  ), [allAuditRows, typesList]);
+
+  const auditFilterConfigs = {
+    at: {
+      label: "Date", value: auditPeriodFilter, setValue: setAuditPeriodFilter,
+      options: AUDIT_PERIOD_OPTIONS.map(o => o.value),
+      labelForOption: v => (AUDIT_PERIOD_OPTIONS.find(o => o.value === v) || {}).label || v,
+    },
+    type: {
+      label: "Type", value: auditTypeFilter, setValue: setAuditTypeFilter, options: auditTypeOptions,
+      labelForOption: v => (v === AUDIT_ALL_TYPES ? v : typeNameOf(v, typesList)),
+    },
+    action: {
+      label: "Action", value: auditActionFilter, setValue: setAuditActionFilter, options: auditActionOptions,
+      labelForOption: v => (v === AUDIT_ALL_ACTIONS ? v : auditActionLabel(v)),
+    },
+    by: { label: "User", value: auditUserFilter, setValue: setAuditUserFilter, options: auditUserOptions },
+  };
+
+  const filteredAuditRows = useMemo(() => {
+    const rows = filterAuditRows(allAuditRows, {
+      query: auditQuery, action: auditActionFilter, by: auditUserFilter,
+      type: auditTypeFilter, period: auditPeriodFilter, now: Date.now(), scopeId,
+      // The same test the Assets and Maintenance tabs apply, so one scope means
+      // one thing everywhere: anything BENEATH where you are.
+      inScope: a => ancestorsOf(a, assets).some(pa => pa.id === scopeId),
+    });
+    return sortAuditRows(rows, auditSortConfig, typesList);
+  }, [allAuditRows, assets, scopeId, auditQuery, auditActionFilter, auditUserFilter, auditTypeFilter, auditPeriodFilter, auditSortConfig, typesList]);
+
+  // Paging resets whenever the question changes. "Show more" raised past row 300
+  // of the previous filter means nothing against a new one, and leaving it
+  // raised makes a freshly narrowed table paint far more rows than the page size
+  // promises.
+  useEffect(() => {
+    setAuditVisibleCount(AUDIT_PAGE_SIZE);
+  }, [auditQuery, auditActionFilter, auditUserFilter, auditTypeFilter, auditPeriodFilter, auditSortConfig, scopeId]);
 
   // Per-device override wins when set; otherwise falls back to the column's
   // server-defined default (e.g. true for a newly added custom column this
@@ -10074,6 +10336,10 @@ function AssetTracker() {
           {[
             { key: "assets", label: "Assets" },
             { key: "maintenance", label: "Maintenance", count: allMaintenanceRows.length, urgent: maintenanceOverdueTotal > 0 },
+            // No count, deliberately. Maintenance's says how much there is to
+            // DO; the audit log only ever grows, so "Audit (11482)" is a number
+            // that answers nothing and gets longer forever.
+            { key: "audit", label: "Audit" },
           ].map(tab => {
             const active = mainTab === tab.key;
             return (
@@ -10237,6 +10503,74 @@ function AssetTracker() {
                 <>
                   <div onClick={() => setShowToolbarMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
                   <div style={{ position: "absolute", right: 0, top: "100%", marginTop: 6, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, minWidth: 170, overflow: "hidden", padding: 4 }}>
+                    <button
+                      onClick={() => { setShowToolbarMenu(false); exportToExcel(); }}
+                      className="icon-btn"
+                      style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
+                    >
+                      <Download size={15} /> Export
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        {mainTab === "audit" && (
+          <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
+            {searchOpen || auditQuery ? (
+              <div style={{ position: "relative", width: 220 }}>
+                <Search size={14} style={{ position: "absolute", left: 10, top: 9, color: C.accent }} />
+                <input
+                  autoFocus
+                  value={auditQuery}
+                  onChange={e => setAuditQuery(e.target.value)}
+                  onBlur={() => { if (!auditQuery) setSearchOpen(false); }}
+                  placeholder="Search asset, user, what changed…"
+                  style={{ width: "100%", padding: "8px 28px 8px 30px", border: `1.5px solid ${C.border}`, background: C.surface, fontSize: 13, borderRadius: 10, color: C.ink }}
+                />
+                {auditQuery && (
+                  <button
+                    onClick={() => { setAuditQuery(""); setSearchOpen(false); }}
+                    aria-label="Clear search"
+                    className="icon-btn"
+                    style={{ position: "absolute", right: 4, top: 4, background: "none", border: "none", padding: 4, borderRadius: 6, color: C.muted, display: "flex" }}
+                  >
+                    <X size={13} />
+                  </button>
+                )}
+              </div>
+            ) : (
+              <button
+                onClick={() => setSearchOpen(true)}
+                aria-label="Search"
+                className="icon-btn"
+                style={{ background: "none", border: "none", padding: 8, borderRadius: 8, color: C.brandDark, display: "flex" }}
+              >
+                <Search size={18} />
+              </button>
+            )}
+
+            <div style={{ position: "relative", flexShrink: 0 }}>
+              <button
+                onClick={() => setShowToolbarMenu(v => !v)}
+                aria-label="More actions"
+                className="icon-btn"
+                style={{ background: "none", border: "none", padding: 8, borderRadius: 8, color: C.brandDark, display: "flex" }}
+              >
+                <Menu size={18} />
+              </button>
+              {showToolbarMenu && (
+                <>
+                  <div onClick={() => setShowToolbarMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
+                  <div style={{ position: "absolute", right: 0, top: "100%", marginTop: 6, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, minWidth: 170, overflow: "hidden", padding: 4 }}>
+                    {/* The workbook's own Audit Log sheet, which has always
+                        carried every entry -- so this is the existing export,
+                        offered where someone asking an audit question is
+                        standing. It is NOT the filtered view: an export that
+                        quietly dropped rows to match a filter would be the
+                        worst possible thing for an audit trail to do. */}
                     <button
                       onClick={() => { setShowToolbarMenu(false); exportToExcel(); }}
                       className="icon-btn"
@@ -10676,6 +11010,123 @@ function AssetTracker() {
           )}
         </>
         )}
+
+        {mainTab === "audit" && (() => {
+          // Sliced at render, not in the memo: the memo holds the full answer to
+          // "what matches", which is what the count line reports and what "Show
+          // more" walks through. Paging is a painting decision, not a filter.
+          const shown = filteredAuditRows.slice(0, auditVisibleCount);
+          const remaining = filteredAuditRows.length - shown.length;
+          const cols = "175px 210px 130px 170px minmax(300px, 1fr) 150px";
+          return (
+            <>
+              {/* The same drill-down the other two tabs use, on the same
+                  scopeId -- narrowing to a building narrows this too. */}
+              <HierarchyNav assets={assets} scopeId={scopeId} setScopeId={setScopeId} />
+
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 12, color: C.muted }}>
+                  Every recorded change, across every asset — including archived assets and assets that have since been deleted.
+                </div>
+                <div style={{ fontSize: 12, color: C.muted, whiteSpace: "nowrap" }}>
+                  {filteredAuditRows.length === auditLog.length
+                    ? `${filteredAuditRows.length.toLocaleString()} entr${auditLog.length === 1 ? "y" : "ies"}`
+                    : `${filteredAuditRows.length.toLocaleString()} of ${auditLog.length.toLocaleString()}`}
+                </div>
+              </div>
+
+              <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden", background: C.surface, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)" }}>
+                <div className="scroller" style={{ overflowX: "auto" }}>
+                  <div style={{ display: "grid", gridTemplateColumns: cols, background: C.brandDark, color: "#F4F0E6", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", minWidth: "max-content" }}>
+                    {[
+                      { key: "at", label: "Date" },
+                      { key: "asset", label: "Asset" },
+                      { key: "type", label: "Type" },
+                      { key: "action", label: "Action" },
+                      { key: "detail", label: "Details" },
+                      { key: "by", label: "User" },
+                    ].map(c => (
+                      <ColumnHeaderCell
+                        key={c.key}
+                        label={c.label}
+                        colKey={c.key}
+                        filterConfigs={auditFilterConfigs}
+                        sortConfig={auditSortConfig}
+                        setSortConfig={setAuditSortConfig}
+                        onOpenFilter={setActiveAuditFilterCol}
+                      />
+                    ))}
+                  </div>
+
+                  {shown.length === 0 ? (
+                    <div style={{ padding: 32, textAlign: "center", color: C.empty, fontSize: 14, minWidth: "max-content" }}>
+                      {auditLog.length === 0 ? "No activity recorded yet." : "No activity matches your filters."}
+                    </div>
+                  ) : shown.map((r, i) => {
+                    const AssetIcon = iconFor(r.typeId);
+                    // A row whose asset is gone opens nothing -- audit entries
+                    // outlive their assets, so this is ordinary here rather than
+                    // a broken link, and it says so instead of looking clickable.
+                    const open = r.asset ? () => openDetail(r.asset, "audit") : undefined;
+                    return (
+                      <div
+                        key={r.idx}
+                        className={r.asset ? "row-body" : undefined}
+                        onClick={open}
+                        style={{ display: "grid", gridTemplateColumns: cols, borderTop: `1px solid ${C.border}`, cursor: r.asset ? "pointer" : "default", background: i % 2 ? C.bg : C.surface, minWidth: "max-content" }}
+                      >
+                        <div style={{ padding: "12px 14px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted }}>{formatWhen(r.entry.at)}</div>
+                        <div
+                          style={{ padding: "12px 14px", fontSize: 13, color: r.asset ? C.brandDark : C.empty, fontWeight: r.asset ? 600 : 400, display: "flex", alignItems: "center", gap: 6, overflow: "hidden" }}
+                          title={r.asset ? r.assetName : `${r.assetName} — no longer in the inventory`}
+                        >
+                          <AssetIcon size={14} style={{ flexShrink: 0, color: r.asset ? C.brand : C.empty }} />
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.assetName}</span>
+                        </div>
+                        <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.typeName || "—"}</div>
+                        <div style={{ padding: "12px 14px", fontSize: 13, color: C.ink }}>{auditActionLabel(r.entry.action)}</div>
+                        {/* The same linked sentence the asset's own Audit tab
+                            renders, read from the SUBJECT's point of view --
+                            which is what a null viewer means. Every link stops
+                            the click from also opening the row's own asset. */}
+                        <div style={{ padding: "12px 14px", fontSize: 13, color: C.ink }}>
+                          {auditSegments(r.entry, null, assets, typesList).map((seg, k) => (
+                            typeof seg === "string" ? <React.Fragment key={k}>{seg}</React.Fragment> : (
+                              <button
+                                key={k}
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  const target = assets.find(a => a.id === seg.id);
+                                  if (target) openDetail(target);
+                                }}
+                                style={AUDIT_LINK_STYLE}
+                                title={`Open ${seg.text}`}
+                              >
+                                {seg.text}
+                              </button>
+                            )
+                          ))}
+                        </div>
+                        <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.entry.by || "—"}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {remaining > 0 && (
+                <div style={{ display: "flex", justifyContent: "center", marginTop: 12 }}>
+                  <button
+                    onClick={() => setAuditVisibleCount(n => n + AUDIT_PAGE_SIZE)}
+                    style={{ padding: "8px 16px", background: "transparent", color: C.brandDark, border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  >
+                    Show {Math.min(remaining, AUDIT_PAGE_SIZE)} more ({remaining.toLocaleString()} left)
+                  </button>
+                </div>
+              )}
+            </>
+          );
+        })()}
       </div>
 
       {/* Column header filter modal */}
@@ -10692,6 +11143,13 @@ function AssetTracker() {
         sortConfig={maintenanceSortConfig}
         setSortConfig={setMaintenanceSortConfig}
         onClose={() => setActiveMaintenanceFilterCol(null)}
+      />
+      <ColumnFilterModal
+        activeCol={activeAuditFilterCol}
+        filterConfigs={auditFilterConfigs}
+        sortConfig={auditSortConfig}
+        setSortConfig={setAuditSortConfig}
+        onClose={() => setActiveAuditFilterCol(null)}
       />
 
       {/* Column manager modal */}

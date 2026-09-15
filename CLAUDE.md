@@ -426,12 +426,14 @@ onboard one.
 
 ## Architecture
 
-- **Top-level navigation**: `mainTab` ("assets" | "maintenance") switches the main page
-  between the asset list (`view === "list"`) and a site-wide Maintenance overview — every
-  asset's `maintenanceItems` flattened into one sortable-by-urgency table (`allMaintenanceRows`).
-  Both live inside the same `view === "list"` screen; opening an asset (either tab) still
+- **Top-level navigation**: `mainTab` ("assets" | "maintenance" | "audit") switches the main
+  page between the asset list (`view === "list"`), a site-wide Maintenance overview — every
+  asset's `maintenanceItems` flattened into one sortable-by-urgency table (`allMaintenanceRows`)
+  — and a site-wide Audit table over the whole `auditLog` (see "The master Audit tab" below).
+  All three live inside the same `view === "list"` screen; opening an asset (any tab) still
   goes through `openDetail()` into `view === "detail"`, and `openDetail(asset, "maintenance")`
-  jumps straight to that asset's Maintenance sub-tab — used by the overview's row click.
+  / `openDetail(asset, "audit")` jump straight to that asset's own sub-tab — which is what
+  each overview's row click does.
 - **Navigation IS the address bar now** (2026-09-10). This bullet used to say the opposite —
   "the app never pushes into the address bar as you navigate (no back-button support, that
   wasn't asked for)" — and it was asked for: clicking through several assets left no way to
@@ -1797,6 +1799,63 @@ and read by `parseRelated()`/`relatedRoleFor()`.
   moved away takes its edit history with it; its *move* stays in the top section forever,
   since that entry names the room by id. The asset's own history is durable; the contents
   section is a snapshot.
+
+**The master Audit tab is the whole log as one table** (2026-09-15) — a third top-level tab
+beside Assets and Maintenance, built the way the site-wide Maintenance tab is: the shared
+`HierarchyNav` scope, `ColumnHeaderCell` + `ColumnFilterModal` per column, its own search.
+Columns are Date / Asset / Type / Action / Details / User; a row opens that asset's own Audit
+tab, and the Details sentence is the same linked `auditSegments()` output the detail view
+renders, read from the SUBJECT's point of view (`viewerLabel` null).
+
+- **It shows ARCHIVED assets and assets that are GONE, which is the one place it deliberately
+  parts company with `allMaintenanceRows`/`allWorkRows`.** Both of those drop archived assets
+  to match the Assets tab's default Active view. Copying that here would hide "who archived
+  this, and when" — the question an audit gets opened for — and dropping the assetless rows
+  would delete the history of every permanently deleted asset from the only screen that can
+  show it. A row whose asset is gone reads `"<type> <label>"` (the fallback
+  `describeAuditFor` already had) and is deliberately not clickable.
+  - **A SCOPE is the one thing that drops an assetless row**, because "inside Building 100"
+    cannot be true of something with no place in the hierarchy. The scope test itself is the
+    same `ancestorsOf()` one the other two tabs use — one scope, one meaning, all three tabs.
+- **No explicit sort means newest first BY POSITION, not by timestamp.** The log is
+  append-only, so its append order IS its chronological order — the same fact `auditIndex`
+  relies on when it stores positions rather than entries. Sorting on `at` looks identical
+  until a row has a missing or skewed date, and then it silently reorders history. Position
+  is also the tiebreak inside every explicit sort, so equal values do not shuffle.
+- **An action is prettified for display and compared as stored.** Actions are snake_case
+  (`maintenance_completed`), and `auditActionLabel()` turns one into "Maintenance completed"
+  rather than a map of them — a map is a second list to keep in step with every `logAudit()`
+  call site, and the failure is silent: a new action would simply be missing from the filter.
+  Every filter's vocabulary is derived from the log itself for the same reason, so an action
+  or a person that exists only in history still filters.
+- **Every column sorts on what its cell SHOWS** — Asset on the resolved name, Type on the
+  type name, Action on the label, Details on the rendered sentence. That rule has shipped
+  broken twice here already (`name` when people gained parts, `person` when the name-order
+  setting landed), which is why it is tested rather than trusted. The sort DECORATES the rows
+  once instead of resolving inside the comparator: a comparator runs O(n log n) times and
+  Details builds a whole sentence per call.
+- **The Date column is a set of rolling windows, not a date-range picker** — "what changed
+  this week" is the question, and two date inputs is a lot of control for it. An entry whose
+  `at` will not parse is excluded once a window is chosen and always shown under "All time",
+  which is the default: nothing is hidden unless a window was asked for.
+- **It pages at `AUDIT_PAGE_SIZE` with a "Show more" button**, and it is the only table here
+  that needs to. The log is never pruned (pruning is still deferred), so this is the one row
+  count in the app that grows without bound — the filters are the real answer and the page
+  size is what keeps the unfiltered view from freezing the tab. The count line above the
+  table reports the FULL match, not the page, or "Show more" would have no context. Paging
+  resets whenever the question changes.
+- **The tab carries no count.** Maintenance's says how much there is to do; an audit count
+  only ever grows, so "Audit (11482)" answers nothing and gets longer forever.
+- **Export is the workbook's existing Audit Log sheet, NOT the filtered view.** An export
+  that quietly dropped rows to match a filter is the worst thing an audit trail can do.
+- **Covered by `test-frontend-audit.js`**, which runs the real filter and sort against a
+  deliberately mixed fixture (a live asset, an archived one, an entry whose asset is gone,
+  and one with no usable date). Verified by mutation that ten silent failures fail it,
+  including each of the two "it must not copy the maintenance tables" rules above.
+  `MOCK_SNAPSHOT`'s `auditLog` gained the same two shapes — a `deleted` entry naming an asset
+  that is not in the fixture, and a snake_case action by a second author — so Sandbox
+  exercises them rather than only the unit test. That is the `personIds` lesson again.
+
 - **Backfill**: `backfillAuditIds_()` in the .gs, run ONCE by hand from the Apps Script
   editor after deploying — deliberately unreachable from `doGet`/`doPost` and never on a
   trigger, since it rewrites history. Best effort by design: a name matching nothing leaves

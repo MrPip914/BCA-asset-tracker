@@ -16,6 +16,28 @@ version that fixed them.
 
 ## Open
 
+### Maintenance › History's column filters never open
+**Found:** 2026-09-15, while building the site-wide Audit tab (its filters go through the
+same two components).
+**Needs a deploy:** no — `index.html` only.
+**Confirmed:** in a browser against Sandbox. Maintenance › History › tap **Work Type** or
+**Vendor**: nothing happens. Maintenance › Scheduled › tap **Frequency**: the modal opens.
+
+The History sub-tab renders `<ColumnFilterModal colKey={activeWorkFilterCol} …>`, and the
+component's prop is **`activeCol`**. So `cfg` resolves to null and it returns null — the
+header cell sets the state, the modal renders nothing, and the tap reads as a dead control.
+Its "Sort A → Z / Z → A" buttons are unreachable for the same reason; the plain columns'
+click-to-sort still works, since that is the header cell's own behaviour.
+
+**The fix is renaming that one prop** (`colKey` → `activeCol`), and the surrounding
+`{activeWorkFilterCol && ( … )}` guard can go with it — every other call site renders the
+component unconditionally and lets it decide, which is what its own comment says it is built
+to do.
+
+Worth noting what this cost: the Work Type and Vendor filters have never worked since the
+site-wide Maintenance History tab shipped, and nothing says so — a filter that silently
+does nothing looks exactly like a filter over data that happens not to vary.
+
 ### An add-form draft keeps its Asset ID after switching to a type that has none
 **Found:** 2026-09-12, while adding a person to test the first/last name work.
 **Needs a deploy:** no — `index.html` only.
