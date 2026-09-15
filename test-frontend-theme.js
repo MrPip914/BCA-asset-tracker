@@ -38,11 +38,26 @@ function resolve(src, { search = '', pathname = '/' } = {}) {
   };
   vm.createContext(ctx);
   new vm.Script(src, { filename: 'clients.js' }).runInContext(ctx);
-  return { client: ctx.window.ASSET_TRACKER_CLIENT, warnings };
+  return {
+    client: ctx.window.ASSET_TRACKER_CLIENT,
+    registry: ctx.window.ASSET_TRACKER_CLIENTS,
+    warnings,
+  };
 }
 
 const { client: base } = resolve(CLIENTS_SRC);
 const THEME = base.theme;
+
+// A tenant of the test's own, so these checks do not depend on whether a real
+// one happens to carry a theme. They used to inject into `bca`; once bca gained
+// its own theme that injection was silently overridden by the real key and the
+// merge test would have passed without testing anything.
+const FAKE_ID = 'themetest';
+const FAKE_SEARCH = { search: `?client=${FAKE_ID}` };
+const withTenant = theme => CLIENTS_SRC.replace(
+  'var CLIENTS = {',
+  `var CLIENTS = {\n    ${FAKE_ID}: { theme: ${theme}, appName: "T", orgName: "T", labelPrefix: "T", apiUrl: "x" },`
+);
 
 check('clients.js resolves a theme with no DOM present', !!THEME && Object.keys(THEME).length > 0,
       'ASSET_TRACKER_CLIENT.theme was empty -- applyTheme() probably touched document unguarded');
@@ -52,11 +67,7 @@ check('clients.js resolves a theme with no DOM present', !!THEME && Object.keys(
 // implementation (assign the override object wholesale) passes a smoke test in
 // the browser and leaves the rest of the palette undefined.
 {
-  const src = CLIENTS_SRC.replace(
-    /(bca: \{\n\s+appName:)/,
-    'bca: {\n      theme: { brand: "#123456" },\n      appName:'
-  );
-  const { theme } = resolve(src).client;
+  const { theme } = resolve(withTenant('{ brand: "#123456" }'), FAKE_SEARCH).client;
   check('a tenant theme overrides only the keys it names',
         theme.brand === '#123456' && theme.bg === THEME.bg && theme.accent === THEME.accent,
         `brand=${theme.brand} bg=${theme.bg} accent=${theme.accent}`);
@@ -69,16 +80,26 @@ check('clients.js resolves a theme with no DOM present', !!THEME && Object.keys(
 // not be silent -- "theming doesn't work" with nothing in the console is the bad
 // hour this warning exists to prevent.
 {
-  const src = CLIENTS_SRC.replace(
-    /(bca: \{\n\s+appName:)/,
-    'bca: {\n      theme: { accnt: "#123456" },\n      appName:'
-  );
-  const { client, warnings } = resolve(src);
+  const { client, warnings } = resolve(withTenant('{ accnt: "#123456" }'), FAKE_SEARCH);
   check('an unknown theme key is dropped, not stored',
         client.theme.accnt === undefined && client.theme.accent === THEME.accent);
   check('an unknown theme key is named in a console warning',
         warnings.some(w => w.includes('accnt')),
         `warnings: ${JSON.stringify(warnings)}`);
+}
+
+// Every theme key the SHIPPED tenants name must be a real one. An unknown key is
+// only a console warning at runtime, and nobody is watching a console -- so a
+// typo in a school's palette would land as "that colour did nothing".
+{
+  const ids = Object.keys(resolve(CLIENTS_SRC).registry || {});
+  const complaints = [];
+  ids.forEach(id => {
+    const { warnings } = resolve(CLIENTS_SRC, { search: `?client=${id}` });
+    warnings.forEach(w => complaints.push(`${id}: ${w}`));
+  });
+  check(`every shipped tenant's theme names only real keys (${ids.length} tenants)`,
+        complaints.length === 0, complaints.join('\n        '));
 }
 
 // --- one source --------------------------------------------------------------

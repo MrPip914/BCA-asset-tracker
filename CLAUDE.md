@@ -422,10 +422,17 @@ onboard one.
   deliberately: the fixture is hand-maintained and generalising it is not what Phase 0 was
   for. Worth doing when a second tenant actually exists.
 - **The palette is per tenant, and it lives in `clients.js`** (2026-09-15). `DEFAULT_THEME`
-  there is the shipped palette — Brookside's, unchanged — and a tenant's optional `theme`
-  overrides only the keys it names, so a school that cares about two colours writes two
-  lines instead of a palette they would then have to maintain against every token added
-  later.
+  there is the shipped palette — Brookside's colours, which are what this app was built
+  with — and a tenant's optional `theme` overrides only the keys it names, so a school that
+  cares about two colours writes two lines instead of a palette they would then have to
+  maintain against every token added later.
+  - **`bca` names the whole palette explicitly**, identical to `DEFAULT_THEME`, so nothing
+    renders differently — but the school OWNS its colours: recolouring Brookside is an edit
+    to its own block rather than to the default every other tenant falls back to. The two
+    are now allowed to differ, which is the point; `dev` is what the default currently
+    dresses. **A key added to `DEFAULT_THEME` later still reaches `bca`**, since a theme
+    overrides only what it names — a new token ships to everyone, an existing one is that
+    school's to move.
   - **It had to move out of `index.html`, because the same values were in three files.**
     `C` there, a `:root` block in `panel.html`, and a smaller one in `panel-qr-sheet.html`,
     with a comment in the second saying "same values as C in index.html" — true until it
@@ -458,10 +465,15 @@ onboard one.
     a differently coloured dev makes a screenshot from it useless as evidence about what a
     client sees. The `Dev` badge answers "which build am I on" without changing what the
     app renders.
-  - Covered by `test-frontend-theme.js`. Verified by mutation that six silent failures fail
-    it: an unguarded `applyTheme`, an override assigned wholesale instead of merged, an
-    unknown key stored, a palette copy reappearing in a page, a page using a `var(--x)`
-    nothing sets, and `C` declared before `CLIENT`.
+  - Covered by `test-frontend-theme.js`, which also resolves EVERY shipped tenant and fails
+    on an unknown key in one — a typo is otherwise just a console warning nobody is
+    watching, landing as "that colour did nothing". Its merge checks inject a tenant of
+    their own rather than into `bca`: once `bca` carried a real theme, an injected second
+    `theme` key was silently overridden by it and the check passed without testing
+    anything. Verified by mutation that seven silent failures fail it: an unguarded
+    `applyTheme`, an override assigned wholesale instead of merged, an unknown key stored,
+    an unknown key in a shipped tenant, a palette copy reappearing in a page, a page using
+    a `var(--x)` nothing sets, and `C` declared before `CLIENT`.
 
 ## Architecture
 

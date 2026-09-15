@@ -48,8 +48,11 @@
   // their existing `var(--brand-dark)` CSS and neither page needs to know a
   // tenant exists. index.html reads the same object directly as `C`.
   var DEFAULT_THEME = {
-    // Brookside Christian Academy's, from brooksideacademy.com. It is the
-    // DEFAULT rather than "the palette" now, but nothing about it changed.
+    // Brookside Christian Academy's, from brooksideacademy.com — the palette
+    // this app was built with, kept as the shipped fallback for a tenant that
+    // names no theme of its own (today: dev). Brookside carries its own copy
+    // below, so changing a colour for the school does not change what a new
+    // tenant starts from, and vice versa.
     bg: "#F4F0E6",
     surface: "#FFFFFF",
     ink: "#2A3439",
@@ -80,6 +83,34 @@
 
   var CLIENTS = {
     bca: {
+      // Brookside's own palette, named in full rather than inherited. These are
+      // the same values DEFAULT_THEME ships, so nothing changed colour when this
+      // was written down here — but the school now OWNS them: recolouring
+      // Brookside is an edit to this block, not to the shipped default that
+      // every other tenant falls back to.
+      //
+      // A key added to DEFAULT_THEME later still reaches this tenant, since a
+      // theme overrides only the keys it names. That is the intended asymmetry:
+      // a new token ships to everyone, an existing one is Brookside's to move.
+      theme: {
+        bg: "#F4F0E6",
+        surface: "#FFFFFF",
+        ink: "#2A3439",
+        brand: "#546F75",
+        brandDark: "#3E5054",
+        accent: "#A9764B",
+        border: "#DCD4C2",
+        hover: "#EAE3D3",
+        danger: "#9C3B2A",
+        success: "#4B6B4E",
+        muted: "#5C6B6E",
+        placeholder: "#9CA7A6",
+        empty: "#7C8A8C",
+        scrollThumb: "#C7BEA8",
+        onBrand: "#F4F0E6",
+        onBrandActive: "#E8C9A0",
+        dangerSurface: "#FBF0EE",
+      },
       appName: "BCA Asset Tracker",
       orgName: "Brookside Christian Academy",
       // Prefix for generated Asset IDs (BCA0082). Rooms and Buildings carry
