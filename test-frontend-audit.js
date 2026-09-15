@@ -200,5 +200,20 @@ eq('search finds a deleted asset by the label it used to carry',
 eq('search matches the user', idsOf(f({ query: 'jen' })), [2, 4]);
 eq('search is trimmed and case-insensitive', idsOf(f({ query: '  JEN  ' })), [2, 4]);
 
+// --- the shared filter modal's prop contract -------------------------------
+// Not about the Audit tab alone: this table's filters go through the same
+// ColumnFilterModal every other table uses, and the component resolves its
+// config from `activeCol`. A call site passing any other name renders NOTHING
+// -- no crash, no warning, just a header cell whose tap does nothing, which is
+// indistinguishable from a filter over data that happens not to vary. That is
+// exactly what happened to Maintenance > History, where the prop was spelled
+// `colKey` and both its filters had never once opened.
+const modalCalls = [...src.matchAll(/<ColumnFilterModal\b([\s\S]*?)\/>/g)].map(m => m[1]);
+eq('every table in the app renders the shared filter modal', modalCalls.length >= 3, true);
+eq('every call site passes the prop the component actually reads',
+  modalCalls.filter(a => !/\bactiveCol=/.test(a)).length, 0);
+eq('no call site spells it `colKey`',
+  modalCalls.filter(a => /\bcolKey=/.test(a)).length, 0);
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
