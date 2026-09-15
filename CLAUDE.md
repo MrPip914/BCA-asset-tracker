@@ -150,7 +150,7 @@ Three things that make this non-optional rather than a convenience:
 - `BUGS.md` — known bugs, why they happen, whether fixing one needs an Apps Script
   deploy, and what each blocks. Read it before starting anything substantial.
 - `clients.js` — the tenant registry: one entry per school, holding everything that
-  differs between them (backend URL, app/org name, asset-ID prefix). Loaded by
+  differs between them (backend URL, app/org name, asset-ID prefix, palette). Loaded by
   `index.html`, `panel.html` and `panel-qr-sheet.html` in `<head>` before anything else
   runs. See "Multiple clients" below.
 - `index.html` — the entire app. No build step, no npm install. React, ReactDOM,
@@ -421,8 +421,47 @@ onboard one.
   school shows Brookside campus names. Harmless (Sandbox touches no backend) and left alone
   deliberately: the fixture is hand-maintained and generalising it is not what Phase 0 was
   for. Worth doing when a second tenant actually exists.
-- **Per-client theming is deferred.** The palette is Brookside's, shared. Adding it later is
-  a `theme` key in `clients.js` and nothing else.
+- **The palette is per tenant, and it lives in `clients.js`** (2026-09-15). `DEFAULT_THEME`
+  there is the shipped palette — Brookside's, unchanged — and a tenant's optional `theme`
+  overrides only the keys it names, so a school that cares about two colours writes two
+  lines instead of a palette they would then have to maintain against every token added
+  later.
+  - **It had to move out of `index.html`, because the same values were in three files.**
+    `C` there, a `:root` block in `panel.html`, and a smaller one in `panel-qr-sheet.html`,
+    with a comment in the second saying "same values as C in index.html" — true until it
+    wasn't. The two public pages now carry **no colour values at all**: `clients.js`
+    publishes every key as a CSS custom property (`brandDark` → `--brand-dark`) on
+    `<html>`, and their existing `var(--brand)` CSS picks it up without either page
+    knowing a tenant exists.
+  - **Set as INLINE properties on the root element, not as a `:root` rule**, so they beat
+    any `:root` block whatever the source order — a palette left behind in a page's
+    `<style>` cannot quietly win. It runs from `<head>`, so nothing paints the wrong
+    colour first.
+  - **`applyTheme()` is guarded on `document` existing**, and that guard is load-bearing:
+    `deploy.mjs` and the tests evaluate `clients.js` in a Node stub with a fake `window`
+    and no DOM. A theme that only resolved inside a browser would take the deploy tool down.
+  - **An unknown key is dropped with a console warning, never thrown on.** A typo (`accnt`)
+    that silently did nothing reads as "theming is broken"; but this file loads before the
+    app exists, so throwing would take the whole app down over a colour.
+  - **Three hex literals in `index.html` became real tokens on the way past** — `onBrand`
+    (text on a `brandDark` surface, i.e. every table header), `onBrandActive` (the same
+    text when its column is sorted or filtered) and `dangerSurface` (the tint behind a
+    danger message). They were not palette entries, so a themed tenant would have kept
+    Brookside's colours exactly where they were most visible. `dangerSurface` replaced TWO
+    literals that differed by about a percent.
+  - **`C` is `CLIENT.theme`, declared AFTER `const CLIENT`** — `index.html` is one module
+    body evaluated top to bottom, so declaration order is dependency order and the obvious
+    tidy-up (moving the palette back to the top) is a temporal-dead-zone `ReferenceError`
+    that white-screens the app at load. `test-frontend-theme.js` fails on it.
+  - **The dev tenant deliberately has NO theme**, though a loud one is the obvious thing to
+    give it. Same argument as its `labelPrefix`: dev exists to behave like production, and
+    a differently coloured dev makes a screenshot from it useless as evidence about what a
+    client sees. The `Dev` badge answers "which build am I on" without changing what the
+    app renders.
+  - Covered by `test-frontend-theme.js`. Verified by mutation that six silent failures fail
+    it: an unguarded `applyTheme`, an override assigned wholesale instead of merged, an
+    unknown key stored, a palette copy reappearing in a page, a page using a `var(--x)`
+    nothing sets, and `C` declared before `CLIENT`.
 
 ## Architecture
 

@@ -66,7 +66,7 @@ Frontend (`index.html`, `panel.html`, `panel-qr-sheet.html`):
 | `localStorage` keys | one global set | **namespaced per client — see below** |
 | `panel.html`'s footer | "Read-only view · Brookside Christian Academy" | `CLIENT.orgName` |
 | The Excel export's filename | `brookside-asset-inventory.xlsx` | `<tenant>-asset-inventory.xlsx` |
-| Accent palette | one palette | optional `theme`, later — still deferred |
+| Accent palette | one palette, copied into 3 files | optional `theme` per tenant, resolved in `clients.js` |
 
 **The last two were missed by phase 0 and found on 2026-09-15**, which is the lesson this
 table is for: phase 0 swept the values the app *reads at startup* and stopped there. Both
@@ -217,7 +217,8 @@ Steps 1–3 were hand-work when this was written and are `new-tenant.mjs` now:
    executes as its owner.
 3. **`node set-tenant.mjs <id> <SCRIPT_ID> [DEPLOYMENT_ID]`** — records the ids in Cloud
    Shell's `$HOME` so later deploys are one command.
-4. Add the tenant to `clients.js` — `apiUrl`, `appName`, `orgName`, `labelPrefix`.
+4. Add the tenant to `clients.js` — `apiUrl`, `appName`, `orgName`, `labelPrefix`, and an
+   optional `theme` naming just the colours they want changed.
 5. `node deploy.mjs <id>` — first real deploy, verified against that tenant's own `/exec`.
 6. Sign in once as owner; add the client's staff to the allowlist via Access.
 7. Load their inventory: paste their CSV into an **Import** tab, then BCA Admin >
@@ -296,7 +297,7 @@ worth moving until someone actually asks for it.
 | 1 | **DONE** (2026-09-08) — Dev tenant: its own Sheet, script and deployment, a `dev` entry in `clients.js`, seeded by `sheet.mjs copy bca dev --scrub` | Backend changes stopped being tested on the school. |
 | 2 | **DONE** (2026-09-08) — `deploy.mjs <tenant>/--all/--status`, per-tenant config via `set-tenant.mjs`, and `new-tenant.mjs` to bootstrap a tenant | One command to deploy or audit every backend. Pulled forward from after phase 1, because adding a second tenant to `clients.js` is what makes the old single-target deploy refuse — the two are not separable. |
 | 3 | **NEXT** — first real client onboarded; write `ONBOARDING.md` from what actually happened | Two live clients. |
-| 4 | Optional, only if wanted: per-client theming, pinned frontend releases, Cloudflare Pages | Staged rollout, custom domains, per-branch previews. |
+| 4 | Optional, only if wanted: pinned frontend releases, Cloudflare Pages. **Per-client theming landed early** (2026-09-15) — a `theme` key in `clients.js`, overriding only the keys it names | Staged rollout, custom domains, per-branch previews. |
 
 Out of order but done: the **published dev build** at `/dev/` (2026-09-04), which started
 life as part of phase 4's "staging" and was pulled forward once it was clear that testing

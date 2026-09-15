@@ -3,7 +3,7 @@
  * ===============
  * One entry per organisation the app is deployed for. Everything that differs
  * between clients lives here; nothing else in the app should hardcode a school's
- * name, its Apps Script URL, or its asset-ID prefix.
+ * name, its Apps Script URL, its asset-ID prefix or a colour.
  *
  * WHY ONE FILE FOR EVERY TENANT rather than one file per tenant: a per-tenant
  * JSON file would have to be FETCHED before the app knows which backend to talk
@@ -29,6 +29,54 @@
  */
 (function () {
   "use strict";
+
+  // ----------------------------------------------------------------- THE PALETTE
+  //
+  // The app's colour scheme, in ONE place. It used to be in three: an object
+  // called `C` in index.html and a `:root` block in each of the two public pages,
+  // all carrying the same hex strings and kept in step by hand. That is the exact
+  // shape of drift this repo's history is a record of — and it is what made
+  // per-client theming look expensive when it is actually one key.
+  //
+  // A tenant's `theme` below overrides ONLY the keys it names; everything else
+  // falls back here. So a school that cares about two colours writes two lines
+  // rather than a full palette they would then have to maintain against every
+  // token added later.
+  //
+  // Keys are camelCase and become CSS custom properties by the obvious rule
+  // (`brandDark` → `--brand-dark`), so panel.html and panel-qr-sheet.html keep
+  // their existing `var(--brand-dark)` CSS and neither page needs to know a
+  // tenant exists. index.html reads the same object directly as `C`.
+  var DEFAULT_THEME = {
+    // Brookside Christian Academy's, from brooksideacademy.com. It is the
+    // DEFAULT rather than "the palette" now, but nothing about it changed.
+    bg: "#F4F0E6",
+    surface: "#FFFFFF",
+    ink: "#2A3439",
+    brand: "#546F75",
+    brandDark: "#3E5054",
+    accent: "#A9764B",
+    border: "#DCD4C2",
+    hover: "#EAE3D3",
+    danger: "#9C3B2A",
+    success: "#4B6B4E",
+    muted: "#5C6B6E",
+    placeholder: "#9CA7A6",
+    empty: "#7C8A8C",
+    scrollThumb: "#C7BEA8",
+
+    // Three tokens that were hex literals scattered through index.html rather
+    // than palette entries, which meant a themed tenant would have kept
+    // Brookside's colours in the places they were used:
+    //   onBrand       text on a brandDark surface — every table header
+    //   onBrandActive the same text when its column is sorted or filtered
+    //   dangerSurface the tint behind a danger message
+    // `dangerSurface` replaces TWO literals that differed by about a percent
+    // (#FBF0EE and #FBEAE7); one token is the honest version of one colour.
+    onBrand: "#F4F0E6",
+    onBrandActive: "#E8C9A0",
+    dangerSurface: "#FBF0EE",
+  };
 
   var CLIENTS = {
     bca: {
@@ -66,6 +114,13 @@
       // dev now looks exactly like one from production.
       labelPrefix: "BCA",
       apiUrl: "https://script.google.com/macros/s/AKfycbyMI_-SlWIYy1DxO0pjtAl31uQbWN5bFZLq9WMrTfrwHbeqNw4xfaGElEGdgT3yvUFI/exec",
+
+      // NO `theme` here, deliberately, though a loud one would be the obvious
+      // thing to give the dev tenant. It is the same argument as labelPrefix
+      // directly above: dev exists to behave like production, and a differently
+      // coloured dev makes a screenshot from it unusable as evidence about what
+      // a client sees. The Dev badge already answers "which build am I on", and
+      // it answers it without changing anything the app renders.
     },
   };
 
@@ -120,6 +175,64 @@
   // school" is otherwise a hard question to answer from inside the app.
   var config = CLIENTS[id];
 
+  /**
+   * The resolved palette: DEFAULT_THEME with this tenant's overrides on top.
+   *
+   * An UNKNOWN key is dropped with a warning rather than thrown on. A typo'd
+   * token (`accnt`) that silently did nothing would present as "theming does not
+   * work", which is a bad hour; but this file loads before the app exists, so
+   * throwing would take the whole app down over a colour. Named in the console
+   * is the honest middle — the app runs, and the reason is one place to look.
+   */
+  function resolveTheme(overrides) {
+    var theme = {};
+    Object.keys(DEFAULT_THEME).forEach(function (key) { theme[key] = DEFAULT_THEME[key]; });
+    if (!overrides) return theme;
+
+    var unknown = [];
+    Object.keys(overrides).forEach(function (key) {
+      if (!Object.prototype.hasOwnProperty.call(DEFAULT_THEME, key)) { unknown.push(key); return; }
+      theme[key] = overrides[key];
+    });
+    if (unknown.length && window.console && window.console.warn) {
+      window.console.warn(
+        "clients.js: tenant \"" + id + "\" names theme key(s) that do not exist and were ignored: "
+        + unknown.join(", ") + ". Valid keys: " + Object.keys(DEFAULT_THEME).join(", ") + "."
+      );
+    }
+    return theme;
+  }
+
+  // brandDark -> --brand-dark. One rule, so a token added to DEFAULT_THEME is
+  // usable from CSS the same moment it exists, with nothing to register.
+  function cssVarName(key) {
+    return "--" + key.replace(/[A-Z]/g, function (ch) { return "-" + ch.toLowerCase(); });
+  }
+
+  /**
+   * Publish the palette as CSS custom properties on <html>.
+   *
+   * This is what themes panel.html and panel-qr-sheet.html: both already style
+   * themselves from var(--brand) and friends, so they now carry no colour values
+   * of their own at all and pick up the tenant's without knowing one exists.
+   *
+   * Set as INLINE properties on the root element rather than as a :root rule,
+   * which means they beat any :root block whatever the source order — so a
+   * leftover palette in a page's <style> cannot quietly win. And this runs from
+   * <head>, before the body paints, so there is no flash of the wrong colour.
+   *
+   * The `document` guard is load-bearing: deploy.mjs and the tests evaluate this
+   * file in a Node stub that has a fake `window` and no DOM at all.
+   */
+  function applyTheme(theme) {
+    if (typeof document === "undefined" || !document.documentElement) return;
+    var style = document.documentElement.style;
+    Object.keys(theme).forEach(function (key) { style.setProperty(cssVarName(key), theme[key]); });
+  }
+
+  var theme = resolveTheme(config.theme);
+  applyTheme(theme);
+
   window.ASSET_TRACKER_CLIENT = {
     id: id,
     appName: config.appName,
@@ -127,6 +240,11 @@
     labelPrefix: config.labelPrefix,
     apiUrl: config.apiUrl,
     isDefault: id === DEFAULT_CLIENT_ID,
+
+    // The merged palette. index.html reads this straight into `C`; the two
+    // public pages never touch it, since applyTheme() above has already put the
+    // same values where their CSS looks for them.
+    theme: theme,
     unknownRequest: requested && requested !== id ? requested : null,
 
     // True on the /dev/ copy. The app shows a DEV marker when it is set — two
