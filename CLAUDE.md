@@ -867,6 +867,55 @@ onboard one.
   `"due-soon"` but shows "Due soon", via `MAINTENANCE_STATUS_FILTER_OPTIONS`). Maintenance's
   default (unsorted) view is always due-soonest-first with never-performed items pinned to the
   top; picking an explicit column sort overrides that until cleared.
+- **Every table is rendered through `StickyTable`, which keeps its HEADER and its
+  HORIZONTAL SCROLLBAR on screen** (2026-09-15). Before it, both lived inside one
+  horizontally scrolling box with the header as its first row, so on a long list the
+  headers scrolled away after a dozen rows and the scrollbar sat at the very bottom —
+  past a hundred assets, reaching it meant scrolling to the end of the list, sideways,
+  and back.
+  - **The page still scrolls vertically, and NOT introducing an inner scroll region is
+    the whole design.** A viewport-height box with the rows inside it is the one-line
+    version of this feature and would undo something the app already has: the browser
+    restores scroll position for same-document history navigation, which is why Back
+    lands where you left the list (see "Scroll position" above). That restoration is
+    for the PAGE and never for a nested scroller, so the easy version takes "losing
+    your place in the list" straight back. Re-verified after this change: Back still
+    returns to the exact offset.
+  - **The header is a SEPARATE scroll box from the body because it has to be.**
+    `overflow-x: auto` computes `overflow-y` to `auto` too, so a header inside the body
+    scroller has that scroller as its sticky container — a box that never scrolls
+    vertically, where `position: sticky` does precisely nothing. Split out, it is an
+    ordinary page-level sticky element.
+  - **So three boxes share one scrollLeft**: header, body, and the scrollbar itself — a
+    `position: sticky; bottom: 0` strip that rides the bottom of the viewport while the
+    table is on screen and settles at the table's own bottom edge when it is not. The
+    body's own scrollbar is hidden (`.hscroll-body`) so there is only ever one.
+  - **The sync needs no re-entrancy flag.** Assigning `scrollLeft` fires a scroll event,
+    so the naive version loops; the usual patch is a flag cleared on rAF, and rAF does
+    not fire while the page is not compositing — the trap the print trigger documents.
+    Comparing before assigning terminates by itself instead.
+  - **Three things that fail silently and are therefore tested** (`test-frontend-table.js`,
+    verified by mutation): `overflow: hidden` on the outer box — which is what rounds the
+    corners of every other bordered box here, so it is an easy thing to re-add, and it
+    makes that box the sticky container so nothing sticks at all; a missing `headerTop`,
+    which parks the header underneath the app's own sticky chrome; and a table built the
+    old way, which is what a new one would be copied from.
+  - **`headerTop` is a measured number per screen** (`LIST_TABLE_HEADER_TOP` 81,
+    `DETAIL_TABLE_HEADER_TOP` 90), in the same spirit as the tab rows' own hardcoded
+    `top: 45` / `top: 53`. If either row's height changes, these move with it.
+  - **The scrollbar strip needs an explicit height**, or its auto height is the 1px
+    spacer inside it and the bar has nowhere to draw — the strip measures 1px and is
+    invisible. Its track is PAINTED rather than left transparent, so it still reads as a
+    scrollbar where the platform draws the thumb as an overlay that only appears while
+    scrolling (most phones, some desktops) — i.e. exactly the case where an invisible
+    affordance would leave the original complaint in place.
+- **A table's columns are all FIXED widths, and the one whose content has no natural
+  length goes LAST.** The header and each row are separate grid containers, so a
+  flexible track (`1fr`, `minmax`) resolves against each one's OWN content: a row with a
+  long sentence in it puts every cell downstream of that track somewhere its neighbours'
+  are not. It is a quiet failure — it reads as a styling wobble rather than a bug. The
+  panel Table view records the same rule; the Audit tab was where it was met the second
+  time, which is why the User column sits ahead of Details.
 - **Edit affordance convention**: every "edit this record" trigger is an icon-only pencil
   (`<Pencil size={14} color={C.muted}/>`, `aria-label="Edit ..."`), positioned at the trailing
   edge of the row/section it edits, alongside that row's other icon actions (delete, etc.) —
@@ -1853,6 +1902,10 @@ renders, read from the SUBJECT's point of view (`viewerLabel` null).
   size is what keeps the unfiltered view from freezing the tab. The count line above the
   table reports the FULL match, not the page, or "Show more" would have no context. Paging
   resets whenever the question changes.
+- **User sits BEFORE Details, and every column is a fixed width.** The column order is
+  Eric's call and the widths are what makes it hold: Details is the one column with no
+  natural length, so it goes last where nothing sits downstream of it to be pushed
+  around. Total 1235px, which fits a 1280 laptop without scrolling sideways at all.
 - **The tab carries no count.** Maintenance's says how much there is to do; an audit count
   only ever grows, so "Audit (11482)" answers nothing and gets longer forever.
 - **Export is the workbook's existing Audit Log sheet, NOT the filtered view.** An export
