@@ -2375,7 +2375,7 @@ const FRONTEND_SCRIPT_VERSION = "v37";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-16.4";
+const APP_VERSION = "2026-09-16.5";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -2638,6 +2638,13 @@ const SANDBOX_DATA_KEY = CLIENT.storageKey("asset-tracker-sandbox-data");
 // and the win is mostly in overlapping one file's downscale with the previous
 // file's upload rather than in raw parallelism.
 const PHOTO_UPLOAD_CONCURRENCY = 3;
+// What share of one file's progress its RESIZE is worth, the rest being the
+// upload. It exists so the indicator moves even where byte progress never
+// arrives: a browser that reports no total, a body small enough that the network
+// stack swallows it whole and reports one event at the end, Sandbox. Small,
+// because the resize IS the short half and a large slice would make the number
+// jump rather than travel.
+const PHOTO_RESIZE_SHARE = 0.15;
 const PHOTO_MAX_EDGE = 1600;
 const PHOTO_JPEG_QUALITY = 0.8;
 // Refused before any work is done. Well above what a re-encoded phone photo
@@ -2740,7 +2747,16 @@ async function downscalePhoto(file) {
 // signedParams list rather than restated here: Cloudinary rejects the upload if
 // the posted set differs from the signed set by even one entry, and says only
 // that the signature is invalid.
-async function uploadPhotoToCloudinary(blob, sig) {
+// XHR RATHER THAN FETCH, FOR ONE REASON: fetch cannot report how much of a
+// request body has gone out. Nothing else here wants XHR, and the error
+// handling below is deliberately the same shape fetch had -- status, then the
+// host's own message, then a fallback -- so the swap changes what the button
+// can SAY and nothing about what happens when an upload fails.
+//
+// `onProgress(fraction)` is called with 0..1 for THIS file as the bytes leave.
+// Optional: a browser that reports no total (a stream, an old engine) simply
+// never calls it and the caller falls back to counting whole files.
+function uploadPhotoToCloudinary(blob, sig, onProgress) {
   const form = new FormData();
   form.append("file", blob);
   form.append("api_key", sig.apiKey);
@@ -2749,16 +2765,36 @@ async function uploadPhotoToCloudinary(blob, sig) {
     const value = k === "public_id" ? sig.publicId : sig[k];
     if (value !== undefined && value !== null && value !== "") form.append(k, value);
   });
-  const res = await fetch("https://api.cloudinary.com/v1_1/" + encodeURIComponent(sig.cloudName) + "/image/upload", {
-    method: "POST",
-    body: form,
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "https://api.cloudinary.com/v1_1/" + encodeURIComponent(sig.cloudName) + "/image/upload");
+    if (onProgress && xhr.upload) {
+      xhr.upload.onprogress = e => {
+        if (e.lengthComputable && e.total > 0) onProgress(Math.min(1, e.loaded / e.total));
+      };
+    }
+    // A network failure is the one case fetch worded for us. Say which half
+    // failed, since "the host refused it" would be wrong here -- it was never
+    // reached.
+    xhr.onerror = () => reject(new Error("the upload could not reach the image host."));
+    xhr.ontimeout = () => reject(new Error("the upload to the image host timed out."));
+    xhr.onload = () => {
+      let data = null;
+      try { data = JSON.parse(xhr.responseText); } catch (err) { data = null; }
+      const ok = xhr.status >= 200 && xhr.status < 300;
+      if (!ok || !data || !data.secure_url) {
+        const detail = data && data.error && data.error.message ? data.error.message : "HTTP " + xhr.status;
+        reject(new Error("The image host refused the upload: " + detail));
+        return;
+      }
+      // The last progress event can land before the response does, and a bar
+      // that stops at 98% while the file is actually finished is the complaint
+      // this whole indicator exists to answer.
+      if (onProgress) onProgress(1);
+      resolve(data);
+    };
+    xhr.send(form);
   });
-  const data = await res.json().catch(() => null);
-  if (!res.ok || !data || !data.secure_url) {
-    const detail = data && data.error && data.error.message ? data.error.message : "HTTP " + res.status;
-    throw new Error("The image host refused the upload: " + detail);
-  }
-  return data;
 }
 
 // Sandbox fixture. Deliberately MIXED, the same way the asset ids and the work
@@ -3513,10 +3549,17 @@ function AssetTracker() {
   // snapshot write at the very end -- and which no longer disables anything.
   const [photoBusy, setPhotoBusy] = useState(false);
   const [photoError, setPhotoError] = useState("");
-  // { done, total } while a multi-file upload is running, else null. Uploads are
-  // sequential rather than parallel: honest progress, one failure at a time to
-  // report, and parallel uploads competing on school wifi is the opposite of
-  // what this feature needs.
+  // { done, total, pct } while an upload is running, else null. `pct` is what
+  // the button shows: a percentage of the whole batch's bytes, each file an
+  // equal share filled by its own upload progress events. `done` counts
+  // FINISHED files and is not displayed -- it is what makes a failed or Sandbox
+  // file (no byte events at all) still claim its share.
+  //
+  // The label used to be "Uploading <n> of <m>" reading `done + 1`, which was
+  // honest while uploads were serial and became a lie when they moved into a
+  // pool: with three photos and a pool of three, all three are in flight at
+  // once and land together, so it sat on "1 of 3" for the entire wait and then
+  // vanished. A file number cannot describe parallel work; a fraction can.
   const [photoProgress, setPhotoProgress] = useState(null);
   // Which photo the lightbox is showing, or null.
   const [photoViewer, setPhotoViewer] = useState(null);
@@ -6110,7 +6153,7 @@ function AssetTracker() {
     if (!PHOTO_OWNER_TYPES.includes(ownerType)) return;
     setPhotoError("");
     setPhotoBusy(true);
-    setPhotoProgress({ done: 0, total: chosen.length });
+    setPhotoProgress({ done: 0, total: chosen.length, pct: 0 });
     // Accumulated HERE and written ONCE at the end, which is the whole reason
     // this is not a loop around the old single-file handler. `photos` is the
     // state this render closed over and does not advance as we go, so a
@@ -6151,23 +6194,46 @@ function AssetTracker() {
         // photo happened to finish first.
         const results = new Array(chosen.length).fill(null);
         const failedAt = new Array(chosen.length).fill(null);
+        // EACH FILE IS AN EQUAL SHARE OF THE WHOLE, and its own share fills as
+        // its bytes go out. Counting whole files is what looked broken: with
+        // three photos and a pool of three, every file is in flight at once and
+        // they all land together, so a file counter reads 0 for the entire wait
+        // and then the button disappears. A fraction moves the whole time and
+        // does not have to pretend one particular file is the current one.
+        //
+        // The resize is worth a small fixed slice of each file's share
+        // (PHOTO_RESIZE_SHARE) and the upload the rest, so the number moves as
+        // files are prepared even where byte progress never arrives at all.
+        const fraction = new Array(chosen.length).fill(0);
         let done = 0;
         let next = 0;
+        const report = () => {
+          let sum = 0;
+          for (let i = 0; i < fraction.length; i++) sum += fraction[i];
+          setPhotoProgress({ done, total: chosen.length, pct: Math.round(100 * sum / chosen.length) });
+        };
         const worker = async () => {
           for (;;) {
             const i = next++;
             if (i >= chosen.length) return;
             const file = chosen[i];
             try {
-              results[i] = await preparePhotoRow(ownerType, ownerId, file, signatures ? signatures[i] : null);
+              results[i] = await preparePhotoRow(ownerType, ownerId, file, signatures ? signatures[i] : null, f => {
+                fraction[i] = f;
+                report();
+              });
             } catch (err) {
               // One bad file does not abandon the rest -- the others are already
               // uploaded, and throwing away good work because the fourth photo
               // was a screenshot of a video would be worse than reporting it.
               failedAt[i] = (file.name || "A file") + ": " + ((err && err.message) || "could not be uploaded.");
             }
+            // A finished file owns its whole share whatever the byte events said
+            // -- Sandbox emits none at all, and a failed one is still not coming
+            // back, so leaving its share empty would strand the number short.
+            fraction[i] = 1;
             done += 1;
-            setPhotoProgress({ done, total: chosen.length });
+            report();
           }
         };
         await Promise.all(
@@ -6213,12 +6279,13 @@ function AssetTracker() {
   // attachPhotos so the per-file failure above has something to wrap, and so the
   // accumulate-then-write-once rule cannot be broken by a future call site: this
   // returns a row and writes nothing.
-  async function preparePhotoRow(ownerType, ownerId, file, sig) {
+  async function preparePhotoRow(ownerType, ownerId, file, sig, onProgress) {
     if (file.size > PHOTO_MAX_BYTES) {
       throw new Error("too large — pick a photo rather than a video or a RAW file.");
     }
     {
       const prepared = await downscalePhoto(file);
+      if (onProgress) onProgress(PHOTO_RESIZE_SHARE);
       let row;
       if (sandboxMode) {
         // Sandbox makes NO network call, here as everywhere. The object URL
@@ -6234,7 +6301,8 @@ function AssetTracker() {
         };
       } else {
         if (!sig) throw new Error("no upload permission was issued for this file.");
-        const uploaded = await uploadPhotoToCloudinary(prepared.blob, sig);
+        const uploaded = await uploadPhotoToCloudinary(prepared.blob, sig,
+          onProgress ? f => onProgress(PHOTO_RESIZE_SHARE + (1 - PHOTO_RESIZE_SHARE) * f) : null);
         row = {
           id: crypto.randomUUID(), ownerType: ownerType, ownerId: ownerId,
           url: uploaded.secure_url,
@@ -15065,12 +15133,14 @@ function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onDelete,
             }}
           >
             {busy ? <Loader2 size={14} className="spin" /> : <ImagePlus size={14} />}
-            {/* Counts through a batch rather than saying "Uploading..." for a
-                minute with nothing moving. Reads 1-based: the first file is
-                "1 of 5", not "0 of 5". */}
+            {/* Moves rather than saying "Uploading..." for a minute with
+                nothing changing. It reports a PERCENTAGE of the batch's bytes,
+                never "file 1 of 3": uploads run in a pool, so several are always
+                in flight and a file number would be claiming otherwise -- which
+                is exactly what made this look stuck. */}
             {busy
-              ? (progress && progress.total > 1
-                  ? "Uploading " + Math.min(progress.done + 1, progress.total) + " of " + progress.total + "…"
+              ? (progress && typeof progress.pct === "number"
+                  ? (progress.total > 1 ? "Uploading " + progress.total + " photos… " : "Uploading… ") + progress.pct + "%"
                   : "Uploading…")
               : "Add photos"}
           </button>

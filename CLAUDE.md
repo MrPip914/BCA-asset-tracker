@@ -2770,6 +2770,45 @@ evaluation and the three decisions behind it are in `PHOTOS_EVAL.md`.
   - **Results are written to their own index rather than pushed**, so the rows
     keep the order the files were chosen in however the uploads interleave —
     otherwise a gallery would reorder itself by whichever photo finished first.
+  - **THE PROGRESS INDICATOR IS A PERCENTAGE OF THE BATCH, NEVER "FILE N OF M"**,
+    and that is a bug the pool caused rather than a preference. The label read
+    `done + 1` — which file is in flight — correct while uploads were serial and
+    a lie the moment three start together: with three photos and a pool of three
+    it sat on "Uploading 1 of 3" for the whole wait and then vanished, reported
+    as an indicator that never moved. **A file index cannot describe parallel
+    work.** Each file is an equal share of the whole and fills as its own bytes
+    go out.
+    - **`uploadPhotoToCloudinary` is XHR rather than fetch for exactly one
+      reason: fetch cannot report how much of a request body has gone out.**
+      Nothing else here wants XHR, so the error handling is deliberately the
+      same shape fetch had — status, then the host's own message, then a
+      fallback — plus one case fetch worded for us, a network failure, which now
+      says the upload never *reached* the host rather than that the host refused
+      it.
+    - **The RESIZE is worth a fixed slice of each file** (`PHOTO_RESIZE_SHARE`,
+      0.15) and the upload the rest. That is what keeps the number moving where
+      byte progress never arrives at all: Sandbox makes no request, a browser
+      can report no total, and a body small enough for the network stack to
+      swallow whole produces one event at the end. Small deliberately — the
+      resize is the short half, and a large slice would make the number jump
+      rather than travel.
+    - **A file that FINISHES claims its whole share whatever its byte events
+      said, including one that FAILED.** A failed file is not coming back, so
+      leaving its share empty strands the number short of 100 with nothing left
+      running to move it.
+    - **Byte-level progress is browser behaviour against a real network and is
+      NOT provable in a harness.** A Playwright-routed request never streams its
+      body to a socket, and ~900KB over loopback is buffered whole however
+      slowly the server reads — both report one event at the end. It was
+      verified by mapping `api.cloudinary.com` to a local TLS server (**CORS
+      headers are load-bearing there**: the browser withholds upload progress
+      from a cross-origin request it has not allowed, which looks exactly like
+      the app failing to report it). Nor is 100% reliably *painted*: against a
+      fast host the last report and the teardown land in the same flush.
+    - Covered by `test-frontend-photos.js`, verified by mutation that eight
+      silent failures fail it — among them the label returning to a file index,
+      the percentage reverting to a whole-file count, and either half of the
+      resize/upload split being dropped.
 
 - **`photos` is a revision domain of its own, not part of `assets`.** A photo can belong to
   a breaker or a work entry, so folding it in would make attaching one conflict with anyone

@@ -201,7 +201,7 @@ eq('a work entry can own photos',
 // every list from the ORIGINAL array and each save would drop the ones before
 // it — N writes, one photo surviving. That failure looks like "only the last
 // photo uploaded", which reads as a flaky network rather than a bug.
-function runAttach({ files, failOn = [], ownerType = 'asset', signFails = false, slow = [] }) {
+function runAttach({ files, failOn = [], ownerType = 'asset', signFails = false, slow = [], emitBytes = [] }) {
   const calls = { persist: [], persistAssets: [], errors: [], progress: [], busy: [], signCounts: [] };
   const fn = new Function(
     'savingRef', 'photoBusy', 'PHOTO_OWNER_TYPES', 'setPhotoError', 'setPhotoBusy',
@@ -218,7 +218,15 @@ function runAttach({ files, failOn = [], ownerType = 'asset', signFails = false,
     (m) => calls.errors.push(m),
     (b) => calls.busy.push(b),
     (p) => calls.progress.push(p),
-    async (ownerType, ownerId, file) => {
+    async (ownerType, ownerId, file, sig, onProgress) => {
+      // A file named in `emitBytes` reports its bytes going out, the way the
+      // real upload's XHR progress events do. Everything else emits nothing --
+      // Sandbox makes no request at all, and a browser can decline to report a
+      // total -- so both paths are exercised.
+      if (emitBytes.includes(file.name) && onProgress) {
+        onProgress(0.5);
+        await new Promise(r => setTimeout(r, 0));
+      }
       if (failOn.includes(file.name)) throw new Error('nope');
       // A file named in `slow` finishes last however early it started, which is
       // what proves the result order follows the FILES rather than the finishes.
@@ -342,6 +350,64 @@ runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg')] }).then(calls => {
      /ownerType: p\.ownerType \|\| "asset"/.test(src), false);
   eq('adoptPhoto leaves a blank ownerType blank',
      /ownerType: p\.ownerType \|\| ""/.test(src), true);
+
+  // ---- the progress indicator, which read as STUCK on a real batch ---------
+  // It said "Uploading 1 of 3" and never moved. The number was `done + 1` -- a
+  // serial reading of which file is in flight -- and it survived uploads moving
+  // into a bounded pool, where three files start together and land together, so
+  // it sat on 1 for the whole wait and then vanished. A file index cannot
+  // describe parallel work; only a fraction of the batch can.
+  eq('the button never reports a file INDEX, which a pool cannot honestly give',
+     /progress\.done \+ 1|Math\.min\(progress\.done/.test(src), false);
+  eq('it reports a percentage of the batch instead',
+     /progress\.pct \+ "%"/.test(src), true);
+  eq('and attachPhotos computes that percentage',
+     /pct: Math\.round\(100 \* sum \/ chosen\.length\)/.test(grab('attachPhotos')), true);
+  // The whole point of the XHR swap: fetch cannot report a request body's
+  // progress, so with fetch there is nothing to put in that percentage until a
+  // file finishes -- which is the frozen indicator all over again.
+  eq('the upload uses XHR so the bytes going out can be reported',
+     /xhr\.upload\.onprogress = /.test(grab('uploadPhotoToCloudinary')), true);
+  eq('and not fetch, which cannot report a request body at all',
+     /fetch\(/.test(grab('uploadPhotoToCloudinary')), false);
+  eq('and it reports 1 on load, so the bar cannot stop short of the response',
+     /if \(onProgress\) onProgress\(1\);/.test(grab('uploadPhotoToCloudinary')), true);
+  // The resize is worth a fixed slice of each file's share, which is what keeps
+  // the number moving where byte progress never arrives: a body small enough
+  // that the network stack swallows it whole and reports once at the end, a
+  // browser that gives no total, or Sandbox, which makes no request at all.
+  eq('the resize reports a share of its own',
+     /if \(onProgress\) onProgress\(PHOTO_RESIZE_SHARE\);/.test(grab('preparePhotoRow')), true);
+  eq('and the upload fills the REST of that file rather than restarting it',
+     /PHOTO_RESIZE_SHARE \+ \(1 - PHOTO_RESIZE_SHARE\) \* f/.test(grab('preparePhotoRow')), true);
+
+  // ONE file, so the only thing that can move the number before the end is that
+  // file's own bytes. With two files a half-finished one and a finished one
+  // average out to something between 0 and 100, and the check would pass with
+  // the byte reports thrown away entirely.
+  return runAttach({ files: [F('a.jpg')], emitBytes: ['a.jpg'] });
+}).then(calls => {
+  const pcts = calls.progress.filter(Boolean).map(p => p.pct);
+  eq('progress starts at 0 rather than claiming a file is already done',
+     pcts[0], 0);
+  eq('it MOVES while the upload is still in flight, not only as it finishes',
+     pcts.some(v => v > 0 && v < 100), true);
+  eq('and the mid-flight number is the fraction of bytes actually sent',
+     pcts.includes(50), true);
+
+  return runAttach({ files: [F('a.jpg'), F('b.jpg')], emitBytes: ['a.jpg'] });
+}).then(calls => {
+  const pcts = calls.progress.filter(Boolean).map(p => p.pct);
+  eq('a batch reaches 100 even though only one file reported any bytes',
+     pcts[pcts.length - 1], 100);
+
+  return runAttach({ files: [F('a.jpg'), F('bad.mov')], failOn: ['bad.mov'] });
+}).then(calls => {
+  const pcts = calls.progress.filter(Boolean).map(p => p.pct);
+  // A failed file is not coming back, so leaving its share empty would strand
+  // the number short of 100 with nothing left running to move it.
+  eq('a FAILED file still claims its share, so the batch finishes at 100',
+     pcts[pcts.length - 1], 100);
 
   // ---- the input and the wiring, which the execution above cannot see -------
   eq('the file input accepts several at once',
