@@ -189,9 +189,37 @@ slow sign-in is §4 wearing a different hat.
 
 ## 4. Coming back after a refresh
 
-Two independent terms, and **the bigger one is not the backend**.
+### It is not authentication, and that matters for where to look
 
-### (a) The client boot — measured, and it is the headline
+The session is recalled **instantly** — `restoreSessionId()` is a single synchronous
+`localStorage` read, and it has always been fast. Nothing re-authenticates on a refresh
+unless the session has genuinely expired or been revoked.
+
+What is actually being watched is the app **rebuilding itself from source and then
+refusing to draw anything until it has refetched the entire inventory**. The sign-in
+screen is not involved. Chasing the auth path would find nothing wrong with it.
+
+The sequence, with measured numbers:
+
+| step | cost | kind |
+|------|------|------|
+| download index.html, babel, react-dom, lucide, xlsx | ~1.22MB compressed over the wire | network |
+| Babel parses its own 2.87MB, then transpiles 884KB of JSX to 732KB | 1.27–1.47s on a server CPU; 4–8s on a phone | **CPU** |
+| mount, restore session from localStorage | ~0ms | — |
+| `loadData()` POSTs `op:"read"`, backend reads 11 tabs | ~1.5s floor (§0) + tab reads | network |
+| first paint | | |
+
+The screen is blank or on the loading state for **all** of it.
+
+Two things follow. First, **the dominant term is CPU, not bandwidth** — 1.22MB compressed
+is not much, but Babel has to parse its own 2.87MB and then transform 884KB on the
+device, and a faster connection does not help with that at all. Second, the backend read
+and the client boot are **two independent halves of the wait**, so fixing either one alone
+still leaves the other in front of the user.
+
+### The two halves
+
+#### (a) The client boot — measured, and it is the headline
 
 `index.html` is **884KB**, and Babel Standalone transpiles all of it **on every single
 load**. Measured by running the real file through the real Babel build the page loads:
@@ -202,14 +230,19 @@ load**. Measured by running the real file through the real Babel build the page 
 A mid-range phone is 3–5× slower than that CPU, so **4–8 seconds of transpiling before the
 app's first line runs**, every refresh. On top of it, the load pulls:
 
-    babel.min.js      2,866KB
-    lucide-react        558KB
-    xlsx                433KB
-    react-dom           132KB
-    react + client       10KB
+                      uncompressed    over the wire
+    babel.min.js           2,866KB          598KB
+    lucide-react             558KB          166KB
+    xlsx                     433KB          175KB
+    react-dom                132KB           53KB
+    react + client            10KB            —
+    index.html               884KB          232KB
 
-**~4.9MB of uncompressed JavaScript before first paint**, over an esm.sh waterfall where
-each package is a redirect shim pointing at the real module (two RTTs deep per package).
+**~4.9MB of JavaScript to parse before first paint** (~1.22MB of it over the wire), over
+an esm.sh waterfall where each package is a redirect shim pointing at the real module —
+two RTTs deep per package. The compressed column is why this is a CPU problem rather than
+a bandwidth one: the bytes arrive quickly and then the device has to chew through the
+uncompressed column.
 
 Options, cheapest first:
 
@@ -217,7 +250,7 @@ Options, cheapest first:
    `await import("xlsx")` inside it removes **433KB from every load** for a button most
    sessions never press. Trivial, frontend only, no deploy. Do this regardless of what else
    is decided.
-2. **Cache Babel's output, keyed by a hash of the source.** Read the inline script text
+2. **Cache Babel's output, keyed by a hash of the source.** *(The single biggest one.)* Read the inline script text
    from the DOM, hash it, and keep the transpiled output in Cache Storage or IndexedDB
    under that hash; on a repeat load skip Babel entirely and inject the cached module. This
    removes the 1.3s–8s transform *and* lets `babel.min.js` load only on a cache miss —
@@ -225,7 +258,10 @@ Options, cheapest first:
    constraints**: it keeps the no-build-step property (edit the JSX inline, reload, and a
    changed hash invalidates the cache automatically) while deleting most of its cost.
    Moderate complexity; the care is all in module-script mechanics and making a cache miss
-   fall back cleanly rather than white-screening.
+   fall back cleanly rather than white-screening. **The honest limit: the first load after
+   any edit to `index.html` is unchanged**, because the hash moved and the cache misses.
+   That is precisely the right trade — it costs nothing on the load where the code is new
+   and pays on every load after, which is what a refresh is.
 3. **A service worker** with stale-while-revalidate over the shell and the CDN deps. Makes
    a refresh near-instant and adds offline tolerance. Bigger commitment: update semantics
    are their own trap, a bad service worker serves stale code to every school at once, and
@@ -244,7 +280,7 @@ Options, cheapest first:
    Eric decides the working style is worth trading** — but it is his call, not a technical
    verdict, and option 2 exists precisely so it does not have to be made.
 
-### (b) The snapshot read
+#### (b) The snapshot read
 
 Every refresh re-reads **eleven tabs** — including the whole AuditLog, which is never
 pruned and grows forever — and blocks the entire UI behind it. `CLAUDE.md` already names
@@ -289,6 +325,11 @@ Ordered by payoff per unit of risk, not by size.
 | 6 | Per-tab dirty via Config hashes | both | yes | 8 tab rewrites → 1–2 |
 | 7 | Cache Babel output by source hash | frontend | no | −1.3s(desktop)/−4–8s(phone) + −2.9MB on repeat loads |
 | 8 | Cap audit rows in the read | both | yes | keeps load flat as history grows |
+
+**On the refresh specifically: 3 and 7 are the pair.** They attack the two halves named
+above and neither one alone finishes the job — 3 removes the read from the blocking path
+but leaves the Babel wait in front of it, 7 removes the Babel wait but leaves the read.
+Together they take a refresh on a phone from roughly 6–10 seconds to near-instant.
 
 1–4 need no backend deploy at all and cover most of what Eric is feeling. 5 and 6 are one
 backend release together, so they should ship as one version rather than two. 7 is the
