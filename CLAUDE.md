@@ -318,6 +318,33 @@ warm.**
   worth having once Babel is fetched lazily, and it is what caught the very first
   test run.
 
+### `xlsx` is loaded on demand
+
+SheetJS is 175KB over the wire and ~433KB to parse, it is used by exactly one
+function (`exportToExcel`), and most sessions never press Export — so every page
+load was paying for it, including the many that only read the inventory. It is a
+dynamic `import("xlsx")` inside that function now.
+
+- **The browser's module map is the cache**, so a second export in the same
+  session costs nothing and there is no memo to maintain here.
+- **THE ONE BEHAVIOUR THIS CHANGES: a FIRST export while offline now fails**,
+  where before the module was already in memory from page load. That matters
+  more than it would have a week ago, because the snapshot cache means the app
+  itself now opens offline — so the export reports the cause instead of being a
+  button that does nothing. Once loaded, later exports work offline as before.
+- `test-frontend-export.js` slices the function by its declaration and had to
+  learn `async`; it now matches either spelling rather than being pinned to one,
+  so the next signature change fails on a real assertion instead of on the slice.
+
+### `readOnlyNotice` became `notice` (2026-09-16)
+
+The dismissible toast for "your click did something other than what you expected,
+and here is why". Three of its four uses had nothing to do with view-only access
+— a refused mass deletion, a write against an unconfirmed snapshot, and a failed
+export — and the rendering was always generic; only the name said otherwise.
+**A name that no longer says what the value is is a bug here, not a tidy-up**, and
+this one was drifting further with every feature that needed to say something.
+
 ### The snapshot cache
 
 The last backend response, kept in Cache Storage so a refresh PAINTS IMMEDIATELY

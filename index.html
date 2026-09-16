@@ -60,7 +60,10 @@ import ReactDOM from "react-dom/client";
 import { createPortal } from "react-dom";
 
 import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from "react";
-import * as XLSX from "xlsx";
+// NOTE: `xlsx` is deliberately NOT imported here. It is 175KB over the wire and
+// ~433KB to parse, it is used by exactly one function (exportToExcel), and most
+// sessions never press Export — so it is loaded on demand with a dynamic
+// import() instead. See the comment there before moving it back up.
 import {
   Search, Plus, X, Pencil, Trash2, Save, ChevronRight, ChevronDown, ChevronUp, ArrowLeft, MessageSquare,
   Monitor, Phone, Tv, Camera, HardDrive, HelpCircle, Columns3, Lock, Filter, Check, DoorOpen, Download,
@@ -2372,7 +2375,7 @@ const FRONTEND_SCRIPT_VERSION = "v36";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-16.1";
+const APP_VERSION = "2026-09-16.2";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -3677,7 +3680,13 @@ function AssetTracker() {
   // security benefit. The real backend is guarded server-side regardless of
   // anything decided here.
   // Set when a view-only user's action was refused, cleared when they dismiss it.
-  const [readOnlyNotice, setReadOnlyNotice] = useState(null);
+  // A dismissible toast for "your click did something other than what you
+  // expected, and here is why". Called readOnlyNotice until 2026-09-16, when
+  // three of its four uses had nothing to do with view-only access — a refused
+  // mass deletion, an unconfirmed snapshot, and a failed export. The rendering
+  // was always generic; only the name said otherwise, and a name that no longer
+  // says what the value is is treated as a bug here rather than a tidy-up.
+  const [notice, setNotice] = useState(null);
 
   // The access allowlist, [{ email, name, role }] — who may sign in and whether
   // they can edit. Distinct from `usersList`, which is the managed list of people
@@ -4518,7 +4527,7 @@ function AssetTracker() {
     // here keeps the cache a pure read optimisation: nothing it paints can ever
     // reach the Sheet without the server's own copy having arrived first.
     if (revalidating || staleSnapshot) {
-      setReadOnlyNotice(staleSnapshot
+      setNotice(staleSnapshot
         ? "This is the last inventory this device saved, and the server couldn't be reached to confirm it. Reload before making changes."
         : "Still catching up with the server — try that again in a moment.");
       return;
@@ -4530,7 +4539,7 @@ function AssetTracker() {
     // that the next load will silently undo. Every write in the app funnels
     // through persist(), so nothing gets past this by being missed.
     if (!canEdit) {
-      setReadOnlyNotice("Your access is view-only, so that change wasn't saved.");
+      setNotice("Your access is view-only, so that change wasn't saved.");
       return;
     }
     // Reference equality against current state, computed before any setState
@@ -4639,7 +4648,7 @@ function AssetTracker() {
         // bad state produced this, and leaving it there invites the user to
         // "fix" it with another save. Server truth replaces it.
         if (result && result.refused === "emptyAssets") {
-          setReadOnlyNotice(result.error || "That save was refused because it would have deleted every asset.");
+          setNotice(result.error || "That save was refused because it would have deleted every asset.");
           setSaveError(false);
           await loadData();
           return;
@@ -7347,7 +7356,30 @@ function AssetTracker() {
     persist(assets, { breakerTypes: breakerTypes.filter(t => t.id !== id) });
   }
 
-  function exportToExcel() {
+  // Async ONLY because of the dynamic import below; everything after it is the
+  // same synchronous workbook build it always was.
+  async function exportToExcel() {
+    // `xlsx` is fetched HERE rather than imported at the top of the module.
+    // It is 175KB over the wire and ~433KB to parse, for a button most sessions
+    // never press — so every page load was paying for it, including the many
+    // that only ever read the inventory.
+    //
+    // The browser's module map caches it, so a second export in the same session
+    // costs nothing and there is no memo to maintain here.
+    //
+    // THE ONE BEHAVIOUR THIS CHANGES: export used to work with no network,
+    // because the module was already in memory from page load. Now a FIRST
+    // export while offline cannot fetch it. That matters more than it used to,
+    // since the snapshot cache means the app itself now opens offline — so this
+    // fails with a message naming the cause rather than a button that does
+    // nothing. A later export, once it has loaded once, still works offline.
+    let XLSX;
+    try {
+      XLSX = await import("xlsx");
+    } catch (e) {
+      setNotice("Couldn't load the spreadsheet export tool. Check your connection and try Export again.");
+      return;
+    }
     // Room/Building/Parent are relationships, not stored text — resolve each to
     // a display name for export the same way the UI does, rather than dumping
     // raw label ids into the sheet. roomNameOf/buildingNameOf already handle the
@@ -10485,11 +10517,12 @@ function AssetTracker() {
       {typesManagerModal}
       {breakerTypesManagerModal}
 
-      {/* Shown when a view-only user's action was refused. persist() sets this
-          and returns without touching anything, so the message is the only
-          evidence the click happened — without it the app would just look
-          broken to someone who doesn't know they're view-only. */}
-      {readOnlyNotice && (
+      {/* Shown when an action was refused or could not be completed, and the
+          refusal is the only evidence the click happened at all — a view-only
+          save, a refused mass deletion, a write against an unconfirmed snapshot,
+          a failed export. Without it the app just looks broken to someone who
+          does not know why nothing happened. */}
+      {notice && (
         <div
           style={{
             position: "fixed", top: 12, left: "50%", transform: "translateX(-50%)", zIndex: 60,
@@ -10498,9 +10531,9 @@ function AssetTracker() {
             boxShadow: "0 4px 12px rgba(42,52,57,0.18)", maxWidth: "min(92vw, 460px)",
           }}
         >
-          <span style={{ fontSize: 13, color: C.ink, lineHeight: 1.45 }}>{readOnlyNotice}</span>
+          <span style={{ fontSize: 13, color: C.ink, lineHeight: 1.45 }}>{notice}</span>
           <button
-            onClick={() => setReadOnlyNotice(null)}
+            onClick={() => setNotice(null)}
             style={{ background: "none", border: "none", padding: 0, color: C.muted, fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}
           >
             Dismiss

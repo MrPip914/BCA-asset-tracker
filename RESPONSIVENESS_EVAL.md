@@ -1,10 +1,10 @@
 # Responsiveness — evaluation
 
-**Status: items 3 and 7 of the table in §5 are BUILT** (2026-09-16, frontend only, no
-backend deploy) — the snapshot cache and the transpile cache, described in `CLAUDE.md`
-under "Two caches in front of the load". Item 1 (lazy `xlsx`) is NOT done and is still
-the cheapest thing left on this list. Everything else here is still evaluation only.
-Written 2026-09-15
+**Status: items 1, 3 and 7 of the table in §5 are BUILT** (2026-09-16, frontend only, no
+backend deploy) — lazy `xlsx`, the snapshot cache and the transpile cache, all described
+in `CLAUDE.md` under "Two caches in front of the load". Everything else here is still
+evaluation only; **item 2 (background saves) is now the largest remaining win**, and
+items 5, 6 and 8 are one backend release between them. Written 2026-09-15
 against the repo at `c98746b`. Every backend version number below is a *shape* — run
 `node deploy.mjs --status` before planning around any of it.
 

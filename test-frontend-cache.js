@@ -157,5 +157,28 @@ check('the cache key carries the tenant and the session',
   /"\/snapshot\/" \+ encodeURIComponent\(CLIENT\.id\) \+ "\/" \+ encodeURIComponent\(id\)/.test(SRC),
   'the tenant is the CLIENT.storageKey() rule; the session is what makes a new sign-in a miss');
 
+// ---------------------------------------------------------------------------
+// Lazy-loaded xlsx
+// ---------------------------------------------------------------------------
+
+// The saving is the module never being FETCHED on an ordinary load. A top-level
+// import puts it back on every page load for a button most sessions never press,
+// and nothing about the app would look wrong.
+check('xlsx is not imported at the top of the module',
+  !/^import \* as XLSX from "xlsx";$/m.test(SRC),
+  '175KB over the wire and ~433KB to parse, for one function');
+check('xlsx is loaded on demand inside the export',
+  /await import\("xlsx"\)/.test(SRC));
+
+// A dynamic import can fail where a static one could not — offline, most
+// obviously, which the snapshot cache made reachable. A button that silently
+// does nothing is the failure this has to avoid.
+const exportBody = body('async function exportToExcel()');
+check('a failed xlsx load reports instead of silently doing nothing',
+  /catch \(e\) \{\s*setNotice\(/.test(exportBody),
+  'offline is now reachable with the app open, so this path is real');
+check('the export gives up rather than running on without the module',
+  /setNotice\([^)]*\);\s*return;/.test(exportBody));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

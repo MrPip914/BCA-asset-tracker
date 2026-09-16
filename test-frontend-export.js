@@ -31,8 +31,13 @@ const check = (name, ok, detail) => {
 };
 
 // --- slice the function ------------------------------------------------------
-const start = src.indexOf('  function exportToExcel() {');
-if (start === -1) throw new Error('exportToExcel not found in index.html');
+// `async` since 2026-09-16, when xlsx became a dynamic import — matched either
+// way rather than pinned to one spelling, so the next signature change fails on
+// a real assertion below instead of on this slice.
+const DECL = ['  async function exportToExcel() {', '  function exportToExcel() {']
+  .map(d => ({ d, at: src.indexOf(d) })).find(x => x.at !== -1);
+if (!DECL) throw new Error('exportToExcel not found in index.html');
+const start = DECL.at;
 // Ends at the next line that is exactly two-space-indented "}".
 // index.html is CRLF; don't assume either.
 const NL = src.includes('\r\n') ? '\r\n' : '\n';
