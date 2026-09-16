@@ -172,5 +172,58 @@ check('the client reads a single-signature response as a batch of one',
   /Array\.isArray\(data\.signatures\) \? data\.signatures : \[data\]/.test(html),
   'so a frontend ahead of its backend still uploads one photo');
 
+// ---------------------------------------------------------------------------
+// The read must survive the rows v37 itself started writing (v38)
+// ---------------------------------------------------------------------------
+// writeTableIfChanged_ records a BARE HEX DIGEST under `hash_<tab>`, and the
+// read's config loop JSON.parse'd every row. JSON.parse of a hex string throws,
+// so the first save after deploying v37 made every subsequent read throw --
+// Apps Script answered with its HTML error page instead of JSON, and the app
+// showed its cached snapshot behind a "Saved copy" pill. The whole failure is
+// one unguarded parse, which is why this EXECUTES the loop rather than reading
+// it: the shape is trivial and the consequence was total.
+{
+  // The loop, lifted out of the read by its two anchors. Pinned to the real
+  // source so it cannot pass against a copy that has drifted.
+  const at = src.indexOf('const config = {};');
+  const end = src.indexOf('});', src.indexOf('configRows.forEach', at));
+  check('the read\'s config loop is where the test thinks it is', at !== -1 && end !== -1);
+  const loop = src.slice(at, end + 3);
+
+  const run = (rows) => {
+    const fn = new Function('configRows', 'TAB_HASH_KEY_PREFIX', loop + '\nreturn { config: config, configRaw: configRaw };');
+    return fn(rows, 'hash_');
+  };
+
+  const rows = [
+    { key: 'columns', value: '[{"key":"name"}]' },
+    { key: 'hash_Assets', value: 'd41d8cd98f00b204e9800998ecf8427e' },
+    { key: 'rev_assets', value: '4' },
+    { key: 'typesList', value: '[{"id":"Room","name":"Room"}]' },
+  ];
+  let out = null, threw = null;
+  try { out = run(rows); } catch (e) { threw = e; }
+  check('a hash row does not throw the whole read away', !threw,
+    threw && String(threw.message));
+  if (out) {
+    eq('real config still parses', JSON.stringify(out.config.columns), '[{"key":"name"}]');
+    eq('the hash is not handed to the client as config', out.config.hash_Assets, undefined);
+    check('but it survives in configRaw, which is what the write copies through',
+      out.configRaw.hash_Assets === 'd41d8cd98f00b204e9800998ecf8427e');
+  }
+
+  // A hand-edited cell is the same failure from the other side, and it predates
+  // v37: one bad row used to make the backend look unreachable to everyone.
+  let threw2 = null, out2 = null;
+  try { out2 = run([{ key: 'vendors', value: '[not json' }, { key: 'columns', value: '[]' }]); }
+  catch (e) { threw2 = e; }
+  check('a malformed value does not take the read down either', !threw2,
+    threw2 && String(threw2.message));
+  if (out2) {
+    eq('the bad row reads as absent', out2.config.vendors, null);
+    eq('and the rows beside it are unaffected', JSON.stringify(out2.config.columns), '[]');
+  }
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

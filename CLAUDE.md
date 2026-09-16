@@ -966,6 +966,34 @@ onboard one.
     reason. A missing hash means "unknown", which always writes — so dropping
     them is the self-healing answer. **Any future writer outside `doPost` must do
     the same.**
+  - **NOT EVERY CONFIG ROW IS JSON ANY MORE, AND v37 IS WHERE THAT STOPPED BEING
+    TRUE — which broke every read until v38.** A hash is a bare hex digest, and
+    the read's config loop did `JSON.parse(r.value)` on every row. So the FIRST
+    SAVE after deploying v37 made every subsequent read throw: Apps Script
+    answers a thrown handler with its HTML error page rather than JSON, the
+    client's `res.json()` failed, and the app fell back to its cached snapshot
+    behind the "Saved copy" pill. The write side already skipped these keys;
+    only the read did not.
+    - **The general rule, which is the half "a new Config KEY is a release" does
+      not cover: a key whose VALUE is not JSON breaks the read for every
+      tenant.** Config is a key/value tab, so anything can be written into it —
+      what costs is whether the read can parse it back.
+    - **The parse is now defensive as well as prefix-skipping**, and that is the
+      part worth keeping: a value that will not parse reads as absent instead of
+      taking the whole read down. One hand-edited Config cell used to make the
+      backend look unreachable to everyone, which predates v37 entirely.
+    - **It surfaced as "the backend is down", which is the diagnostic lesson.**
+      Every `doGet` still worked, so `deploy.mjs --status` reported a healthy
+      v37 and the deploy looked clean. Only `doPost` threw. **A tenant that
+      reports its version correctly has not been shown to serve a read.**
+    - The snapshot cache is what kept dev usable through it rather than showing
+      a blocking error screen — the failure mode it was built for, arriving
+      sooner than expected.
+    - Covered by `test-backend-v37.js`, which EXECUTES the read's config loop
+      against a row carrying a hash and a row carrying malformed JSON. Verified
+      by mutation that restoring the unguarded parse, dropping the try/catch, or
+      hiding hashes from `configRaw` (which is what the write copies through)
+      all fail it.
   - Worth stating plainly: since saves went to the background this is no longer a
     change anyone can FEEL. What it buys is less work inside the Apps Script
     quota, a narrower window for someone else's save to collide, and less lock

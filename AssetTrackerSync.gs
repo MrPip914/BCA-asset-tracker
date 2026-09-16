@@ -49,7 +49,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v37";
+const SCRIPT_VERSION = "v38";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -1266,7 +1266,24 @@ function handleAuthenticatedRead_(body, e) {
     const configRaw = {};
     configRows.forEach(r => {
       configRaw[r.key] = r.value;
-      config[r.key] = r.value ? JSON.parse(r.value) : null;
+      // NOT EVERY CONFIG ROW IS JSON, and v37 is where that stopped being true.
+      // writeTableIfChanged_ records a bare hex digest under `hash_<tab>`, and
+      // JSON.parse of a hex string throws -- so the first save after deploying
+      // v37 made EVERY subsequent read throw, Apps Script returned its HTML
+      // error page instead of JSON, and the app fell back to its cached
+      // snapshot and showed the "Saved copy" pill. The write side already
+      // skipped these keys; this side did not.
+      if (r.key && String(r.key).indexOf(TAB_HASH_KEY_PREFIX) === 0) return;
+      // And a value that will not parse no longer takes the whole read down
+      // with it. A single hand-edited Config cell -- or any future key that is
+      // not JSON -- used to break the app for everyone, with the failure
+      // surfacing as an unreachable backend rather than as a bad row.
+      if (!r.value) { config[r.key] = null; return; }
+      try {
+        config[r.key] = JSON.parse(r.value);
+      } catch (err) {
+        config[r.key] = null;
+      }
     });
 
     const assets = assetRows.map(a => {
