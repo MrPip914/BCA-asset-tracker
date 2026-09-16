@@ -2375,7 +2375,7 @@ const FRONTEND_SCRIPT_VERSION = "v36";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-16.2";
+const APP_VERSION = "2026-09-16.3";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -3505,7 +3505,7 @@ function AssetTracker() {
   // Upload is the one write here that is slow for a reason unrelated to the
   // backend -- resizing, then a second round trip to the image host -- so it
   // carries its own busy flag rather than riding isSaving, which only covers the
-  // snapshot write at the very end.
+  // snapshot write at the very end -- and which no longer disables anything.
   const [photoBusy, setPhotoBusy] = useState(false);
   const [photoError, setPhotoError] = useState("");
   // { done, total } while a multi-file upload is running, else null. Uploads are
@@ -3549,7 +3549,6 @@ function AssetTracker() {
   // null normally; otherwise the array of domains a save was just rejected on
   // ("assets", ...) — someone else saved first, so this client's change never
   // reached the Sheet and has to be redone. Drives the conflict modal.
-  const [saveConflict, setSaveConflict] = useState(null);
   // The same numbers as `revisions`, mirrored in a ref because a POST needs the
   // value as of the moment it's SENT, not the one its closure captured: several
   // call sites fire persist() without awaiting it, so a save can be queued
@@ -3561,20 +3560,45 @@ function AssetTracker() {
   // the above, and independently correct: two overlapping full-snapshot writes
   // could already land out of order and let the older one win.
   const writeQueueRef = useRef(Promise.resolve());
-  // True from the moment persist() starts until it finishes — including the
-  // conflict-rejection path, which reloads before it returns. Every write in
-  // the app funnels through persist(), so this one flag covers the whole app
-  // without per-form plumbing: it drives the header "Saving…" pill and puts
-  // every write control into a visibly-working disabled state.
+  // How many backgrounded writes are still in flight. A COUNT rather than a
+  // boolean because several can overlap now that nothing awaits them, and the
+  // "Saving…" pill has to stay up until the last one lands rather than the first.
+  const pendingWritesRef = useRef(0);
+  // A backgrounded save that failed, held so the user can be told about it after
+  // they have moved on — and, when the save carried a draft, offered the typing
+  // back. `{ kind: "conflict" | "error", domains, context }`.
+  const [saveFailure, setSaveFailure] = useState(null);
+  // True while any backgrounded write is in flight, and it now drives the header
+  // pill and NOTHING ELSE.
+  //
+  // It used to disable every write control in the app and swap their labels to
+  // "Saving…" — correct while each handler awaited its own round trip, because
+  // the user was still looking at the form it belonged to. Once saves went to
+  // the background that same flag would have disabled the form the user moved
+  // ON to, for the 1.5-5s a write they had already forgotten about was still
+  // running. That is the frozen-app feeling this change exists to remove, just
+  // relocated, so the ~130 disabled props and label swaps came out with it.
+  //
+  // What replaced them: savingRef below still catches the double click, and a
+  // failed write now reports itself through the save-failure modal instead of
+  // by greying out a button.
   const [isSaving, setIsSaving] = useState(false);
-  // Mirrored in a ref for the same reason revisionsRef is: a double-click can
-  // land in the same tick as the first click, before React has re-rendered the
-  // button as disabled, so the guard in each submit handler has to read a value
-  // that's already up to date rather than the state this render closed over.
+  // The double-submit guard each write handler starts with, and since the
+  // disabled states went away it is the ONLY thing catching a double click.
+  //
+  // A ref rather than state for the reason revisionsRef is one: the second click
+  // can land in the same tick as the first, before React has re-rendered at all,
+  // so the guard has to read a value that is already current rather than the
+  // state this render closed over.
+  //
+  // persist() sets it and clears it on a macrotask — NOT when the write lands.
+  // See the comment there: holding it for the round trip is what would have let
+  // one background save block every unrelated control, attachPhotos included.
+  //
   // Deliberately NOT checked inside persist() itself — persist() is also reached
-  // from write paths that aren't gated on isSaving (the bulk reassign/move
+  // from write paths that never had a submit button (the bulk reassign/move
   // toolbar, the panel diagram), and refusing one of those would silently drop a
-  // real edit. Every handler that checks it is a control this file also disables.
+  // real edit.
   const savingRef = useRef(false);
   function rememberRevisions(raw) {
     const next = normalizeRevisions(raw);
@@ -4515,6 +4539,13 @@ function AssetTracker() {
       // actually sent — so a save that isn't about access can never rewrite it,
       // even if this client's copy were somehow stale or empty.
       authUsers: nextAuthUsers = undefined,
+      // What this save was ABOUT, so a failure that surfaces after the user has
+      // moved on can name it, link back to it, and offer the typing back.
+      // Optional: a bulk action legitimately has no single subject, and a save
+      // with no context simply reports that it failed.
+      //   assetId — the asset to link to.
+      //   restore — { mode: "edit" | "add", draft } to put back in the form.
+      context: saveContext = null,
     } = overrides;
     // Guard against ever writing over the Sheet before a real snapshot has been
     // loaded — the UI shouldn't be reachable in that state, but this keeps a
@@ -4562,13 +4593,22 @@ function AssetTracker() {
       // conflict with anyone editing any asset anywhere.
       photos: nextPhotos !== photos,
     };
-    // Set before the first await and cleared in the finally below, so it always
-    // clears — on success, on a network/backend failure, and on the conflict
-    // path that reloads and opens the blocking modal. A spinner that never
-    // stops would be worse than no spinner at all.
+    // THE DOUBLE-SUBMIT LOCK, and its scope is the whole point since saves went
+    // to the background. It used to be held for the entire round trip, which was
+    // fine while every handler awaited that round trip — and became wrong the
+    // moment they stopped: a background write would have blocked every unrelated
+    // write control for its whole duration, which is the frozen-app feeling this
+    // change exists to remove. attachPhotos and deletePhoto read this too, so
+    // the old scope would have blocked attaching a photo because someone renamed
+    // a room two seconds ago.
+    //
+    // What it actually has to catch is the second click that lands before React
+    // re-renders — a real window, since the click and the re-render are the same
+    // task. Clearing on a macrotask is after React has flushed and the form has
+    // closed, which is exactly that window and no more.
     savingRef.current = true;
-    setIsSaving(true);
-    try {
+    setTimeout(() => { savingRef.current = false; }, 0);
+    {
       setAssets(nextAssets);
       setColumns(nextColumns);
       setChangeTypes(nextChangeTypes);
@@ -4609,10 +4649,10 @@ function AssetTracker() {
         // check runs, rather than fabricating revision numbers locally.
         // scriptVersion is stamped fresh each save so the sandbox never shows a
         // false "backend outdated" warning.
-        // Note this path never awaits, so isSaving goes true and false again
-        // inside one React batch — the sandbox gets no distracting flash of a
-        // "Saving…" state for a write that took a millisecond, without the
-        // indicator having to special-case sandbox mode into being wrong.
+        // Note this path enqueues no write at all, so the sandbox paints no
+        // "Saving…" pill for something that took a millisecond and no failure
+        // can arrive later — without the indicator having to special-case
+        // sandbox mode into being wrong.
         try {
           localStorage.setItem(SANDBOX_DATA_KEY, JSON.stringify({ ...payload, scriptVersion: FRONTEND_SCRIPT_VERSION }));
           setSaveError(false);
@@ -4621,73 +4661,105 @@ function AssetTracker() {
         }
         return;
       }
-      try {
-        // Queued behind any save still in flight, and reading the revisions at
-        // send time (not closure-capture time) so a queued save uses whatever the
-        // one before it came back with — see writeQueueRef/revisionsRef.
-        const send = writeQueueRef.current.then(
-          () => writeSnapshot({ ...payload, _revisions: revisionsRef.current })
-        );
-        writeQueueRef.current = send.then(() => {}, () => {}); // keep the chain alive past a failure
-        const result = await send;
-        // Sign-in expired mid-session, or access was changed since load. Nothing
-        // was written. endSession() drops `assets` back to null, which also
-        // discards the optimistic setState above — the edit is genuinely gone,
-        // and leaving it on screen would be a lie the next load would undo.
-        if (result && result.authFailed) {
-          endSession({
-            reason: result.reason || "signin",
-            message: result.error || "Your sign-in expired. Sign in again to keep working.",
-            detail: result.detail || "",
-          });
-          return;
-        }
-        // The backend refused a save that would have emptied the Assets tab.
-        // Nothing was written. Reloading matters as much as the message: the
-        // optimistic setState above has already painted the app with whatever
-        // bad state produced this, and leaving it there invites the user to
-        // "fix" it with another save. Server truth replaces it.
-        if (result && result.refused === "emptyAssets") {
-          setNotice(result.error || "That save was refused because it would have deleted every asset.");
-          setSaveError(false);
-          await loadData();
-          return;
-        }
-        if (result && Array.isArray(result.conflict) && result.conflict.length) {
-          // Someone else saved first, so the backend wrote NOTHING and this edit
-          // is gone. Deliberately no auto-merge and no silent retry — a merge
-          // can't know which of two conflicting values is right, and a retry
-          // would overwrite the other person's change, which is the exact bug
-          // this whole mechanism exists to prevent. Reload server truth instead
-          // (which also replaces the optimistic setState above, so the app stops
-          // showing an edit that isn't stored anywhere) and say so plainly.
-          rememberRevisions(result.revisions);
-          setSaveConflict(result.conflict);
-          setSaveError(false);
-          // Close anything mid-edit against records the reload is about to
-          // replace underneath it.
-          setBreakerModal(null);
-          setAddBreakerDraft(null);
-          setSwapModal(null);
-          setMoveCircuitModal(null);
-          setDetailEditing(false);
-          setEditingMaintenanceId(null);
-          setMaintenanceEditDraft(null);
-          await loadData();
-          return;
-        }
-        // A v11-or-older backend reports no revisions; leaving them as-is keeps
-        // posting the same (all-zero) numbers, which it ignores anyway.
-        if (result && result.revisions) rememberRevisions(result.revisions);
-        setSaveConflict(null);
-        setSaveError(false);
-      } catch (e) {
-        setSaveError(true);
-      }
-    } finally {
-      savingRef.current = false;
-      setIsSaving(false);
+      // ENQUEUED, NOT AWAITED — this is what makes a save feel instant. The
+      // optimistic setState above has already painted the change, writeQueueRef
+      // already serializes the POSTs, and the revision check already refuses a
+      // stale one. So the only thing awaiting the round trip ever bought was a
+      // form frozen for the 1.5-5s it takes, which is the whole complaint.
+      //
+      // persist() still returns a promise and every `await persist(...)` call
+      // site is unchanged — it simply resolves now instead of in five seconds,
+      // so each handler closes its form and moves on. That is deliberately the
+      // ENTIRE call-site change: making 23 handlers individually fire-and-forget
+      // would have been 23 chances to get one wrong.
+      //
+      // THE COST, stated where it is paid: a failure now surfaces after the user
+      // has moved on. `saveContext` is what makes that recoverable rather than
+      // merely reported — see the save-failure modal.
+      const send = writeQueueRef.current.then(
+        () => writeSnapshot({ ...payload, _revisions: revisionsRef.current })
+      );
+      writeQueueRef.current = send.then(() => {}, () => {}); // keep the chain alive past a failure
+      pendingWritesRef.current += 1;
+      setIsSaving(true);
+      send.then(
+        (result) => finishWrite(result, null, saveContext),
+        (err) => finishWrite(null, err, saveContext)
+      );
     }
+  }
+
+  // The outcome of a backgrounded write. Split out of persist() because it now
+  // runs long after persist() returned, and because both the resolved and the
+  // rejected path have the same bookkeeping to do.
+  async function finishWrite(result, err, saveContext) {
+    pendingWritesRef.current = Math.max(0, pendingWritesRef.current - 1);
+    if (pendingWritesRef.current === 0) setIsSaving(false);
+
+    if (err) {
+      // The request never landed. NOTHING was written, which is what makes
+      // putting the draft back and letting the user press Save again safe here.
+      setSaveError(true);
+      setSaveFailure({ kind: "error", domains: [], context: saveContext });
+      return;
+    }
+    // Sign-in expired mid-session, or access was changed since load. Nothing
+    // was written. endSession() drops `assets` back to null, which also
+    // discards the optimistic setState — the edit is genuinely gone, and
+    // leaving it on screen would be a lie the next load would undo.
+    if (result && result.authFailed) {
+      endSession({
+        reason: result.reason || "signin",
+        message: result.error || "Your sign-in expired. Sign in again to keep working.",
+        detail: result.detail || "",
+      });
+      return;
+    }
+    // The backend refused a save that would have emptied the Assets tab.
+    // Nothing was written. Reloading matters as much as the message: the
+    // optimistic setState has already painted the app with whatever bad state
+    // produced this, and leaving it there invites the user to "fix" it with
+    // another save. Server truth replaces it.
+    if (result && result.refused === "emptyAssets") {
+      setNotice(result.error || "That save was refused because it would have deleted every asset.");
+      setSaveError(false);
+      await loadData();
+      return;
+    }
+    if (result && Array.isArray(result.conflict) && result.conflict.length) {
+      // Someone else saved first, so the backend wrote NOTHING and this edit is
+      // gone. Deliberately no auto-merge and no silent retry — a merge can't
+      // know which of two conflicting values is right, and a retry would
+      // overwrite the other person's change, which is the exact bug this whole
+      // mechanism exists to prevent. Reload server truth instead (which also
+      // replaces the optimistic setState, so the app stops showing an edit that
+      // isn't stored anywhere) and say so plainly.
+      //
+      // NOTE the revision domain is `assets`, not one asset: this fires when
+      // anyone saves ANY asset in the same moment, so in almost every case the
+      // other person touched something unrelated to what was typed here. That is
+      // exactly why putting the draft back on top of the reloaded data is the
+      // right offer — and why it is an OFFER, never an automatic re-send.
+      rememberRevisions(result.revisions);
+      setSaveFailure({ kind: "conflict", domains: result.conflict, context: saveContext });
+      setSaveError(false);
+      // Close anything mid-edit against records the reload is about to replace
+      // underneath it. The draft being offered back was captured into
+      // saveFailure above, so this cannot discard it.
+      setBreakerModal(null);
+      setAddBreakerDraft(null);
+      setSwapModal(null);
+      setMoveCircuitModal(null);
+      setDetailEditing(false);
+      setEditingMaintenanceId(null);
+      setMaintenanceEditDraft(null);
+      await loadData();
+      return;
+    }
+    // A v11-or-older backend reports no revisions; leaving them as-is keeps
+    // posting the same (all-zero) numbers, which it ignores anyway.
+    if (result && result.revisions) rememberRevisions(result.revisions);
+    setSaveError(false);
   }
 
   function logAudit(entries) {
@@ -5549,7 +5621,13 @@ function AssetTracker() {
       // than the raw draft string.
       await persist(
         [...assets, { comments: [], changes: [], allocations: [], ...named }],
-        { auditLog: logAudit([createdEntry]), nextAssetNumber: advanceAssetNumber(tag) }
+        {
+          auditLog: logAudit([createdEntry]), nextAssetNumber: advanceAssetNumber(tag),
+          // No assetId: a rejected add is rolled back, so there is no asset left
+          // to link to. The draft is the whole of what is recoverable, and
+          // re-opening the add form with it is exactly the retype it saves.
+          context: { restore: { mode: "add", draft } },
+        }
       );
       cancelAdd();
     } else {
@@ -5676,7 +5754,13 @@ function AssetTracker() {
           assetType: draftToSave.type || original.type, action: "noted", note: editNote.trim(),
         });
       }
-      await persist(next, { auditLog: editEntries.length ? logAudit(editEntries) : auditLog });
+      await persist(next, {
+        auditLog: editEntries.length ? logAudit(editEntries) : auditLog,
+        // The draft as typed, not the stripped/derived `savedDraft`: what goes
+        // back in the form has to be what was in the form, so the person sees
+        // their own words rather than a normalised version of them.
+        context: { assetId: original.id, restore: { mode: "edit", draft: draftToSave } },
+      });
       setDetailEditing(false);
       setEditNote("");
     }
@@ -8032,9 +8116,57 @@ function AssetTracker() {
   // and the app has already reloaded what's actually stored — so this has to be
   // unmissable and has to say "redo it", not "retrying…". zIndex 60, above every
   // other modal, since it can fire while one of them is open.
-  const conflictModal = saveConflict && (
+  // Shown when a save failed — rejected because someone else saved first, or
+  // never reached the Sheet at all. Either way the change is gone: the backend
+  // wrote nothing and the app has reloaded what is actually stored.
+  //
+  // THIS BECAME LOAD-BEARING WHEN SAVES WENT TO THE BACKGROUND. While every
+  // handler awaited its round trip the user was still standing on the form when
+  // this fired, so "make your change again" was advice they could act on
+  // immediately. Now they may be two assets away, so this has to carry the way
+  // BACK — and, when the save was a form, the typing itself.
+  //
+  // zIndex 60, above every other modal, since it can fire while one is open.
+  const failedContext = (saveFailure && saveFailure.context) || null;
+  const failedAsset = failedContext && failedContext.assetId
+    ? assets && assets.find(a => a.id === failedContext.assetId)
+    : null;
+  // Offered only when the save carried one. A bulk action has no draft, and the
+  // asset an edit names can have been deleted by whoever we lost the race to —
+  // in which case there is nothing to restore it onto and the offer is dropped
+  // rather than shown broken.
+  const canRestore = !!(failedContext && failedContext.restore
+    && (failedContext.restore.mode === "add" || failedAsset));
+
+  // Puts the typing back and stops. NEVER re-sends: on a conflict an automatic
+  // retry would overwrite whoever saved first, which is the one thing the
+  // revision counters exist to prevent, and a person pressing Save on data they
+  // can see is the only version of "try again" that is safe in both cases.
+  // Deliberately the SAME path for both failure kinds, so there is one recovery
+  // to understand rather than a button that means different things.
+  function restoreFailedSave() {
+    const restore = failedContext && failedContext.restore;
+    setSaveFailure(null);
+    if (!restore) return;
+    // Seeded onto FRESHLY LOADED data — the conflict path reloaded before this
+    // modal could be clicked — so the form opens on what is actually stored with
+    // the typing on top, which is exactly what a person would redo by hand.
+    const seeded = { ...restore.draft, formError: "", errorFields: [] };
+    if (restore.mode === "add") {
+      closeDetail();
+      setShowAdd(true);
+      setDraft(seeded);
+      return;
+    }
+    if (!failedAsset) return;
+    openDetail(failedAsset);
+    setDraft(seeded);
+    setDetailEditing(true);
+  }
+
+  const conflictModal = saveFailure && (
     <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 60, padding: 16 }}>
-      <div style={{ background: C.surface, border: `1.5px solid ${C.danger}`, borderRadius: 14, padding: 22, width: "100%", maxWidth: 380, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)" }}>
+      <div style={{ background: C.surface, border: `1.5px solid ${C.danger}`, borderRadius: 14, padding: 22, width: "100%", maxWidth: 400, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)" }}>
         <div
           style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}
           title={`Server revisions now: ${REVISION_DOMAINS.map(d => `${d} ${revisions[d]}`).join(", ")}`}
@@ -8043,20 +8175,49 @@ function AssetTracker() {
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.danger }}>Your change wasn't saved</div>
         </div>
         <div style={{ fontSize: 14, color: C.ink, marginBottom: 10 }}>
-          Someone else saved{" "}
-          {saveConflict.map(d => REVISION_DOMAIN_LABELS[d] || d).join(" and ")}{" "}
-          while you were working, so this save was rejected to avoid overwriting their change.
+          {saveFailure.kind === "conflict" ? (
+            <>
+              Someone else saved{" "}
+              {(saveFailure.domains || []).map(d => REVISION_DOMAIN_LABELS[d] || d).join(" and ")}{" "}
+              while you were working, so this save was rejected to avoid overwriting their change.
+            </>
+          ) : (
+            <>That change didn't reach the Google Sheet, so nothing was stored.</>
+          )}
         </div>
+        {/* Names the subject, because by the time this appears the user may be
+            somewhere else entirely — the whole reason it exists. */}
+        {failedAsset && (
+          <div style={{ fontSize: 13, color: C.muted, marginBottom: 10 }}>
+            It was your change to{" "}
+            <button
+              onClick={() => { setSaveFailure(null); openDetail(failedAsset); }}
+              style={{ background: "none", border: "none", padding: 0, font: "inherit", color: C.brand, fontWeight: 600, textDecoration: "underline", cursor: "pointer" }}
+            >
+              {nameOf(failedAsset, typesList)}
+            </button>.
+          </div>
+        )}
         <div style={{ fontSize: 13, color: C.muted, marginBottom: 16 }}>
-          Nothing you just did was stored. The latest data has been reloaded — check it, then make your change again.
+          {canRestore
+            ? "Nothing was stored. The latest data has been reloaded — put your changes back on top of it, check them, and save again."
+            : "Nothing you just did was stored. The latest data has been reloaded — check it, then make your change again."}
         </div>
-        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button
-            onClick={() => setSaveConflict(null)}
-            style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+            onClick={() => setSaveFailure(null)}
+            style={{ padding: "8px 14px", background: canRestore ? "transparent" : C.brand, color: canRestore ? C.muted : "#fff", border: canRestore ? `1.5px solid ${C.border}` : "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
           >
-            Got it
+            {canRestore ? "Discard" : "Got it"}
           </button>
+          {canRestore && (
+            <button
+              onClick={restoreFailedSave}
+              style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+            >
+              Restore my changes
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -8072,7 +8233,6 @@ function AssetTracker() {
       onRemove={removePeripheral}
       onClose={() => { setShowPeripheralsManager(false); setNewPeripheralName(""); }}
       placeholder="New peripheral name"
-      isSaving={isSaving}
     />
   );
 
@@ -8172,7 +8332,7 @@ function AssetTracker() {
                   <>
                     <select
                       value={u.role}
-                      disabled={isSelf || isSaving}
+                      disabled={isSelf}
                       onChange={e => setAccessRole(u.email, e.target.value)}
                       style={{ padding: "5px 8px", border: `1.5px solid ${C.border}`, borderRadius: 8, fontSize: 12, background: C.surface, color: C.ink }}
                     >
@@ -8181,7 +8341,7 @@ function AssetTracker() {
                     </select>
                     <button
                       onClick={() => removeAccessUser(u.email)}
-                      disabled={isSelf || isSaving}
+                      disabled={isSelf}
                       style={{ background: "none", border: "none", padding: 4, color: isSelf ? C.border : C.danger, fontSize: 12, fontWeight: 600, cursor: isSelf ? "default" : "pointer" }}
                     >
                       Remove
@@ -8223,7 +8383,6 @@ function AssetTracker() {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
           <button
             onClick={addAccessUser}
-            disabled={isSaving}
             style={{ padding: "8px 16px", background: C.brand, color: "#fff", border: "none", fontWeight: 600, fontSize: 13, borderRadius: 10, cursor: "pointer" }}
           >
             Add
@@ -8258,7 +8417,6 @@ function AssetTracker() {
       onRemove={removeUser}
       onClose={() => { setShowUsersManager(false); setNewUserName(""); }}
       placeholder="New user's name"
-      isSaving={isSaving}
     />
   );
 
@@ -8272,7 +8430,6 @@ function AssetTracker() {
       onRemove={removeBulkItemType}
       onClose={() => { setShowBulkItemTypesManager(false); setNewBulkItemTypeName(""); }}
       placeholder="New sub-type, e.g. Folding Chair"
-      isSaving={isSaving}
     />
   );
 
@@ -8290,7 +8447,6 @@ function AssetTracker() {
       onReset={resetTypeSettings}
       onRemove={removeType}
       onClose={() => { setShowTypesManager(false); setNewTypeName(""); }}
-      isSaving={isSaving}
       canEdit={canEdit}
       isLocked={isLockedType}
       nameTaken={typeNameTaken}
@@ -8343,10 +8499,9 @@ function AssetTracker() {
                         <button onClick={() => setConfirmDeleteTypeId(null)} style={{ padding: "3px 8px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12, color: C.ink }}>Cancel</button>
                         <button
                           onClick={() => { removeBreakerType(t.id); setConfirmDeleteTypeId(null); }}
-                          disabled={isSaving}
-                          style={{ padding: "3px 8px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontSize: 12, fontWeight: 600 }}
+                          style={{ padding: "3px 8px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontSize: 12, fontWeight: 600 }}
                         >
-                          {isSaving ? "Saving…" : "Delete"}
+                          {"Delete"}
                         </button>
                       </div>
                     </div>
@@ -8466,8 +8621,8 @@ function AssetTracker() {
               <button onClick={cancelBreakerTypeDraft} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
                 Cancel
               </button>
-              <button onClick={saveBreakerType} disabled={isSaving} style={{ padding: "8px 14px", background: isSaving ? C.border : C.success, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>
-                {isSaving ? "Saving…" : "Save Type"}
+              <button onClick={saveBreakerType} style={{ padding: "8px 14px", background: C.success, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>
+                {"Save Type"}
               </button>
             </div>
           </div>
@@ -8643,10 +8798,10 @@ function AssetTracker() {
                   <button onClick={() => setChangeModal(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                   <button
                     onClick={changeModal.mode === "edit" ? saveChangeEdit : addChange}
-                    disabled={isSaving || !changeDraft.changeType || !workTarget || (changeDraft.markPerformed && !changeDraft.performedOn)}
-                    style={{ padding: "8px 14px", background: (!isSaving && changeDraft.changeType && workTarget && !(changeDraft.markPerformed && !changeDraft.performedOn)) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                    disabled={!changeDraft.changeType || !workTarget || (changeDraft.markPerformed && !changeDraft.performedOn)}
+                    style={{ padding: "8px 14px", background: (changeDraft.changeType && workTarget && !(changeDraft.markPerformed && !changeDraft.performedOn)) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                   >
-                    {isSaving ? "Saving…" : (changeModal.mode === "edit" ? "Save changes" : "Log work")}
+                    {(changeModal.mode === "edit" ? "Save changes" : "Log work")}
                   </button>
                 </div>
               </div>
@@ -8724,10 +8879,10 @@ function AssetTracker() {
                   <button onClick={() => setShowMaintenanceAdd(false)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                   <button
                     onClick={addMaintenanceItem}
-                    disabled={isSaving || !maintenanceDraft.task.trim() || !workTarget}
-                    style={{ padding: "8px 14px", background: (!isSaving && maintenanceDraft.task.trim() && workTarget) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                    disabled={!maintenanceDraft.task.trim() || !workTarget}
+                    style={{ padding: "8px 14px", background: (maintenanceDraft.task.trim() && workTarget) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                   >
-                    {isSaving ? "Saving…" : "Schedule"}
+                    {"Schedule"}
                   </button>
                 </div>
               </div>
@@ -8769,10 +8924,10 @@ function AssetTracker() {
                   />
                   <button
                     onClick={savePhotoCaption}
-                    disabled={isSaving || photoCaptionDraft === (photoViewer.caption || "")}
-                    style={{ padding: "8px 14px", background: (isSaving || photoCaptionDraft === (photoViewer.caption || "")) ? "rgba(255,255,255,0.14)" : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13, cursor: "pointer" }}
+                    disabled={photoCaptionDraft === (photoViewer.caption || "")}
+                    style={{ padding: "8px 14px", background: (photoCaptionDraft === (photoViewer.caption || "")) ? "rgba(255,255,255,0.14)" : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13, cursor: "pointer" }}
                   >
-                    {isSaving ? "Saving…" : "Save"}
+                    {"Save"}
                   </button>
                 </div>
               ) : photoViewer.caption ? (
@@ -9069,10 +9224,9 @@ function AssetTracker() {
                 {!isPlaceType(selectedAsset.type) && (
                   <button
                     onClick={() => duplicateAsset(selectedAsset)}
-                    disabled={isSaving}
-                    style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: "transparent", color: isSaving ? C.placeholder : C.brandDark, border: `1.5px solid ${isSaving ? C.border : C.brandDark}`, fontWeight: 600, fontSize: 14, borderRadius: 10 }}
+                    style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: "transparent", color: C.brandDark, border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 14, borderRadius: 10 }}
                   >
-                    {isSaving ? <Loader2 size={15} className="spin" /> : <Copy size={15} />} {isSaving ? "Saving…" : "Duplicate"}
+                    <Copy size={15} /> Duplicate
                   </button>
                 )}
                 {(selectedAsset.status || "Active") !== "Archived" ? (
@@ -9086,10 +9240,9 @@ function AssetTracker() {
                   <>
                     <button
                       onClick={() => restoreAsset(selectedAsset.id)}
-                      disabled={isSaving}
-                      style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: "transparent", color: isSaving ? C.placeholder : C.brandDark, border: `1.5px solid ${isSaving ? C.border : C.brandDark}`, fontWeight: 600, fontSize: 14, borderRadius: 10 }}
+                      style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: "transparent", color: C.brandDark, border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 14, borderRadius: 10 }}
                     >
-                      {isSaving ? <Loader2 size={15} className="spin" /> : <ArchiveRestore size={15} />} {isSaving ? "Saving…" : "Restore"}
+                      <ArchiveRestore size={15} /> Restore
                     </button>
                     <button
                       onClick={() => setConfirmDelete(selectedAsset.id)}
@@ -9186,8 +9339,8 @@ function AssetTracker() {
                 />
               </label>
               <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
-                <button onClick={saveDraft} disabled={isSaving} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: isSaving ? C.border : C.success, color: "#fff", border: "none", fontWeight: 600, fontSize: 14, borderRadius: 10 }}>
-                  {isSaving ? <Loader2 size={15} className="spin" /> : <Save size={15} />} {isSaving ? "Saving…" : "Save"}
+                <button onClick={saveDraft} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: C.success, color: "#fff", border: "none", fontWeight: 600, fontSize: 14, borderRadius: 10 }}>
+                  <Save size={15} /> Save
                 </button>
                 <button onClick={() => { setDetailEditing(false); setEditNote(""); }} style={{ padding: "9px 16px", background: "transparent", border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 14, borderRadius: 10, color: C.ink }}>
                   Cancel
@@ -9337,10 +9490,10 @@ function AssetTracker() {
                 <div style={{ display: "flex", justifyContent: "flex-end" }}>
                   <button
                     onClick={saveAllocation}
-                    disabled={isSaving || !allocationDraft.roomId || !allocationDraft.quantity}
-                    style={{ padding: "8px 14px", background: (!isSaving && allocationDraft.roomId && allocationDraft.quantity) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                    disabled={!allocationDraft.roomId || !allocationDraft.quantity}
+                    style={{ padding: "8px 14px", background: (allocationDraft.roomId && allocationDraft.quantity) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                   >
-                    {isSaving ? "Saving…" : "Assign"}
+                    {"Assign"}
                   </button>
                 </div>
               </div>
@@ -9380,7 +9533,6 @@ function AssetTracker() {
               setAddBreakerDraft={setAddBreakerDraft}
               setShowBreakerTypesManager={setShowBreakerTypesManager}
               addBreaker={addBreaker}
-              isSaving={isSaving}
               addCircuit={addCircuit}
               saveCircuitEdit={saveCircuitEdit}
               deleteCircuit={deleteCircuit}
@@ -9427,8 +9579,7 @@ function AssetTracker() {
               <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
                 <button
                   onClick={() => openMaintenanceAdd()}
-                  disabled={isSaving}
-                  style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                 >
                   <Plus size={14} /> Add task
                 </button>
@@ -9486,10 +9637,10 @@ function AssetTracker() {
                           <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
                             <button
                               onClick={saveMaintenanceEdit}
-                              disabled={isSaving || !maintenanceEditDraft.task.trim()}
-                              style={{ padding: "8px 14px", background: (!isSaving && maintenanceEditDraft.task.trim()) ? C.success : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                              disabled={!maintenanceEditDraft.task.trim()}
+                              style={{ padding: "8px 14px", background: (maintenanceEditDraft.task.trim()) ? C.success : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                             >
-                              {isSaving ? "Saving…" : "Save"}
+                              {"Save"}
                             </button>
                             <button onClick={cancelEditMaintenance} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
                               Cancel
@@ -9564,8 +9715,8 @@ function AssetTracker() {
                               {(canEdit || history.length > 0) && (
                               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                                 {canEdit && (
-                                <button onClick={() => openMaintenanceComplete(item.id)} disabled={isSaving} style={{ padding: "6px 12px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 12 }}>
-                                  {isSaving ? "Saving…" : "Log completion…"}
+                                <button onClick={() => openMaintenanceComplete(item.id)} style={{ padding: "6px 12px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 12 }}>
+                                  {"Log completion…"}
                                 </button>
                                 )}
                                 {history.length > 0 && (
@@ -9624,8 +9775,7 @@ function AssetTracker() {
               <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
                 <button
                   onClick={() => openChangeAdd()}
-                  disabled={isSaving}
-                  style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                 >
                   <Plus size={14} /> Log work
                 </button>
@@ -9750,10 +9900,10 @@ function AssetTracker() {
                 <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
                   <button
                     onClick={addComment}
-                    disabled={isSaving || !commentDraft.trim()}
-                    style={{ padding: "8px 14px", background: (!isSaving && commentDraft.trim()) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                    disabled={!commentDraft.trim()}
+                    style={{ padding: "8px 14px", background: (commentDraft.trim()) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                   >
-                    {isSaving ? "Saving…" : "Add comment"}
+                    {"Add comment"}
                   </button>
                 </div>
               </div>
@@ -9865,7 +10015,7 @@ function AssetTracker() {
                     <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>This erases it from the inventory entirely — including its comments and work history. Unlike archiving, this cannot be recovered.</div>
                     <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
                       <button onClick={() => setConfirmDelete(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
-                      <button onClick={() => doDelete(confirmDelete)} disabled={isSaving} style={{ padding: "8px 14px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>{isSaving ? "Saving…" : "Permanently delete"}</button>
+                      <button onClick={() => doDelete(confirmDelete)} style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>{"Permanently delete"}</button>
                     </div>
                   </>
                 )}
@@ -9881,7 +10031,7 @@ function AssetTracker() {
               <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>It'll be hidden from the active list by default but nothing is deleted — you can restore it, or permanently delete it, anytime from here.</div>
               <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
                 <button onClick={() => setConfirmArchive(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
-                <button onClick={() => archiveAsset(confirmArchive)} disabled={isSaving} style={{ padding: "8px 14px", background: isSaving ? C.border : C.brandDark, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>{isSaving ? "Saving…" : "Archive"}</button>
+                <button onClick={() => archiveAsset(confirmArchive)} style={{ padding: "8px 14px", background: C.brandDark, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>{"Archive"}</button>
               </div>
             </div>
           </div>
@@ -9896,10 +10046,9 @@ function AssetTracker() {
                 <button onClick={() => setConfirmCommentDelete(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                 <button
                   onClick={() => { deleteComment(confirmCommentDelete); setConfirmCommentDelete(null); }}
-                  disabled={isSaving}
-                  style={{ padding: "8px 14px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                 >
-                  {isSaving ? "Saving…" : "Delete"}
+                  {"Delete"}
                 </button>
               </div>
             </div>
@@ -9915,10 +10064,9 @@ function AssetTracker() {
                 <button onClick={() => setConfirmChangeDelete(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                 <button
                   onClick={() => { deleteChange(confirmChangeDelete); setConfirmChangeDelete(null); }}
-                  disabled={isSaving}
-                  style={{ padding: "8px 14px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                 >
-                  {isSaving ? "Saving…" : "Delete"}
+                  {"Delete"}
                 </button>
               </div>
             </div>
@@ -9934,10 +10082,9 @@ function AssetTracker() {
                 <button onClick={() => setConfirmAllocationRemove(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                 <button
                   onClick={() => removeAllocation(confirmAllocationRemove)}
-                  disabled={isSaving}
-                  style={{ padding: "8px 14px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                 >
-                  {isSaving ? "Saving…" : "Remove"}
+                  {"Remove"}
                 </button>
               </div>
             </div>
@@ -9953,10 +10100,9 @@ function AssetTracker() {
                 <button onClick={() => setConfirmMaintenanceDelete(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                 <button
                   onClick={() => deleteMaintenanceItem(confirmMaintenanceDelete)}
-                  disabled={isSaving}
-                  style={{ padding: "8px 14px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                 >
-                  {isSaving ? "Saving…" : "Delete"}
+                  {"Delete"}
                 </button>
               </div>
             </div>
@@ -10036,10 +10182,9 @@ function AssetTracker() {
                 <button onClick={() => setMaintenanceCompleteModal(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                 <button
                   onClick={submitMaintenanceComplete}
-                  disabled={isSaving}
-                  style={{ padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                 >
-                  {isSaving ? "Saving…" : "Log completion"}
+                  {"Log completion"}
                 </button>
               </div>
             </div>
@@ -10252,7 +10397,6 @@ function AssetTracker() {
                             items={member.circuits || []}
                             fields={CIRCUIT_TABLE_FIELDS}
                             initialDraft={CIRCUIT_TABLE_INITIAL_DRAFT}
-                            isSaving={isSaving}
                             onAdd={draft2 => addCircuit(member.id, draft2)}
                             onSave={(id, draft2) => saveCircuitEdit(member.id, id, draft2)}
                             onDelete={id => deleteCircuit(member.id, id)}
@@ -10321,10 +10465,9 @@ function AssetTracker() {
                               deleteBreakerGroup(members, groupSlotLabel, attached > 0);
                               closeModal();
                             }}
-                            disabled={isSaving}
-                            style={{ padding: "8px 12px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                            style={{ padding: "8px 12px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                           >
-                            {isSaving ? "Saving…" : attached > 0 ? "Unassign & delete" : "Delete"}
+                            {attached > 0 ? "Unassign & delete" : "Delete"}
                           </button>
                         </div>
                       </>
@@ -10351,10 +10494,9 @@ function AssetTracker() {
                               if (reason) { patchBreakerModal({ error: reason }); return; }
                               patchBreakerModal({ editing: false, error: null });
                             }}
-                            disabled={isSaving}
-                            style={{ padding: "8px 14px", background: isSaving ? C.border : C.success, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                            style={{ padding: "8px 14px", background: C.success, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                           >
-                            {isSaving ? "Saving…" : "Save"}
+                            {"Save"}
                           </button>
                         </div>
                       </>
@@ -10457,10 +10599,9 @@ function AssetTracker() {
                 </button>
                 <button
                   onClick={submitMoveCircuit}
-                  disabled={isSaving}
-                  style={{ padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                 >
-                  {isSaving ? "Saving…" : "Move"}
+                  {"Move"}
                 </button>
               </div>
             </div>
@@ -10477,7 +10618,6 @@ function AssetTracker() {
             onRemove={removeChangeType}
             onClose={() => { setShowChangeTypeManager(false); setNewChangeTypeName(""); }}
             placeholder="New work type"
-            isSaving={isSaving}
           />
         )}
 
@@ -10491,7 +10631,6 @@ function AssetTracker() {
             onRemove={removeVendor}
             onClose={() => { setShowVendorManager(false); setNewVendorName(""); }}
             placeholder="New vendor name"
-            isSaving={isSaving}
           />
         )}
         {renderWorkDialogs()}
@@ -10860,8 +10999,7 @@ function AssetTracker() {
           <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16 }}>
             <button
               onClick={startAdd}
-              disabled={isSaving}
-              style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+              style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
             >
               <Plus size={14} /> Add asset
             </button>
@@ -10945,8 +11083,8 @@ function AssetTracker() {
             </div>
             {showsFormError(draft, addFormColumns) && <div style={{ fontSize: 13, color: C.danger, marginTop: 12 }}>{draft.formError}</div>}
             <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
-              <button onClick={saveDraft} disabled={isSaving} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: isSaving ? C.border : C.success, color: "#fff", border: "none", fontWeight: 600, fontSize: 14, borderRadius: 10 }}>
-                {isSaving ? <Loader2 size={15} className="spin" /> : <Save size={15} />} {isSaving ? "Saving…" : "Save"}
+              <button onClick={saveDraft} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: C.success, color: "#fff", border: "none", fontWeight: 600, fontSize: 14, borderRadius: 10 }}>
+                <Save size={15} /> Save
               </button>
               <button onClick={cancelAdd} style={{ padding: "9px 16px", background: "transparent", border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 14, borderRadius: 10, color: C.ink }}>
                 Cancel
@@ -11145,15 +11283,13 @@ function AssetTracker() {
             <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
               <button
                 onClick={() => openMaintenanceAdd("")}
-                disabled={isSaving}
                 style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", background: "transparent", color: C.brandDark, border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13 }}
               >
                 <Plus size={14} /> Add task
               </button>
               <button
                 onClick={() => openChangeAdd("")}
-                disabled={isSaving}
-                style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
               >
                 <Plus size={14} /> Log work
               </button>
@@ -11509,7 +11645,7 @@ function AssetTracker() {
                   title="Kind of value"
                 />
               </div>
-              <button onClick={addColumn} disabled={isSaving} style={{ padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600, flexShrink: 0 }}>{isSaving ? "Saving…" : "Add"}</button>
+              <button onClick={addColumn} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600, flexShrink: 0 }}>{"Add"}</button>
             </div>
             )}
           </div>
@@ -11524,7 +11660,7 @@ function AssetTracker() {
             <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>This deletes that field's data from every asset. This can't be undone.</div>
             <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
               <button onClick={() => setConfirmDeleteCol(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
-              <button onClick={() => removeColumn(confirmDeleteCol)} disabled={isSaving} style={{ padding: "8px 14px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>{isSaving ? "Saving…" : "Remove"}</button>
+              <button onClick={() => removeColumn(confirmDeleteCol)} style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>{"Remove"}</button>
             </div>
           </div>
         </div>
@@ -12353,10 +12489,10 @@ function Detail({ label, value, wide, italic }) {
   );
 }
 
-// `isSaving` is threaded in from AssetTracker rather than each caller wiring up
-// its own: every one of these lists writes through the same persist(), so the
-// add/remove controls here disable and say "Saving…" for the same reason the
-// asset forms do. Guarding onAdd/onRemove in one place covers all six lists.
+// These lists took an `isSaving` prop until 2026-09-16, to disable their add and
+// remove controls while a write was in flight. Saves are backgrounded now, so a
+// write in flight is no longer something the person in front of this modal is
+// waiting on, and the double click is caught by savingRef in the handler.
 // Manages the asset TYPE list: add, rename, remove. Separate from
 // ListManagerModal because a type is an { id, name } record rather than a bare
 // string — renaming one edits a field, where renaming a string would mean
@@ -12371,7 +12507,7 @@ function Detail({ label, value, wide, italic }) {
 // trailing edge of the row it edits (see CLAUDE.md).
 function TypeManagerModal({
   types, newValue, onNewValueChange, onAdd, onSave, onReset, onRemove, onClose,
-  isSaving, canEdit, isLocked, nameTaken, countFor, fieldOptions, hasOverrides,
+  canEdit, isLocked, nameTaken, countFor, fieldOptions, hasOverrides,
   labels, onSaveLabels,
 }) {
   const [confirmId, setConfirmId] = useState(null);
@@ -12448,7 +12584,7 @@ function TypeManagerModal({
   // thing: those ids already exist in the registry and must not change.)
   const addLabel = () => {
     const name = newLabelName.trim();
-    if (!name || isSaving) return;
+    if (!name) return;
     if ((labels || []).some(c => c.name.trim().toLowerCase() === name.toLowerCase())) return;
     onSaveLabels([...(labels || []), { id: crypto.randomUUID(), name }]);
     setNewLabelName("");
@@ -12456,7 +12592,7 @@ function TypeManagerModal({
 
   const clean = (draft?.name || "").trim();
   const duplicate = !!draft && !!clean && nameTaken(clean, draft.id);
-  const canSave = !!clean && !duplicate && !isSaving;
+  const canSave = !!clean && !duplicate;
   const toggle = (list, v) => (list.includes(v) ? list.filter(x => x !== v) : [...list, v]);
 
   // Pending until Save, so the whole editor is still one commit — creating the
@@ -12706,9 +12842,9 @@ function TypeManagerModal({
                 style={{ flex: 1, padding: "6px 8px", border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 13, fontFamily: "inherit", background: C.surface, color: C.ink }}
               />
               <button
-                type="button" onClick={addLabel} disabled={isSaving}
-                style={{ padding: "6px 12px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 13, fontWeight: 600 }}
-              >{isSaving ? "Saving…" : "Add"}</button>
+                type="button" onClick={addLabel}
+                style={{ padding: "6px 12px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 13, fontWeight: 600 }}
+              >{"Add"}</button>
             </div>
             <button
               type="button" onClick={() => setEditingLabels(false)}
@@ -12924,12 +13060,12 @@ function TypeManagerModal({
                 disabled={!canSave}
                 style={{ padding: "6px 14px", background: canSave ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontSize: 13, fontWeight: 600 }}
               >
-                {isSaving ? "Saving…" : "Save"}
+                {"Save"}
               </button>
               <button onClick={cancelEdit} style={{ padding: "6px 12px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 13, color: C.ink }}>Cancel</button>
               {hasOverrides(draft.id) && (
                 <button
-                  onClick={() => { if (isSaving) return; onReset(draft.id); cancelEdit(); }}
+                  onClick={() => { onReset(draft.id); cancelEdit(); }}
                   style={{ marginLeft: "auto", padding: "6px 12px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12, color: C.muted }}
                 >
                   Reset to default
@@ -12963,11 +13099,10 @@ function TypeManagerModal({
                         <div style={{ display: "flex", gap: 6 }}>
                           <button onClick={() => setConfirmId(null)} style={{ padding: "3px 8px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12, color: C.ink }}>Cancel</button>
                           <button
-                            onClick={() => { if (isSaving) return; onRemove(t.id); setConfirmId(null); }}
-                            disabled={isSaving}
-                            style={{ padding: "3px 8px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontSize: 12, fontWeight: 600 }}
+                            onClick={() => { onRemove(t.id); setConfirmId(null); }}
+                            style={{ padding: "3px 8px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontSize: 12, fontWeight: 600 }}
                           >
-                            {isSaving ? "Saving…" : "Delete"}
+                            {"Delete"}
                           </button>
                         </div>
                       </>
@@ -13024,10 +13159,9 @@ function TypeManagerModal({
                 />
                 <button
                   onClick={onAdd}
-                  disabled={isSaving}
-                  style={{ padding: "6px 12px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 13, fontWeight: 600 }}
+                  style={{ padding: "6px 12px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 13, fontWeight: 600 }}
                 >
-                  {isSaving ? "Saving…" : "Add"}
+                  {"Add"}
                 </button>
               </div>
             )}
@@ -13043,7 +13177,7 @@ function TypeManagerModal({
 // archive live on the asset itself. `action` is an optional one-shot button --
 // the users conversion, which belongs here because this is where someone goes
 // looking for the user list.
-function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onRemove, onClose, placeholder, isLocked, hint, isSaving, readOnly, note, action }) {
+function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onRemove, onClose, placeholder, isLocked, hint, readOnly, note, action }) {
   const [confirmItem, setConfirmItem] = useState(null);
   return (
     // zIndex 50, above SelectionModal's 40 — this modal is frequently opened via the
@@ -13060,16 +13194,15 @@ function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onR
         {action && (
           <div style={{ marginBottom: 14 }}>
             <button
-              onClick={() => { if (isSaving) return; action.onClick(); }}
-              disabled={isSaving}
+              onClick={() => { action.onClick(); }}
               style={{
                 width: "100%", padding: "8px 12px", borderRadius: 10, fontSize: 13, fontWeight: 600,
-                border: "none", background: isSaving ? C.border : C.brand, color: "#fff",
+                border: "none", background: C.brand, color: "#fff",
                 display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
               }}
             >
-              {isSaving ? <Loader2 size={14} className="spin" /> : null}
-              {isSaving ? "Saving…" : action.label}
+              {null}
+              {action.label}
             </button>
             {action.hint && <div style={{ fontSize: 11, color: C.empty, marginTop: 6 }}>{action.hint}</div>}
           </div>
@@ -13088,11 +13221,10 @@ function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onR
                   <div style={{ display: "flex", gap: 6 }}>
                     <button onClick={() => setConfirmItem(null)} style={{ padding: "3px 8px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12, color: C.ink }}>Cancel</button>
                     <button
-                      onClick={() => { if (isSaving) return; onRemove(item); setConfirmItem(null); }}
-                      disabled={isSaving}
-                      style={{ padding: "3px 8px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontSize: 12, fontWeight: 600 }}
+                      onClick={() => { onRemove(item); setConfirmItem(null); }}
+                      style={{ padding: "3px 8px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontSize: 12, fontWeight: 600 }}
                     >
-                      {isSaving ? "Saving…" : "Delete"}
+                      {"Delete"}
                     </button>
                   </div>
                 </>
@@ -13117,11 +13249,11 @@ function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onR
           <input
             value={newValue}
             onChange={e => onNewValueChange(e.target.value)}
-            onKeyDown={e => { if (e.key === "Enter" && !isSaving) onAdd(); }}
+            onKeyDown={e => { if (e.key === "Enter") onAdd(); }}
             placeholder={placeholder}
             style={{ flex: 1, padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
           />
-          <button onClick={onAdd} disabled={isSaving} style={{ padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600 }}>{isSaving ? "Saving…" : "Add"}</button>
+          <button onClick={onAdd} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600 }}>{"Add"}</button>
         </div>
         )}
       </div>
@@ -13578,7 +13710,7 @@ function ColumnFilterModal({ activeCol, filterConfigs, sortConfig, setSortConfig
 function BreakersTabContent({
   selectedAsset, assets, breakerTypes, showPanelConfig, setShowPanelConfig,
   updatePanelConfig, openBreakerModal, addBreakerDraft, setAddBreakerDraft,
-  setShowBreakerTypesManager, addBreaker, isSaving,
+  setShowBreakerTypesManager, addBreaker,
   addCircuit, saveCircuitEdit, deleteCircuit, openMoveCircuit,
   canEdit,
 }) {
@@ -13611,7 +13743,6 @@ function BreakersTabContent({
           layout={selectedAsset.panelLayout}
           onSave={(count, lay) => { updatePanelConfig(count, lay); setShowPanelConfig(false); }}
           onCancel={slotCount > 0 ? () => setShowPanelConfig(false) : null}
-          isSaving={isSaving}
         />
       ) : (
         <PanelDiagram
@@ -13663,7 +13794,6 @@ function BreakersTabContent({
           items={unassignedCircuits}
           fields={CIRCUIT_TABLE_FIELDS}
           initialDraft={CIRCUIT_TABLE_INITIAL_DRAFT}
-          isSaving={isSaving}
           onAdd={draft => addCircuit(null, draft)}
           onSave={(id, draft) => saveCircuitEdit(null, id, draft)}
           onDelete={id => deleteCircuit(null, id)}
@@ -13765,10 +13895,9 @@ function BreakersTabContent({
                     setAddBreakerDraft(null);
                     openBreakerModal(result.newBreakers[0].id, result.newBreakers);
                   }}
-                  disabled={isSaving}
-                  style={{ padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                 >
-                  {isSaving ? "Saving…" : "Add Breaker"}
+                  {"Add Breaker"}
                 </button>
               </div>
             </div>
@@ -13783,7 +13912,7 @@ function BreakersTabContent({
 // layout — total slot count plus a layout preset. Kept separate from the
 // generic asset Edit form since it's specific to how the Breakers tab draws
 // the diagram, not a general asset field a user would expect in Details.
-function PanelConfigForm({ slotCount, layout, onSave, onCancel, isSaving }) {
+function PanelConfigForm({ slotCount, layout, onSave, onCancel }) {
   const [count, setCount] = useState(slotCount || "");
   const [lay, setLay] = useState(layout || "two-column");
   const valid = count && parseInt(count, 10) > 0;
@@ -13817,10 +13946,10 @@ function PanelConfigForm({ slotCount, layout, onSave, onCancel, isSaving }) {
         )}
         <button
           onClick={() => onSave(parseInt(count, 10) || 0, lay)}
-          disabled={isSaving || !valid}
-          style={{ padding: "8px 14px", background: (!isSaving && valid) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+          disabled={!valid}
+          style={{ padding: "8px 14px", background: (valid) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
         >
-          {isSaving ? "Saving…" : "Save layout"}
+          {"Save layout"}
         </button>
       </div>
     </div>
@@ -14860,7 +14989,7 @@ function ChildEntityTable({
   items, fields, onAdd, onSave, onDelete, initialDraft,
   renderCustomFields, renderSummary, renderExpanded, customRowActions,
   addLabel, emptyMessage, canDelete, deleteConfirmMessage, highlightedId, hideAddButton,
-  addOpen: addOpenProp, onAddOpenChange, isSaving,
+  addOpen: addOpenProp, onAddOpenChange,
   // Defaults true so a caller that predates view-only roles behaves as it always
   // did. Both current callers pass it explicitly; keep doing that rather than
   // relying on the default, since silently defaulting to "editable" is the wrong
@@ -14976,10 +15105,10 @@ function ChildEntityTable({
     setEditDraft(null);
     setEditError(null);
   }
-  // onAdd/onSave may return a validation error string (e.g. slot overlap, or
-  // "a save is already in flight") — when they do, the draft is kept as-is so
-  // the user doesn't lose their input. The isSaving case therefore needs no
-  // separate guard here: the caller's handler reports it like any other refusal.
+  // onAdd/onSave may return a validation error string (e.g. slot overlap) — when
+  // they do, the draft is kept as-is so the user doesn't lose their input. A
+  // refusal from the caller's own guard arrives the same way, so there is
+  // nothing to check here.
   function saveEdit() {
     const error = onSave(editingId, editDraft);
     if (error) { setEditError(error); return; }
@@ -15012,8 +15141,8 @@ function ChildEntityTable({
             >
               Cancel
             </button>
-            <button onClick={submitAdd} disabled={isSaving} style={{ padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>
-              {isSaving ? "Saving…" : addLabel}
+            <button onClick={submitAdd} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>
+              {addLabel}
             </button>
           </div>
         </div>
@@ -15044,8 +15173,8 @@ function ChildEntityTable({
                   </div>
                   {editError && <div style={{ fontSize: 13, color: C.danger, marginBottom: 8 }}>{editError}</div>}
                   <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-                    <button onClick={saveEdit} disabled={isSaving} style={{ padding: "8px 14px", background: isSaving ? C.border : C.success, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>
-                      {isSaving ? "Saving…" : "Save"}
+                    <button onClick={saveEdit} style={{ padding: "8px 14px", background: C.success, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>
+                      {"Save"}
                     </button>
                     <button onClick={cancelEdit} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
                       Cancel
@@ -15133,11 +15262,10 @@ function ChildEntityTable({
                       Cancel
                     </button>
                     <button
-                      onClick={() => { if (isSaving) return; onDelete(confirmDeleteId); setConfirmDeleteId(null); }}
-                      disabled={isSaving}
-                      style={{ padding: "8px 14px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                      onClick={() => { onDelete(confirmDeleteId); setConfirmDeleteId(null); }}
+                      style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                     >
-                      {isSaving ? "Saving…" : "Delete"}
+                      {"Delete"}
                     </button>
                   </div>
                 </>

@@ -870,30 +870,82 @@ onboard one.
     - The scratch tab is **deleted once the write succeeds**, so no second copy of the
       inventory is left in the document for a later import to read by mistake. A failure to
       delete it is reported without claiming the import failed.
-- **Saving feedback is one flag, because `persist()` is the one choke point**: `isSaving`
-  (plus a `savingRef` mirror) is set at the top of `persist()` and cleared in a `finally`,
-  so it clears on success, on a network/backend failure, *and* on the conflict path that
-  reloads and opens the blocking modal — a spinner that never stops would be worse than
-  none. Since every write in the app funnels through `persist()`, that single flag covers
-  every form without per-form plumbing: it drives a "Saving…" pill in **both** headers
-  (list and detail) and puts every write control into a disabled *and visibly working*
-  state — label swapped to "Saving…", `C.border` background, spinner (`Loader2` +
-  the `.spin` keyframe) on the icon buttons. A disabled-but-otherwise-unchanged button
-  still reads as frozen, which is the exact confusion this exists to fix. Components
-  outside `AssetTracker` (`ListManagerModal`, `ChildEntityTable`, `BreakersTabContent`,
-  `PanelConfigForm`) take it as an `isSaving` prop.
-  Two things this is deliberately *not*: it is **not** a guard inside `persist()` — a few
-  write paths aren't gated on it (the bulk reassign/move toolbar), and refusing one of
-  those would silently drop a real edit; the guard is an `if (savingRef.current) return;`
-  at the top of each submit *handler* instead, catching the double-click that lands before
-  React re-renders the button as disabled. And it does **not** replace `writeQueueRef` —
-  that still serializes the POSTs; this stops the second identical submit from ever being
-  created, which the queue can't do (it would happily send both).
-  Sandbox mode needs no special case: its write never awaits, so `isSaving` goes true and
-  false inside one React batch and no "Saving…" frame is ever painted.
-  A failed save now shows a "Save failed" pill in that same slot. It used to be a bare
-  "Sync failed" tucked inside the name button on the *list* header only — i.e. invisible
-  on the detail page, where almost every edit is actually made.
+- **SAVES HAPPEN IN THE BACKGROUND, and the form closes immediately** (2026-09-16).
+  Measured by driving the real page against a backend held at 4 seconds: the edit
+  form now closes in **48ms**. `RESPONSIVENESS_EVAL.md` §1 has the reasoning.
+  - **`persist()` enqueues the write and returns; it does not await it.** The
+    optimistic `setState` has already painted the change, `writeQueueRef` already
+    serializes the POSTs, and the revision check already refuses a stale one — so
+    awaiting the round trip only ever bought a form frozen for the 1.5–5s it
+    takes, which was the whole complaint.
+  - **Every `await persist(...)` call site is UNCHANGED**, and that is deliberate:
+    persist still returns a promise, it just resolves now instead of in five
+    seconds. Making 23 handlers individually fire-and-forget would have been 23
+    chances to get one wrong.
+  - **`finishWrite()` handles the outcome**, because it now runs long after
+    persist() returned. Both the resolved and the rejected path land there.
+  - **`isSaving` drives the header pill and NOTHING ELSE now.** It used to disable
+    every write control and swap ~130 labels to "Saving…" — correct while each
+    handler awaited its own round trip, because the user was still looking at the
+    form it belonged to. Backgrounded, that same flag would have disabled the form
+    they moved ON to, for a write they had already forgotten about: the frozen
+    feeling relocated rather than removed. The disabled props and label swaps came
+    out with it.
+  - **`savingRef` is now the ONLY thing catching a double click**, and its scope is
+    the point: persist sets it and clears it on a **macrotask**, not when the write
+    lands. Holding it for the round trip is what would have let one background save
+    block every unrelated control — `attachPhotos` and `deletePhoto` read it too,
+    so attaching a photo would have been refused because someone renamed a room two
+    seconds ago. What it has to catch is the second click that lands before React
+    re-renders, and a macrotask is exactly that window.
+  - **`pendingWritesRef` is a COUNT**, since several writes can overlap once
+    nothing awaits them; the pill has to clear on the last one home, not the first.
+  - Sandbox needs no special case: it enqueues no write, so no pill is painted and
+    no failure can arrive later.
+
+- **A FAILED SAVE IS RECOVERABLE, because by the time it surfaces the user has
+  moved on** (2026-09-16). This is what made backgrounding acceptable rather than
+  merely faster — and it is a strictly better answer than the old blocking save,
+  which lost the typing too and only guaranteed you were standing on the right
+  page when it happened.
+  - **One modal for both failure kinds** — rejected by the revision check, or never
+    reached the Sheet. `saveConflict` and the separate conflict modal are gone;
+    `saveFailure` (`{ kind, domains, context }`) drives both.
+  - **`persist()` takes a `context`**: `{ assetId, restore: { mode, draft } }`.
+    Optional — a bulk action has no single subject and simply reports that it
+    failed. The asset edit form and the add form supply one.
+  - **It NAMES and LINKS the asset**, resolved through `nameOf()` at render, so a
+    rename between the failure and the click cannot leave a stale word on it.
+  - **Restoring puts the typing back in the FORM and stops. It never re-sends.**
+    That is the whole safety argument: on a conflict an automatic retry would
+    overwrite whoever saved first, which is the one thing the revision counters
+    exist to prevent. A person pressing Save on data they can see is the only
+    "try again" that is safe in both cases — so it is deliberately the SAME
+    recovery for both kinds, rather than a button that means different things.
+  - **It restores the DRAFT, never the failed payload**, and that distinction is
+    the whole of "does it restore one asset or everything". The payload is a full
+    snapshot; replaying it would carry every domain and silently overwrite whatever
+    arrived in between. The draft is one asset's fields, seeded onto freshly
+    reloaded data — exactly the retype it saves. **Verified in the browser**: after
+    a conflict caused by someone editing a DIFFERENT asset, the restored save
+    carries their value for their asset and the typing only for the one being
+    edited.
+  - **THE CONFLICT IS NOT A SAME-ASSET COLLISION**, and this is the thing to know
+    before reasoning about how rare it is. The revision domain is `assets` — the
+    whole domain — so a save is rejected when anyone saves ANY asset in the same
+    moment. In almost every such case the other person touched something unrelated
+    to what was typed, which is exactly why putting the draft back on top of the
+    reload is right.
+  - **The draft is captured into `saveFailure` BEFORE the conflict path closes
+    mid-edit forms**, or the thing being offered back would be discarded on the way.
+  - **The offer is dropped, not shown broken, when there is nothing to restore
+    onto** — the asset can have been deleted by whoever won the race.
+  - **Covered by `test-frontend-saves.js`**, verified by mutation that eight silent
+    failures fail it: the write awaited again, the submit lock held for the round
+    trip, the context dropped, the draft captured after the forms close, a restore
+    that re-sends, a restore that replays the payload, `isSaving` disabling a
+    control again, and the pill clearing on the first write home.
+
 - **Sheet schema**: Assets tab holds flat fields only (see `ASSET_FIELDS` in the .gs
   file). Comments, Changes (structured change log with type/vendor/cost), Allocations
   (bulk-item quantity assignments), and Maintenance (scheduled maintenance items) each
