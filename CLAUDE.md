@@ -946,6 +946,69 @@ onboard one.
     that re-sends, a restore that replays the payload, `isSaving` disabling a
     control again, and the pill clearing on the first write home.
 
+- **A save rewrites only the tabs whose contents actually MOVED (backend v37).**
+  `dirty.assets` is one flag covering seven tabs, so editing a word of a comment
+  rewrote Breakers and Circuits too. `writeTableIfChanged_` hashes the rows it is
+  about to write and skips the tab when the hash matches what Config recorded.
+  - **The client is not asked which child tab it touched**, and that is the whole
+    design. That would be bookkeeping at ~85 `persist()` call sites where a flag
+    someone forgets is a SILENT non-write. The backend already builds every tab's
+    rows in memory, so it can notice that nothing moved without being told.
+  - **Headers are hashed WITH the rows.** A schema change can reorder or rename
+    columns without moving a single value, and that still has to write.
+  - **THE STORED ROW COUNT IS CHECKED AGAINST THE SHEET before skipping**, and
+    that is the guard against a stale hash rather than tidiness. Anything that
+    empties a tab behind this script — the admin wipe, `sheet.mjs`, a person
+    deleting rows by hand — would otherwise be masked by a hash that still
+    matches the data the app is holding, and the tab would never be rebuilt.
+  - **`adminWriteConfig_` DROPS every hash rather than copying it through**, and
+    `sheet.mjs` blanks them in the same batch as its revision bump, for that same
+    reason. A missing hash means "unknown", which always writes — so dropping
+    them is the self-healing answer. **Any future writer outside `doPost` must do
+    the same.**
+  - Worth stating plainly: since saves went to the background this is no longer a
+    change anyone can FEEL. What it buys is less work inside the Apps Script
+    quota, a narrower window for someone else's save to collide, and less lock
+    contention.
+
+- **An ordinary read returns only the most recent slice of the audit log
+  (backend v37).** The log is append-only and never pruned, so it was the one
+  part of the snapshot that grew without bound — ~2MB at 10k entries, ~10MB at
+  50k, downloaded on every load whether or not anyone opened an audit view.
+  `AUDIT_READ_LIMIT` is 2000.
+  - **NOTHING IS PRUNED.** Pruning is the cheaper-sounding change this one exists
+    to avoid: it destroys history, and this does not.
+  - **The tail is the newest history** because append order IS chronological
+    order on an append-only tab — the same fact `auditIndex` relies on. No date is
+    parsed or sorted to find it.
+  - **`auditTotal` is what tells the client it has a window.** Absent from a
+    pre-v37 backend, and absent reads as "this IS the whole log" — which is what
+    keeps a newer frontend correct against an older backend.
+  - **`op:"auditFull"` fetches the whole thing, once**, for the three views that
+    genuinely need it: an asset's own Audit tab, the master Audit tab, and the
+    Excel export. Fetching the WHOLE log rather than paging is deliberate — no
+    view has to learn about windows, and the export cannot quietly drop rows,
+    which is the worst thing an audit trail can do.
+  - **Both audit views SAY when they are showing a window.** An audit view
+    silently showing partial history is the one thing it must not do, and "still
+    loading" is a different statement from "this is everything".
+  - **THE APPEND IS THE DANGEROUS HALF, and the client sends an OFFSET rather
+    than "here are the new rows".** `appendNewRows_` decided newness by comparing
+    the client's array length against the tab's own row count; a client holding
+    only the tail would have appended nothing at all, silently, forever. It now
+    takes `auditBase` — how many rows sit before the client's first — and
+    compares against the tab as it always did. Deciding newness on the CLIENT
+    instead needs it to track what the server has stored, which two overlapping
+    saves and one failed retry get wrong in opposite directions: duplicated
+    history or lost history, both silent, in the one table with no rewrite path.
+    Comparing against the tab is self-correcting — a failed save changes nothing
+    and a repeated save appends nothing the second time.
+  - `auditBase` returns to 0 the moment the full log is fetched. Missing that is
+    how the next save would append from the wrong place.
+  - A tab holding FEWER rows than the client was told sat before its slice means
+    history was removed behind the app's back; the held slice is written back
+    rather than the loss being quietly accepted.
+
 - **Sheet schema**: Assets tab holds flat fields only (see `ASSET_FIELDS` in the .gs
   file). Comments, Changes (structured change log with type/vendor/cost), Allocations
   (bulk-item quantity assignments), and Maintenance (scheduled maintenance items) each
@@ -2686,6 +2749,28 @@ evaluation and the three decisions behind it are in `PHOTOS_EVAL.md`.
   - **The folder and object name are chosen by the BACKEND, never taken from the request.**
     A client picking its own could overwrite an existing photo by naming it. A signature
     authorizes exactly one object, and deciding the name server-side is what makes that true.
+- **A batch is signed in ONE call and uploads run in a bounded pool (v37).**
+  Signing used to be a separate `/exec` round trip per file — ~1.5s each — so
+  four photos spent six seconds doing nothing but asking permission, serially.
+  - **A batch is N INDEPENDENT signatures, each naming one server-chosen
+    object.** It is never one signature covering a folder or a prefix, which
+    would give back exactly the overwrite-by-naming that deciding the name
+    server-side exists to prevent. `PHOTO_SIGN_MAX_BATCH` bounds it, since the
+    count arrives from the client.
+  - **The first signature is ALSO spread at the top level of the response**, so a
+    pre-v37 client reading `signature`/`publicId` from the root keeps working —
+    which is what makes this backend deployable BEFORE the frontend that reads
+    the array, as the release ordering requires. The client does the mirror
+    image: a response with no `signatures` array is read as a batch of one, so a
+    frontend that gets ahead of its backend still uploads a single photo rather
+    than failing in a plant room.
+  - **`PHOTO_UPLOAD_CONCURRENCY` is 3, not unlimited.** A phone re-encoding
+    several multi-megapixel images at once is its own stall, and most of the win
+    is overlapping one file's downscale with the previous file's upload.
+  - **Results are written to their own index rather than pushed**, so the rows
+    keep the order the files were chosen in however the uploads interleave —
+    otherwise a gallery would reorder itself by whichever photo finished first.
+
 - **`photos` is a revision domain of its own, not part of `assets`.** A photo can belong to
   a breaker or a work entry, so folding it in would make attaching one conflict with anyone
   editing any asset anywhere.

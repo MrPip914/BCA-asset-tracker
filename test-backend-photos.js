@@ -54,13 +54,18 @@ const eq = (name, got, want) => {
   ok ? pass++ : fail++;
 };
 
+// v37 routes every full-tab write through writeTableIfChanged_, which skips a
+// tab whose contents hash unchanged. The slice marker below names that call, and
+// matches the older spelling too so this file reads both.
+const TAB_WRITE_CALL = src.includes('writeTableIfChanged_(SHEET_NAMES.photos') ? 'writeTableIfChanged_' : 'writeTable_';
+
 // --- 1. the doPost -> doGet round trip --------------------------------------
 const writePhotos = new Function('body', `
   ${constSrc('PHOTO_FIELDS')}
   const SHEET_NAMES = { photos: 'Photos' };
   let out = null;
   const writeTable_ = (name, fields, rows) => { out = { name, fields, rows }; };
-  ${between('const photoRows = (body.photos || []).map(ph => ({', 'writeTable_(SHEET_NAMES.photos')}
+  ${between('const photoRows = (body.photos || []).map(ph => ({', TAB_WRITE_CALL + '(SHEET_NAMES.photos')}
   writeTable_(SHEET_NAMES.photos, PHOTO_FIELDS, photoRows);
   return out;
 `);

@@ -201,11 +201,13 @@ eq('a work entry can own photos',
 // every list from the ORIGINAL array and each save would drop the ones before
 // it — N writes, one photo surviving. That failure looks like "only the last
 // photo uploaded", which reads as a flaky network rather than a bug.
-function runAttach({ files, failOn = [], ownerType = 'asset' }) {
-  const calls = { persist: [], persistAssets: [], errors: [], progress: [], busy: [] };
+function runAttach({ files, failOn = [], ownerType = 'asset', signFails = false, slow = [] }) {
+  const calls = { persist: [], persistAssets: [], errors: [], progress: [], busy: [], signCounts: [] };
   const fn = new Function(
     'savingRef', 'photoBusy', 'PHOTO_OWNER_TYPES', 'setPhotoError', 'setPhotoBusy',
-    'setPhotoProgress', 'preparePhotoRow', 'persist', 'photos', 'assets', 'module',
+    'setPhotoProgress', 'preparePhotoRow', 'persist', 'photos', 'assets',
+    // v37: the batch is signed once up front and uploads run in a bounded pool.
+    'sandboxMode', 'signPhotoUploads', 'PHOTO_UPLOAD_CONCURRENCY', 'module',
     grab('attachPhotos') + '\nmodule.f = attachPhotos;'
   );
   const mod = {};
@@ -218,11 +220,21 @@ function runAttach({ files, failOn = [], ownerType = 'asset' }) {
     (p) => calls.progress.push(p),
     async (ownerType, ownerId, file) => {
       if (failOn.includes(file.name)) throw new Error('nope');
+      // A file named in `slow` finishes last however early it started, which is
+      // what proves the result order follows the FILES rather than the finishes.
+      if (slow.includes(file.name)) await new Promise(r => setTimeout(r, 30));
       return { id: 'row-' + file.name, ownerType, ownerId };
     },
     async (a, overrides) => { calls.persist.push(overrides.photos); calls.persistAssets.push(a); },
     [{ id: 'existing' }],
     ASSETS,
+    false,
+    async (count) => {
+      calls.signCounts.push(count);
+      if (signFails) throw new Error('no permission');
+      return Array.from({ length: count }, (_, i) => ({ publicId: 'sig-' + i }));
+    },
+    3,
     mod
   );
   return mod.f(ownerType, 'owner-1', files).then(() => calls);
@@ -234,6 +246,35 @@ function runAttach({ files, failOn = [], ownerType = 'asset' }) {
 const ASSETS = [{ id: 'a1' }];
 
 const F = (name) => ({ name, size: 1000 });
+
+// --- v37: one signature call, parallel uploads, stable order -----------------
+// Signing used to be a round trip PER FILE -- ~1.5s each -- which was most of
+// what made a multi-photo batch slow. And once uploads overlap, the order they
+// FINISH in stops matching the order they were chosen in, which would silently
+// reorder a gallery.
+runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg'), F('d.jpg')] }).then(calls => {
+  eq('a four-photo batch asks for permission ONCE', calls.signCounts.length, 1);
+  eq('and asks for one signature per file', calls.signCounts[0], 4);
+});
+
+runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg')], slow: ['a.jpg'] }).then(calls => {
+  // a.jpg finishes last but was chosen first.
+  eq('the written rows follow the order the FILES were chosen, not finished',
+     (calls.persist[0] || []).map(r => r.id).join(','),
+     'existing,row-a.jpg,row-b.jpg,row-c.jpg');
+});
+
+runAttach({ files: [F('a.jpg'), F('b.jpg')], signFails: true }).then(calls => {
+  eq('a refused signing batch writes nothing', calls.persist.length, 0);
+  eq('and says so rather than failing silently', calls.errors.length > 0, true);
+});
+
+runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg')], failOn: ['b.jpg'] }).then(calls => {
+  eq('one bad file still lets the others through', (calls.persist[0] || []).length, 3);
+  eq('and the good rows keep their order',
+     (calls.persist[0] || []).map(r => r.id).join(','), 'existing,row-a.jpg,row-c.jpg');
+});
+
 
 runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg')] }).then(calls => {
   eq('three files produce exactly ONE snapshot write', calls.persist.length, 1);

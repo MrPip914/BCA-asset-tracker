@@ -53,7 +53,11 @@ function between(startMarker, endMarker) {
 }
 
 const readBlock = between('const assets = assetRows.map(a => {', '\n    const auditLog =');
-const writeBlock = between('assets.forEach(a => {', 'writeTable_(SHEET_NAMES.comments');
+// v37 routes every full-tab write through writeTableIfChanged_, which skips a
+// tab whose contents hash unchanged. The slice markers below name that call, and
+// match the older spelling too so this file reads both.
+const TAB_WRITE_CALL = src.includes('writeTableIfChanged_(SHEET_NAMES.comments') ? 'writeTableIfChanged_' : 'writeTable_';
+const writeBlock = between('assets.forEach(a => {', TAB_WRITE_CALL + '(SHEET_NAMES.comments');
 
 const readSide = new Function(
   'assetRows', 'commentRows', 'changeRows', 'allocationRows', 'maintenanceRows',
@@ -121,7 +125,7 @@ check('MAINTENANCE_FIELDS carries id', mod.MAINTENANCE_FIELDS.indexOf('id') !== 
 [['CHANGE_FIELDS', 'changes'], ['MAINTENANCE_FIELDS', 'maintenance']].forEach(([constName, tab]) => {
   const uses = [
     `readTable_(SHEET_NAMES.${tab}, ${constName})`,
-    `writeTable_(SHEET_NAMES.${tab}, ${constName},`,
+    `${TAB_WRITE_CALL}(SHEET_NAMES.${tab}, ${constName},`,
     `{ name: SHEET_NAMES.${tab}, headers: ${constName} }`,
   ];
   uses.forEach(u => check(`${constName} is used at: ${u}`, src.includes(u)));

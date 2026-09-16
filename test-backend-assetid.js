@@ -49,7 +49,11 @@ function between(startMarker, endMarker) {
 // doGet's asset assembly: builds each asset with its child arrays attached.
 const readBlock = between('const assets = assetRows.map(a => {', '\n    const auditLog =');
 // doPost's child-row flattening: turns assets back into flat rows per tab.
-const writeBlock = between('assets.forEach(a => {', 'writeTable_(SHEET_NAMES.comments');
+// v37 routes every full-tab write through writeTableIfChanged_, which skips a
+// tab whose contents hash unchanged. The slice markers below name that call, and
+// match the older spelling too so this file reads both.
+const TAB_WRITE_CALL = src.includes('writeTableIfChanged_(SHEET_NAMES.comments') ? 'writeTableIfChanged_' : 'writeTable_';
+const writeBlock = between('assets.forEach(a => {', TAB_WRITE_CALL + '(SHEET_NAMES.comments');
 
 const readSide = new Function(
   'assetRows', 'commentRows', 'changeRows', 'allocationRows', 'maintenanceRows',

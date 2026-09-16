@@ -78,6 +78,12 @@ const API = "https://sheets.googleapis.com/v4/spreadsheets";
 // Mirrors REVISION_DOMAINS / REVISION_KEY_PREFIX in AssetTrackerSync.gs.
 const REVISION_DOMAINS = ["assets", "config", "breakerTypes"];
 const REVISION_KEY_PREFIX = "rev_";
+// Mirrors TAB_HASH_KEY_PREFIX in AssetTrackerSync.gs. The backend skips
+// rewriting a tab whose contents hash unchanged (v37), so a hash left behind
+// after THIS tool rewrote that tab would describe data the app is still holding
+// in memory -- and the next save would decline to rebuild the tab we just
+// changed. Blanking the hashes means "unknown", which always writes.
+const TAB_HASH_KEY_PREFIX = "hash_";
 
 // Which revision domain a tab belongs to, so `write` can bump the right counter
 // without being told. Mirrors doPost's own _dirty grouping: the asset domain is
@@ -381,6 +387,20 @@ export async function bumpRevisions(sheetId, domains) {
   const result = {};
   const updates = [];
   const appended = [];
+
+  // Blank every tab hash in the same batch as the bump. Not optional, and for
+  // the same reason the bump itself is not: both exist so that a writer outside
+  // doPost cannot leave the app believing something it is no longer true.
+  grid.forEach((row, i) => {
+    if (i === 0) return;
+    if (!String(row[keyCol] || "").startsWith(TAB_HASH_KEY_PREFIX)) return;
+    if (String(row[valCol] || "") === "") return;
+    updates.push({
+      range: `${quote("Config")}!${colLetter(valCol)}${i + 1}`,
+      values: [[""]],
+    });
+  });
+
   for (const domain of domains) {
     const key = REVISION_KEY_PREFIX + domain;
     const idx = grid.findIndex((r, i) => i > 0 && String(r[keyCol]) === key);

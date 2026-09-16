@@ -95,6 +95,9 @@ new Function(
   constSrc('const ASSET_FIELDS = [') + '\n' +
   constSrc('const REVISION_DOMAINS = [') + '\n' +
   'const REVISION_KEY_PREFIX = "rev_";\n' +
+  // v37: adminWriteConfig_ drops every per-tab hash rather than copying it
+  // through, so the wipe/import cannot leave one describing data it just erased.
+  'const TAB_HASH_KEY_PREFIX = "hash_";\n' +
   tabNameSrc + '\n' +
   grab('readRevisions_') + '\n' +
   grab('adminReadGrid_') + '\n' +

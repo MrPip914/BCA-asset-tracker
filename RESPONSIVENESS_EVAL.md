@@ -1,13 +1,10 @@
 # Responsiveness — evaluation
 
-**Status: items 1, 2, 3 and 7 of the table in §5 are BUILT** (2026-09-16, frontend only, no
-backend deploy) — lazy `xlsx`, the snapshot cache and the transpile cache, all described
-in `CLAUDE.md` under "Two caches in front of the load". Everything else here is still
-evaluation only. Background saves landed with two things this document did not
-propose — a failure that names and links its asset, and putting the draft back —
-because backgrounding is what made a failure surface after the user had moved on.
-Items 5, 6 and 8 are one backend release between them, and are all that is left.
-Written 2026-09-15
+**Status: EVERY item in the table in §5 is now BUILT** (2026-09-16). Items 1-4 and 7
+are frontend-only and shipped first; items 5, 6 and 8 are backend v37 and ship as one
+version, so they need a deploy before the branch is merged. What survives here is the
+reasoning and the measurements, plus the two things still explicitly rejected at the
+bottom. Written 2026-09-15
 against the repo at `c98746b`. Every backend version number below is a *shape* — run
 `node deploy.mjs --status` before planning around any of it.
 

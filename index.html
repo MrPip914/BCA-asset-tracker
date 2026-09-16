@@ -2357,7 +2357,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v36";
+const FRONTEND_SCRIPT_VERSION = "v37";
 // The version of THIS file — shown in About (the account menu), so "is my browser
 // actually running the build I just deployed, or a cached one?" is answerable in
 // two clicks instead of by reading view-source.
@@ -2375,7 +2375,7 @@ const FRONTEND_SCRIPT_VERSION = "v36";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-16.3";
+const APP_VERSION = "2026-09-16.4";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -2633,6 +2633,11 @@ const SANDBOX_DATA_KEY = CLIENT.storageKey("asset-tracker-sandbox-data");
 // browser, and the JPEG quality it is re-encoded at. ~1600px at q0.8 turns a
 // typical 4MB phone photo into ~300KB, which is the difference between a usable
 // gallery on school wifi and an unusable one.
+// How many photos upload at once. Bounded rather than unlimited: a phone
+// re-encoding several multi-megapixel images simultaneously is its own stall,
+// and the win is mostly in overlapping one file's downscale with the previous
+// file's upload rather than in raw parallelism.
+const PHOTO_UPLOAD_CONCURRENCY = 3;
 const PHOTO_MAX_EDGE = 1600;
 const PHOTO_JPEG_QUALITY = 0.8;
 // Refused before any work is done. Well above what a re-encoded phone photo
@@ -3568,6 +3573,20 @@ function AssetTracker() {
   // they have moved on — and, when the save carried a draft, offered the typing
   // back. `{ kind: "conflict" | "error", domains, context }`.
   const [saveFailure, setSaveFailure] = useState(null);
+  // How many AuditLog rows exist on the server, which is not the same as how
+  // many are loaded: an ordinary read returns only the most recent slice (v37,
+  // AUDIT_READ_LIMIT) because the log is append-only, never pruned, and was the
+  // one part of the snapshot that grew without bound on every load.
+  //
+  // Absent from a pre-v37 backend, which reads as "this IS the whole log" and
+  // keeps a newer frontend correct against an older backend.
+  const [auditTotal, setAuditTotal] = useState(null);
+  // How many rows sit BEFORE the first one held in `auditLog`. Posted with every
+  // save so the backend can work out which rows are new by comparing against its
+  // own tab -- see appendNewRows_. Zero once the full log has been fetched.
+  const auditBaseRef = useRef(0);
+  // In flight, so the audit views can say they are still filling in.
+  const [auditLoadingFull, setAuditLoadingFull] = useState(false);
   // True while any backgrounded write is in flight, and it now drives the header
   // pill and NOTHING ELSE.
   //
@@ -4142,7 +4161,15 @@ function AssetTracker() {
     rememberRevisions(data.revisions);
     setChangeTypes(data.changeTypes && data.changeTypes.length ? data.changeTypes : DEFAULT_CHANGE_TYPES);
     setVendors(Array.isArray(data.vendors) ? data.vendors : []);
-    setAuditLog(Array.isArray(data.auditLog) ? data.auditLog : []);
+    const loadedAudit = Array.isArray(data.auditLog) ? data.auditLog : [];
+    setAuditLog(loadedAudit);
+    // A pre-v37 backend reports no total, which means the slice IS everything.
+    const reportedTotal = Number(data.auditTotal);
+    const knownTotal = Number.isFinite(reportedTotal) && reportedTotal >= loadedAudit.length
+      ? reportedTotal
+      : loadedAudit.length;
+    setAuditTotal(knownTotal);
+    auditBaseRef.current = Math.max(0, knownTotal - loadedAudit.length);
     setPeripheralsList(Array.isArray(data.peripheralsList) ? data.peripheralsList : DEFAULT_PERIPHERALS);
     setBulkItemTypes(Array.isArray(data.bulkItemTypes) ? data.bulkItemTypes : DEFAULT_BULK_ITEM_TYPES);
     // Migrate the managed type list the same way columns are migrated above:
@@ -4187,6 +4214,88 @@ function AssetTracker() {
       setUsersList(derived);
     }
   }
+
+  // Fetches the WHOLE audit log, once, for the views that genuinely need all of
+  // it. An ordinary read carries only the recent slice, so an asset's own
+  // history, the master Audit tab and the Excel export would otherwise each be
+  // looking at a window and unable to say so.
+  //
+  // Resolves to the complete array. Everything downstream then behaves exactly
+  // as it did before the cap existed -- which is the point of fetching the whole
+  // thing rather than paging: no view needs to learn about windows, and the
+  // export cannot quietly drop rows, which is the worst thing an audit trail can
+  // do. The payload is the one that used to be on every single load; now it is
+  // asked for on purpose.
+  const auditFullRef = useRef(null);
+  async function ensureFullAuditLog() {
+    if (sandboxMode) return auditLog;
+    if (auditTotal === null || auditLog.length >= auditTotal) return auditLog;
+    // One in-flight fetch, shared: the master tab and the detail tab can both
+    // ask at once, and two round trips for one answer would be silly.
+    if (!auditFullRef.current) {
+      auditFullRef.current = (async () => {
+        setAuditLoadingFull(true);
+        try {
+          const res = await fetch(SHEET_API_URL, {
+            method: "POST",
+            headers: { "Content-Type": "text/plain;charset=utf-8" },
+            body: JSON.stringify({ op: "auditFull", sessionId: sessionId }),
+            cache: "no-store",
+          });
+          const data = await res.json().catch(() => null);
+          if (!data || !data.ok || !Array.isArray(data.auditLog)) {
+            throw new Error((data && data.error) || "Couldn't load the full history.");
+          }
+          setAuditLog(data.auditLog);
+          setAuditTotal(data.auditLog.length);
+          // The client now holds the whole log, so nothing sits before its first
+          // row. Missing this is how the next save would append from the wrong
+          // place -- see appendNewRows_.
+          auditBaseRef.current = 0;
+          return data.auditLog;
+        } finally {
+          setAuditLoadingFull(false);
+          // Cleared either way: a failure should be retryable rather than stick.
+          auditFullRef.current = null;
+        }
+      })();
+    }
+    try {
+      return await auditFullRef.current;
+    } catch (e) {
+      setNotice("Couldn't load the older history. Check your connection and try again.");
+      return auditLog;
+    }
+  }
+
+  // Both audit views need the whole log, so opening either fetches the rest.
+  // An effect rather than a click handler because either can be reached by a
+  // deep link, a row click from the other, or a reload standing on it.
+  useEffect(() => {
+    if (!authSatisfied || sandboxMode) return;
+    const wantsFullLog = mainTab === "audit" || (view === "detail" && detailTab === "audit");
+    if (wantsFullLog) ensureFullAuditLog();
+  }, [mainTab, detailTab, view, authSatisfied, sandboxMode, auditTotal]);
+
+  // Rendered by both audit views while the log on this device is still a recent
+  // slice. An audit view quietly showing part of the history is the one thing it
+  // must not do, and "it is still loading" is a different statement from "this
+  // is everything" -- so it says which, rather than leaving the reader to guess
+  // from a count that looks complete.
+  const auditPartialNotice = (!sandboxMode && auditTotal !== null && auditLog.length < auditTotal) ? (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 8, marginBottom: 8,
+      border: `1.5px solid ${C.border}`, borderRadius: 10, padding: "8px 12px",
+      fontSize: 12, color: C.muted, background: C.surface,
+    }}>
+      <Loader2 size={13} className={auditLoadingFull ? "spin" : undefined} />
+      <span>
+        Showing the most recent {auditLog.length.toLocaleString()} of{" "}
+        {auditTotal.toLocaleString()} entries
+        {auditLoadingFull ? " — loading the rest…" : " — the rest hasn't loaded yet."}
+      </span>
+    </div>
+  ) : null;
 
   async function loadData() {
     lastLoadedSandboxRef.current = sandboxMode;
@@ -4631,6 +4740,12 @@ function AssetTracker() {
       const payload = {
         assets: nextAssets, columns: nextColumns, changeTypes: nextChangeTypes,
         vendors: nextVendors, auditLog: nextAuditLog, peripheralsList: nextPeripheralsList, usersList: nextUsersList,
+        // How much of the log this client does NOT hold. The backend needs it to
+        // tell new rows from held ones; deciding that here instead would mean
+        // tracking what the server has already stored, which two overlapping
+        // saves and one failed retry get wrong in opposite directions -- in the
+        // one table with no rewrite path. Zero is the pre-v37 behaviour exactly.
+        auditBase: auditBaseRef.current,
         bulkItemTypes: nextBulkItemTypes, typesList: nextTypesList,
         typeSettings: nextTypeSettings, typeCategories: nextTypeLabels,
         breakerTypes: nextBreakerTypes,
@@ -6006,17 +6121,60 @@ function AssetTracker() {
     const added = [];
     const failures = [];
     try {
-      for (let i = 0; i < chosen.length; i++) {
-        const file = chosen[i];
-        setPhotoProgress({ done: i, total: chosen.length });
+      // EVERY SIGNATURE IN ONE ROUND TRIP. Signing used to happen inside the
+      // per-file loop, so a four-photo batch spent four separate /exec calls --
+      // ~1.5s each by RESPONSIVENESS_EVAL.md §0 -- doing nothing but asking
+      // permission. The whole batch is authorized up front now.
+      //
+      // Null when signing fails or in Sandbox; preparePhotoRow reports the
+      // failure per file rather than this throwing the batch away, so a tenant
+      // with no Cloudinary keys still names the missing ones.
+      let signatures = null;
+      if (!sandboxMode) {
         try {
-          added.push(await preparePhotoRow(ownerType, ownerId, file));
+          signatures = await signPhotoUploads(chosen.length);
         } catch (err) {
-          // One bad file does not abandon the rest -- the others are already
-          // uploaded, and throwing away good work because the fourth photo was
-          // a screenshot of a video would be worse than reporting it.
-          failures.push((file.name || "A file") + ": " + ((err && err.message) || "could not be uploaded."));
+          failures.push((err && err.message) || "Could not get permission to upload.");
+          signatures = null;
         }
+      }
+      if (sandboxMode || signatures) {
+        // UPLOADS RUN IN PARALLEL, BOUNDED. Serial was costing the whole batch
+        // the sum of its uploads; unbounded would have a phone re-encoding four
+        // multi-megapixel images at once, which is its own stall. A small pool
+        // overlaps each file's downscale with the previous one's upload, which
+        // is where the rest of the saving is.
+        //
+        // Results are written to their OWN INDEX rather than pushed, so `added`
+        // keeps the order the files were chosen in however the uploads
+        // interleave -- otherwise a gallery would reorder itself by whichever
+        // photo happened to finish first.
+        const results = new Array(chosen.length).fill(null);
+        const failedAt = new Array(chosen.length).fill(null);
+        let done = 0;
+        let next = 0;
+        const worker = async () => {
+          for (;;) {
+            const i = next++;
+            if (i >= chosen.length) return;
+            const file = chosen[i];
+            try {
+              results[i] = await preparePhotoRow(ownerType, ownerId, file, signatures ? signatures[i] : null);
+            } catch (err) {
+              // One bad file does not abandon the rest -- the others are already
+              // uploaded, and throwing away good work because the fourth photo
+              // was a screenshot of a video would be worse than reporting it.
+              failedAt[i] = (file.name || "A file") + ": " + ((err && err.message) || "could not be uploaded.");
+            }
+            done += 1;
+            setPhotoProgress({ done, total: chosen.length });
+          }
+        };
+        await Promise.all(
+          Array.from({ length: Math.min(PHOTO_UPLOAD_CONCURRENCY, chosen.length) }, worker)
+        );
+        results.forEach(row => { if (row) added.push(row); });
+        failedAt.forEach(msg => { if (msg) failures.push(msg); });
       }
       // A work entry's or a schedule's id can exist ONLY IN MEMORY, and that is
       // what orphaned the first batch of work-entry photos. Both are adopted at
@@ -6055,7 +6213,7 @@ function AssetTracker() {
   // attachPhotos so the per-file failure above has something to wrap, and so the
   // accumulate-then-write-once rule cannot be broken by a future call site: this
   // returns a row and writes nothing.
-  async function preparePhotoRow(ownerType, ownerId, file) {
+  async function preparePhotoRow(ownerType, ownerId, file, sig) {
     if (file.size > PHOTO_MAX_BYTES) {
       throw new Error("too large — pick a photo rather than a video or a RAW file.");
     }
@@ -6075,7 +6233,7 @@ function AssetTracker() {
           at: new Date().toISOString(), by: currentUser || "",
         };
       } else {
-        const sig = await signPhotoUpload();
+        if (!sig) throw new Error("no upload permission was issued for this file.");
         const uploaded = await uploadPhotoToCloudinary(prepared.blob, sig);
         row = {
           id: crypto.randomUUID(), ownerType: ownerType, ownerId: ownerId,
@@ -6096,19 +6254,32 @@ function AssetTracker() {
     }
   }
 
-  // Asks the backend to sign one upload. It refuses loudly when a tenant has no
-  // Cloudinary credentials in its Script Properties and NAMES the missing keys:
-  // that is a per-tenant setup step, easy to forget on a newly onboarded school,
-  // and the symptom otherwise looks like a broken feature.
-  async function signPhotoUpload() {
+  // Asks the backend to sign a WHOLE BATCH in one call. It refuses loudly when a
+  // tenant has no Cloudinary credentials in its Script Properties and NAMES the
+  // missing keys: that is a per-tenant setup step, easy to forget on a newly
+  // onboarded school, and the symptom otherwise looks like a broken feature.
+  //
+  // One call rather than one per file is most of what made a multi-photo batch
+  // slow -- see attachPhotos. `count` is bounded server-side, so asking for a
+  // hundred signatures does not mint a hundred.
+  async function signPhotoUploads(count) {
     const res = await fetch(SHEET_API_URL, {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ op: "photoSign", sessionId: sessionId }),
+      body: JSON.stringify({ op: "photoSign", sessionId: sessionId, count: count }),
     });
     const data = await res.json().catch(() => null);
     if (!data || !data.ok) throw new Error((data && data.error) || "Could not get permission to upload.");
-    return data;
+    // A v36-or-older backend answers with ONE signature at the top level and no
+    // `signatures` array. Reading that shape as a batch of one keeps a frontend
+    // deployed ahead of its backend working for single-photo uploads rather than
+    // failing at the one moment someone is standing in a plant room with a phone.
+    const list = Array.isArray(data.signatures) ? data.signatures : [data];
+    if (list.length < count) {
+      throw new Error("The backend issued " + list.length + " upload permissions for "
+        + count + " photos. Add them a few at a time, or update the backend.");
+    }
+    return list;
   }
 
   // Removes the ROW. The image itself stays at the host -- see PHOTOS_EVAL.md
@@ -7457,6 +7628,11 @@ function AssetTracker() {
     // since the snapshot cache means the app itself now opens offline — so this
     // fails with a message naming the cause rather than a button that does
     // nothing. A later export, once it has loaded once, still works offline.
+    // THE WHOLE LOG, always. An export that quietly dropped rows to match
+    // whatever happened to be loaded is the worst thing an audit trail can do --
+    // the same rule that keeps the Audit tab's Export emitting the workbook
+    // sheet rather than the filtered view.
+    const fullAuditLog = await ensureFullAuditLog();
     let XLSX;
     try {
       XLSX = await import("xlsx");
@@ -7551,7 +7727,7 @@ function AssetTracker() {
       });
     });
 
-    const auditRows = auditLog.map(entry => ({
+    const auditRows = fullAuditLog.map(entry => ({
       "Asset ID": entry.assetLabel, Type: entry.assetType, When: formatWhen(entry.at),
       Action: entry.action, Detail: describeAudit(entry), "By": entry.by || "",
     }));
@@ -9966,6 +10142,7 @@ function AssetTracker() {
             );
             return (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {auditPartialNotice}
                 {assetAuditEntries.length === 0 ? (
                   <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>No edits recorded yet.</div>
                 ) : assetAuditEntries.map(row)}
@@ -11461,6 +11638,8 @@ function AssetTracker() {
               {/* The same drill-down the other two tabs use, on the same
                   scopeId -- narrowing to a building narrows this too. */}
               <HierarchyNav assets={assets} scopeId={scopeId} setScopeId={setScopeId} />
+
+              {auditPartialNotice}
 
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
                 <div style={{ fontSize: 12, color: C.muted }}>
