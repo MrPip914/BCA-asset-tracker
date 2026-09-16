@@ -1,6 +1,10 @@
 # Responsiveness — evaluation
 
-**Status: evaluation only. Nothing is built and nothing is decided.** Written 2026-09-15
+**Status: items 3 and 7 of the table in §5 are BUILT** (2026-09-16, frontend only, no
+backend deploy) — the snapshot cache and the transpile cache, described in `CLAUDE.md`
+under "Two caches in front of the load". Item 1 (lazy `xlsx`) is NOT done and is still
+the cheapest thing left on this list. Everything else here is still evaluation only.
+Written 2026-09-15
 against the repo at `c98746b`. Every backend version number below is a *shape* — run
 `node deploy.mjs --status` before planning around any of it.
 

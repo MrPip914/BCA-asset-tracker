@@ -270,6 +270,109 @@ padding rather than shifting, `colLetter` past Z). It is the only place that log
 covered: Sandbox never contacts anything, and rehearsing a destructive write against a live
 Sheet is the thing being avoided.
 
+## Two caches in front of the load (2026-09-16)
+
+A refresh used to be ~3 seconds of client boot before the app drew anything, and
+then another ~1.5s of backend round trip before it drew anything USEFUL. Both are
+now cached. `RESPONSIVENESS_EVAL.md` holds the measurements and the options that
+were rejected; what follows is what shipped and why it is safe.
+
+**Neither cache is load-bearing. Every failure path is the old behaviour**, which
+is the property to preserve when touching either: no Cache Storage, no
+`crypto.subtle`, a corrupt entry, a full quota, an insecure context — all of them
+fall through to exactly what this file did before.
+
+### The transpile cache
+
+`index.html` is ~880KB of JSX that Babel turns into **~2.9MB** (the inline source
+map is most of it). Measured: 1.3–1.8s on a server-class CPU, so 4–8s on a phone,
+in front of EVERY load. Driving the real page in Chromium: **3.0s cold, 128ms
+warm.**
+
+- **The app source is `type="text/x-babel-source"`, NOT `text/babel`.** That is
+  what Babel Standalone's own auto-runner scans for; leaving it would transpile
+  the file twice and mount the app twice. A loader at the bottom of `<body>` owns
+  the job instead.
+- **Babel is no longer loaded in `<head>`** — it is fetched only on a cache miss.
+  That is 598KB over the wire and 2.87MB of parsing skipped on a hit, which is
+  most of what this buys.
+- **The key is a SHA-256 of the source, and that choice is the whole design.**
+  A stale entry here does not show a stale label, it runs the wrong code. Every
+  other versioning scheme in this project is hand-bumped and this file's history
+  is a list of hand-bumps that got forgotten. A content hash cannot be forgotten.
+  The honest limit: **the first load after any edit is unchanged**, which is the
+  right trade — nothing is lost on the load where the code is new.
+- **The transform options are Babel's auto-runner's, character for character**,
+  read out of `babel.min.js` rather than guessed. Its default `plugins` list is
+  NOT empty (`transform-class-properties`, `transform-object-rest-spread`,
+  `transform-flow-strip-types`); dropping it emits different code silently. Bump
+  `CACHE_NAME` if these ever change — the hash covers the source, not the options.
+- **Injected as an INLINE module script, exactly as Babel injects it.** Not a
+  blob URL: bare specifiers (`react`, `lucide-react`) resolve against the import
+  map in `<head>`, which is a property of this document.
+- **`waitForGoogleIdentity` stopped being belt-and-braces and became load-bearing.**
+  The GSI script tag's comment used to say Babel was always slow enough that GSI
+  won the race. On a cache hit the app can mount in milliseconds. Do not remove
+  that wait on the grounds that it never fires.
+- A start-up failure now says so in `#root` instead of leaving a blank page —
+  worth having once Babel is fetched lazily, and it is what caught the very first
+  test run.
+
+### The snapshot cache
+
+The last backend response, kept in Cache Storage so a refresh PAINTS IMMEDIATELY
+instead of watching a loading screen for the ~1.5s an `/exec` round trip costs at
+its very best.
+
+- **What makes it safe was already shipped.** A save posts per-domain revision
+  counters and `doPost` refuses a stale one — so the worst a stale snapshot can do
+  to the Sheet is nothing. This cache does not weaken optimistic concurrency, it
+  **relies** on it.
+- **Writes are blocked until revalidation lands anyway.** Being refused is not the
+  same as not being invited, and the window is about 1.5 seconds. That keeps the
+  cache a pure READ optimisation: nothing it paints can reach the Sheet before the
+  server's own copy has arrived.
+- **The RAW response is stored, never the derived state**, so every adoption and
+  migration in `applySnapshot()` runs identically on a cached load — including
+  migrations added after the entry was written. That is what stops a cache from
+  pinning the app to an old build's reading of the data.
+- **`applySnapshot()` was extracted from `loadData()` for exactly that reason.**
+  Two readers of one payload would drift.
+- **FOUR guards on the cached paint, each ruling out a case where server truth is
+  the point of the call**: not in sandbox (it has its own copy), not during a fresh
+  Google sign-in (`sessionId` may still name the EXPIRED session being replaced,
+  whose cache is not this user's), a session id to key on, and — the sharpest —
+  **`assets === null`, i.e. the FIRST load only**. The conflict handler reloads
+  *because* the state in memory is wrong; handing it a cache would defeat the
+  reload and leave the user looking at the edit that was just rejected.
+- **Keyed by tenant AND session.** The tenant is the `CLIENT.storageKey()` rule met
+  in a second store — one origin serves every school. The session is what makes
+  signing out and back in as someone else a MISS rather than a peek at the previous
+  person's inventory, since a new sign-in always mints a new session id.
+- **Stored AFTER `applySnapshot`**, deliberately: a sign-in adopts the session the
+  backend just issued, and `sessionId` is a module-level value read at call time,
+  so this keys the snapshot under the id the NEXT load will present.
+- **Cleared on sign-out and on any `authFailed`.** The session id is erased from
+  `localStorage` already; leaving the inventory it named in Cache Storage would
+  make "Sign out" mean less than it says.
+- **A FAILED revalidation keeps the cached view and says so** ("Saved copy" pill,
+  writes still blocked) rather than falling back to the blocking error screen. A
+  flaky connection is when a local copy is worth the most; throwing it away there
+  would mean the cache bought nothing in the one case it was for. Showing
+  unconfirmed data is honest, letting someone edit it is not.
+- The header pill gained two states rather than growing a second pill beside it —
+  they are mutually exclusive with the save states, since `persist()` refuses to
+  write while either load state is set.
+- **Covered by `test-frontend-cache.js`** for the structural properties, verified
+  by mutation that nine silent failures fail it (a conflict reload reading the
+  cache, `persist` losing its guard, sign-out leaving the inventory, a dropped
+  Babel plugin, Babel going eager again, a truncated entry being run, caching
+  before the session is adopted, a fresh sign-in reading the cache, and a stale
+  load falling back to the error screen). **The browser behaviour is browser
+  behaviour** — Cache Storage, module injection, the revalidate swap — and was
+  verified by driving the real page in Chromium against a mocked backend,
+  including a CONTROL case proving the harness can see a write at all.
+
 ## Local Sandbox mode
 
 A "Sandbox" pill in the top-right of the header (next to the name tag) toggles between

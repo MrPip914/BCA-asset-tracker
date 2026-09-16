@@ -30,22 +30,32 @@
 }
 </script>
 
-<!-- Babel Standalone: transpiles the JSX/ESM below in the browser at load time. -->
-<script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+<!-- Babel Standalone is NOT loaded here any more — see the transpile cache at the
+     bottom of <body>, which loads it only when it actually has to transpile.
+     It is 598KB over the wire and 2.87MB to parse, so keeping it off the repeat
+     load is most of what that cache buys. -->
 
 <!-- Google Identity Services — the "Sign in with Google" button and the ID token
      it mints. Loaded as a plain classic script (not through the import map)
      because it registers the global `google.accounts.id` that the app polls for
-     on mount. Deliberately NOT async/defer: Babel transpiles the module below
-     at load time, which takes long enough that this has always resolved first,
-     and waiting on it explicitly (see waitForGoogleIdentity) covers the case
-     where it hasn't. -->
+     on mount.
+     This USED to be described as winning a race it could not lose: Babel took so
+     long to transpile the module below that this had always resolved first. The
+     transpile cache removed that guarantee — on a cache hit the app can mount in
+     a few milliseconds — so `waitForGoogleIdentity`, which was written as
+     belt-and-braces, is now the thing that actually makes this correct. Do not
+     remove it on the grounds that it never fires. -->
 <script src="https://accounts.google.com/gsi/client"></script>
 </head>
 <body>
 <div id="root"></div>
 
-<script type="text/babel" data-type="module" data-presets="react">
+<!-- The app's source. Deliberately NOT type="text/babel": that is what Babel
+     Standalone's own auto-runner scans for, and this file is transpiled by the
+     loader at the end of this body instead, so that the OUTPUT can be cached.
+     An unknown script type is an inert data block to the browser, which is
+     exactly what this needs to be until the loader decides what to do with it. -->
+<script type="text/x-babel-source" id="app-source">
 import ReactDOM from "react-dom/client";
 import { createPortal } from "react-dom";
 
@@ -2202,6 +2212,86 @@ function setSessionId(id) {
   }
 }
 
+// ---------- SNAPSHOT CACHE ----------
+// The last snapshot the backend returned, kept so a refresh can PAINT
+// IMMEDIATELY instead of staring at a loading screen for the ~1.5s an /exec
+// round trip costs before it has drawn anything.
+//
+// WHAT MAKES THIS SAFE IS ALREADY SHIPPED. Every save posts per-domain revision
+// counters and doPost refuses a save whose counters are stale (see "Optimistic
+// concurrency"). So the worst a stale snapshot can do to the SHEET is nothing:
+// a save built on one is rejected and the app reloads. This cache does not
+// weaken that guarantee, it relies on it. Writes are additionally blocked until
+// revalidation lands, so the rejection is a case that should not arise rather
+// than one the user is invited into.
+//
+// THE RAW RESPONSE IS WHAT IS STORED, not the derived state. Every adoption and
+// migration in applySnapshot() therefore runs identically on a cached load and a
+// fresh one — including migrations added after the entry was written, which is
+// what stops a cache from pinning the app to an old build's reading of the data.
+//
+// KEYED BY TENANT AND BY SESSION, and both halves matter. The tenant is the
+// CLIENT.storageKey() rule met in a second store: one origin serves every
+// school. The session is what makes signing out and back in as someone else a
+// MISS rather than a peek at the previous person's inventory — a new sign-in
+// always mints a new session id.
+const SNAPSHOT_CACHE_NAME = "asset-tracker-snapshot-v1";
+
+function snapshotCacheKey(id) {
+  return "/snapshot/" + encodeURIComponent(CLIENT.id) + "/" + encodeURIComponent(id);
+}
+
+// Resolves null for every failure, and there are a lot of them: an insecure
+// context has no Cache Storage at all, private mode can refuse, an entry can be
+// truncated. None of them are errors — they mean "no shortcut available", and
+// the ordinary load runs exactly as it always has.
+async function readSnapshotCache(id) {
+  if (!id || !window.caches) return null;
+  try {
+    const cache = await caches.open(SNAPSHOT_CACHE_NAME);
+    const hit = await cache.match(snapshotCacheKey(id));
+    if (!hit) return null;
+    const data = await hit.json();
+    // A snapshot with no assets array cannot be applied, and half-applying one
+    // would leave the app in a state no code path expects.
+    if (!data || !Array.isArray(data.assets)) return null;
+    return data;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Fire-and-forget by design: this runs after the fresh snapshot is already on
+// screen, so a quota failure costs the NEXT load its head start and nothing
+// else. Every other entry is dropped first — a snapshot is megabytes, and only
+// one of them can ever be the current tenant-and-session.
+async function writeSnapshotCache(id, data) {
+  if (!id || !window.caches) return;
+  try {
+    const cache = await caches.open(SNAPSHOT_CACHE_NAME);
+    const keys = await cache.keys();
+    await Promise.all(keys.map(k => cache.delete(k)));
+    await cache.put(
+      snapshotCacheKey(id),
+      new Response(JSON.stringify(data), { headers: { "Content-Type": "application/json" } })
+    );
+  } catch (e) {
+    /* quota, private mode — the next load just pays full price */
+  }
+}
+
+// Called on sign-out and on any authFailed. A session id in localStorage is
+// erased there already; leaving the inventory it named sitting in Cache Storage
+// would make "sign out" mean less than it says.
+async function clearSnapshotCache() {
+  if (!window.caches) return;
+  try {
+    await caches.delete(SNAPSHOT_CACHE_NAME);
+  } catch (e) {
+    /* nothing to clean up */
+  }
+}
+
 // No expiry check on this side, deliberately, unlike the ID token it replaced.
 // Only the server knows when a session really ends: it slides the expiry forward
 // on every request, and can revoke early. Guessing here would either log people
@@ -2282,7 +2372,7 @@ const FRONTEND_SCRIPT_VERSION = "v36";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-15.6";
+const APP_VERSION = "2026-09-16.1";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -3440,6 +3530,15 @@ function AssetTracker() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [saveError, setSaveError] = useState(false);
+  // The app is showing a CACHED snapshot and the fresh one is still in flight.
+  // True only between a cached paint and the response that replaces it — roughly
+  // 1.5s — and what it gates is writes, not rendering.
+  const [revalidating, setRevalidating] = useState(false);
+  // The cached snapshot is on screen and the revalidation FAILED, so this is the
+  // last known inventory rather than the current one. Unlike `revalidating` this
+  // does not clear on its own: the only ways out are a successful reload or a
+  // sign-out.
+  const [staleSnapshot, setStaleSnapshot] = useState(false);
   const [backendScriptVersion, setBackendScriptVersion] = useState(null);
   // Per-domain revision numbers as of the last load or successful save — see
   // REVISION_DOMAINS. Loaded alongside nextAssetNumber/backendScriptVersion.
@@ -3817,6 +3916,13 @@ function AssetTracker() {
     }
     setAuthIdToken(null);
     setSessionId(null);
+    // The session id in localStorage is erased by setSessionId(null) above;
+    // leaving the INVENTORY it named sitting in Cache Storage would make "Sign
+    // out" mean less than it says, and would hand the next person to sign in on
+    // this device a snapshot that is not theirs. Fire-and-forget for the same
+    // reason the signout POST above is: the local sign-out must happen whether
+    // or not this lands.
+    clearSnapshotCache();
     setAuth(null);
     setAuthPending(false);
     setCurrentUser(null);
@@ -3835,10 +3941,258 @@ function AssetTracker() {
   // than in the effect so a sign-in-triggered load counts too — see the effect.
   const lastLoadedSandboxRef = useRef(null);
 
+  // Populates every piece of app state from one backend snapshot. Extracted from
+  // loadData() so a CACHED snapshot and a freshly fetched one go through exactly
+  // the same adoptions, migrations and backfills — the two must not be able to
+  // diverge, or the app would read the cache under different rules than the
+  // response it is a copy of.
+  //
+  // Takes the RAW response, which is the whole reason that property holds: a
+  // migration added after an entry was cached still runs when it is read back.
+  function applySnapshot(data) {
+    if (!data || !Array.isArray(data.assets)) throw new Error("Malformed response from backend");
+
+    // Identity as the SERVER resolved it — never assembled from the token on
+    // this side. Absent in sandbox mode, which has no backend and no allowlist,
+    // and where authSatisfied is already true.
+    if (data.auth) {
+      // Adopt the session the backend just issued or sled forward, and drop
+      // the Google credential the moment it has been exchanged — it has done
+      // its one job and keeping it around is pure liability.
+      if (data.auth.sessionId) setSessionId(data.auth.sessionId);
+      setAuthIdToken(null);
+      setAuth(data.auth);
+      setCurrentUser(data.auth.name || data.auth.email);
+      setAccessUsers(data.auth.users || []);
+      setShowNamePrompt(false);
+    }
+    setAuthPending(false);
+
+    // Migrate column config: add any default columns introduced in newer app
+    // versions, at the position DEFAULT_COLUMNS puts them in rather than always
+    // just before `status`. That blanket rule sent `name` to the far right of an
+    // existing user's table — past a dozen columns, effectively invisible — even
+    // though it's the first column for anyone starting fresh. Anchoring on the
+    // nearest preceding default column that this user already has keeps the new
+    // column next to the ones it belongs with; a column with no such anchor (one
+    // that leads the default order, like `name`) goes to the front.
+    let storedCols = data.columns && data.columns.length ? data.columns : DEFAULT_COLUMNS;
+    // Rename first, then drop retired columns, then add new defaults — a
+    // renamed key has to reach the add pass under its NEW name or that pass
+    // sees it as missing and inserts a duplicate.
+    storedCols = storedCols.map(c => (
+      !c.custom && RENAMED_COLUMN_KEYS[c.key]
+        ? { ...c, key: RENAMED_COLUMN_KEYS[c.key], label: DEFAULT_COLUMNS.find(d => d.key === RENAMED_COLUMN_KEYS[c.key])?.label || c.label }
+        : c
+    ));
+    // Drop columns retired in a newer app version before adding new ones, so a
+    // sheet last saved by an older client doesn't keep offering a column that
+    // nothing renders or edits any more (see RETIRED_COLUMN_KEYS).
+    storedCols = storedCols.filter(c => c.custom || !RETIRED_COLUMN_KEYS.has(c.key));
+    DEFAULT_COLUMNS.forEach((dc, defaultIdx) => {
+      if (storedCols.some(c => c.key === dc.key)) return;
+      let insertAt = 0;
+      for (let i = defaultIdx - 1; i >= 0; i--) {
+        const anchor = storedCols.findIndex(c => c.key === DEFAULT_COLUMNS[i].key);
+        if (anchor !== -1) { insertAt = anchor + 1; break; }
+      }
+      storedCols = [...storedCols.slice(0, insertAt), dc, ...storedCols.slice(insertAt)];
+    });
+    setColumns(storedCols);
+    // BEFORE the assets are mapped, not just before the setState: the load-time
+    // backfills below ask typeTakesParent and isPlaceType, and those read the
+    // module-level settings. Applied later, the first load after a settings
+    // change would adopt parents and names using the PREVIOUS rules.
+    const loadedTypeSettings = data.typeSettings && typeof data.typeSettings === "object" ? data.typeSettings : {};
+    applyTypeSettings(loadedTypeSettings, storedCols);
+    // Resolved here rather than at its setState below, because adoptLegacyNames
+    // needs it: a name is built from the type's NAME, and only this list maps a
+    // type id to one. Migrated the same way columns are above — see the note at
+    // setTypesList for why only LOCKED types are restored.
+    const loadedTypes = ensureLockedTypes(adoptLegacyTypesList(
+      Array.isArray(data.typesList) && data.typesList.length ? data.typesList : DEFAULT_TYPES
+    ));
+
+    const parented = data.assets
+      .map(a => ({ comments: [], changes: [], allocations: [], status: "Active", subType: "", purchaseDate: "", warrantyUntil: "", ...a }))
+      // THE asset key, adopted before anything else reads one. An asset written
+      // before v31 has no `id`, so its LABEL is its id -- which is what makes
+      // this whole change need no migration: every reference already stored in
+      // the sheet (parentId, personIds, a child row's assetLabel, a breaker's
+      // panelLabel, AuditLog's assetLabel and related) is already a valid id.
+      // Same trick typesList uses, where a built-in type's id is its own name.
+      //
+      // Must run BEFORE the personIds normalize and adoptLegacyNames below:
+      // the name backfill walks the parent chain, and it has to walk it by the
+      // ids everything downstream will actually be joined on.
+      //
+      // From here on `a.id` is populated on every asset and is the ONLY thing
+      // that should be compared for identity. `a.label` is display text.
+      .map(a => (a.id ? a : { ...a, id: a.label }))
+      // The tag, adopted from the label the same way (v32) -- with ONE
+      // exception that is the whole of Eric's "clear them for places and
+      // users" decision (2026-09-09): a type whose registry entry excludes the
+      // tag field does not get one, so the BCR/BCB/BCC labels on Rooms,
+      // Buildings and Campuses and the BCA labels on Users simply are not
+      // carried over, and the first save writes the column empty for them.
+      //
+      // Deliberately a load-time READ that declines to adopt, not a load-time
+      // REWRITE -- the same shape as every other adoptLegacy*, with no race
+      // between two browsers and nothing to run by hand.
+      //
+      // `label` is untouched and still written, so this is reversible: tick
+      // the tag field back on for a type and the next load adopts it again.
+      // Phase 4 is what closes that door.
+      .map(a => {
+        if (a.tag !== undefined && a.tag !== null) return a;
+        const carries = fieldAppliesTo("tag", a.type);
+        return { ...a, tag: carries ? (a.label || "") : "" };
+      })
+      // The sandbox fixture is hand-written and the backend is not, so normalize
+      // here rather than trusting either: personIds must be an ARRAY on every
+      // asset from this point on. It arrives as one from doGet and is absent
+      // from older fixture rows, and code downstream branches on isArray.
+      .map(a => (Array.isArray(a.personIds) ? a : { ...a, personIds: [] }))
+      // v34: every maintenance item gets a stable id, so a change entry can
+      // name the schedule it was performed against (change.maintenanceId).
+      // Array position cannot serve -- items are deleted by index, so removing
+      // one renumbers every item below it and would re-point every change
+      // referencing them. Same reasoning that gave Breakers and Circuits a UUID.
+      //
+      // A load-time READ that fills a blank, NOT a load-time rewrite:
+      // loadData never persists, so a freshly minted id reaches the Sheet only
+      // when some save happens for other reasons, inside that same snapshot.
+      // No migration, no script, no window where one browser has written an id
+      // nobody else can see.
+      //
+      // Two browsers CAN mint different ids for the same item, and the
+      // per-domain revision counters are what make that safe: whichever saves
+      // second posts a stale rev_assets, doPost refuses it as a conflict, and
+      // that browser reloads onto the id the first one wrote. Without the
+      // optimistic-concurrency check this pattern would not be safe.
+      //
+      // Changes deliberately get no id of their own -- nothing references a
+      // change, so a stable handle would be dead weight.
+      .map(a => {
+        const items = a.maintenanceItems || [];
+        if (!items.some(m => !m || !m.id)) return a;
+        return { ...a, maintenanceItems: items.map(m => (m && m.id ? m : { ...m, id: crypto.randomUUID() })) };
+      })
+      // Same adoption for work entries, and for the same reason now that
+      // photos attach to one: an entry addressed by array position loses its
+      // attachments to the row above it the moment anything earlier is
+      // deleted. Also a load-time READ that fills a blank -- it reaches the
+      // Sheet only inside whatever save happens next, and a stale browser
+      // that minted different ids is caught by the revision check.
+      .map(a => {
+        const chs = a.changes || [];
+        if (!chs.some(c => !c || !c.id)) return a;
+        return { ...a, changes: chs.map(c => (c && c.id ? c : { ...c, id: crypto.randomUUID() })) };
+      });
+    // Names are filled in over the already-parented list, because the
+    // suggestion for fixed equipment reads the chain above the asset ("Room 102
+    // Mini Split") — running it inside the first map would walk a list whose
+    // parentIds were still half-adopted.
+    // People are split into parts BEFORE adoptLegacyNames, which skips them —
+    // so a person whose parts are adopted here is already excluded from the
+    // "fill in a blank name" pass, and there is no window in which a person
+    // could pick up a generated "User BCA0090".
+    const loadedAssets = adoptLegacyNames(adoptPersonNames(parented), loadedTypes);
+    setAssets(loadedAssets);
+    // No scriptVersion at all means an old backend that predates this check entirely —
+    // still a real mismatch, not a "nothing to compare" case. In sandbox mode the
+    // fixture always reports the current frontend version, so this never fires there.
+    setBackendScriptVersion(data.scriptVersion || "(none reported — backend predates version tracking)");
+    // Absent (sandbox fixture, or a backend predating v12) normalizes to all
+    // zeros, which is exactly what such a backend compares against — so this
+    // stays a no-op rather than a permanent conflict.
+    rememberRevisions(data.revisions);
+    setChangeTypes(data.changeTypes && data.changeTypes.length ? data.changeTypes : DEFAULT_CHANGE_TYPES);
+    setVendors(Array.isArray(data.vendors) ? data.vendors : []);
+    setAuditLog(Array.isArray(data.auditLog) ? data.auditLog : []);
+    setPeripheralsList(Array.isArray(data.peripheralsList) ? data.peripheralsList : DEFAULT_PERIPHERALS);
+    setBulkItemTypes(Array.isArray(data.bulkItemTypes) ? data.bulkItemTypes : DEFAULT_BULK_ITEM_TYPES);
+    // Migrate the managed type list the same way columns are migrated above:
+    // a list stored before a new LOCKED type existed would otherwise never gain
+    // it, so the type could never be picked in the add form and its assets
+    // could never be created. Campus is what exposed this — the stored list on
+    // any sheet (and any saved sandbox copy) predates it.
+    //
+    // Only locked types are restored, and that limit is the point: a locked
+    // type can't be removed in the type manager at all, so its absence is
+    // always a version gap and never a choice. An ordinary type the user
+    // deliberately deleted stays deleted, which re-adding every entry in
+    // TYPE_OPTIONS would undo on every single load.
+    setTypesList(loadedTypes);
+    setTypeSettings(loadedTypeSettings);
+    // Shipped defaults when the sheet has never stored a list -- which is
+    // every sheet until the first config save after v33, and is why the labels
+    // work with no seeding step. A stored list is topped up with any shipped
+    // label added since it was written. (`typeCategories` is the wire key the
+    // backend accepts; the value is the label vocabulary -- see TYPE LABELS.)
+    setTypeLabels(ensureShippedLabels(
+      Array.isArray(data.typeCategories) && data.typeCategories.length
+        ? data.typeCategories
+        : DEFAULT_TYPE_LABELS
+    ));
+    // Absent/0/garbage all mean "never stored" — peekAssetNumber() seeds it
+    // from the loaded assets instead, and the first asset created writes it.
+    const storedNextNumber = Number(data.nextAssetNumber);
+    setNextAssetNumber(Number.isFinite(storedNextNumber) && storedNextNumber > 0 ? storedNextNumber : null);
+    setBreakerTypes(Array.isArray(data.breakerTypes) && data.breakerTypes.length ? data.breakerTypes : SEEDED_BREAKER_TYPES);
+    // Absent on a pre-v35 backend, which is a normal state and not an error:
+    // an empty list simply means no photo has been attached yet.
+    setPhotos(Array.isArray(data.photos) ? data.photos.map(adoptPhoto) : []);
+    if (Array.isArray(data.usersList) && data.usersList.length) {
+      setUsersList(data.usersList);
+    } else {
+      // No stored users list yet (e.g. brand-new sheet) — derive starter names
+      // from whatever's already on the loaded assets, if any.
+      const derived = Array.from(
+        new Set(loadedAssets.flatMap(a => (a.person ? a.person.split("/").map(s => s.trim()) : [])).filter(Boolean))
+      ).sort();
+      setUsersList(derived);
+    }
+  }
+
   async function loadData() {
     lastLoadedSandboxRef.current = sandboxMode;
-    setLoading(true);
     setLoadError(false);
+    setStaleSnapshot(false);
+
+    // Paint the last known snapshot BEFORE asking the network anything. An
+    // /exec round trip costs ~1.5s at the very best (see RESPONSIVENESS_EVAL.md),
+    // and the app used to spend all of it showing a loading screen on a device
+    // that already had a perfectly good copy of the inventory.
+    //
+    // FOUR CONDITIONS, and each rules out a case where server truth is the whole
+    // point of the call:
+    //   sandboxMode  — sandbox has its own localStorage copy and never fetches.
+    //   authIdToken  — a fresh Google sign-in. `sessionId` may still hold the
+    //                  expired session this sign-in is REPLACING, so its cache
+    //                  is the previous session's and must not be shown.
+    //   sessionId    — nothing to key on, so nothing to find.
+    //   assets===null— FIRST load only. The conflict path and the sandbox toggle
+    //                  both call loadData() precisely because the state in
+    //                  memory is wrong; handing either a cache would defeat it.
+    let paintedFromCache = false;
+    if (!sandboxMode && !authIdToken && sessionId && assets === null) {
+      const cached = await readSnapshotCache(sessionId);
+      if (cached) {
+        try {
+          applySnapshot(cached);
+          setLoading(false);
+          setRevalidating(true);
+          paintedFromCache = true;
+        } catch (e) {
+          // A snapshot this build cannot apply. Nothing is on screen worth
+          // keeping, so fall through and load normally rather than half-render.
+          paintedFromCache = false;
+        }
+      }
+    }
+    if (!paintedFromCache) setLoading(true);
+
     try {
       let data;
       if (sandboxMode) {
@@ -3902,218 +4256,39 @@ function AssetTracker() {
             detail: data.detail || "",
           });
           setLoading(false);
+          setRevalidating(false);
           return;
         }
       }
-      if (!data || !Array.isArray(data.assets)) throw new Error("Malformed response from backend");
-
-      // Identity as the SERVER resolved it — never assembled from the token on
-      // this side. Absent in sandbox mode, which has no backend and no allowlist,
-      // and where authSatisfied is already true.
-      if (data.auth) {
-        // Adopt the session the backend just issued or sled forward, and drop
-        // the Google credential the moment it has been exchanged — it has done
-        // its one job and keeping it around is pure liability.
-        if (data.auth.sessionId) setSessionId(data.auth.sessionId);
-        setAuthIdToken(null);
-        setAuth(data.auth);
-        setCurrentUser(data.auth.name || data.auth.email);
-        setAccessUsers(data.auth.users || []);
-        setShowNamePrompt(false);
-      }
-      setAuthPending(false);
-
-      // Migrate column config: add any default columns introduced in newer app
-      // versions, at the position DEFAULT_COLUMNS puts them in rather than always
-      // just before `status`. That blanket rule sent `name` to the far right of an
-      // existing user's table — past a dozen columns, effectively invisible — even
-      // though it's the first column for anyone starting fresh. Anchoring on the
-      // nearest preceding default column that this user already has keeps the new
-      // column next to the ones it belongs with; a column with no such anchor (one
-      // that leads the default order, like `name`) goes to the front.
-      let storedCols = data.columns && data.columns.length ? data.columns : DEFAULT_COLUMNS;
-      // Rename first, then drop retired columns, then add new defaults — a
-      // renamed key has to reach the add pass under its NEW name or that pass
-      // sees it as missing and inserts a duplicate.
-      storedCols = storedCols.map(c => (
-        !c.custom && RENAMED_COLUMN_KEYS[c.key]
-          ? { ...c, key: RENAMED_COLUMN_KEYS[c.key], label: DEFAULT_COLUMNS.find(d => d.key === RENAMED_COLUMN_KEYS[c.key])?.label || c.label }
-          : c
-      ));
-      // Drop columns retired in a newer app version before adding new ones, so a
-      // sheet last saved by an older client doesn't keep offering a column that
-      // nothing renders or edits any more (see RETIRED_COLUMN_KEYS).
-      storedCols = storedCols.filter(c => c.custom || !RETIRED_COLUMN_KEYS.has(c.key));
-      DEFAULT_COLUMNS.forEach((dc, defaultIdx) => {
-        if (storedCols.some(c => c.key === dc.key)) return;
-        let insertAt = 0;
-        for (let i = defaultIdx - 1; i >= 0; i--) {
-          const anchor = storedCols.findIndex(c => c.key === DEFAULT_COLUMNS[i].key);
-          if (anchor !== -1) { insertAt = anchor + 1; break; }
-        }
-        storedCols = [...storedCols.slice(0, insertAt), dc, ...storedCols.slice(insertAt)];
-      });
-      setColumns(storedCols);
-      // BEFORE the assets are mapped, not just before the setState: the load-time
-      // backfills below ask typeTakesParent and isPlaceType, and those read the
-      // module-level settings. Applied later, the first load after a settings
-      // change would adopt parents and names using the PREVIOUS rules.
-      const loadedTypeSettings = data.typeSettings && typeof data.typeSettings === "object" ? data.typeSettings : {};
-      applyTypeSettings(loadedTypeSettings, storedCols);
-      // Resolved here rather than at its setState below, because adoptLegacyNames
-      // needs it: a name is built from the type's NAME, and only this list maps a
-      // type id to one. Migrated the same way columns are above — see the note at
-      // setTypesList for why only LOCKED types are restored.
-      const loadedTypes = ensureLockedTypes(adoptLegacyTypesList(
-        Array.isArray(data.typesList) && data.typesList.length ? data.typesList : DEFAULT_TYPES
-      ));
-
-      const parented = data.assets
-        .map(a => ({ comments: [], changes: [], allocations: [], status: "Active", subType: "", purchaseDate: "", warrantyUntil: "", ...a }))
-        // THE asset key, adopted before anything else reads one. An asset written
-        // before v31 has no `id`, so its LABEL is its id -- which is what makes
-        // this whole change need no migration: every reference already stored in
-        // the sheet (parentId, personIds, a child row's assetLabel, a breaker's
-        // panelLabel, AuditLog's assetLabel and related) is already a valid id.
-        // Same trick typesList uses, where a built-in type's id is its own name.
-        //
-        // Must run BEFORE the personIds normalize and adoptLegacyNames below:
-        // the name backfill walks the parent chain, and it has to walk it by the
-        // ids everything downstream will actually be joined on.
-        //
-        // From here on `a.id` is populated on every asset and is the ONLY thing
-        // that should be compared for identity. `a.label` is display text.
-        .map(a => (a.id ? a : { ...a, id: a.label }))
-        // The tag, adopted from the label the same way (v32) -- with ONE
-        // exception that is the whole of Eric's "clear them for places and
-        // users" decision (2026-09-09): a type whose registry entry excludes the
-        // tag field does not get one, so the BCR/BCB/BCC labels on Rooms,
-        // Buildings and Campuses and the BCA labels on Users simply are not
-        // carried over, and the first save writes the column empty for them.
-        //
-        // Deliberately a load-time READ that declines to adopt, not a load-time
-        // REWRITE -- the same shape as every other adoptLegacy*, with no race
-        // between two browsers and nothing to run by hand.
-        //
-        // `label` is untouched and still written, so this is reversible: tick
-        // the tag field back on for a type and the next load adopts it again.
-        // Phase 4 is what closes that door.
-        .map(a => {
-          if (a.tag !== undefined && a.tag !== null) return a;
-          const carries = fieldAppliesTo("tag", a.type);
-          return { ...a, tag: carries ? (a.label || "") : "" };
-        })
-        // The sandbox fixture is hand-written and the backend is not, so normalize
-        // here rather than trusting either: personIds must be an ARRAY on every
-        // asset from this point on. It arrives as one from doGet and is absent
-        // from older fixture rows, and code downstream branches on isArray.
-        .map(a => (Array.isArray(a.personIds) ? a : { ...a, personIds: [] }))
-        // v34: every maintenance item gets a stable id, so a change entry can
-        // name the schedule it was performed against (change.maintenanceId).
-        // Array position cannot serve -- items are deleted by index, so removing
-        // one renumbers every item below it and would re-point every change
-        // referencing them. Same reasoning that gave Breakers and Circuits a UUID.
-        //
-        // A load-time READ that fills a blank, NOT a load-time rewrite:
-        // loadData never persists, so a freshly minted id reaches the Sheet only
-        // when some save happens for other reasons, inside that same snapshot.
-        // No migration, no script, no window where one browser has written an id
-        // nobody else can see.
-        //
-        // Two browsers CAN mint different ids for the same item, and the
-        // per-domain revision counters are what make that safe: whichever saves
-        // second posts a stale rev_assets, doPost refuses it as a conflict, and
-        // that browser reloads onto the id the first one wrote. Without the
-        // optimistic-concurrency check this pattern would not be safe.
-        //
-        // Changes deliberately get no id of their own -- nothing references a
-        // change, so a stable handle would be dead weight.
-        .map(a => {
-          const items = a.maintenanceItems || [];
-          if (!items.some(m => !m || !m.id)) return a;
-          return { ...a, maintenanceItems: items.map(m => (m && m.id ? m : { ...m, id: crypto.randomUUID() })) };
-        })
-        // Same adoption for work entries, and for the same reason now that
-        // photos attach to one: an entry addressed by array position loses its
-        // attachments to the row above it the moment anything earlier is
-        // deleted. Also a load-time READ that fills a blank -- it reaches the
-        // Sheet only inside whatever save happens next, and a stale browser
-        // that minted different ids is caught by the revision check.
-        .map(a => {
-          const chs = a.changes || [];
-          if (!chs.some(c => !c || !c.id)) return a;
-          return { ...a, changes: chs.map(c => (c && c.id ? c : { ...c, id: crypto.randomUUID() })) };
-        });
-      // Names are filled in over the already-parented list, because the
-      // suggestion for fixed equipment reads the chain above the asset ("Room 102
-      // Mini Split") — running it inside the first map would walk a list whose
-      // parentIds were still half-adopted.
-      // People are split into parts BEFORE adoptLegacyNames, which skips them —
-      // so a person whose parts are adopted here is already excluded from the
-      // "fill in a blank name" pass, and there is no window in which a person
-      // could pick up a generated "User BCA0090".
-      const loadedAssets = adoptLegacyNames(adoptPersonNames(parented), loadedTypes);
-      setAssets(loadedAssets);
-      // No scriptVersion at all means an old backend that predates this check entirely —
-      // still a real mismatch, not a "nothing to compare" case. In sandbox mode the
-      // fixture always reports the current frontend version, so this never fires there.
-      setBackendScriptVersion(data.scriptVersion || "(none reported — backend predates version tracking)");
-      // Absent (sandbox fixture, or a backend predating v12) normalizes to all
-      // zeros, which is exactly what such a backend compares against — so this
-      // stays a no-op rather than a permanent conflict.
-      rememberRevisions(data.revisions);
-      setChangeTypes(data.changeTypes && data.changeTypes.length ? data.changeTypes : DEFAULT_CHANGE_TYPES);
-      setVendors(Array.isArray(data.vendors) ? data.vendors : []);
-      setAuditLog(Array.isArray(data.auditLog) ? data.auditLog : []);
-      setPeripheralsList(Array.isArray(data.peripheralsList) ? data.peripheralsList : DEFAULT_PERIPHERALS);
-      setBulkItemTypes(Array.isArray(data.bulkItemTypes) ? data.bulkItemTypes : DEFAULT_BULK_ITEM_TYPES);
-      // Migrate the managed type list the same way columns are migrated above:
-      // a list stored before a new LOCKED type existed would otherwise never gain
-      // it, so the type could never be picked in the add form and its assets
-      // could never be created. Campus is what exposed this — the stored list on
-      // any sheet (and any saved sandbox copy) predates it.
+      applySnapshot(data);
+      // AFTER applySnapshot, deliberately: a sign-in adopts the session the
+      // backend just issued, and `sessionId` is a module-level value read at
+      // call time, so this stores the snapshot under the id the NEXT load will
+      // present rather than the one this load arrived with.
       //
-      // Only locked types are restored, and that limit is the point: a locked
-      // type can't be removed in the type manager at all, so its absence is
-      // always a version gap and never a choice. An ordinary type the user
-      // deliberately deleted stays deleted, which re-adding every entry in
-      // TYPE_OPTIONS would undo on every single load.
-      setTypesList(loadedTypes);
-      setTypeSettings(loadedTypeSettings);
-      // Shipped defaults when the sheet has never stored a list -- which is
-      // every sheet until the first config save after v33, and is why the labels
-      // work with no seeding step. A stored list is topped up with any shipped
-      // label added since it was written. (`typeCategories` is the wire key the
-      // backend accepts; the value is the label vocabulary -- see TYPE LABELS.)
-      setTypeLabels(ensureShippedLabels(
-        Array.isArray(data.typeCategories) && data.typeCategories.length
-          ? data.typeCategories
-          : DEFAULT_TYPE_LABELS
-      ));
-      // Absent/0/garbage all mean "never stored" — peekAssetNumber() seeds it
-      // from the loaded assets instead, and the first asset created writes it.
-      const storedNextNumber = Number(data.nextAssetNumber);
-      setNextAssetNumber(Number.isFinite(storedNextNumber) && storedNextNumber > 0 ? storedNextNumber : null);
-      setBreakerTypes(Array.isArray(data.breakerTypes) && data.breakerTypes.length ? data.breakerTypes : SEEDED_BREAKER_TYPES);
-      // Absent on a pre-v35 backend, which is a normal state and not an error:
-      // an empty list simply means no photo has been attached yet.
-      setPhotos(Array.isArray(data.photos) ? data.photos.map(adoptPhoto) : []);
-      if (Array.isArray(data.usersList) && data.usersList.length) {
-        setUsersList(data.usersList);
-      } else {
-        // No stored users list yet (e.g. brand-new sheet) — derive starter names
-        // from whatever's already on the loaded assets, if any.
-        const derived = Array.from(
-          new Set(loadedAssets.flatMap(a => (a.person ? a.person.split("/").map(s => s.trim()) : [])).filter(Boolean))
-        ).sort();
-        setUsersList(derived);
-      }
+      // Not awaited. The data is already on screen; a slow or failed write costs
+      // the next load its head start and nothing else.
+      if (!sandboxMode && sessionId) writeSnapshotCache(sessionId, data);
       setLoading(false);
+      setRevalidating(false);
     } catch (e) {
-      // Sheet unreachable or returned something unexpected — show a blocking error
-      // instead of guessing. Assets stays null, so persist()/writeSnapshot() never
-      // run against fabricated data (see the write-guard in persist()).
-      setLoadError(true);
+      // Sheet unreachable or returned something unexpected.
+      //
+      // WITH A CACHED VIEW ALREADY PAINTED, the blocking error screen would
+      // throw away a usable read of the inventory at exactly the moment it is
+      // most useful — a flaky connection is when having a local copy pays. So
+      // the cached view stays and says so, with writes still blocked: showing
+      // unconfirmed data is honest, letting someone edit it is not.
+      //
+      // Otherwise this is unchanged: a blocking error rather than a guess.
+      // Assets stays null, so persist()/writeSnapshot() never run against
+      // fabricated data (see the write-guard in persist()).
+      if (paintedFromCache) {
+        setStaleSnapshot(true);
+      } else {
+        setLoadError(true);
+      }
+      setRevalidating(false);
       setLoading(false);
     }
   }
@@ -4336,6 +4511,18 @@ function AssetTracker() {
     // loaded — the UI shouldn't be reachable in that state, but this keeps a
     // load-failure from being able to clobber live data no matter how it's triggered.
     if (assets === null) return;
+    // Showing a cached snapshot that the server has not yet confirmed. The
+    // revision counters would CATCH a save built on stale data — that is what
+    // makes painting from cache safe at all — but being refused is not the same
+    // as not being invited, and the whole window is about 1.5 seconds. Refusing
+    // here keeps the cache a pure read optimisation: nothing it paints can ever
+    // reach the Sheet without the server's own copy having arrived first.
+    if (revalidating || staleSnapshot) {
+      setReadOnlyNotice(staleSnapshot
+        ? "This is the last inventory this device saved, and the server couldn't be reached to confirm it. Reload before making changes."
+        : "Still catching up with the server — try that again in a moment.");
+      return;
+    }
     // View-only. The backend refuses these saves too — that is the actual
     // control, and it's the one that matters since anything here can be edited
     // in a browser console. Stopping at this choke point as well means a
@@ -7512,20 +7699,55 @@ function AssetTracker() {
   //
   // Styled after the existing header pills (Sandbox, Backend outdated) rather
   // than introducing a new idiom.
-  const saveStatusPill = (isSaving || saveError) && (
+  //
+  // The snapshot cache added two more states to this same slot rather than a
+  // second pill beside it. They are mutually exclusive with the save states in
+  // practice — persist() refuses to write while either load state is set — so
+  // one pill with a priority order says the true thing without two competing
+  // indicators in the corner.
+  //
+  // STALE OUTRANKS EVERYTHING. "You are looking at unconfirmed data" is worth
+  // more than any transient, and unlike the others it does not clear itself.
+  const pillState = staleSnapshot ? "stale"
+    : saveError ? "saveError"
+    : isSaving ? "saving"
+    : revalidating ? "revalidating"
+    : null;
+  const PILL_COPY = {
+    stale: {
+      label: "Saved copy",
+      title: "The server couldn't be reached, so this is the last inventory this device saved. It may be out of date, and changes can't be made until it reloads.",
+      danger: true,
+    },
+    saveError: {
+      label: "Save failed",
+      title: "The last save didn't reach the Google Sheet. Check your connection, then make the change again — it was not stored.",
+      danger: true,
+    },
+    saving: {
+      label: "Saving…",
+      title: "Saving to the Google Sheet — this can take a few seconds on the first save.",
+      danger: false,
+    },
+    revalidating: {
+      label: "Updating…",
+      title: "Showing the copy this device already had while checking the Google Sheet for anything newer.",
+      danger: false,
+    },
+  };
+  const saveStatusPill = pillState && (
     <span
-      title={isSaving
-        ? "Saving to the Google Sheet — this can take a few seconds on the first save."
-        : "The last save didn't reach the Google Sheet. Check your connection, then make the change again — it was not stored."}
+      title={PILL_COPY[pillState].title}
       style={{
         display: "flex", alignItems: "center", gap: 5, flexShrink: 0,
-        border: `1.5px solid ${isSaving ? C.border : C.danger}`, borderRadius: 12, padding: "3px 10px",
+        border: `1.5px solid ${PILL_COPY[pillState].danger ? C.danger : C.border}`, borderRadius: 12, padding: "3px 10px",
         fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 700,
-        color: isSaving ? C.muted : C.danger, background: isSaving ? "transparent" : C.surface,
+        color: PILL_COPY[pillState].danger ? C.danger : C.muted,
+        background: PILL_COPY[pillState].danger ? C.surface : "transparent",
       }}
     >
-      {isSaving ? <Loader2 size={12} className="spin" /> : <AlertTriangle size={12} />}
-      {isSaving ? "Saving…" : "Save failed"}
+      {PILL_COPY[pillState].danger ? <AlertTriangle size={12} /> : <Loader2 size={12} className="spin" />}
+      {PILL_COPY[pillState].label}
     </span>
   );
 
@@ -14898,6 +15120,149 @@ function ChildEntityTable({
 
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(<AssetTracker />);
+</script>
+
+<!-- ============================ TRANSPILE CACHE ============================
+     The app ships as ~880KB of JSX that Babel Standalone turns into ~2.9MB of
+     JS (the inline source map is most of that). Measured on a server-class CPU
+     that transform is 1.3-1.8s; a phone is 3-5x slower, so it was 4-8 seconds
+     of pure CPU in front of every single page load, on top of downloading
+     Babel's own 598KB and parsing its 2.87MB.
+
+     None of that work changes unless the source does. So it is done once and
+     the OUTPUT is kept in Cache Storage under a SHA-256 of the source that
+     produced it. A hit skips the transform AND skips downloading Babel at all.
+
+     WHY THE HASH IS OF THE SOURCE ITSELF, not APP_VERSION or a build date: a
+     stale cache here does not show a stale label, it runs the wrong code. Every
+     other versioning scheme in this project is hand-bumped, and this file's own
+     history is a list of hand-bumps that got forgotten. A content hash cannot be
+     forgotten -- edit the JSX, the hash moves, the cache misses, and the next
+     load transpiles exactly as it always did.
+
+     THE HONEST LIMIT: the first load after any edit is unchanged. That is the
+     right trade -- it costs nothing on the load where the code is new, and pays
+     on every load after, which is what a refresh is.
+
+     EVERY FAILURE PATH FALLS BACK TO TRANSPILING. No Cache Storage (an insecure
+     context), no crypto.subtle, a corrupt entry, a full quota -- all of them land
+     on the same path this file has always taken. The cache is an optimisation
+     and is never load-bearing. -->
+<script>
+(function () {
+  var BABEL_URL = "https://unpkg.com/@babel/standalone@7.24.7/babel.min.js";
+  // Bump the suffix if the transform OPTIONS below ever change. The hash covers
+  // the source, not the options, so without this an options change would keep
+  // serving output built under the old ones.
+  var CACHE_NAME = "asset-tracker-transpiled-v1";
+
+  var sourceTag = document.getElementById("app-source");
+  var source = sourceTag ? sourceTag.textContent : "";
+
+  // Character for character what Babel Standalone's own auto-runner passes for a
+  // <script type="text/babel" data-type="module" data-presets="react"> tag --
+  // read out of babel.min.js rather than guessed, because the default `plugins`
+  // list is NOT empty and silently dropping it would change the emitted code.
+  // sourceType is left unset, exactly as the auto-runner leaves it; Babel's own
+  // default is "module", which is what this file needs.
+  var TRANSFORM_OPTIONS = {
+    filename: "Inline Babel script",
+    presets: ["react"],
+    plugins: ["transform-class-properties", "transform-object-rest-spread", "transform-flow-strip-types"],
+    sourceMaps: "inline",
+    sourceFileName: "Inline Babel script",
+  };
+
+  // Injected the same way Babel's auto-runner injects it: an INLINE module
+  // script, not a blob URL. That matters -- bare specifiers ("react",
+  // "lucide-react") resolve against the import map in <head>, which is a
+  // property of this document, and an inline script is unambiguously part of it.
+  function run(code) {
+    var el = document.createElement("script");
+    el.type = "module";
+    el.text = code;
+    document.body.appendChild(el);
+  }
+
+  // A blank page is what this used to fail as, and a lazily-loaded Babel makes
+  // that failure likelier rather than rarer, so it now says something.
+  function fail(err) {
+    if (window.console && console.error) console.error("Asset Tracker failed to start:", err);
+    var root = document.getElementById("root");
+    if (root && !root.firstChild) {
+      root.textContent = "This app couldn't finish loading. Check your connection and reload.";
+      root.style.cssText = "padding:24px;font-family:system-ui,sans-serif;color:#7a2e2e";
+    }
+  }
+
+  function hashSource(text) {
+    var bytes = new TextEncoder().encode(text);
+    return crypto.subtle.digest("SHA-256", bytes).then(function (digest) {
+      var out = "";
+      new Uint8Array(digest).forEach(function (b) { out += b.toString(16).padStart(2, "0"); });
+      return out;
+    });
+  }
+
+  function loadBabel() {
+    return new Promise(function (resolve, reject) {
+      var el = document.createElement("script");
+      el.src = BABEL_URL;
+      el.onload = resolve;
+      el.onerror = function () { reject(new Error("Couldn't load the JSX compiler.")); };
+      document.head.appendChild(el);
+    });
+  }
+
+  // Transpile, run, and only then try to store -- the app being on screen beats
+  // the next load being fast, and a storage failure must never cost a start-up.
+  function transpileAndRun(cache, key) {
+    return loadBabel().then(function () {
+      var code = Babel.transform(source, TRANSFORM_OPTIONS).code;
+      run(code);
+      if (!cache || !key) return undefined;
+      // Drop every other entry first. Only one source hash can be current, so
+      // anything else here is a previous build of this file -- at ~2.9MB each,
+      // worth evicting rather than accumulating.
+      return cache.keys()
+        .then(function (keys) { return Promise.all(keys.map(function (k) { return cache.delete(k); })); })
+        .then(function () { return cache.put(key, new Response(code, { headers: { "Content-Type": "text/javascript" } })); })
+        .catch(function () { /* quota, private mode -- the app is already running */ });
+    });
+  }
+
+  var cache = null;
+  var key = null;
+
+  Promise.resolve()
+    .then(function () {
+      if (!source) throw new Error("The app source block is missing.");
+      // Both are absent outside a secure context, which is also where
+      // crypto.randomUUID and Google sign-in already don't work -- so this is not
+      // a case worth supporting, only one worth surviving.
+      if (!window.caches || !window.crypto || !crypto.subtle) return null;
+      return hashSource(source)
+        .then(function (hex) {
+          key = "/transpiled/" + hex;
+          return caches.open(CACHE_NAME);
+        })
+        .then(function (opened) {
+          cache = opened;
+          return cache.match(key);
+        })
+        .catch(function () { cache = null; key = null; return null; });
+    })
+    .then(function (hit) {
+      if (!hit) return transpileAndRun(cache, key);
+      return hit.text().then(function (code) {
+        // An empty or truncated entry would white-screen the app silently, which
+        // is worse than the second of transpiling it costs to not trust it.
+        if (!code) return transpileAndRun(cache, key);
+        run(code);
+      });
+    })
+    .catch(fail);
+})();
 </script>
 </body>
 </html>
