@@ -1498,12 +1498,12 @@ function handleAuthenticatedRead_(body, e) {
 // toBlob falls back to it if a browser ever refuses image/jpeg.
 //
 // PDFs ride the IMAGE pipeline rather than raw storage, which is what lets a
-// document have a real first-page thumbnail. ONE PER-TENANT SETTING GOES WITH
-// THAT: Cloudinary ships new accounts with PDF delivery disabled (Settings >
-// Security > "Allow delivery of PDF and ZIP files"), and until it is ticked the
-// original file 404s while its rasterized page-1 preview still works -- so the
-// symptom is "the thumbnail is there and Open does nothing", which reads as a
-// broken feature rather than a checkbox.
+// document have a real first-page thumbnail. ONE ACCOUNT SETTING GOES WITH THAT,
+// and it is account-wide rather than per tenant: Cloudinary ships accounts with
+// PDF delivery disabled (Settings > Security > "Allow delivery of PDF and ZIP
+// files"), and every tenant shares one account with a folder each, so it is
+// ticked once for all of them. Until it is, a document shows as its icon rather
+// than its first page -- which reads as a broken feature rather than a checkbox.
 const PHOTO_ALLOWED_FORMATS = "jpg,png,pdf";
 
 // SHA-1 as lowercase hex. Apps Script hands back SIGNED bytes, so -1 has to

@@ -2934,11 +2934,16 @@ three decisions.
   real thumbnail: page 1 is rasterized on demand (`f_jpg,pg_1`) through the same pipeline a
   photo takes. Raw storage was the obvious home for a document and would have left every
   one of them a generic icon.
-  - **ONE PER-TENANT CLOUDINARY SETTING RIDES ON THAT.** Accounts ship with PDF delivery
-    disabled (Settings > Security > "Allow delivery of PDF and ZIP files"). Until it is
-    ticked the page-1 preview still renders while the ORIGINAL 404s — so the symptom is
-    "the tile looks right and Open does nothing", which reads as a broken feature rather
-    than as a checkbox. Tick it per tenant, alongside the three Script Properties.
+  - **ONE CLOUDINARY ACCOUNT SETTING RIDES ON THAT, AND IT IS ACCOUNT-WIDE RATHER THAN
+    PER TENANT.** Accounts ship with PDF delivery disabled (Settings > Security > "Allow
+    delivery of PDF and ZIP files"). Every tenant shares one Cloudinary account with a
+    folder each (`PHOTOS_EVAL.md` §8.5), so this is ticked ONCE and covers all of them —
+    unlike the three Script Properties, which are genuinely per tenant. Until it is
+    ticked a document renders as its icon rather than its first page, which reads as a
+    broken feature rather than as a checkbox. **A tile falling back to the icon is the
+    symptom to check this against**, and the app cannot tell the two apart: the fallback
+    is the same whether the render is refused, the host is down, or the row points at a
+    data URI (which is why Sandbox's fixture documents always show the icon).
   - **The lightbox shows the page-1 render and OPENS the file in a new tab.** No browser can
     be relied on to display a PDF inline — iOS refuses inside a frame, and a phone in a
     mechanical room is exactly the case — so the platform's own viewer does it.
