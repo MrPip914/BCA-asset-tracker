@@ -30,27 +30,40 @@
 }
 </script>
 
-<!-- Babel Standalone: transpiles the JSX/ESM below in the browser at load time. -->
-<script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+<!-- Babel Standalone is NOT loaded here any more — see the transpile cache at the
+     bottom of <body>, which loads it only when it actually has to transpile.
+     It is 598KB over the wire and 2.87MB to parse, so keeping it off the repeat
+     load is most of what that cache buys. -->
 
 <!-- Google Identity Services — the "Sign in with Google" button and the ID token
      it mints. Loaded as a plain classic script (not through the import map)
      because it registers the global `google.accounts.id` that the app polls for
-     on mount. Deliberately NOT async/defer: Babel transpiles the module below
-     at load time, which takes long enough that this has always resolved first,
-     and waiting on it explicitly (see waitForGoogleIdentity) covers the case
-     where it hasn't. -->
+     on mount.
+     This USED to be described as winning a race it could not lose: Babel took so
+     long to transpile the module below that this had always resolved first. The
+     transpile cache removed that guarantee — on a cache hit the app can mount in
+     a few milliseconds — so `waitForGoogleIdentity`, which was written as
+     belt-and-braces, is now the thing that actually makes this correct. Do not
+     remove it on the grounds that it never fires. -->
 <script src="https://accounts.google.com/gsi/client"></script>
 </head>
 <body>
 <div id="root"></div>
 
-<script type="text/babel" data-type="module" data-presets="react">
+<!-- The app's source. Deliberately NOT type="text/babel": that is what Babel
+     Standalone's own auto-runner scans for, and this file is transpiled by the
+     loader at the end of this body instead, so that the OUTPUT can be cached.
+     An unknown script type is an inert data block to the browser, which is
+     exactly what this needs to be until the loader decides what to do with it. -->
+<script type="text/x-babel-source" id="app-source">
 import ReactDOM from "react-dom/client";
 import { createPortal } from "react-dom";
 
 import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from "react";
-import * as XLSX from "xlsx";
+// NOTE: `xlsx` is deliberately NOT imported here. It is 175KB over the wire and
+// ~433KB to parse, it is used by exactly one function (exportToExcel), and most
+// sessions never press Export — so it is loaded on demand with a dynamic
+// import() instead. See the comment there before moving it back up.
 import {
   Search, Plus, X, Pencil, Trash2, Save, ChevronRight, ChevronDown, ChevronUp, ArrowLeft, MessageSquare,
   Monitor, Phone, Tv, Camera, HardDrive, HelpCircle, Columns3, Lock, Filter, Check, DoorOpen, Download,
@@ -2202,6 +2215,86 @@ function setSessionId(id) {
   }
 }
 
+// ---------- SNAPSHOT CACHE ----------
+// The last snapshot the backend returned, kept so a refresh can PAINT
+// IMMEDIATELY instead of staring at a loading screen for the ~1.5s an /exec
+// round trip costs before it has drawn anything.
+//
+// WHAT MAKES THIS SAFE IS ALREADY SHIPPED. Every save posts per-domain revision
+// counters and doPost refuses a save whose counters are stale (see "Optimistic
+// concurrency"). So the worst a stale snapshot can do to the SHEET is nothing:
+// a save built on one is rejected and the app reloads. This cache does not
+// weaken that guarantee, it relies on it. Writes are additionally blocked until
+// revalidation lands, so the rejection is a case that should not arise rather
+// than one the user is invited into.
+//
+// THE RAW RESPONSE IS WHAT IS STORED, not the derived state. Every adoption and
+// migration in applySnapshot() therefore runs identically on a cached load and a
+// fresh one — including migrations added after the entry was written, which is
+// what stops a cache from pinning the app to an old build's reading of the data.
+//
+// KEYED BY TENANT AND BY SESSION, and both halves matter. The tenant is the
+// CLIENT.storageKey() rule met in a second store: one origin serves every
+// school. The session is what makes signing out and back in as someone else a
+// MISS rather than a peek at the previous person's inventory — a new sign-in
+// always mints a new session id.
+const SNAPSHOT_CACHE_NAME = "asset-tracker-snapshot-v1";
+
+function snapshotCacheKey(id) {
+  return "/snapshot/" + encodeURIComponent(CLIENT.id) + "/" + encodeURIComponent(id);
+}
+
+// Resolves null for every failure, and there are a lot of them: an insecure
+// context has no Cache Storage at all, private mode can refuse, an entry can be
+// truncated. None of them are errors — they mean "no shortcut available", and
+// the ordinary load runs exactly as it always has.
+async function readSnapshotCache(id) {
+  if (!id || !window.caches) return null;
+  try {
+    const cache = await caches.open(SNAPSHOT_CACHE_NAME);
+    const hit = await cache.match(snapshotCacheKey(id));
+    if (!hit) return null;
+    const data = await hit.json();
+    // A snapshot with no assets array cannot be applied, and half-applying one
+    // would leave the app in a state no code path expects.
+    if (!data || !Array.isArray(data.assets)) return null;
+    return data;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Fire-and-forget by design: this runs after the fresh snapshot is already on
+// screen, so a quota failure costs the NEXT load its head start and nothing
+// else. Every other entry is dropped first — a snapshot is megabytes, and only
+// one of them can ever be the current tenant-and-session.
+async function writeSnapshotCache(id, data) {
+  if (!id || !window.caches) return;
+  try {
+    const cache = await caches.open(SNAPSHOT_CACHE_NAME);
+    const keys = await cache.keys();
+    await Promise.all(keys.map(k => cache.delete(k)));
+    await cache.put(
+      snapshotCacheKey(id),
+      new Response(JSON.stringify(data), { headers: { "Content-Type": "application/json" } })
+    );
+  } catch (e) {
+    /* quota, private mode — the next load just pays full price */
+  }
+}
+
+// Called on sign-out and on any authFailed. A session id in localStorage is
+// erased there already; leaving the inventory it named sitting in Cache Storage
+// would make "sign out" mean less than it says.
+async function clearSnapshotCache() {
+  if (!window.caches) return;
+  try {
+    await caches.delete(SNAPSHOT_CACHE_NAME);
+  } catch (e) {
+    /* nothing to clean up */
+  }
+}
+
 // No expiry check on this side, deliberately, unlike the ID token it replaced.
 // Only the server knows when a session really ends: it slides the expiry forward
 // on every request, and can revoke early. Guessing here would either log people
@@ -2264,7 +2357,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v37";
+const FRONTEND_SCRIPT_VERSION = "v39";
 // The version of THIS file — shown in About (the account menu), so "is my browser
 // actually running the build I just deployed, or a cached one?" is answerable in
 // two clicks instead of by reading view-source.
@@ -2537,7 +2630,7 @@ const SANDBOX_DATA_KEY = CLIENT.storageKey("asset-tracker-sandbox-data");
 // See PHOTOS_EVAL.md, and the Files section of CLAUDE.md.
 //
 // EVERYTHING IN HERE IS STILL NAMED `photo`, DELIBERATELY. PDFs joined photos in
-// v37, and what people READ says Files -- the tab, the buttons, the empty
+// v39, and what people READ says Files -- the tab, the buttons, the empty
 // states. The stored key did not move: the revision domain, the Sheet tab, the
 // `photos` array in every payload and the `?tab=photos` deep link all still say
 // photos, and renaming any of those is a schema change that would drop rows on
@@ -2549,6 +2642,18 @@ const SANDBOX_DATA_KEY = CLIENT.storageKey("asset-tracker-sandbox-data");
 // browser, and the JPEG quality it is re-encoded at. ~1600px at q0.8 turns a
 // typical 4MB phone photo into ~300KB, which is the difference between a usable
 // gallery on school wifi and an unusable one.
+// How many photos upload at once. Bounded rather than unlimited: a phone
+// re-encoding several multi-megapixel images simultaneously is its own stall,
+// and the win is mostly in overlapping one file's downscale with the previous
+// file's upload rather than in raw parallelism.
+const PHOTO_UPLOAD_CONCURRENCY = 3;
+// What share of one file's progress its RESIZE is worth, the rest being the
+// upload. It exists so the indicator moves even where byte progress never
+// arrives: a browser that reports no total, a body small enough that the network
+// stack swallows it whole and reports one event at the end, Sandbox. Small,
+// because the resize IS the short half and a large slice would make the number
+// jump rather than travel.
+const PHOTO_RESIZE_SHARE = 0.15;
 const PHOTO_MAX_EDGE = 1600;
 const PHOTO_JPEG_QUALITY = 0.8;
 // Refused before any work is done. Well above what a re-encoded phone photo
@@ -2602,7 +2707,7 @@ function adoptPhoto(p) {
     url: p.url || "",
     thumbUrl: p.thumbUrl || "",
     // "image" unless the row says otherwise, and unlike ownerType above this
-    // default is KNOWN rather than guessed: before v37 an image was the only
+    // default is KNOWN rather than guessed: before v39 an image was the only
     // thing that could be uploaded, so every row written before then is one.
     kind: p.kind || "image",
     fileName: p.fileName || "",
@@ -2711,7 +2816,17 @@ async function downscalePhoto(file) {
 // A PDF goes to the SAME /image/upload endpoint as a photo, which is what makes
 // its first page renderable later (see PDF_THUMB_TRANSFORM). Raw storage would
 // have been the obvious home for a document and would have left it thumbnailless.
-async function uploadPhotoToCloudinary(blob, sig, uploadName) {
+//
+// XHR RATHER THAN FETCH, FOR ONE REASON: fetch cannot report how much of a
+// request body has gone out. Nothing else here wants XHR, and the error
+// handling below is deliberately the same shape fetch had -- status, then the
+// host's own message, then a fallback -- so the swap changes what the button
+// can SAY and nothing about what happens when an upload fails.
+//
+// `onProgress(fraction)` is called with 0..1 for THIS file as the bytes leave.
+// Optional: a browser that reports no total (a stream, an old engine) simply
+// never calls it and the caller falls back to counting whole files.
+function uploadPhotoToCloudinary(blob, sig, uploadName, onProgress) {
   const form = new FormData();
   // The third argument is the multipart part's filename, and its EXTENSION is
   // what Cloudinary reads to name the format: a Blob posted without one arrives
@@ -2727,16 +2842,36 @@ async function uploadPhotoToCloudinary(blob, sig, uploadName) {
     const value = k === "public_id" ? sig.publicId : sig[k];
     if (value !== undefined && value !== null && value !== "") form.append(k, value);
   });
-  const res = await fetch("https://api.cloudinary.com/v1_1/" + encodeURIComponent(sig.cloudName) + "/image/upload", {
-    method: "POST",
-    body: form,
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "https://api.cloudinary.com/v1_1/" + encodeURIComponent(sig.cloudName) + "/image/upload");
+    if (onProgress && xhr.upload) {
+      xhr.upload.onprogress = e => {
+        if (e.lengthComputable && e.total > 0) onProgress(Math.min(1, e.loaded / e.total));
+      };
+    }
+    // A network failure is the one case fetch worded for us. Say which half
+    // failed, since "the host refused it" would be wrong here -- it was never
+    // reached.
+    xhr.onerror = () => reject(new Error("the upload could not reach the image host."));
+    xhr.ontimeout = () => reject(new Error("the upload to the image host timed out."));
+    xhr.onload = () => {
+      let data = null;
+      try { data = JSON.parse(xhr.responseText); } catch (err) { data = null; }
+      const ok = xhr.status >= 200 && xhr.status < 300;
+      if (!ok || !data || !data.secure_url) {
+        const detail = data && data.error && data.error.message ? data.error.message : "HTTP " + xhr.status;
+        reject(new Error("The image host refused the upload: " + detail));
+        return;
+      }
+      // The last progress event can land before the response does, and a bar
+      // that stops at 98% while the file is actually finished is the complaint
+      // this whole indicator exists to answer.
+      if (onProgress) onProgress(1);
+      resolve(data);
+    };
+    xhr.send(form);
   });
-  const data = await res.json().catch(() => null);
-  if (!res.ok || !data || !data.secure_url) {
-    const detail = data && data.error && data.error.message ? data.error.message : "HTTP " + res.status;
-    throw new Error("The image host refused the upload: " + detail);
-  }
-  return data;
 }
 
 // Sandbox fixture. Deliberately MIXED, the same way the asset ids and the work
@@ -2779,7 +2914,7 @@ const MOCK_PHOTOS = [
     caption: "North wall outlet run", width: 400, height: 300, bytes: 4096,
     hiddenFromPublic: false, at: "2026-09-01T17:26:00.000Z", by: "Eric Stamage",
   },
-  // Two DOCUMENTS, so Sandbox exercises the v37 path rather than only the unit
+  // Two DOCUMENTS, so Sandbox exercises the v39 path rather than only the unit
   // test: a document tile (which falls back to its icon here, since a data URI
   // PDF has no host to rasterize page 1), an Open that really opens a PDF, and a
   // work entry whose photos and paperwork sit side by side. Note neither of the
@@ -3513,13 +3648,20 @@ function AssetTracker() {
   // Upload is the one write here that is slow for a reason unrelated to the
   // backend -- resizing, then a second round trip to the image host -- so it
   // carries its own busy flag rather than riding isSaving, which only covers the
-  // snapshot write at the very end.
+  // snapshot write at the very end -- and which no longer disables anything.
   const [photoBusy, setPhotoBusy] = useState(false);
   const [photoError, setPhotoError] = useState("");
-  // { done, total } while a multi-file upload is running, else null. Uploads are
-  // sequential rather than parallel: honest progress, one failure at a time to
-  // report, and parallel uploads competing on school wifi is the opposite of
-  // what this feature needs.
+  // { done, total, pct } while an upload is running, else null. `pct` is what
+  // the button shows: a percentage of the whole batch's bytes, each file an
+  // equal share filled by its own upload progress events. `done` counts
+  // FINISHED files and is not displayed -- it is what makes a failed or Sandbox
+  // file (no byte events at all) still claim its share.
+  //
+  // The label used to be "Uploading <n> of <m>" reading `done + 1`, which was
+  // honest while uploads were serial and became a lie when they moved into a
+  // pool: with three photos and a pool of three, all three are in flight at
+  // once and land together, so it sat on "1 of 3" for the entire wait and then
+  // vanished. A file number cannot describe parallel work; a fraction can.
   const [photoProgress, setPhotoProgress] = useState(null);
   // Which photo the lightbox is showing, or null.
   const [photoViewer, setPhotoViewer] = useState(null);
@@ -3541,6 +3683,15 @@ function AssetTracker() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [saveError, setSaveError] = useState(false);
+  // The app is showing a CACHED snapshot and the fresh one is still in flight.
+  // True only between a cached paint and the response that replaces it — roughly
+  // 1.5s — and what it gates is writes, not rendering.
+  const [revalidating, setRevalidating] = useState(false);
+  // The cached snapshot is on screen and the revalidation FAILED, so this is the
+  // last known inventory rather than the current one. Unlike `revalidating` this
+  // does not clear on its own: the only ways out are a successful reload or a
+  // sign-out.
+  const [staleSnapshot, setStaleSnapshot] = useState(false);
   const [backendScriptVersion, setBackendScriptVersion] = useState(null);
   // Per-domain revision numbers as of the last load or successful save — see
   // REVISION_DOMAINS. Loaded alongside nextAssetNumber/backendScriptVersion.
@@ -3548,7 +3699,6 @@ function AssetTracker() {
   // null normally; otherwise the array of domains a save was just rejected on
   // ("assets", ...) — someone else saved first, so this client's change never
   // reached the Sheet and has to be redone. Drives the conflict modal.
-  const [saveConflict, setSaveConflict] = useState(null);
   // The same numbers as `revisions`, mirrored in a ref because a POST needs the
   // value as of the moment it's SENT, not the one its closure captured: several
   // call sites fire persist() without awaiting it, so a save can be queued
@@ -3560,20 +3710,59 @@ function AssetTracker() {
   // the above, and independently correct: two overlapping full-snapshot writes
   // could already land out of order and let the older one win.
   const writeQueueRef = useRef(Promise.resolve());
-  // True from the moment persist() starts until it finishes — including the
-  // conflict-rejection path, which reloads before it returns. Every write in
-  // the app funnels through persist(), so this one flag covers the whole app
-  // without per-form plumbing: it drives the header "Saving…" pill and puts
-  // every write control into a visibly-working disabled state.
+  // How many backgrounded writes are still in flight. A COUNT rather than a
+  // boolean because several can overlap now that nothing awaits them, and the
+  // "Saving…" pill has to stay up until the last one lands rather than the first.
+  const pendingWritesRef = useRef(0);
+  // A backgrounded save that failed, held so the user can be told about it after
+  // they have moved on — and, when the save carried a draft, offered the typing
+  // back. `{ kind: "conflict" | "error", domains, context }`.
+  const [saveFailure, setSaveFailure] = useState(null);
+  // How many AuditLog rows exist on the server, which is not the same as how
+  // many are loaded: an ordinary read returns only the most recent slice (v37,
+  // AUDIT_READ_LIMIT) because the log is append-only, never pruned, and was the
+  // one part of the snapshot that grew without bound on every load.
+  //
+  // Absent from a pre-v37 backend, which reads as "this IS the whole log" and
+  // keeps a newer frontend correct against an older backend.
+  const [auditTotal, setAuditTotal] = useState(null);
+  // How many rows sit BEFORE the first one held in `auditLog`. Posted with every
+  // save so the backend can work out which rows are new by comparing against its
+  // own tab -- see appendNewRows_. Zero once the full log has been fetched.
+  const auditBaseRef = useRef(0);
+  // In flight, so the audit views can say they are still filling in.
+  const [auditLoadingFull, setAuditLoadingFull] = useState(false);
+  // True while any backgrounded write is in flight, and it now drives the header
+  // pill and NOTHING ELSE.
+  //
+  // It used to disable every write control in the app and swap their labels to
+  // "Saving…" — correct while each handler awaited its own round trip, because
+  // the user was still looking at the form it belonged to. Once saves went to
+  // the background that same flag would have disabled the form the user moved
+  // ON to, for the 1.5-5s a write they had already forgotten about was still
+  // running. That is the frozen-app feeling this change exists to remove, just
+  // relocated, so the ~130 disabled props and label swaps came out with it.
+  //
+  // What replaced them: savingRef below still catches the double click, and a
+  // failed write now reports itself through the save-failure modal instead of
+  // by greying out a button.
   const [isSaving, setIsSaving] = useState(false);
-  // Mirrored in a ref for the same reason revisionsRef is: a double-click can
-  // land in the same tick as the first click, before React has re-rendered the
-  // button as disabled, so the guard in each submit handler has to read a value
-  // that's already up to date rather than the state this render closed over.
+  // The double-submit guard each write handler starts with, and since the
+  // disabled states went away it is the ONLY thing catching a double click.
+  //
+  // A ref rather than state for the reason revisionsRef is one: the second click
+  // can land in the same tick as the first, before React has re-rendered at all,
+  // so the guard has to read a value that is already current rather than the
+  // state this render closed over.
+  //
+  // persist() sets it and clears it on a macrotask — NOT when the write lands.
+  // See the comment there: holding it for the round trip is what would have let
+  // one background save block every unrelated control, attachPhotos included.
+  //
   // Deliberately NOT checked inside persist() itself — persist() is also reached
-  // from write paths that aren't gated on isSaving (the bulk reassign/move
+  // from write paths that never had a submit button (the bulk reassign/move
   // toolbar, the panel diagram), and refusing one of those would silently drop a
-  // real edit. Every handler that checks it is a control this file also disables.
+  // real edit.
   const savingRef = useRef(false);
   function rememberRevisions(raw) {
     const next = normalizeRevisions(raw);
@@ -3679,7 +3868,13 @@ function AssetTracker() {
   // security benefit. The real backend is guarded server-side regardless of
   // anything decided here.
   // Set when a view-only user's action was refused, cleared when they dismiss it.
-  const [readOnlyNotice, setReadOnlyNotice] = useState(null);
+  // A dismissible toast for "your click did something other than what you
+  // expected, and here is why". Called readOnlyNotice until 2026-09-16, when
+  // three of its four uses had nothing to do with view-only access — a refused
+  // mass deletion, an unconfirmed snapshot, and a failed export. The rendering
+  // was always generic; only the name said otherwise, and a name that no longer
+  // says what the value is is treated as a bug here rather than a tidy-up.
+  const [notice, setNotice] = useState(null);
 
   // The access allowlist, [{ email, name, role }] — who may sign in and whether
   // they can edit. Distinct from `usersList`, which is the managed list of people
@@ -3918,6 +4113,13 @@ function AssetTracker() {
     }
     setAuthIdToken(null);
     setSessionId(null);
+    // The session id in localStorage is erased by setSessionId(null) above;
+    // leaving the INVENTORY it named sitting in Cache Storage would make "Sign
+    // out" mean less than it says, and would hand the next person to sign in on
+    // this device a snapshot that is not theirs. Fire-and-forget for the same
+    // reason the signout POST above is: the local sign-out must happen whether
+    // or not this lands.
+    clearSnapshotCache();
     setAuth(null);
     setAuthPending(false);
     setCurrentUser(null);
@@ -3936,10 +4138,348 @@ function AssetTracker() {
   // than in the effect so a sign-in-triggered load counts too — see the effect.
   const lastLoadedSandboxRef = useRef(null);
 
+  // Populates every piece of app state from one backend snapshot. Extracted from
+  // loadData() so a CACHED snapshot and a freshly fetched one go through exactly
+  // the same adoptions, migrations and backfills — the two must not be able to
+  // diverge, or the app would read the cache under different rules than the
+  // response it is a copy of.
+  //
+  // Takes the RAW response, which is the whole reason that property holds: a
+  // migration added after an entry was cached still runs when it is read back.
+  function applySnapshot(data) {
+    if (!data || !Array.isArray(data.assets)) throw new Error("Malformed response from backend");
+
+    // Identity as the SERVER resolved it — never assembled from the token on
+    // this side. Absent in sandbox mode, which has no backend and no allowlist,
+    // and where authSatisfied is already true.
+    if (data.auth) {
+      // Adopt the session the backend just issued or sled forward, and drop
+      // the Google credential the moment it has been exchanged — it has done
+      // its one job and keeping it around is pure liability.
+      if (data.auth.sessionId) setSessionId(data.auth.sessionId);
+      setAuthIdToken(null);
+      setAuth(data.auth);
+      setCurrentUser(data.auth.name || data.auth.email);
+      setAccessUsers(data.auth.users || []);
+      setShowNamePrompt(false);
+    }
+    setAuthPending(false);
+
+    // Migrate column config: add any default columns introduced in newer app
+    // versions, at the position DEFAULT_COLUMNS puts them in rather than always
+    // just before `status`. That blanket rule sent `name` to the far right of an
+    // existing user's table — past a dozen columns, effectively invisible — even
+    // though it's the first column for anyone starting fresh. Anchoring on the
+    // nearest preceding default column that this user already has keeps the new
+    // column next to the ones it belongs with; a column with no such anchor (one
+    // that leads the default order, like `name`) goes to the front.
+    let storedCols = data.columns && data.columns.length ? data.columns : DEFAULT_COLUMNS;
+    // Rename first, then drop retired columns, then add new defaults — a
+    // renamed key has to reach the add pass under its NEW name or that pass
+    // sees it as missing and inserts a duplicate.
+    storedCols = storedCols.map(c => (
+      !c.custom && RENAMED_COLUMN_KEYS[c.key]
+        ? { ...c, key: RENAMED_COLUMN_KEYS[c.key], label: DEFAULT_COLUMNS.find(d => d.key === RENAMED_COLUMN_KEYS[c.key])?.label || c.label }
+        : c
+    ));
+    // Drop columns retired in a newer app version before adding new ones, so a
+    // sheet last saved by an older client doesn't keep offering a column that
+    // nothing renders or edits any more (see RETIRED_COLUMN_KEYS).
+    storedCols = storedCols.filter(c => c.custom || !RETIRED_COLUMN_KEYS.has(c.key));
+    DEFAULT_COLUMNS.forEach((dc, defaultIdx) => {
+      if (storedCols.some(c => c.key === dc.key)) return;
+      let insertAt = 0;
+      for (let i = defaultIdx - 1; i >= 0; i--) {
+        const anchor = storedCols.findIndex(c => c.key === DEFAULT_COLUMNS[i].key);
+        if (anchor !== -1) { insertAt = anchor + 1; break; }
+      }
+      storedCols = [...storedCols.slice(0, insertAt), dc, ...storedCols.slice(insertAt)];
+    });
+    setColumns(storedCols);
+    // BEFORE the assets are mapped, not just before the setState: the load-time
+    // backfills below ask typeTakesParent and isPlaceType, and those read the
+    // module-level settings. Applied later, the first load after a settings
+    // change would adopt parents and names using the PREVIOUS rules.
+    const loadedTypeSettings = data.typeSettings && typeof data.typeSettings === "object" ? data.typeSettings : {};
+    applyTypeSettings(loadedTypeSettings, storedCols);
+    // Resolved here rather than at its setState below, because adoptLegacyNames
+    // needs it: a name is built from the type's NAME, and only this list maps a
+    // type id to one. Migrated the same way columns are above — see the note at
+    // setTypesList for why only LOCKED types are restored.
+    const loadedTypes = ensureLockedTypes(adoptLegacyTypesList(
+      Array.isArray(data.typesList) && data.typesList.length ? data.typesList : DEFAULT_TYPES
+    ));
+
+    const parented = data.assets
+      .map(a => ({ comments: [], changes: [], allocations: [], status: "Active", subType: "", purchaseDate: "", warrantyUntil: "", ...a }))
+      // THE asset key, adopted before anything else reads one. An asset written
+      // before v31 has no `id`, so its LABEL is its id -- which is what makes
+      // this whole change need no migration: every reference already stored in
+      // the sheet (parentId, personIds, a child row's assetLabel, a breaker's
+      // panelLabel, AuditLog's assetLabel and related) is already a valid id.
+      // Same trick typesList uses, where a built-in type's id is its own name.
+      //
+      // Must run BEFORE the personIds normalize and adoptLegacyNames below:
+      // the name backfill walks the parent chain, and it has to walk it by the
+      // ids everything downstream will actually be joined on.
+      //
+      // From here on `a.id` is populated on every asset and is the ONLY thing
+      // that should be compared for identity. `a.label` is display text.
+      .map(a => (a.id ? a : { ...a, id: a.label }))
+      // The tag, adopted from the label the same way (v32) -- with ONE
+      // exception that is the whole of Eric's "clear them for places and
+      // users" decision (2026-09-09): a type whose registry entry excludes the
+      // tag field does not get one, so the BCR/BCB/BCC labels on Rooms,
+      // Buildings and Campuses and the BCA labels on Users simply are not
+      // carried over, and the first save writes the column empty for them.
+      //
+      // Deliberately a load-time READ that declines to adopt, not a load-time
+      // REWRITE -- the same shape as every other adoptLegacy*, with no race
+      // between two browsers and nothing to run by hand.
+      //
+      // `label` is untouched and still written, so this is reversible: tick
+      // the tag field back on for a type and the next load adopts it again.
+      // Phase 4 is what closes that door.
+      .map(a => {
+        if (a.tag !== undefined && a.tag !== null) return a;
+        const carries = fieldAppliesTo("tag", a.type);
+        return { ...a, tag: carries ? (a.label || "") : "" };
+      })
+      // The sandbox fixture is hand-written and the backend is not, so normalize
+      // here rather than trusting either: personIds must be an ARRAY on every
+      // asset from this point on. It arrives as one from doGet and is absent
+      // from older fixture rows, and code downstream branches on isArray.
+      .map(a => (Array.isArray(a.personIds) ? a : { ...a, personIds: [] }))
+      // v34: every maintenance item gets a stable id, so a change entry can
+      // name the schedule it was performed against (change.maintenanceId).
+      // Array position cannot serve -- items are deleted by index, so removing
+      // one renumbers every item below it and would re-point every change
+      // referencing them. Same reasoning that gave Breakers and Circuits a UUID.
+      //
+      // A load-time READ that fills a blank, NOT a load-time rewrite:
+      // loadData never persists, so a freshly minted id reaches the Sheet only
+      // when some save happens for other reasons, inside that same snapshot.
+      // No migration, no script, no window where one browser has written an id
+      // nobody else can see.
+      //
+      // Two browsers CAN mint different ids for the same item, and the
+      // per-domain revision counters are what make that safe: whichever saves
+      // second posts a stale rev_assets, doPost refuses it as a conflict, and
+      // that browser reloads onto the id the first one wrote. Without the
+      // optimistic-concurrency check this pattern would not be safe.
+      //
+      // Changes deliberately get no id of their own -- nothing references a
+      // change, so a stable handle would be dead weight.
+      .map(a => {
+        const items = a.maintenanceItems || [];
+        if (!items.some(m => !m || !m.id)) return a;
+        return { ...a, maintenanceItems: items.map(m => (m && m.id ? m : { ...m, id: crypto.randomUUID() })) };
+      })
+      // Same adoption for work entries, and for the same reason now that
+      // photos attach to one: an entry addressed by array position loses its
+      // attachments to the row above it the moment anything earlier is
+      // deleted. Also a load-time READ that fills a blank -- it reaches the
+      // Sheet only inside whatever save happens next, and a stale browser
+      // that minted different ids is caught by the revision check.
+      .map(a => {
+        const chs = a.changes || [];
+        if (!chs.some(c => !c || !c.id)) return a;
+        return { ...a, changes: chs.map(c => (c && c.id ? c : { ...c, id: crypto.randomUUID() })) };
+      });
+    // Names are filled in over the already-parented list, because the
+    // suggestion for fixed equipment reads the chain above the asset ("Room 102
+    // Mini Split") — running it inside the first map would walk a list whose
+    // parentIds were still half-adopted.
+    // People are split into parts BEFORE adoptLegacyNames, which skips them —
+    // so a person whose parts are adopted here is already excluded from the
+    // "fill in a blank name" pass, and there is no window in which a person
+    // could pick up a generated "User BCA0090".
+    const loadedAssets = adoptLegacyNames(adoptPersonNames(parented), loadedTypes);
+    setAssets(loadedAssets);
+    // No scriptVersion at all means an old backend that predates this check entirely —
+    // still a real mismatch, not a "nothing to compare" case. In sandbox mode the
+    // fixture always reports the current frontend version, so this never fires there.
+    setBackendScriptVersion(data.scriptVersion || "(none reported — backend predates version tracking)");
+    // Absent (sandbox fixture, or a backend predating v12) normalizes to all
+    // zeros, which is exactly what such a backend compares against — so this
+    // stays a no-op rather than a permanent conflict.
+    rememberRevisions(data.revisions);
+    setChangeTypes(data.changeTypes && data.changeTypes.length ? data.changeTypes : DEFAULT_CHANGE_TYPES);
+    setVendors(Array.isArray(data.vendors) ? data.vendors : []);
+    const loadedAudit = Array.isArray(data.auditLog) ? data.auditLog : [];
+    setAuditLog(loadedAudit);
+    // A pre-v37 backend reports no total, which means the slice IS everything.
+    const reportedTotal = Number(data.auditTotal);
+    const knownTotal = Number.isFinite(reportedTotal) && reportedTotal >= loadedAudit.length
+      ? reportedTotal
+      : loadedAudit.length;
+    setAuditTotal(knownTotal);
+    auditBaseRef.current = Math.max(0, knownTotal - loadedAudit.length);
+    setPeripheralsList(Array.isArray(data.peripheralsList) ? data.peripheralsList : DEFAULT_PERIPHERALS);
+    setBulkItemTypes(Array.isArray(data.bulkItemTypes) ? data.bulkItemTypes : DEFAULT_BULK_ITEM_TYPES);
+    // Migrate the managed type list the same way columns are migrated above:
+    // a list stored before a new LOCKED type existed would otherwise never gain
+    // it, so the type could never be picked in the add form and its assets
+    // could never be created. Campus is what exposed this — the stored list on
+    // any sheet (and any saved sandbox copy) predates it.
+    //
+    // Only locked types are restored, and that limit is the point: a locked
+    // type can't be removed in the type manager at all, so its absence is
+    // always a version gap and never a choice. An ordinary type the user
+    // deliberately deleted stays deleted, which re-adding every entry in
+    // TYPE_OPTIONS would undo on every single load.
+    setTypesList(loadedTypes);
+    setTypeSettings(loadedTypeSettings);
+    // Shipped defaults when the sheet has never stored a list -- which is
+    // every sheet until the first config save after v33, and is why the labels
+    // work with no seeding step. A stored list is topped up with any shipped
+    // label added since it was written. (`typeCategories` is the wire key the
+    // backend accepts; the value is the label vocabulary -- see TYPE LABELS.)
+    setTypeLabels(ensureShippedLabels(
+      Array.isArray(data.typeCategories) && data.typeCategories.length
+        ? data.typeCategories
+        : DEFAULT_TYPE_LABELS
+    ));
+    // Absent/0/garbage all mean "never stored" — peekAssetNumber() seeds it
+    // from the loaded assets instead, and the first asset created writes it.
+    const storedNextNumber = Number(data.nextAssetNumber);
+    setNextAssetNumber(Number.isFinite(storedNextNumber) && storedNextNumber > 0 ? storedNextNumber : null);
+    setBreakerTypes(Array.isArray(data.breakerTypes) && data.breakerTypes.length ? data.breakerTypes : SEEDED_BREAKER_TYPES);
+    // Absent on a pre-v35 backend, which is a normal state and not an error:
+    // an empty list simply means no photo has been attached yet.
+    setPhotos(Array.isArray(data.photos) ? data.photos.map(adoptPhoto) : []);
+    if (Array.isArray(data.usersList) && data.usersList.length) {
+      setUsersList(data.usersList);
+    } else {
+      // No stored users list yet (e.g. brand-new sheet) — derive starter names
+      // from whatever's already on the loaded assets, if any.
+      const derived = Array.from(
+        new Set(loadedAssets.flatMap(a => (a.person ? a.person.split("/").map(s => s.trim()) : [])).filter(Boolean))
+      ).sort();
+      setUsersList(derived);
+    }
+  }
+
+  // Fetches the WHOLE audit log, once, for the views that genuinely need all of
+  // it. An ordinary read carries only the recent slice, so an asset's own
+  // history, the master Audit tab and the Excel export would otherwise each be
+  // looking at a window and unable to say so.
+  //
+  // Resolves to the complete array. Everything downstream then behaves exactly
+  // as it did before the cap existed -- which is the point of fetching the whole
+  // thing rather than paging: no view needs to learn about windows, and the
+  // export cannot quietly drop rows, which is the worst thing an audit trail can
+  // do. The payload is the one that used to be on every single load; now it is
+  // asked for on purpose.
+  const auditFullRef = useRef(null);
+  async function ensureFullAuditLog() {
+    if (sandboxMode) return auditLog;
+    if (auditTotal === null || auditLog.length >= auditTotal) return auditLog;
+    // One in-flight fetch, shared: the master tab and the detail tab can both
+    // ask at once, and two round trips for one answer would be silly.
+    if (!auditFullRef.current) {
+      auditFullRef.current = (async () => {
+        setAuditLoadingFull(true);
+        try {
+          const res = await fetch(SHEET_API_URL, {
+            method: "POST",
+            headers: { "Content-Type": "text/plain;charset=utf-8" },
+            body: JSON.stringify({ op: "auditFull", sessionId: sessionId }),
+            cache: "no-store",
+          });
+          const data = await res.json().catch(() => null);
+          if (!data || !data.ok || !Array.isArray(data.auditLog)) {
+            throw new Error((data && data.error) || "Couldn't load the full history.");
+          }
+          setAuditLog(data.auditLog);
+          setAuditTotal(data.auditLog.length);
+          // The client now holds the whole log, so nothing sits before its first
+          // row. Missing this is how the next save would append from the wrong
+          // place -- see appendNewRows_.
+          auditBaseRef.current = 0;
+          return data.auditLog;
+        } finally {
+          setAuditLoadingFull(false);
+          // Cleared either way: a failure should be retryable rather than stick.
+          auditFullRef.current = null;
+        }
+      })();
+    }
+    try {
+      return await auditFullRef.current;
+    } catch (e) {
+      setNotice("Couldn't load the older history. Check your connection and try again.");
+      return auditLog;
+    }
+  }
+
+  // Both audit views need the whole log, so opening either fetches the rest.
+  // An effect rather than a click handler because either can be reached by a
+  // deep link, a row click from the other, or a reload standing on it.
+  useEffect(() => {
+    if (!authSatisfied || sandboxMode) return;
+    const wantsFullLog = mainTab === "audit" || (view === "detail" && detailTab === "audit");
+    if (wantsFullLog) ensureFullAuditLog();
+  }, [mainTab, detailTab, view, authSatisfied, sandboxMode, auditTotal]);
+
+  // Rendered by both audit views while the log on this device is still a recent
+  // slice. An audit view quietly showing part of the history is the one thing it
+  // must not do, and "it is still loading" is a different statement from "this
+  // is everything" -- so it says which, rather than leaving the reader to guess
+  // from a count that looks complete.
+  const auditPartialNotice = (!sandboxMode && auditTotal !== null && auditLog.length < auditTotal) ? (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 8, marginBottom: 8,
+      border: `1.5px solid ${C.border}`, borderRadius: 10, padding: "8px 12px",
+      fontSize: 12, color: C.muted, background: C.surface,
+    }}>
+      <Loader2 size={13} className={auditLoadingFull ? "spin" : undefined} />
+      <span>
+        Showing the most recent {auditLog.length.toLocaleString()} of{" "}
+        {auditTotal.toLocaleString()} entries
+        {auditLoadingFull ? " — loading the rest…" : " — the rest hasn't loaded yet."}
+      </span>
+    </div>
+  ) : null;
+
   async function loadData() {
     lastLoadedSandboxRef.current = sandboxMode;
-    setLoading(true);
     setLoadError(false);
+    setStaleSnapshot(false);
+
+    // Paint the last known snapshot BEFORE asking the network anything. An
+    // /exec round trip costs ~1.5s at the very best (see RESPONSIVENESS_EVAL.md),
+    // and the app used to spend all of it showing a loading screen on a device
+    // that already had a perfectly good copy of the inventory.
+    //
+    // FOUR CONDITIONS, and each rules out a case where server truth is the whole
+    // point of the call:
+    //   sandboxMode  — sandbox has its own localStorage copy and never fetches.
+    //   authIdToken  — a fresh Google sign-in. `sessionId` may still hold the
+    //                  expired session this sign-in is REPLACING, so its cache
+    //                  is the previous session's and must not be shown.
+    //   sessionId    — nothing to key on, so nothing to find.
+    //   assets===null— FIRST load only. The conflict path and the sandbox toggle
+    //                  both call loadData() precisely because the state in
+    //                  memory is wrong; handing either a cache would defeat it.
+    let paintedFromCache = false;
+    if (!sandboxMode && !authIdToken && sessionId && assets === null) {
+      const cached = await readSnapshotCache(sessionId);
+      if (cached) {
+        try {
+          applySnapshot(cached);
+          setLoading(false);
+          setRevalidating(true);
+          paintedFromCache = true;
+        } catch (e) {
+          // A snapshot this build cannot apply. Nothing is on screen worth
+          // keeping, so fall through and load normally rather than half-render.
+          paintedFromCache = false;
+        }
+      }
+    }
+    if (!paintedFromCache) setLoading(true);
+
     try {
       let data;
       if (sandboxMode) {
@@ -4003,218 +4543,39 @@ function AssetTracker() {
             detail: data.detail || "",
           });
           setLoading(false);
+          setRevalidating(false);
           return;
         }
       }
-      if (!data || !Array.isArray(data.assets)) throw new Error("Malformed response from backend");
-
-      // Identity as the SERVER resolved it — never assembled from the token on
-      // this side. Absent in sandbox mode, which has no backend and no allowlist,
-      // and where authSatisfied is already true.
-      if (data.auth) {
-        // Adopt the session the backend just issued or sled forward, and drop
-        // the Google credential the moment it has been exchanged — it has done
-        // its one job and keeping it around is pure liability.
-        if (data.auth.sessionId) setSessionId(data.auth.sessionId);
-        setAuthIdToken(null);
-        setAuth(data.auth);
-        setCurrentUser(data.auth.name || data.auth.email);
-        setAccessUsers(data.auth.users || []);
-        setShowNamePrompt(false);
-      }
-      setAuthPending(false);
-
-      // Migrate column config: add any default columns introduced in newer app
-      // versions, at the position DEFAULT_COLUMNS puts them in rather than always
-      // just before `status`. That blanket rule sent `name` to the far right of an
-      // existing user's table — past a dozen columns, effectively invisible — even
-      // though it's the first column for anyone starting fresh. Anchoring on the
-      // nearest preceding default column that this user already has keeps the new
-      // column next to the ones it belongs with; a column with no such anchor (one
-      // that leads the default order, like `name`) goes to the front.
-      let storedCols = data.columns && data.columns.length ? data.columns : DEFAULT_COLUMNS;
-      // Rename first, then drop retired columns, then add new defaults — a
-      // renamed key has to reach the add pass under its NEW name or that pass
-      // sees it as missing and inserts a duplicate.
-      storedCols = storedCols.map(c => (
-        !c.custom && RENAMED_COLUMN_KEYS[c.key]
-          ? { ...c, key: RENAMED_COLUMN_KEYS[c.key], label: DEFAULT_COLUMNS.find(d => d.key === RENAMED_COLUMN_KEYS[c.key])?.label || c.label }
-          : c
-      ));
-      // Drop columns retired in a newer app version before adding new ones, so a
-      // sheet last saved by an older client doesn't keep offering a column that
-      // nothing renders or edits any more (see RETIRED_COLUMN_KEYS).
-      storedCols = storedCols.filter(c => c.custom || !RETIRED_COLUMN_KEYS.has(c.key));
-      DEFAULT_COLUMNS.forEach((dc, defaultIdx) => {
-        if (storedCols.some(c => c.key === dc.key)) return;
-        let insertAt = 0;
-        for (let i = defaultIdx - 1; i >= 0; i--) {
-          const anchor = storedCols.findIndex(c => c.key === DEFAULT_COLUMNS[i].key);
-          if (anchor !== -1) { insertAt = anchor + 1; break; }
-        }
-        storedCols = [...storedCols.slice(0, insertAt), dc, ...storedCols.slice(insertAt)];
-      });
-      setColumns(storedCols);
-      // BEFORE the assets are mapped, not just before the setState: the load-time
-      // backfills below ask typeTakesParent and isPlaceType, and those read the
-      // module-level settings. Applied later, the first load after a settings
-      // change would adopt parents and names using the PREVIOUS rules.
-      const loadedTypeSettings = data.typeSettings && typeof data.typeSettings === "object" ? data.typeSettings : {};
-      applyTypeSettings(loadedTypeSettings, storedCols);
-      // Resolved here rather than at its setState below, because adoptLegacyNames
-      // needs it: a name is built from the type's NAME, and only this list maps a
-      // type id to one. Migrated the same way columns are above — see the note at
-      // setTypesList for why only LOCKED types are restored.
-      const loadedTypes = ensureLockedTypes(adoptLegacyTypesList(
-        Array.isArray(data.typesList) && data.typesList.length ? data.typesList : DEFAULT_TYPES
-      ));
-
-      const parented = data.assets
-        .map(a => ({ comments: [], changes: [], allocations: [], status: "Active", subType: "", purchaseDate: "", warrantyUntil: "", ...a }))
-        // THE asset key, adopted before anything else reads one. An asset written
-        // before v31 has no `id`, so its LABEL is its id -- which is what makes
-        // this whole change need no migration: every reference already stored in
-        // the sheet (parentId, personIds, a child row's assetLabel, a breaker's
-        // panelLabel, AuditLog's assetLabel and related) is already a valid id.
-        // Same trick typesList uses, where a built-in type's id is its own name.
-        //
-        // Must run BEFORE the personIds normalize and adoptLegacyNames below:
-        // the name backfill walks the parent chain, and it has to walk it by the
-        // ids everything downstream will actually be joined on.
-        //
-        // From here on `a.id` is populated on every asset and is the ONLY thing
-        // that should be compared for identity. `a.label` is display text.
-        .map(a => (a.id ? a : { ...a, id: a.label }))
-        // The tag, adopted from the label the same way (v32) -- with ONE
-        // exception that is the whole of Eric's "clear them for places and
-        // users" decision (2026-09-09): a type whose registry entry excludes the
-        // tag field does not get one, so the BCR/BCB/BCC labels on Rooms,
-        // Buildings and Campuses and the BCA labels on Users simply are not
-        // carried over, and the first save writes the column empty for them.
-        //
-        // Deliberately a load-time READ that declines to adopt, not a load-time
-        // REWRITE -- the same shape as every other adoptLegacy*, with no race
-        // between two browsers and nothing to run by hand.
-        //
-        // `label` is untouched and still written, so this is reversible: tick
-        // the tag field back on for a type and the next load adopts it again.
-        // Phase 4 is what closes that door.
-        .map(a => {
-          if (a.tag !== undefined && a.tag !== null) return a;
-          const carries = fieldAppliesTo("tag", a.type);
-          return { ...a, tag: carries ? (a.label || "") : "" };
-        })
-        // The sandbox fixture is hand-written and the backend is not, so normalize
-        // here rather than trusting either: personIds must be an ARRAY on every
-        // asset from this point on. It arrives as one from doGet and is absent
-        // from older fixture rows, and code downstream branches on isArray.
-        .map(a => (Array.isArray(a.personIds) ? a : { ...a, personIds: [] }))
-        // v34: every maintenance item gets a stable id, so a change entry can
-        // name the schedule it was performed against (change.maintenanceId).
-        // Array position cannot serve -- items are deleted by index, so removing
-        // one renumbers every item below it and would re-point every change
-        // referencing them. Same reasoning that gave Breakers and Circuits a UUID.
-        //
-        // A load-time READ that fills a blank, NOT a load-time rewrite:
-        // loadData never persists, so a freshly minted id reaches the Sheet only
-        // when some save happens for other reasons, inside that same snapshot.
-        // No migration, no script, no window where one browser has written an id
-        // nobody else can see.
-        //
-        // Two browsers CAN mint different ids for the same item, and the
-        // per-domain revision counters are what make that safe: whichever saves
-        // second posts a stale rev_assets, doPost refuses it as a conflict, and
-        // that browser reloads onto the id the first one wrote. Without the
-        // optimistic-concurrency check this pattern would not be safe.
-        //
-        // Changes deliberately get no id of their own -- nothing references a
-        // change, so a stable handle would be dead weight.
-        .map(a => {
-          const items = a.maintenanceItems || [];
-          if (!items.some(m => !m || !m.id)) return a;
-          return { ...a, maintenanceItems: items.map(m => (m && m.id ? m : { ...m, id: crypto.randomUUID() })) };
-        })
-        // Same adoption for work entries, and for the same reason now that
-        // photos attach to one: an entry addressed by array position loses its
-        // attachments to the row above it the moment anything earlier is
-        // deleted. Also a load-time READ that fills a blank -- it reaches the
-        // Sheet only inside whatever save happens next, and a stale browser
-        // that minted different ids is caught by the revision check.
-        .map(a => {
-          const chs = a.changes || [];
-          if (!chs.some(c => !c || !c.id)) return a;
-          return { ...a, changes: chs.map(c => (c && c.id ? c : { ...c, id: crypto.randomUUID() })) };
-        });
-      // Names are filled in over the already-parented list, because the
-      // suggestion for fixed equipment reads the chain above the asset ("Room 102
-      // Mini Split") — running it inside the first map would walk a list whose
-      // parentIds were still half-adopted.
-      // People are split into parts BEFORE adoptLegacyNames, which skips them —
-      // so a person whose parts are adopted here is already excluded from the
-      // "fill in a blank name" pass, and there is no window in which a person
-      // could pick up a generated "User BCA0090".
-      const loadedAssets = adoptLegacyNames(adoptPersonNames(parented), loadedTypes);
-      setAssets(loadedAssets);
-      // No scriptVersion at all means an old backend that predates this check entirely —
-      // still a real mismatch, not a "nothing to compare" case. In sandbox mode the
-      // fixture always reports the current frontend version, so this never fires there.
-      setBackendScriptVersion(data.scriptVersion || "(none reported — backend predates version tracking)");
-      // Absent (sandbox fixture, or a backend predating v12) normalizes to all
-      // zeros, which is exactly what such a backend compares against — so this
-      // stays a no-op rather than a permanent conflict.
-      rememberRevisions(data.revisions);
-      setChangeTypes(data.changeTypes && data.changeTypes.length ? data.changeTypes : DEFAULT_CHANGE_TYPES);
-      setVendors(Array.isArray(data.vendors) ? data.vendors : []);
-      setAuditLog(Array.isArray(data.auditLog) ? data.auditLog : []);
-      setPeripheralsList(Array.isArray(data.peripheralsList) ? data.peripheralsList : DEFAULT_PERIPHERALS);
-      setBulkItemTypes(Array.isArray(data.bulkItemTypes) ? data.bulkItemTypes : DEFAULT_BULK_ITEM_TYPES);
-      // Migrate the managed type list the same way columns are migrated above:
-      // a list stored before a new LOCKED type existed would otherwise never gain
-      // it, so the type could never be picked in the add form and its assets
-      // could never be created. Campus is what exposed this — the stored list on
-      // any sheet (and any saved sandbox copy) predates it.
+      applySnapshot(data);
+      // AFTER applySnapshot, deliberately: a sign-in adopts the session the
+      // backend just issued, and `sessionId` is a module-level value read at
+      // call time, so this stores the snapshot under the id the NEXT load will
+      // present rather than the one this load arrived with.
       //
-      // Only locked types are restored, and that limit is the point: a locked
-      // type can't be removed in the type manager at all, so its absence is
-      // always a version gap and never a choice. An ordinary type the user
-      // deliberately deleted stays deleted, which re-adding every entry in
-      // TYPE_OPTIONS would undo on every single load.
-      setTypesList(loadedTypes);
-      setTypeSettings(loadedTypeSettings);
-      // Shipped defaults when the sheet has never stored a list -- which is
-      // every sheet until the first config save after v33, and is why the labels
-      // work with no seeding step. A stored list is topped up with any shipped
-      // label added since it was written. (`typeCategories` is the wire key the
-      // backend accepts; the value is the label vocabulary -- see TYPE LABELS.)
-      setTypeLabels(ensureShippedLabels(
-        Array.isArray(data.typeCategories) && data.typeCategories.length
-          ? data.typeCategories
-          : DEFAULT_TYPE_LABELS
-      ));
-      // Absent/0/garbage all mean "never stored" — peekAssetNumber() seeds it
-      // from the loaded assets instead, and the first asset created writes it.
-      const storedNextNumber = Number(data.nextAssetNumber);
-      setNextAssetNumber(Number.isFinite(storedNextNumber) && storedNextNumber > 0 ? storedNextNumber : null);
-      setBreakerTypes(Array.isArray(data.breakerTypes) && data.breakerTypes.length ? data.breakerTypes : SEEDED_BREAKER_TYPES);
-      // Absent on a pre-v35 backend, which is a normal state and not an error:
-      // an empty list simply means no photo has been attached yet.
-      setPhotos(Array.isArray(data.photos) ? data.photos.map(adoptPhoto) : []);
-      if (Array.isArray(data.usersList) && data.usersList.length) {
-        setUsersList(data.usersList);
-      } else {
-        // No stored users list yet (e.g. brand-new sheet) — derive starter names
-        // from whatever's already on the loaded assets, if any.
-        const derived = Array.from(
-          new Set(loadedAssets.flatMap(a => (a.person ? a.person.split("/").map(s => s.trim()) : [])).filter(Boolean))
-        ).sort();
-        setUsersList(derived);
-      }
+      // Not awaited. The data is already on screen; a slow or failed write costs
+      // the next load its head start and nothing else.
+      if (!sandboxMode && sessionId) writeSnapshotCache(sessionId, data);
       setLoading(false);
+      setRevalidating(false);
     } catch (e) {
-      // Sheet unreachable or returned something unexpected — show a blocking error
-      // instead of guessing. Assets stays null, so persist()/writeSnapshot() never
-      // run against fabricated data (see the write-guard in persist()).
-      setLoadError(true);
+      // Sheet unreachable or returned something unexpected.
+      //
+      // WITH A CACHED VIEW ALREADY PAINTED, the blocking error screen would
+      // throw away a usable read of the inventory at exactly the moment it is
+      // most useful — a flaky connection is when having a local copy pays. So
+      // the cached view stays and says so, with writes still blocked: showing
+      // unconfirmed data is honest, letting someone edit it is not.
+      //
+      // Otherwise this is unchanged: a blocking error rather than a guess.
+      // Assets stays null, so persist()/writeSnapshot() never run against
+      // fabricated data (see the write-guard in persist()).
+      if (paintedFromCache) {
+        setStaleSnapshot(true);
+      } else {
+        setLoadError(true);
+      }
+      setRevalidating(false);
       setLoading(false);
     }
   }
@@ -4432,11 +4793,30 @@ function AssetTracker() {
       // actually sent — so a save that isn't about access can never rewrite it,
       // even if this client's copy were somehow stale or empty.
       authUsers: nextAuthUsers = undefined,
+      // What this save was ABOUT, so a failure that surfaces after the user has
+      // moved on can name it, link back to it, and offer the typing back.
+      // Optional: a bulk action legitimately has no single subject, and a save
+      // with no context simply reports that it failed.
+      //   assetId — the asset to link to.
+      //   restore — { mode: "edit" | "add", draft } to put back in the form.
+      context: saveContext = null,
     } = overrides;
     // Guard against ever writing over the Sheet before a real snapshot has been
     // loaded — the UI shouldn't be reachable in that state, but this keeps a
     // load-failure from being able to clobber live data no matter how it's triggered.
     if (assets === null) return;
+    // Showing a cached snapshot that the server has not yet confirmed. The
+    // revision counters would CATCH a save built on stale data — that is what
+    // makes painting from cache safe at all — but being refused is not the same
+    // as not being invited, and the whole window is about 1.5 seconds. Refusing
+    // here keeps the cache a pure read optimisation: nothing it paints can ever
+    // reach the Sheet without the server's own copy having arrived first.
+    if (revalidating || staleSnapshot) {
+      setNotice(staleSnapshot
+        ? "This is the last inventory this device saved, and the server couldn't be reached to confirm it. Reload before making changes."
+        : "Still catching up with the server — try that again in a moment.");
+      return;
+    }
     // View-only. The backend refuses these saves too — that is the actual
     // control, and it's the one that matters since anything here can be edited
     // in a browser console. Stopping at this choke point as well means a
@@ -4444,7 +4824,7 @@ function AssetTracker() {
     // that the next load will silently undo. Every write in the app funnels
     // through persist(), so nothing gets past this by being missed.
     if (!canEdit) {
-      setReadOnlyNotice("Your access is view-only, so that change wasn't saved.");
+      setNotice("Your access is view-only, so that change wasn't saved.");
       return;
     }
     // Reference equality against current state, computed before any setState
@@ -4467,13 +4847,22 @@ function AssetTracker() {
       // conflict with anyone editing any asset anywhere.
       photos: nextPhotos !== photos,
     };
-    // Set before the first await and cleared in the finally below, so it always
-    // clears — on success, on a network/backend failure, and on the conflict
-    // path that reloads and opens the blocking modal. A spinner that never
-    // stops would be worse than no spinner at all.
+    // THE DOUBLE-SUBMIT LOCK, and its scope is the whole point since saves went
+    // to the background. It used to be held for the entire round trip, which was
+    // fine while every handler awaited that round trip — and became wrong the
+    // moment they stopped: a background write would have blocked every unrelated
+    // write control for its whole duration, which is the frozen-app feeling this
+    // change exists to remove. attachPhotos and deletePhoto read this too, so
+    // the old scope would have blocked attaching a photo because someone renamed
+    // a room two seconds ago.
+    //
+    // What it actually has to catch is the second click that lands before React
+    // re-renders — a real window, since the click and the re-render are the same
+    // task. Clearing on a macrotask is after React has flushed and the form has
+    // closed, which is exactly that window and no more.
     savingRef.current = true;
-    setIsSaving(true);
-    try {
+    setTimeout(() => { savingRef.current = false; }, 0);
+    {
       setAssets(nextAssets);
       setColumns(nextColumns);
       setChangeTypes(nextChangeTypes);
@@ -4496,6 +4885,12 @@ function AssetTracker() {
       const payload = {
         assets: nextAssets, columns: nextColumns, changeTypes: nextChangeTypes,
         vendors: nextVendors, auditLog: nextAuditLog, peripheralsList: nextPeripheralsList, usersList: nextUsersList,
+        // How much of the log this client does NOT hold. The backend needs it to
+        // tell new rows from held ones; deciding that here instead would mean
+        // tracking what the server has already stored, which two overlapping
+        // saves and one failed retry get wrong in opposite directions -- in the
+        // one table with no rewrite path. Zero is the pre-v37 behaviour exactly.
+        auditBase: auditBaseRef.current,
         bulkItemTypes: nextBulkItemTypes, typesList: nextTypesList,
         typeSettings: nextTypeSettings, typeCategories: nextTypeLabels,
         breakerTypes: nextBreakerTypes,
@@ -4514,10 +4909,10 @@ function AssetTracker() {
         // check runs, rather than fabricating revision numbers locally.
         // scriptVersion is stamped fresh each save so the sandbox never shows a
         // false "backend outdated" warning.
-        // Note this path never awaits, so isSaving goes true and false again
-        // inside one React batch — the sandbox gets no distracting flash of a
-        // "Saving…" state for a write that took a millisecond, without the
-        // indicator having to special-case sandbox mode into being wrong.
+        // Note this path enqueues no write at all, so the sandbox paints no
+        // "Saving…" pill for something that took a millisecond and no failure
+        // can arrive later — without the indicator having to special-case
+        // sandbox mode into being wrong.
         try {
           localStorage.setItem(SANDBOX_DATA_KEY, JSON.stringify({ ...payload, scriptVersion: FRONTEND_SCRIPT_VERSION }));
           setSaveError(false);
@@ -4526,73 +4921,105 @@ function AssetTracker() {
         }
         return;
       }
-      try {
-        // Queued behind any save still in flight, and reading the revisions at
-        // send time (not closure-capture time) so a queued save uses whatever the
-        // one before it came back with — see writeQueueRef/revisionsRef.
-        const send = writeQueueRef.current.then(
-          () => writeSnapshot({ ...payload, _revisions: revisionsRef.current })
-        );
-        writeQueueRef.current = send.then(() => {}, () => {}); // keep the chain alive past a failure
-        const result = await send;
-        // Sign-in expired mid-session, or access was changed since load. Nothing
-        // was written. endSession() drops `assets` back to null, which also
-        // discards the optimistic setState above — the edit is genuinely gone,
-        // and leaving it on screen would be a lie the next load would undo.
-        if (result && result.authFailed) {
-          endSession({
-            reason: result.reason || "signin",
-            message: result.error || "Your sign-in expired. Sign in again to keep working.",
-            detail: result.detail || "",
-          });
-          return;
-        }
-        // The backend refused a save that would have emptied the Assets tab.
-        // Nothing was written. Reloading matters as much as the message: the
-        // optimistic setState above has already painted the app with whatever
-        // bad state produced this, and leaving it there invites the user to
-        // "fix" it with another save. Server truth replaces it.
-        if (result && result.refused === "emptyAssets") {
-          setReadOnlyNotice(result.error || "That save was refused because it would have deleted every asset.");
-          setSaveError(false);
-          await loadData();
-          return;
-        }
-        if (result && Array.isArray(result.conflict) && result.conflict.length) {
-          // Someone else saved first, so the backend wrote NOTHING and this edit
-          // is gone. Deliberately no auto-merge and no silent retry — a merge
-          // can't know which of two conflicting values is right, and a retry
-          // would overwrite the other person's change, which is the exact bug
-          // this whole mechanism exists to prevent. Reload server truth instead
-          // (which also replaces the optimistic setState above, so the app stops
-          // showing an edit that isn't stored anywhere) and say so plainly.
-          rememberRevisions(result.revisions);
-          setSaveConflict(result.conflict);
-          setSaveError(false);
-          // Close anything mid-edit against records the reload is about to
-          // replace underneath it.
-          setBreakerModal(null);
-          setAddBreakerDraft(null);
-          setSwapModal(null);
-          setMoveCircuitModal(null);
-          setDetailEditing(false);
-          setEditingMaintenanceId(null);
-          setMaintenanceEditDraft(null);
-          await loadData();
-          return;
-        }
-        // A v11-or-older backend reports no revisions; leaving them as-is keeps
-        // posting the same (all-zero) numbers, which it ignores anyway.
-        if (result && result.revisions) rememberRevisions(result.revisions);
-        setSaveConflict(null);
-        setSaveError(false);
-      } catch (e) {
-        setSaveError(true);
-      }
-    } finally {
-      savingRef.current = false;
-      setIsSaving(false);
+      // ENQUEUED, NOT AWAITED — this is what makes a save feel instant. The
+      // optimistic setState above has already painted the change, writeQueueRef
+      // already serializes the POSTs, and the revision check already refuses a
+      // stale one. So the only thing awaiting the round trip ever bought was a
+      // form frozen for the 1.5-5s it takes, which is the whole complaint.
+      //
+      // persist() still returns a promise and every `await persist(...)` call
+      // site is unchanged — it simply resolves now instead of in five seconds,
+      // so each handler closes its form and moves on. That is deliberately the
+      // ENTIRE call-site change: making 23 handlers individually fire-and-forget
+      // would have been 23 chances to get one wrong.
+      //
+      // THE COST, stated where it is paid: a failure now surfaces after the user
+      // has moved on. `saveContext` is what makes that recoverable rather than
+      // merely reported — see the save-failure modal.
+      const send = writeQueueRef.current.then(
+        () => writeSnapshot({ ...payload, _revisions: revisionsRef.current })
+      );
+      writeQueueRef.current = send.then(() => {}, () => {}); // keep the chain alive past a failure
+      pendingWritesRef.current += 1;
+      setIsSaving(true);
+      send.then(
+        (result) => finishWrite(result, null, saveContext),
+        (err) => finishWrite(null, err, saveContext)
+      );
     }
+  }
+
+  // The outcome of a backgrounded write. Split out of persist() because it now
+  // runs long after persist() returned, and because both the resolved and the
+  // rejected path have the same bookkeeping to do.
+  async function finishWrite(result, err, saveContext) {
+    pendingWritesRef.current = Math.max(0, pendingWritesRef.current - 1);
+    if (pendingWritesRef.current === 0) setIsSaving(false);
+
+    if (err) {
+      // The request never landed. NOTHING was written, which is what makes
+      // putting the draft back and letting the user press Save again safe here.
+      setSaveError(true);
+      setSaveFailure({ kind: "error", domains: [], context: saveContext });
+      return;
+    }
+    // Sign-in expired mid-session, or access was changed since load. Nothing
+    // was written. endSession() drops `assets` back to null, which also
+    // discards the optimistic setState — the edit is genuinely gone, and
+    // leaving it on screen would be a lie the next load would undo.
+    if (result && result.authFailed) {
+      endSession({
+        reason: result.reason || "signin",
+        message: result.error || "Your sign-in expired. Sign in again to keep working.",
+        detail: result.detail || "",
+      });
+      return;
+    }
+    // The backend refused a save that would have emptied the Assets tab.
+    // Nothing was written. Reloading matters as much as the message: the
+    // optimistic setState has already painted the app with whatever bad state
+    // produced this, and leaving it there invites the user to "fix" it with
+    // another save. Server truth replaces it.
+    if (result && result.refused === "emptyAssets") {
+      setNotice(result.error || "That save was refused because it would have deleted every asset.");
+      setSaveError(false);
+      await loadData();
+      return;
+    }
+    if (result && Array.isArray(result.conflict) && result.conflict.length) {
+      // Someone else saved first, so the backend wrote NOTHING and this edit is
+      // gone. Deliberately no auto-merge and no silent retry — a merge can't
+      // know which of two conflicting values is right, and a retry would
+      // overwrite the other person's change, which is the exact bug this whole
+      // mechanism exists to prevent. Reload server truth instead (which also
+      // replaces the optimistic setState, so the app stops showing an edit that
+      // isn't stored anywhere) and say so plainly.
+      //
+      // NOTE the revision domain is `assets`, not one asset: this fires when
+      // anyone saves ANY asset in the same moment, so in almost every case the
+      // other person touched something unrelated to what was typed here. That is
+      // exactly why putting the draft back on top of the reloaded data is the
+      // right offer — and why it is an OFFER, never an automatic re-send.
+      rememberRevisions(result.revisions);
+      setSaveFailure({ kind: "conflict", domains: result.conflict, context: saveContext });
+      setSaveError(false);
+      // Close anything mid-edit against records the reload is about to replace
+      // underneath it. The draft being offered back was captured into
+      // saveFailure above, so this cannot discard it.
+      setBreakerModal(null);
+      setAddBreakerDraft(null);
+      setSwapModal(null);
+      setMoveCircuitModal(null);
+      setDetailEditing(false);
+      setEditingMaintenanceId(null);
+      setMaintenanceEditDraft(null);
+      await loadData();
+      return;
+    }
+    // A v11-or-older backend reports no revisions; leaving them as-is keeps
+    // posting the same (all-zero) numbers, which it ignores anyway.
+    if (result && result.revisions) rememberRevisions(result.revisions);
+    setSaveError(false);
   }
 
   function logAudit(entries) {
@@ -5454,7 +5881,13 @@ function AssetTracker() {
       // than the raw draft string.
       await persist(
         [...assets, { comments: [], changes: [], allocations: [], ...named }],
-        { auditLog: logAudit([createdEntry]), nextAssetNumber: advanceAssetNumber(tag) }
+        {
+          auditLog: logAudit([createdEntry]), nextAssetNumber: advanceAssetNumber(tag),
+          // No assetId: a rejected add is rolled back, so there is no asset left
+          // to link to. The draft is the whole of what is recoverable, and
+          // re-opening the add form with it is exactly the retype it saves.
+          context: { restore: { mode: "add", draft } },
+        }
       );
       cancelAdd();
     } else {
@@ -5581,7 +6014,13 @@ function AssetTracker() {
           assetType: draftToSave.type || original.type, action: "noted", note: editNote.trim(),
         });
       }
-      await persist(next, { auditLog: editEntries.length ? logAudit(editEntries) : auditLog });
+      await persist(next, {
+        auditLog: editEntries.length ? logAudit(editEntries) : auditLog,
+        // The draft as typed, not the stripped/derived `savedDraft`: what goes
+        // back in the form has to be what was in the form, so the person sees
+        // their own words rather than a normalised version of them.
+        context: { assetId: original.id, restore: { mode: "edit", draft: draftToSave } },
+      });
       setDetailEditing(false);
       setEditNote("");
     }
@@ -5816,7 +6255,7 @@ function AssetTracker() {
     if (!PHOTO_OWNER_TYPES.includes(ownerType)) return;
     setPhotoError("");
     setPhotoBusy(true);
-    setPhotoProgress({ done: 0, total: chosen.length });
+    setPhotoProgress({ done: 0, total: chosen.length, pct: 0 });
     // Accumulated HERE and written ONCE at the end, which is the whole reason
     // this is not a loop around the old single-file handler. `photos` is the
     // state this render closed over and does not advance as we go, so a
@@ -5827,17 +6266,83 @@ function AssetTracker() {
     const added = [];
     const failures = [];
     try {
-      for (let i = 0; i < chosen.length; i++) {
-        const file = chosen[i];
-        setPhotoProgress({ done: i, total: chosen.length });
+      // EVERY SIGNATURE IN ONE ROUND TRIP. Signing used to happen inside the
+      // per-file loop, so a four-photo batch spent four separate /exec calls --
+      // ~1.5s each by RESPONSIVENESS_EVAL.md §0 -- doing nothing but asking
+      // permission. The whole batch is authorized up front now.
+      //
+      // Null when signing fails or in Sandbox; preparePhotoRow reports the
+      // failure per file rather than this throwing the batch away, so a tenant
+      // with no Cloudinary keys still names the missing ones.
+      let signatures = null;
+      if (!sandboxMode) {
         try {
-          added.push(await preparePhotoRow(ownerType, ownerId, file));
+          signatures = await signPhotoUploads(chosen.length);
         } catch (err) {
-          // One bad file does not abandon the rest -- the others are already
-          // uploaded, and throwing away good work because the fourth photo was
-          // a screenshot of a video would be worse than reporting it.
-          failures.push((file.name || "A file") + ": " + ((err && err.message) || "could not be uploaded."));
+          failures.push((err && err.message) || "Could not get permission to upload.");
+          signatures = null;
         }
+      }
+      if (sandboxMode || signatures) {
+        // UPLOADS RUN IN PARALLEL, BOUNDED. Serial was costing the whole batch
+        // the sum of its uploads; unbounded would have a phone re-encoding four
+        // multi-megapixel images at once, which is its own stall. A small pool
+        // overlaps each file's downscale with the previous one's upload, which
+        // is where the rest of the saving is.
+        //
+        // Results are written to their OWN INDEX rather than pushed, so `added`
+        // keeps the order the files were chosen in however the uploads
+        // interleave -- otherwise a gallery would reorder itself by whichever
+        // photo happened to finish first.
+        const results = new Array(chosen.length).fill(null);
+        const failedAt = new Array(chosen.length).fill(null);
+        // EACH FILE IS AN EQUAL SHARE OF THE WHOLE, and its own share fills as
+        // its bytes go out. Counting whole files is what looked broken: with
+        // three photos and a pool of three, every file is in flight at once and
+        // they all land together, so a file counter reads 0 for the entire wait
+        // and then the button disappears. A fraction moves the whole time and
+        // does not have to pretend one particular file is the current one.
+        //
+        // The resize is worth a small fixed slice of each file's share
+        // (PHOTO_RESIZE_SHARE) and the upload the rest, so the number moves as
+        // files are prepared even where byte progress never arrives at all.
+        const fraction = new Array(chosen.length).fill(0);
+        let done = 0;
+        let next = 0;
+        const report = () => {
+          let sum = 0;
+          for (let i = 0; i < fraction.length; i++) sum += fraction[i];
+          setPhotoProgress({ done, total: chosen.length, pct: Math.round(100 * sum / chosen.length) });
+        };
+        const worker = async () => {
+          for (;;) {
+            const i = next++;
+            if (i >= chosen.length) return;
+            const file = chosen[i];
+            try {
+              results[i] = await preparePhotoRow(ownerType, ownerId, file, signatures ? signatures[i] : null, f => {
+                fraction[i] = f;
+                report();
+              });
+            } catch (err) {
+              // One bad file does not abandon the rest -- the others are already
+              // uploaded, and throwing away good work because the fourth photo
+              // was a screenshot of a video would be worse than reporting it.
+              failedAt[i] = (file.name || "A file") + ": " + ((err && err.message) || "could not be uploaded.");
+            }
+            // A finished file owns its whole share whatever the byte events said
+            // -- Sandbox emits none at all, and a failed one is still not coming
+            // back, so leaving its share empty would strand the number short.
+            fraction[i] = 1;
+            done += 1;
+            report();
+          }
+        };
+        await Promise.all(
+          Array.from({ length: Math.min(PHOTO_UPLOAD_CONCURRENCY, chosen.length) }, worker)
+        );
+        results.forEach(row => { if (row) added.push(row); });
+        failedAt.forEach(msg => { if (msg) failures.push(msg); });
       }
       // A work entry's or a schedule's id can exist ONLY IN MEMORY, and that is
       // what orphaned the first batch of work-entry photos. Both are adopted at
@@ -5876,7 +6381,7 @@ function AssetTracker() {
   // attachPhotos so the per-file failure above has something to wrap, and so the
   // accumulate-then-write-once rule cannot be broken by a future call site: this
   // returns a row and writes nothing.
-  async function preparePhotoRow(ownerType, ownerId, file) {
+  async function preparePhotoRow(ownerType, ownerId, file, sig, onProgress) {
     // Both caps are checked here rather than at the picker, because a file can
     // also arrive from a drop or a share sheet that never consulted `accept`.
     const kind = fileKindOf(file);
@@ -5901,6 +6406,11 @@ function AssetTracker() {
         ? await downscalePhoto(file)
         : { blob: file, width: undefined, height: undefined };
       const fileName = (file.name || "").slice(0, 200);
+      // A document skips the resize, so its share of the bar is already spent:
+      // reporting it anyway keeps one file's progress monotonic whichever kind
+      // it is, rather than having a PDF start its upload at zero while a photo
+      // beside it starts at PHOTO_RESIZE_SHARE.
+      if (onProgress) onProgress(PHOTO_RESIZE_SHARE);
       let row;
       if (sandboxMode) {
         // Sandbox makes NO network call, here as everywhere. The object URL
@@ -5916,12 +6426,13 @@ function AssetTracker() {
           at: new Date().toISOString(), by: currentUser || "",
         };
       } else {
-        const sig = await signPhotoUpload();
+        if (!sig) throw new Error("no upload permission was issued for this file.");
         // Announces the bytes as they are NOW -- JPEG for a re-encoded photo,
         // PDF for a document that was never touched. See uploadPhotoToCloudinary.
         const uploadName = kind === "image" ? "upload.jpg"
           : (/\.pdf$/i.test(fileName) ? fileName : "document.pdf");
-        const uploaded = await uploadPhotoToCloudinary(prepared.blob, sig, uploadName);
+        const uploaded = await uploadPhotoToCloudinary(prepared.blob, sig, uploadName,
+          onProgress ? f => onProgress(PHOTO_RESIZE_SHARE + (1 - PHOTO_RESIZE_SHARE) * f) : null);
         row = {
           id: crypto.randomUUID(), ownerType: ownerType, ownerId: ownerId,
           url: uploaded.secure_url,
@@ -5944,19 +6455,32 @@ function AssetTracker() {
     }
   }
 
-  // Asks the backend to sign one upload. It refuses loudly when a tenant has no
-  // Cloudinary credentials in its Script Properties and NAMES the missing keys:
-  // that is a per-tenant setup step, easy to forget on a newly onboarded school,
-  // and the symptom otherwise looks like a broken feature.
-  async function signPhotoUpload() {
+  // Asks the backend to sign a WHOLE BATCH in one call. It refuses loudly when a
+  // tenant has no Cloudinary credentials in its Script Properties and NAMES the
+  // missing keys: that is a per-tenant setup step, easy to forget on a newly
+  // onboarded school, and the symptom otherwise looks like a broken feature.
+  //
+  // One call rather than one per file is most of what made a multi-photo batch
+  // slow -- see attachPhotos. `count` is bounded server-side, so asking for a
+  // hundred signatures does not mint a hundred.
+  async function signPhotoUploads(count) {
     const res = await fetch(SHEET_API_URL, {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ op: "photoSign", sessionId: sessionId }),
+      body: JSON.stringify({ op: "photoSign", sessionId: sessionId, count: count }),
     });
     const data = await res.json().catch(() => null);
     if (!data || !data.ok) throw new Error((data && data.error) || "Could not get permission to upload.");
-    return data;
+    // A v36-or-older backend answers with ONE signature at the top level and no
+    // `signatures` array. Reading that shape as a batch of one keeps a frontend
+    // deployed ahead of its backend working for single-photo uploads rather than
+    // failing at the one moment someone is standing in a plant room with a phone.
+    const list = Array.isArray(data.signatures) ? data.signatures : [data];
+    if (list.length < count) {
+      throw new Error("The backend issued " + list.length + " upload permissions for "
+        + count + " photos. Add them a few at a time, or update the backend.");
+    }
+    return list;
   }
 
   // Removes the ROW. The image itself stays at the host -- see PHOTOS_EVAL.md
@@ -7288,7 +7812,35 @@ function AssetTracker() {
     persist(assets, { breakerTypes: breakerTypes.filter(t => t.id !== id) });
   }
 
-  function exportToExcel() {
+  // Async ONLY because of the dynamic import below; everything after it is the
+  // same synchronous workbook build it always was.
+  async function exportToExcel() {
+    // `xlsx` is fetched HERE rather than imported at the top of the module.
+    // It is 175KB over the wire and ~433KB to parse, for a button most sessions
+    // never press — so every page load was paying for it, including the many
+    // that only ever read the inventory.
+    //
+    // The browser's module map caches it, so a second export in the same session
+    // costs nothing and there is no memo to maintain here.
+    //
+    // THE ONE BEHAVIOUR THIS CHANGES: export used to work with no network,
+    // because the module was already in memory from page load. Now a FIRST
+    // export while offline cannot fetch it. That matters more than it used to,
+    // since the snapshot cache means the app itself now opens offline — so this
+    // fails with a message naming the cause rather than a button that does
+    // nothing. A later export, once it has loaded once, still works offline.
+    // THE WHOLE LOG, always. An export that quietly dropped rows to match
+    // whatever happened to be loaded is the worst thing an audit trail can do --
+    // the same rule that keeps the Audit tab's Export emitting the workbook
+    // sheet rather than the filtered view.
+    const fullAuditLog = await ensureFullAuditLog();
+    let XLSX;
+    try {
+      XLSX = await import("xlsx");
+    } catch (e) {
+      setNotice("Couldn't load the spreadsheet export tool. Check your connection and try Export again.");
+      return;
+    }
     // Room/Building/Parent are relationships, not stored text — resolve each to
     // a display name for export the same way the UI does, rather than dumping
     // raw label ids into the sheet. roomNameOf/buildingNameOf already handle the
@@ -7376,7 +7928,7 @@ function AssetTracker() {
       });
     });
 
-    const auditRows = auditLog.map(entry => ({
+    const auditRows = fullAuditLog.map(entry => ({
       "Asset ID": entry.assetLabel, Type: entry.assetType, When: formatWhen(entry.at),
       Action: entry.action, Detail: describeAudit(entry), "By": entry.by || "",
     }));
@@ -7640,20 +8192,55 @@ function AssetTracker() {
   //
   // Styled after the existing header pills (Sandbox, Backend outdated) rather
   // than introducing a new idiom.
-  const saveStatusPill = (isSaving || saveError) && (
+  //
+  // The snapshot cache added two more states to this same slot rather than a
+  // second pill beside it. They are mutually exclusive with the save states in
+  // practice — persist() refuses to write while either load state is set — so
+  // one pill with a priority order says the true thing without two competing
+  // indicators in the corner.
+  //
+  // STALE OUTRANKS EVERYTHING. "You are looking at unconfirmed data" is worth
+  // more than any transient, and unlike the others it does not clear itself.
+  const pillState = staleSnapshot ? "stale"
+    : saveError ? "saveError"
+    : isSaving ? "saving"
+    : revalidating ? "revalidating"
+    : null;
+  const PILL_COPY = {
+    stale: {
+      label: "Saved copy",
+      title: "The server couldn't be reached, so this is the last inventory this device saved. It may be out of date, and changes can't be made until it reloads.",
+      danger: true,
+    },
+    saveError: {
+      label: "Save failed",
+      title: "The last save didn't reach the Google Sheet. Check your connection, then make the change again — it was not stored.",
+      danger: true,
+    },
+    saving: {
+      label: "Saving…",
+      title: "Saving to the Google Sheet — this can take a few seconds on the first save.",
+      danger: false,
+    },
+    revalidating: {
+      label: "Updating…",
+      title: "Showing the copy this device already had while checking the Google Sheet for anything newer.",
+      danger: false,
+    },
+  };
+  const saveStatusPill = pillState && (
     <span
-      title={isSaving
-        ? "Saving to the Google Sheet — this can take a few seconds on the first save."
-        : "The last save didn't reach the Google Sheet. Check your connection, then make the change again — it was not stored."}
+      title={PILL_COPY[pillState].title}
       style={{
         display: "flex", alignItems: "center", gap: 5, flexShrink: 0,
-        border: `1.5px solid ${isSaving ? C.border : C.danger}`, borderRadius: 12, padding: "3px 10px",
+        border: `1.5px solid ${PILL_COPY[pillState].danger ? C.danger : C.border}`, borderRadius: 12, padding: "3px 10px",
         fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 700,
-        color: isSaving ? C.muted : C.danger, background: isSaving ? "transparent" : C.surface,
+        color: PILL_COPY[pillState].danger ? C.danger : C.muted,
+        background: PILL_COPY[pillState].danger ? C.surface : "transparent",
       }}
     >
-      {isSaving ? <Loader2 size={12} className="spin" /> : <AlertTriangle size={12} />}
-      {isSaving ? "Saving…" : "Save failed"}
+      {PILL_COPY[pillState].danger ? <AlertTriangle size={12} /> : <Loader2 size={12} className="spin" />}
+      {PILL_COPY[pillState].label}
     </span>
   );
 
@@ -7906,9 +8493,57 @@ function AssetTracker() {
   // and the app has already reloaded what's actually stored — so this has to be
   // unmissable and has to say "redo it", not "retrying…". zIndex 60, above every
   // other modal, since it can fire while one of them is open.
-  const conflictModal = saveConflict && (
+  // Shown when a save failed — rejected because someone else saved first, or
+  // never reached the Sheet at all. Either way the change is gone: the backend
+  // wrote nothing and the app has reloaded what is actually stored.
+  //
+  // THIS BECAME LOAD-BEARING WHEN SAVES WENT TO THE BACKGROUND. While every
+  // handler awaited its round trip the user was still standing on the form when
+  // this fired, so "make your change again" was advice they could act on
+  // immediately. Now they may be two assets away, so this has to carry the way
+  // BACK — and, when the save was a form, the typing itself.
+  //
+  // zIndex 60, above every other modal, since it can fire while one is open.
+  const failedContext = (saveFailure && saveFailure.context) || null;
+  const failedAsset = failedContext && failedContext.assetId
+    ? assets && assets.find(a => a.id === failedContext.assetId)
+    : null;
+  // Offered only when the save carried one. A bulk action has no draft, and the
+  // asset an edit names can have been deleted by whoever we lost the race to —
+  // in which case there is nothing to restore it onto and the offer is dropped
+  // rather than shown broken.
+  const canRestore = !!(failedContext && failedContext.restore
+    && (failedContext.restore.mode === "add" || failedAsset));
+
+  // Puts the typing back and stops. NEVER re-sends: on a conflict an automatic
+  // retry would overwrite whoever saved first, which is the one thing the
+  // revision counters exist to prevent, and a person pressing Save on data they
+  // can see is the only version of "try again" that is safe in both cases.
+  // Deliberately the SAME path for both failure kinds, so there is one recovery
+  // to understand rather than a button that means different things.
+  function restoreFailedSave() {
+    const restore = failedContext && failedContext.restore;
+    setSaveFailure(null);
+    if (!restore) return;
+    // Seeded onto FRESHLY LOADED data — the conflict path reloaded before this
+    // modal could be clicked — so the form opens on what is actually stored with
+    // the typing on top, which is exactly what a person would redo by hand.
+    const seeded = { ...restore.draft, formError: "", errorFields: [] };
+    if (restore.mode === "add") {
+      closeDetail();
+      setShowAdd(true);
+      setDraft(seeded);
+      return;
+    }
+    if (!failedAsset) return;
+    openDetail(failedAsset);
+    setDraft(seeded);
+    setDetailEditing(true);
+  }
+
+  const conflictModal = saveFailure && (
     <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 60, padding: 16 }}>
-      <div style={{ background: C.surface, border: `1.5px solid ${C.danger}`, borderRadius: 14, padding: 22, width: "100%", maxWidth: 380, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)" }}>
+      <div style={{ background: C.surface, border: `1.5px solid ${C.danger}`, borderRadius: 14, padding: 22, width: "100%", maxWidth: 400, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)" }}>
         <div
           style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}
           title={`Server revisions now: ${REVISION_DOMAINS.map(d => `${d} ${revisions[d]}`).join(", ")}`}
@@ -7917,20 +8552,49 @@ function AssetTracker() {
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.danger }}>Your change wasn't saved</div>
         </div>
         <div style={{ fontSize: 14, color: C.ink, marginBottom: 10 }}>
-          Someone else saved{" "}
-          {saveConflict.map(d => REVISION_DOMAIN_LABELS[d] || d).join(" and ")}{" "}
-          while you were working, so this save was rejected to avoid overwriting their change.
+          {saveFailure.kind === "conflict" ? (
+            <>
+              Someone else saved{" "}
+              {(saveFailure.domains || []).map(d => REVISION_DOMAIN_LABELS[d] || d).join(" and ")}{" "}
+              while you were working, so this save was rejected to avoid overwriting their change.
+            </>
+          ) : (
+            <>That change didn't reach the Google Sheet, so nothing was stored.</>
+          )}
         </div>
+        {/* Names the subject, because by the time this appears the user may be
+            somewhere else entirely — the whole reason it exists. */}
+        {failedAsset && (
+          <div style={{ fontSize: 13, color: C.muted, marginBottom: 10 }}>
+            It was your change to{" "}
+            <button
+              onClick={() => { setSaveFailure(null); openDetail(failedAsset); }}
+              style={{ background: "none", border: "none", padding: 0, font: "inherit", color: C.brand, fontWeight: 600, textDecoration: "underline", cursor: "pointer" }}
+            >
+              {nameOf(failedAsset, typesList)}
+            </button>.
+          </div>
+        )}
         <div style={{ fontSize: 13, color: C.muted, marginBottom: 16 }}>
-          Nothing you just did was stored. The latest data has been reloaded — check it, then make your change again.
+          {canRestore
+            ? "Nothing was stored. The latest data has been reloaded — put your changes back on top of it, check them, and save again."
+            : "Nothing you just did was stored. The latest data has been reloaded — check it, then make your change again."}
         </div>
-        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button
-            onClick={() => setSaveConflict(null)}
-            style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+            onClick={() => setSaveFailure(null)}
+            style={{ padding: "8px 14px", background: canRestore ? "transparent" : C.brand, color: canRestore ? C.muted : "#fff", border: canRestore ? `1.5px solid ${C.border}` : "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
           >
-            Got it
+            {canRestore ? "Discard" : "Got it"}
           </button>
+          {canRestore && (
+            <button
+              onClick={restoreFailedSave}
+              style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+            >
+              Restore my changes
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -7946,7 +8610,6 @@ function AssetTracker() {
       onRemove={removePeripheral}
       onClose={() => { setShowPeripheralsManager(false); setNewPeripheralName(""); }}
       placeholder="New peripheral name"
-      isSaving={isSaving}
     />
   );
 
@@ -8046,7 +8709,7 @@ function AssetTracker() {
                   <>
                     <select
                       value={u.role}
-                      disabled={isSelf || isSaving}
+                      disabled={isSelf}
                       onChange={e => setAccessRole(u.email, e.target.value)}
                       style={{ padding: "5px 8px", border: `1.5px solid ${C.border}`, borderRadius: 8, fontSize: 12, background: C.surface, color: C.ink }}
                     >
@@ -8055,7 +8718,7 @@ function AssetTracker() {
                     </select>
                     <button
                       onClick={() => removeAccessUser(u.email)}
-                      disabled={isSelf || isSaving}
+                      disabled={isSelf}
                       style={{ background: "none", border: "none", padding: 4, color: isSelf ? C.border : C.danger, fontSize: 12, fontWeight: 600, cursor: isSelf ? "default" : "pointer" }}
                     >
                       Remove
@@ -8097,7 +8760,6 @@ function AssetTracker() {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
           <button
             onClick={addAccessUser}
-            disabled={isSaving}
             style={{ padding: "8px 16px", background: C.brand, color: "#fff", border: "none", fontWeight: 600, fontSize: 13, borderRadius: 10, cursor: "pointer" }}
           >
             Add
@@ -8132,7 +8794,6 @@ function AssetTracker() {
       onRemove={removeUser}
       onClose={() => { setShowUsersManager(false); setNewUserName(""); }}
       placeholder="New user's name"
-      isSaving={isSaving}
     />
   );
 
@@ -8146,7 +8807,6 @@ function AssetTracker() {
       onRemove={removeBulkItemType}
       onClose={() => { setShowBulkItemTypesManager(false); setNewBulkItemTypeName(""); }}
       placeholder="New sub-type, e.g. Folding Chair"
-      isSaving={isSaving}
     />
   );
 
@@ -8164,7 +8824,6 @@ function AssetTracker() {
       onReset={resetTypeSettings}
       onRemove={removeType}
       onClose={() => { setShowTypesManager(false); setNewTypeName(""); }}
-      isSaving={isSaving}
       canEdit={canEdit}
       isLocked={isLockedType}
       nameTaken={typeNameTaken}
@@ -8217,10 +8876,9 @@ function AssetTracker() {
                         <button onClick={() => setConfirmDeleteTypeId(null)} style={{ padding: "3px 8px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12, color: C.ink }}>Cancel</button>
                         <button
                           onClick={() => { removeBreakerType(t.id); setConfirmDeleteTypeId(null); }}
-                          disabled={isSaving}
-                          style={{ padding: "3px 8px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontSize: 12, fontWeight: 600 }}
+                          style={{ padding: "3px 8px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontSize: 12, fontWeight: 600 }}
                         >
-                          {isSaving ? "Saving…" : "Delete"}
+                          {"Delete"}
                         </button>
                       </div>
                     </div>
@@ -8340,8 +8998,8 @@ function AssetTracker() {
               <button onClick={cancelBreakerTypeDraft} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
                 Cancel
               </button>
-              <button onClick={saveBreakerType} disabled={isSaving} style={{ padding: "8px 14px", background: isSaving ? C.border : C.success, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>
-                {isSaving ? "Saving…" : "Save Type"}
+              <button onClick={saveBreakerType} style={{ padding: "8px 14px", background: C.success, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>
+                {"Save Type"}
               </button>
             </div>
           </div>
@@ -8517,10 +9175,10 @@ function AssetTracker() {
                   <button onClick={() => setChangeModal(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                   <button
                     onClick={changeModal.mode === "edit" ? saveChangeEdit : addChange}
-                    disabled={isSaving || !changeDraft.changeType || !workTarget || (changeDraft.markPerformed && !changeDraft.performedOn)}
-                    style={{ padding: "8px 14px", background: (!isSaving && changeDraft.changeType && workTarget && !(changeDraft.markPerformed && !changeDraft.performedOn)) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                    disabled={!changeDraft.changeType || !workTarget || (changeDraft.markPerformed && !changeDraft.performedOn)}
+                    style={{ padding: "8px 14px", background: (changeDraft.changeType && workTarget && !(changeDraft.markPerformed && !changeDraft.performedOn)) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                   >
-                    {isSaving ? "Saving…" : (changeModal.mode === "edit" ? "Save changes" : "Log work")}
+                    {(changeModal.mode === "edit" ? "Save changes" : "Log work")}
                   </button>
                 </div>
               </div>
@@ -8598,10 +9256,10 @@ function AssetTracker() {
                   <button onClick={() => setShowMaintenanceAdd(false)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                   <button
                     onClick={addMaintenanceItem}
-                    disabled={isSaving || !maintenanceDraft.task.trim() || !workTarget}
-                    style={{ padding: "8px 14px", background: (!isSaving && maintenanceDraft.task.trim() && workTarget) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                    disabled={!maintenanceDraft.task.trim() || !workTarget}
+                    style={{ padding: "8px 14px", background: (maintenanceDraft.task.trim() && workTarget) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                   >
-                    {isSaving ? "Saving…" : "Schedule"}
+                    {"Schedule"}
                   </button>
                 </div>
               </div>
@@ -8665,10 +9323,10 @@ function AssetTracker() {
                   />
                   <button
                     onClick={savePhotoCaption}
-                    disabled={isSaving || photoCaptionDraft === (photoViewer.caption || "")}
-                    style={{ padding: "8px 14px", background: (isSaving || photoCaptionDraft === (photoViewer.caption || "")) ? "rgba(255,255,255,0.14)" : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13, cursor: "pointer" }}
+                    disabled={photoCaptionDraft === (photoViewer.caption || "")}
+                    style={{ padding: "8px 14px", background: (photoCaptionDraft === (photoViewer.caption || "")) ? "rgba(255,255,255,0.14)" : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13, cursor: "pointer" }}
                   >
-                    {isSaving ? "Saving…" : "Save"}
+                    {"Save"}
                   </button>
                 </div>
               ) : photoViewer.caption ? (
@@ -8965,10 +9623,9 @@ function AssetTracker() {
                 {!isPlaceType(selectedAsset.type) && (
                   <button
                     onClick={() => duplicateAsset(selectedAsset)}
-                    disabled={isSaving}
-                    style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: "transparent", color: isSaving ? C.placeholder : C.brandDark, border: `1.5px solid ${isSaving ? C.border : C.brandDark}`, fontWeight: 600, fontSize: 14, borderRadius: 10 }}
+                    style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: "transparent", color: C.brandDark, border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 14, borderRadius: 10 }}
                   >
-                    {isSaving ? <Loader2 size={15} className="spin" /> : <Copy size={15} />} {isSaving ? "Saving…" : "Duplicate"}
+                    <Copy size={15} /> Duplicate
                   </button>
                 )}
                 {(selectedAsset.status || "Active") !== "Archived" ? (
@@ -8982,10 +9639,9 @@ function AssetTracker() {
                   <>
                     <button
                       onClick={() => restoreAsset(selectedAsset.id)}
-                      disabled={isSaving}
-                      style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: "transparent", color: isSaving ? C.placeholder : C.brandDark, border: `1.5px solid ${isSaving ? C.border : C.brandDark}`, fontWeight: 600, fontSize: 14, borderRadius: 10 }}
+                      style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: "transparent", color: C.brandDark, border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 14, borderRadius: 10 }}
                     >
-                      {isSaving ? <Loader2 size={15} className="spin" /> : <ArchiveRestore size={15} />} {isSaving ? "Saving…" : "Restore"}
+                      <ArchiveRestore size={15} /> Restore
                     </button>
                     <button
                       onClick={() => setConfirmDelete(selectedAsset.id)}
@@ -9082,8 +9738,8 @@ function AssetTracker() {
                 />
               </label>
               <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
-                <button onClick={saveDraft} disabled={isSaving} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: isSaving ? C.border : C.success, color: "#fff", border: "none", fontWeight: 600, fontSize: 14, borderRadius: 10 }}>
-                  {isSaving ? <Loader2 size={15} className="spin" /> : <Save size={15} />} {isSaving ? "Saving…" : "Save"}
+                <button onClick={saveDraft} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: C.success, color: "#fff", border: "none", fontWeight: 600, fontSize: 14, borderRadius: 10 }}>
+                  <Save size={15} /> Save
                 </button>
                 <button onClick={() => { setDetailEditing(false); setEditNote(""); }} style={{ padding: "9px 16px", background: "transparent", border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 14, borderRadius: 10, color: C.ink }}>
                   Cancel
@@ -9233,10 +9889,10 @@ function AssetTracker() {
                 <div style={{ display: "flex", justifyContent: "flex-end" }}>
                   <button
                     onClick={saveAllocation}
-                    disabled={isSaving || !allocationDraft.roomId || !allocationDraft.quantity}
-                    style={{ padding: "8px 14px", background: (!isSaving && allocationDraft.roomId && allocationDraft.quantity) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                    disabled={!allocationDraft.roomId || !allocationDraft.quantity}
+                    style={{ padding: "8px 14px", background: (allocationDraft.roomId && allocationDraft.quantity) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                   >
-                    {isSaving ? "Saving…" : "Assign"}
+                    {"Assign"}
                   </button>
                 </div>
               </div>
@@ -9276,7 +9932,6 @@ function AssetTracker() {
               setAddBreakerDraft={setAddBreakerDraft}
               setShowBreakerTypesManager={setShowBreakerTypesManager}
               addBreaker={addBreaker}
-              isSaving={isSaving}
               addCircuit={addCircuit}
               saveCircuitEdit={saveCircuitEdit}
               deleteCircuit={deleteCircuit}
@@ -9323,8 +9978,7 @@ function AssetTracker() {
               <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
                 <button
                   onClick={() => openMaintenanceAdd()}
-                  disabled={isSaving}
-                  style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                 >
                   <Plus size={14} /> Add task
                 </button>
@@ -9382,10 +10036,10 @@ function AssetTracker() {
                           <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
                             <button
                               onClick={saveMaintenanceEdit}
-                              disabled={isSaving || !maintenanceEditDraft.task.trim()}
-                              style={{ padding: "8px 14px", background: (!isSaving && maintenanceEditDraft.task.trim()) ? C.success : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                              disabled={!maintenanceEditDraft.task.trim()}
+                              style={{ padding: "8px 14px", background: (maintenanceEditDraft.task.trim()) ? C.success : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                             >
-                              {isSaving ? "Saving…" : "Save"}
+                              {"Save"}
                             </button>
                             <button onClick={cancelEditMaintenance} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
                               Cancel
@@ -9460,8 +10114,8 @@ function AssetTracker() {
                               {(canEdit || history.length > 0) && (
                               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                                 {canEdit && (
-                                <button onClick={() => openMaintenanceComplete(item.id)} disabled={isSaving} style={{ padding: "6px 12px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 12 }}>
-                                  {isSaving ? "Saving…" : "Log completion…"}
+                                <button onClick={() => openMaintenanceComplete(item.id)} style={{ padding: "6px 12px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 12 }}>
+                                  {"Log completion…"}
                                 </button>
                                 )}
                                 {history.length > 0 && (
@@ -9520,8 +10174,7 @@ function AssetTracker() {
               <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
                 <button
                   onClick={() => openChangeAdd()}
-                  disabled={isSaving}
-                  style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                 >
                   <Plus size={14} /> Log work
                 </button>
@@ -9652,10 +10305,10 @@ function AssetTracker() {
                 <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
                   <button
                     onClick={addComment}
-                    disabled={isSaving || !commentDraft.trim()}
-                    style={{ padding: "8px 14px", background: (!isSaving && commentDraft.trim()) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                    disabled={!commentDraft.trim()}
+                    style={{ padding: "8px 14px", background: (commentDraft.trim()) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                   >
-                    {isSaving ? "Saving…" : "Add comment"}
+                    {"Add comment"}
                   </button>
                 </div>
               </div>
@@ -9718,6 +10371,7 @@ function AssetTracker() {
             );
             return (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {auditPartialNotice}
                 {assetAuditEntries.length === 0 ? (
                   <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>No edits recorded yet.</div>
                 ) : assetAuditEntries.map(row)}
@@ -9767,7 +10421,7 @@ function AssetTracker() {
                     <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>This erases it from the inventory entirely — including its comments and work history. Unlike archiving, this cannot be recovered.</div>
                     <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
                       <button onClick={() => setConfirmDelete(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
-                      <button onClick={() => doDelete(confirmDelete)} disabled={isSaving} style={{ padding: "8px 14px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>{isSaving ? "Saving…" : "Permanently delete"}</button>
+                      <button onClick={() => doDelete(confirmDelete)} style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>{"Permanently delete"}</button>
                     </div>
                   </>
                 )}
@@ -9783,7 +10437,7 @@ function AssetTracker() {
               <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>It'll be hidden from the active list by default but nothing is deleted — you can restore it, or permanently delete it, anytime from here.</div>
               <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
                 <button onClick={() => setConfirmArchive(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
-                <button onClick={() => archiveAsset(confirmArchive)} disabled={isSaving} style={{ padding: "8px 14px", background: isSaving ? C.border : C.brandDark, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>{isSaving ? "Saving…" : "Archive"}</button>
+                <button onClick={() => archiveAsset(confirmArchive)} style={{ padding: "8px 14px", background: C.brandDark, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>{"Archive"}</button>
               </div>
             </div>
           </div>
@@ -9798,10 +10452,9 @@ function AssetTracker() {
                 <button onClick={() => setConfirmCommentDelete(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                 <button
                   onClick={() => { deleteComment(confirmCommentDelete); setConfirmCommentDelete(null); }}
-                  disabled={isSaving}
-                  style={{ padding: "8px 14px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                 >
-                  {isSaving ? "Saving…" : "Delete"}
+                  {"Delete"}
                 </button>
               </div>
             </div>
@@ -9817,10 +10470,9 @@ function AssetTracker() {
                 <button onClick={() => setConfirmChangeDelete(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                 <button
                   onClick={() => { deleteChange(confirmChangeDelete); setConfirmChangeDelete(null); }}
-                  disabled={isSaving}
-                  style={{ padding: "8px 14px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                 >
-                  {isSaving ? "Saving…" : "Delete"}
+                  {"Delete"}
                 </button>
               </div>
             </div>
@@ -9836,10 +10488,9 @@ function AssetTracker() {
                 <button onClick={() => setConfirmAllocationRemove(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                 <button
                   onClick={() => removeAllocation(confirmAllocationRemove)}
-                  disabled={isSaving}
-                  style={{ padding: "8px 14px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                 >
-                  {isSaving ? "Saving…" : "Remove"}
+                  {"Remove"}
                 </button>
               </div>
             </div>
@@ -9855,10 +10506,9 @@ function AssetTracker() {
                 <button onClick={() => setConfirmMaintenanceDelete(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                 <button
                   onClick={() => deleteMaintenanceItem(confirmMaintenanceDelete)}
-                  disabled={isSaving}
-                  style={{ padding: "8px 14px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                 >
-                  {isSaving ? "Saving…" : "Delete"}
+                  {"Delete"}
                 </button>
               </div>
             </div>
@@ -9938,10 +10588,9 @@ function AssetTracker() {
                 <button onClick={() => setMaintenanceCompleteModal(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                 <button
                   onClick={submitMaintenanceComplete}
-                  disabled={isSaving}
-                  style={{ padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                 >
-                  {isSaving ? "Saving…" : "Log completion"}
+                  {"Log completion"}
                 </button>
               </div>
             </div>
@@ -10154,7 +10803,6 @@ function AssetTracker() {
                             items={member.circuits || []}
                             fields={CIRCUIT_TABLE_FIELDS}
                             initialDraft={CIRCUIT_TABLE_INITIAL_DRAFT}
-                            isSaving={isSaving}
                             onAdd={draft2 => addCircuit(member.id, draft2)}
                             onSave={(id, draft2) => saveCircuitEdit(member.id, id, draft2)}
                             onDelete={id => deleteCircuit(member.id, id)}
@@ -10223,10 +10871,9 @@ function AssetTracker() {
                               deleteBreakerGroup(members, groupSlotLabel, attached > 0);
                               closeModal();
                             }}
-                            disabled={isSaving}
-                            style={{ padding: "8px 12px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                            style={{ padding: "8px 12px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                           >
-                            {isSaving ? "Saving…" : attached > 0 ? "Unassign & delete" : "Delete"}
+                            {attached > 0 ? "Unassign & delete" : "Delete"}
                           </button>
                         </div>
                       </>
@@ -10253,10 +10900,9 @@ function AssetTracker() {
                               if (reason) { patchBreakerModal({ error: reason }); return; }
                               patchBreakerModal({ editing: false, error: null });
                             }}
-                            disabled={isSaving}
-                            style={{ padding: "8px 14px", background: isSaving ? C.border : C.success, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                            style={{ padding: "8px 14px", background: C.success, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                           >
-                            {isSaving ? "Saving…" : "Save"}
+                            {"Save"}
                           </button>
                         </div>
                       </>
@@ -10359,10 +11005,9 @@ function AssetTracker() {
                 </button>
                 <button
                   onClick={submitMoveCircuit}
-                  disabled={isSaving}
-                  style={{ padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                 >
-                  {isSaving ? "Saving…" : "Move"}
+                  {"Move"}
                 </button>
               </div>
             </div>
@@ -10379,7 +11024,6 @@ function AssetTracker() {
             onRemove={removeChangeType}
             onClose={() => { setShowChangeTypeManager(false); setNewChangeTypeName(""); }}
             placeholder="New work type"
-            isSaving={isSaving}
           />
         )}
 
@@ -10393,7 +11037,6 @@ function AssetTracker() {
             onRemove={removeVendor}
             onClose={() => { setShowVendorManager(false); setNewVendorName(""); }}
             placeholder="New vendor name"
-            isSaving={isSaving}
           />
         )}
         {renderWorkDialogs()}
@@ -10419,11 +11062,12 @@ function AssetTracker() {
       {typesManagerModal}
       {breakerTypesManagerModal}
 
-      {/* Shown when a view-only user's action was refused. persist() sets this
-          and returns without touching anything, so the message is the only
-          evidence the click happened — without it the app would just look
-          broken to someone who doesn't know they're view-only. */}
-      {readOnlyNotice && (
+      {/* Shown when an action was refused or could not be completed, and the
+          refusal is the only evidence the click happened at all — a view-only
+          save, a refused mass deletion, a write against an unconfirmed snapshot,
+          a failed export. Without it the app just looks broken to someone who
+          does not know why nothing happened. */}
+      {notice && (
         <div
           style={{
             position: "fixed", top: 12, left: "50%", transform: "translateX(-50%)", zIndex: 60,
@@ -10432,9 +11076,9 @@ function AssetTracker() {
             boxShadow: "0 4px 12px rgba(42,52,57,0.18)", maxWidth: "min(92vw, 460px)",
           }}
         >
-          <span style={{ fontSize: 13, color: C.ink, lineHeight: 1.45 }}>{readOnlyNotice}</span>
+          <span style={{ fontSize: 13, color: C.ink, lineHeight: 1.45 }}>{notice}</span>
           <button
-            onClick={() => setReadOnlyNotice(null)}
+            onClick={() => setNotice(null)}
             style={{ background: "none", border: "none", padding: 0, color: C.muted, fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}
           >
             Dismiss
@@ -10761,8 +11405,7 @@ function AssetTracker() {
           <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16 }}>
             <button
               onClick={startAdd}
-              disabled={isSaving}
-              style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+              style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
             >
               <Plus size={14} /> Add asset
             </button>
@@ -10846,8 +11489,8 @@ function AssetTracker() {
             </div>
             {showsFormError(draft, addFormColumns) && <div style={{ fontSize: 13, color: C.danger, marginTop: 12 }}>{draft.formError}</div>}
             <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
-              <button onClick={saveDraft} disabled={isSaving} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: isSaving ? C.border : C.success, color: "#fff", border: "none", fontWeight: 600, fontSize: 14, borderRadius: 10 }}>
-                {isSaving ? <Loader2 size={15} className="spin" /> : <Save size={15} />} {isSaving ? "Saving…" : "Save"}
+              <button onClick={saveDraft} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: C.success, color: "#fff", border: "none", fontWeight: 600, fontSize: 14, borderRadius: 10 }}>
+                <Save size={15} /> Save
               </button>
               <button onClick={cancelAdd} style={{ padding: "9px 16px", background: "transparent", border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 14, borderRadius: 10, color: C.ink }}>
                 Cancel
@@ -11046,15 +11689,13 @@ function AssetTracker() {
             <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
               <button
                 onClick={() => openMaintenanceAdd("")}
-                disabled={isSaving}
                 style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", background: "transparent", color: C.brandDark, border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13 }}
               >
                 <Plus size={14} /> Add task
               </button>
               <button
                 onClick={() => openChangeAdd("")}
-                disabled={isSaving}
-                style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
               >
                 <Plus size={14} /> Log work
               </button>
@@ -11226,6 +11867,8 @@ function AssetTracker() {
               {/* The same drill-down the other two tabs use, on the same
                   scopeId -- narrowing to a building narrows this too. */}
               <HierarchyNav assets={assets} scopeId={scopeId} setScopeId={setScopeId} />
+
+              {auditPartialNotice}
 
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
                 <div style={{ fontSize: 12, color: C.muted }}>
@@ -11410,7 +12053,7 @@ function AssetTracker() {
                   title="Kind of value"
                 />
               </div>
-              <button onClick={addColumn} disabled={isSaving} style={{ padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600, flexShrink: 0 }}>{isSaving ? "Saving…" : "Add"}</button>
+              <button onClick={addColumn} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600, flexShrink: 0 }}>{"Add"}</button>
             </div>
             )}
           </div>
@@ -11425,7 +12068,7 @@ function AssetTracker() {
             <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>This deletes that field's data from every asset. This can't be undone.</div>
             <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
               <button onClick={() => setConfirmDeleteCol(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
-              <button onClick={() => removeColumn(confirmDeleteCol)} disabled={isSaving} style={{ padding: "8px 14px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>{isSaving ? "Saving…" : "Remove"}</button>
+              <button onClick={() => removeColumn(confirmDeleteCol)} style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>{"Remove"}</button>
             </div>
           </div>
         </div>
@@ -12254,10 +12897,10 @@ function Detail({ label, value, wide, italic }) {
   );
 }
 
-// `isSaving` is threaded in from AssetTracker rather than each caller wiring up
-// its own: every one of these lists writes through the same persist(), so the
-// add/remove controls here disable and say "Saving…" for the same reason the
-// asset forms do. Guarding onAdd/onRemove in one place covers all six lists.
+// These lists took an `isSaving` prop until 2026-09-16, to disable their add and
+// remove controls while a write was in flight. Saves are backgrounded now, so a
+// write in flight is no longer something the person in front of this modal is
+// waiting on, and the double click is caught by savingRef in the handler.
 // Manages the asset TYPE list: add, rename, remove. Separate from
 // ListManagerModal because a type is an { id, name } record rather than a bare
 // string — renaming one edits a field, where renaming a string would mean
@@ -12272,7 +12915,7 @@ function Detail({ label, value, wide, italic }) {
 // trailing edge of the row it edits (see CLAUDE.md).
 function TypeManagerModal({
   types, newValue, onNewValueChange, onAdd, onSave, onReset, onRemove, onClose,
-  isSaving, canEdit, isLocked, nameTaken, countFor, fieldOptions, hasOverrides,
+  canEdit, isLocked, nameTaken, countFor, fieldOptions, hasOverrides,
   labels, onSaveLabels,
 }) {
   const [confirmId, setConfirmId] = useState(null);
@@ -12349,7 +12992,7 @@ function TypeManagerModal({
   // thing: those ids already exist in the registry and must not change.)
   const addLabel = () => {
     const name = newLabelName.trim();
-    if (!name || isSaving) return;
+    if (!name) return;
     if ((labels || []).some(c => c.name.trim().toLowerCase() === name.toLowerCase())) return;
     onSaveLabels([...(labels || []), { id: crypto.randomUUID(), name }]);
     setNewLabelName("");
@@ -12357,7 +13000,7 @@ function TypeManagerModal({
 
   const clean = (draft?.name || "").trim();
   const duplicate = !!draft && !!clean && nameTaken(clean, draft.id);
-  const canSave = !!clean && !duplicate && !isSaving;
+  const canSave = !!clean && !duplicate;
   const toggle = (list, v) => (list.includes(v) ? list.filter(x => x !== v) : [...list, v]);
 
   // Pending until Save, so the whole editor is still one commit — creating the
@@ -12607,9 +13250,9 @@ function TypeManagerModal({
                 style={{ flex: 1, padding: "6px 8px", border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 13, fontFamily: "inherit", background: C.surface, color: C.ink }}
               />
               <button
-                type="button" onClick={addLabel} disabled={isSaving}
-                style={{ padding: "6px 12px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 13, fontWeight: 600 }}
-              >{isSaving ? "Saving…" : "Add"}</button>
+                type="button" onClick={addLabel}
+                style={{ padding: "6px 12px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 13, fontWeight: 600 }}
+              >{"Add"}</button>
             </div>
             <button
               type="button" onClick={() => setEditingLabels(false)}
@@ -12825,12 +13468,12 @@ function TypeManagerModal({
                 disabled={!canSave}
                 style={{ padding: "6px 14px", background: canSave ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontSize: 13, fontWeight: 600 }}
               >
-                {isSaving ? "Saving…" : "Save"}
+                {"Save"}
               </button>
               <button onClick={cancelEdit} style={{ padding: "6px 12px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 13, color: C.ink }}>Cancel</button>
               {hasOverrides(draft.id) && (
                 <button
-                  onClick={() => { if (isSaving) return; onReset(draft.id); cancelEdit(); }}
+                  onClick={() => { onReset(draft.id); cancelEdit(); }}
                   style={{ marginLeft: "auto", padding: "6px 12px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12, color: C.muted }}
                 >
                   Reset to default
@@ -12864,11 +13507,10 @@ function TypeManagerModal({
                         <div style={{ display: "flex", gap: 6 }}>
                           <button onClick={() => setConfirmId(null)} style={{ padding: "3px 8px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12, color: C.ink }}>Cancel</button>
                           <button
-                            onClick={() => { if (isSaving) return; onRemove(t.id); setConfirmId(null); }}
-                            disabled={isSaving}
-                            style={{ padding: "3px 8px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontSize: 12, fontWeight: 600 }}
+                            onClick={() => { onRemove(t.id); setConfirmId(null); }}
+                            style={{ padding: "3px 8px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontSize: 12, fontWeight: 600 }}
                           >
-                            {isSaving ? "Saving…" : "Delete"}
+                            {"Delete"}
                           </button>
                         </div>
                       </>
@@ -12925,10 +13567,9 @@ function TypeManagerModal({
                 />
                 <button
                   onClick={onAdd}
-                  disabled={isSaving}
-                  style={{ padding: "6px 12px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 13, fontWeight: 600 }}
+                  style={{ padding: "6px 12px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 13, fontWeight: 600 }}
                 >
-                  {isSaving ? "Saving…" : "Add"}
+                  {"Add"}
                 </button>
               </div>
             )}
@@ -12944,7 +13585,7 @@ function TypeManagerModal({
 // archive live on the asset itself. `action` is an optional one-shot button --
 // the users conversion, which belongs here because this is where someone goes
 // looking for the user list.
-function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onRemove, onClose, placeholder, isLocked, hint, isSaving, readOnly, note, action }) {
+function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onRemove, onClose, placeholder, isLocked, hint, readOnly, note, action }) {
   const [confirmItem, setConfirmItem] = useState(null);
   return (
     // zIndex 50, above SelectionModal's 40 — this modal is frequently opened via the
@@ -12961,16 +13602,15 @@ function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onR
         {action && (
           <div style={{ marginBottom: 14 }}>
             <button
-              onClick={() => { if (isSaving) return; action.onClick(); }}
-              disabled={isSaving}
+              onClick={() => { action.onClick(); }}
               style={{
                 width: "100%", padding: "8px 12px", borderRadius: 10, fontSize: 13, fontWeight: 600,
-                border: "none", background: isSaving ? C.border : C.brand, color: "#fff",
+                border: "none", background: C.brand, color: "#fff",
                 display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
               }}
             >
-              {isSaving ? <Loader2 size={14} className="spin" /> : null}
-              {isSaving ? "Saving…" : action.label}
+              {null}
+              {action.label}
             </button>
             {action.hint && <div style={{ fontSize: 11, color: C.empty, marginTop: 6 }}>{action.hint}</div>}
           </div>
@@ -12989,11 +13629,10 @@ function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onR
                   <div style={{ display: "flex", gap: 6 }}>
                     <button onClick={() => setConfirmItem(null)} style={{ padding: "3px 8px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12, color: C.ink }}>Cancel</button>
                     <button
-                      onClick={() => { if (isSaving) return; onRemove(item); setConfirmItem(null); }}
-                      disabled={isSaving}
-                      style={{ padding: "3px 8px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontSize: 12, fontWeight: 600 }}
+                      onClick={() => { onRemove(item); setConfirmItem(null); }}
+                      style={{ padding: "3px 8px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontSize: 12, fontWeight: 600 }}
                     >
-                      {isSaving ? "Saving…" : "Delete"}
+                      {"Delete"}
                     </button>
                   </div>
                 </>
@@ -13018,11 +13657,11 @@ function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onR
           <input
             value={newValue}
             onChange={e => onNewValueChange(e.target.value)}
-            onKeyDown={e => { if (e.key === "Enter" && !isSaving) onAdd(); }}
+            onKeyDown={e => { if (e.key === "Enter") onAdd(); }}
             placeholder={placeholder}
             style={{ flex: 1, padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
           />
-          <button onClick={onAdd} disabled={isSaving} style={{ padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600 }}>{isSaving ? "Saving…" : "Add"}</button>
+          <button onClick={onAdd} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600 }}>{"Add"}</button>
         </div>
         )}
       </div>
@@ -13479,7 +14118,7 @@ function ColumnFilterModal({ activeCol, filterConfigs, sortConfig, setSortConfig
 function BreakersTabContent({
   selectedAsset, assets, breakerTypes, showPanelConfig, setShowPanelConfig,
   updatePanelConfig, openBreakerModal, addBreakerDraft, setAddBreakerDraft,
-  setShowBreakerTypesManager, addBreaker, isSaving,
+  setShowBreakerTypesManager, addBreaker,
   addCircuit, saveCircuitEdit, deleteCircuit, openMoveCircuit,
   canEdit,
 }) {
@@ -13512,7 +14151,6 @@ function BreakersTabContent({
           layout={selectedAsset.panelLayout}
           onSave={(count, lay) => { updatePanelConfig(count, lay); setShowPanelConfig(false); }}
           onCancel={slotCount > 0 ? () => setShowPanelConfig(false) : null}
-          isSaving={isSaving}
         />
       ) : (
         <PanelDiagram
@@ -13564,7 +14202,6 @@ function BreakersTabContent({
           items={unassignedCircuits}
           fields={CIRCUIT_TABLE_FIELDS}
           initialDraft={CIRCUIT_TABLE_INITIAL_DRAFT}
-          isSaving={isSaving}
           onAdd={draft => addCircuit(null, draft)}
           onSave={(id, draft) => saveCircuitEdit(null, id, draft)}
           onDelete={id => deleteCircuit(null, id)}
@@ -13666,10 +14303,9 @@ function BreakersTabContent({
                     setAddBreakerDraft(null);
                     openBreakerModal(result.newBreakers[0].id, result.newBreakers);
                   }}
-                  disabled={isSaving}
-                  style={{ padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                 >
-                  {isSaving ? "Saving…" : "Add Breaker"}
+                  {"Add Breaker"}
                 </button>
               </div>
             </div>
@@ -13684,7 +14320,7 @@ function BreakersTabContent({
 // layout — total slot count plus a layout preset. Kept separate from the
 // generic asset Edit form since it's specific to how the Breakers tab draws
 // the diagram, not a general asset field a user would expect in Details.
-function PanelConfigForm({ slotCount, layout, onSave, onCancel, isSaving }) {
+function PanelConfigForm({ slotCount, layout, onSave, onCancel }) {
   const [count, setCount] = useState(slotCount || "");
   const [lay, setLay] = useState(layout || "two-column");
   const valid = count && parseInt(count, 10) > 0;
@@ -13718,10 +14354,10 @@ function PanelConfigForm({ slotCount, layout, onSave, onCancel, isSaving }) {
         )}
         <button
           onClick={() => onSave(parseInt(count, 10) || 0, lay)}
-          disabled={isSaving || !valid}
-          style={{ padding: "8px 14px", background: (!isSaving && valid) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+          disabled={!valid}
+          style={{ padding: "8px 14px", background: (valid) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
         >
-          {isSaving ? "Saving…" : "Save layout"}
+          {"Save layout"}
         </button>
       </div>
     </div>
@@ -14660,7 +15296,7 @@ function AttachmentImage({ photo, src, alt, style, iconSize, hideName }) {
 }
 
 // The gallery is called PhotoGallery and holds photos AND documents: the stored
-// key never moved when PDFs landed in v37, and the code follows the stored key.
+// key never moved when PDFs landed in v39, and the code follows the stored key.
 // See the Files section near the top of this file.
 function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onDelete, onToggleHidden, onOpen, emptyText }) {
   const [confirmDelete, setConfirmDelete] = React.useState(null);
@@ -14697,12 +15333,14 @@ function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onDelete,
             }}
           >
             {busy ? <Loader2 size={14} className="spin" /> : <Paperclip size={14} />}
-            {/* Counts through a batch rather than saying "Uploading..." for a
-                minute with nothing moving. Reads 1-based: the first file is
-                "1 of 5", not "0 of 5". */}
+            {/* Moves rather than saying "Uploading..." for a minute with
+                nothing changing. It reports a PERCENTAGE of the batch's bytes,
+                never "file 1 of 3": uploads run in a pool, so several are always
+                in flight and a file number would be claiming otherwise -- which
+                is exactly what made this look stuck. */}
             {busy
-              ? (progress && progress.total > 1
-                  ? "Uploading " + Math.min(progress.done + 1, progress.total) + " of " + progress.total + "…"
+              ? (progress && typeof progress.pct === "number"
+                  ? (progress.total > 1 ? "Uploading " + progress.total + " files… " : "Uploading… ") + progress.pct + "%"
                   : "Uploading…")
               : "Add files"}
           </button>
@@ -14819,7 +15457,7 @@ function ChildEntityTable({
   items, fields, onAdd, onSave, onDelete, initialDraft,
   renderCustomFields, renderSummary, renderExpanded, customRowActions,
   addLabel, emptyMessage, canDelete, deleteConfirmMessage, highlightedId, hideAddButton,
-  addOpen: addOpenProp, onAddOpenChange, isSaving,
+  addOpen: addOpenProp, onAddOpenChange,
   // Defaults true so a caller that predates view-only roles behaves as it always
   // did. Both current callers pass it explicitly; keep doing that rather than
   // relying on the default, since silently defaulting to "editable" is the wrong
@@ -14935,10 +15573,10 @@ function ChildEntityTable({
     setEditDraft(null);
     setEditError(null);
   }
-  // onAdd/onSave may return a validation error string (e.g. slot overlap, or
-  // "a save is already in flight") — when they do, the draft is kept as-is so
-  // the user doesn't lose their input. The isSaving case therefore needs no
-  // separate guard here: the caller's handler reports it like any other refusal.
+  // onAdd/onSave may return a validation error string (e.g. slot overlap) — when
+  // they do, the draft is kept as-is so the user doesn't lose their input. A
+  // refusal from the caller's own guard arrives the same way, so there is
+  // nothing to check here.
   function saveEdit() {
     const error = onSave(editingId, editDraft);
     if (error) { setEditError(error); return; }
@@ -14971,8 +15609,8 @@ function ChildEntityTable({
             >
               Cancel
             </button>
-            <button onClick={submitAdd} disabled={isSaving} style={{ padding: "8px 14px", background: isSaving ? C.border : C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>
-              {isSaving ? "Saving…" : addLabel}
+            <button onClick={submitAdd} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>
+              {addLabel}
             </button>
           </div>
         </div>
@@ -15003,8 +15641,8 @@ function ChildEntityTable({
                   </div>
                   {editError && <div style={{ fontSize: 13, color: C.danger, marginBottom: 8 }}>{editError}</div>}
                   <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-                    <button onClick={saveEdit} disabled={isSaving} style={{ padding: "8px 14px", background: isSaving ? C.border : C.success, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>
-                      {isSaving ? "Saving…" : "Save"}
+                    <button onClick={saveEdit} style={{ padding: "8px 14px", background: C.success, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>
+                      {"Save"}
                     </button>
                     <button onClick={cancelEdit} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
                       Cancel
@@ -15092,11 +15730,10 @@ function ChildEntityTable({
                       Cancel
                     </button>
                     <button
-                      onClick={() => { if (isSaving) return; onDelete(confirmDeleteId); setConfirmDeleteId(null); }}
-                      disabled={isSaving}
-                      style={{ padding: "8px 14px", background: isSaving ? C.border : C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                      onClick={() => { onDelete(confirmDeleteId); setConfirmDeleteId(null); }}
+                      style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                     >
-                      {isSaving ? "Saving…" : "Delete"}
+                      {"Delete"}
                     </button>
                   </div>
                 </>
@@ -15112,6 +15749,149 @@ function ChildEntityTable({
 
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(<AssetTracker />);
+</script>
+
+<!-- ============================ TRANSPILE CACHE ============================
+     The app ships as ~880KB of JSX that Babel Standalone turns into ~2.9MB of
+     JS (the inline source map is most of that). Measured on a server-class CPU
+     that transform is 1.3-1.8s; a phone is 3-5x slower, so it was 4-8 seconds
+     of pure CPU in front of every single page load, on top of downloading
+     Babel's own 598KB and parsing its 2.87MB.
+
+     None of that work changes unless the source does. So it is done once and
+     the OUTPUT is kept in Cache Storage under a SHA-256 of the source that
+     produced it. A hit skips the transform AND skips downloading Babel at all.
+
+     WHY THE HASH IS OF THE SOURCE ITSELF, not APP_VERSION or a build date: a
+     stale cache here does not show a stale label, it runs the wrong code. Every
+     other versioning scheme in this project is hand-bumped, and this file's own
+     history is a list of hand-bumps that got forgotten. A content hash cannot be
+     forgotten -- edit the JSX, the hash moves, the cache misses, and the next
+     load transpiles exactly as it always did.
+
+     THE HONEST LIMIT: the first load after any edit is unchanged. That is the
+     right trade -- it costs nothing on the load where the code is new, and pays
+     on every load after, which is what a refresh is.
+
+     EVERY FAILURE PATH FALLS BACK TO TRANSPILING. No Cache Storage (an insecure
+     context), no crypto.subtle, a corrupt entry, a full quota -- all of them land
+     on the same path this file has always taken. The cache is an optimisation
+     and is never load-bearing. -->
+<script>
+(function () {
+  var BABEL_URL = "https://unpkg.com/@babel/standalone@7.24.7/babel.min.js";
+  // Bump the suffix if the transform OPTIONS below ever change. The hash covers
+  // the source, not the options, so without this an options change would keep
+  // serving output built under the old ones.
+  var CACHE_NAME = "asset-tracker-transpiled-v1";
+
+  var sourceTag = document.getElementById("app-source");
+  var source = sourceTag ? sourceTag.textContent : "";
+
+  // Character for character what Babel Standalone's own auto-runner passes for a
+  // <script type="text/babel" data-type="module" data-presets="react"> tag --
+  // read out of babel.min.js rather than guessed, because the default `plugins`
+  // list is NOT empty and silently dropping it would change the emitted code.
+  // sourceType is left unset, exactly as the auto-runner leaves it; Babel's own
+  // default is "module", which is what this file needs.
+  var TRANSFORM_OPTIONS = {
+    filename: "Inline Babel script",
+    presets: ["react"],
+    plugins: ["transform-class-properties", "transform-object-rest-spread", "transform-flow-strip-types"],
+    sourceMaps: "inline",
+    sourceFileName: "Inline Babel script",
+  };
+
+  // Injected the same way Babel's auto-runner injects it: an INLINE module
+  // script, not a blob URL. That matters -- bare specifiers ("react",
+  // "lucide-react") resolve against the import map in <head>, which is a
+  // property of this document, and an inline script is unambiguously part of it.
+  function run(code) {
+    var el = document.createElement("script");
+    el.type = "module";
+    el.text = code;
+    document.body.appendChild(el);
+  }
+
+  // A blank page is what this used to fail as, and a lazily-loaded Babel makes
+  // that failure likelier rather than rarer, so it now says something.
+  function fail(err) {
+    if (window.console && console.error) console.error("Asset Tracker failed to start:", err);
+    var root = document.getElementById("root");
+    if (root && !root.firstChild) {
+      root.textContent = "This app couldn't finish loading. Check your connection and reload.";
+      root.style.cssText = "padding:24px;font-family:system-ui,sans-serif;color:#7a2e2e";
+    }
+  }
+
+  function hashSource(text) {
+    var bytes = new TextEncoder().encode(text);
+    return crypto.subtle.digest("SHA-256", bytes).then(function (digest) {
+      var out = "";
+      new Uint8Array(digest).forEach(function (b) { out += b.toString(16).padStart(2, "0"); });
+      return out;
+    });
+  }
+
+  function loadBabel() {
+    return new Promise(function (resolve, reject) {
+      var el = document.createElement("script");
+      el.src = BABEL_URL;
+      el.onload = resolve;
+      el.onerror = function () { reject(new Error("Couldn't load the JSX compiler.")); };
+      document.head.appendChild(el);
+    });
+  }
+
+  // Transpile, run, and only then try to store -- the app being on screen beats
+  // the next load being fast, and a storage failure must never cost a start-up.
+  function transpileAndRun(cache, key) {
+    return loadBabel().then(function () {
+      var code = Babel.transform(source, TRANSFORM_OPTIONS).code;
+      run(code);
+      if (!cache || !key) return undefined;
+      // Drop every other entry first. Only one source hash can be current, so
+      // anything else here is a previous build of this file -- at ~2.9MB each,
+      // worth evicting rather than accumulating.
+      return cache.keys()
+        .then(function (keys) { return Promise.all(keys.map(function (k) { return cache.delete(k); })); })
+        .then(function () { return cache.put(key, new Response(code, { headers: { "Content-Type": "text/javascript" } })); })
+        .catch(function () { /* quota, private mode -- the app is already running */ });
+    });
+  }
+
+  var cache = null;
+  var key = null;
+
+  Promise.resolve()
+    .then(function () {
+      if (!source) throw new Error("The app source block is missing.");
+      // Both are absent outside a secure context, which is also where
+      // crypto.randomUUID and Google sign-in already don't work -- so this is not
+      // a case worth supporting, only one worth surviving.
+      if (!window.caches || !window.crypto || !crypto.subtle) return null;
+      return hashSource(source)
+        .then(function (hex) {
+          key = "/transpiled/" + hex;
+          return caches.open(CACHE_NAME);
+        })
+        .then(function (opened) {
+          cache = opened;
+          return cache.match(key);
+        })
+        .catch(function () { cache = null; key = null; return null; });
+    })
+    .then(function (hit) {
+      if (!hit) return transpileAndRun(cache, key);
+      return hit.text().then(function (code) {
+        // An empty or truncated entry would white-screen the app silently, which
+        // is worse than the second of transpiling it costs to not trust it.
+        if (!code) return transpileAndRun(cache, key);
+        run(code);
+      });
+    })
+    .catch(fail);
+})();
 </script>
 </body>
 </html>

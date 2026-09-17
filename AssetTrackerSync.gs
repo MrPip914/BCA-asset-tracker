@@ -49,7 +49,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v37";
+const SCRIPT_VERSION = "v39";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -326,9 +326,9 @@ const AUDIT_FIELDS = [
 // photo that caught a person, a screen, or paperwork that was never its subject.
 // Stored as the string "true" or blank, like every other flag in this sheet.
 //
-// "kind" is "image" or "pdf" (v37, when attaching a document became possible).
+// "kind" is "image" or "pdf" (v39, when attaching a document became possible).
 // A blank cell reads as "image", and that default is safe where ownerType's is
-// not: before v37 an image was the only thing that COULD be uploaded, so the
+// not: before v39 an image was the only thing that COULD be uploaded, so the
 // answer is known rather than guessed.
 //
 // "fileName" is the name the file had on the uploader's device. The object name
@@ -826,6 +826,51 @@ function readTable_(name, headers) {
     });
 }
 
+// --- Per-tab change detection (v37) -------------------------------------------
+// `dirty.assets` is ONE flag covering seven tabs, so editing a word of a comment
+// rewrote Breakers and Circuits too. The client cannot usefully say which child
+// tab it touched -- that would be bookkeeping at ~85 persist() call sites, where
+// a flag someone forgets is a SILENT non-write -- but the backend already builds
+// every tab's rows in memory before writing them, so it can simply notice that
+// nothing moved.
+//
+// The hash lives in Config, which is rewritten on every save anyway for the
+// revision counters, so storing it costs nothing extra.
+const TAB_HASH_KEY_PREFIX = "hash_";
+
+function rowsHash_(headers, rows) {
+  // Headers are hashed WITH the rows: a schema change reorders or renames
+  // columns without necessarily changing any value, and that must still write.
+  const payload = JSON.stringify([headers, rows]);
+  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, payload, Utilities.Charset.UTF_8);
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) {
+    out += ((bytes[i] & 0xff) + 0x100).toString(16).slice(1);
+  }
+  return out;
+}
+
+// Writes the tab only when its contents actually changed, and records the new
+// hash in `nextHashes` for the Config write at the end of doPost.
+//
+// THE ROW COUNT IS CHECKED AGAINST THE SHEET as well as the hash, and that is
+// the guard against a stale hash rather than tidiness: anything that empties a
+// tab behind this script's back -- the admin wipe, sheet.mjs, a person deleting
+// rows by hand -- would otherwise be masked by a hash that still matches the
+// data the app is holding, and the tab would never be rebuilt. Both of those
+// tools also CLEAR every hash row for the same reason; this is the belt to that
+// pair of braces, and it is one cheap call against six saved writes.
+function writeTableIfChanged_(name, headers, rows, configMap, nextHashes) {
+  const hash = rowsHash_(headers, rows);
+  nextHashes[name] = hash;
+  const stored = configMap[TAB_HASH_KEY_PREFIX + name];
+  if (stored && String(stored) === hash) {
+    const sheet = getSheet_(name);
+    if (Math.max(0, sheet.getLastRow() - 1) === rows.length) return;
+  }
+  writeTable_(name, headers, rows);
+}
+
 function writeTable_(name, headers, rows) {
   const sheet = getSheet_(name);
   sheet.clear();
@@ -848,7 +893,19 @@ function writeTable_(name, headers, rows) {
 // that qualifies today. If the caller's array is shorter than or equal to
 // what's already stored (a stale client, or nothing new), this is a no-op —
 // it never truncates existing history.
-function appendNewRows_(name, headers, rows) {
+// `base` is how many rows exist in the tab BEFORE the caller's first row, i.e.
+// how much of the log the client does not hold (v37). Zero -- and absent, which
+// is every pre-v37 client -- means the caller holds the whole log, and this
+// behaves exactly as it always did.
+//
+// THIS IS WHY THE CLIENT SENDS AN OFFSET RATHER THAN "HERE ARE THE NEW ROWS".
+// Deciding newness on the client needs it to track what the server has already
+// stored, which two overlapping saves and one failed retry get wrong in
+// opposite directions -- duplicated history or lost history, both silent, in the
+// one table with no rewrite path. Comparing against the tab's OWN row count is
+// self-correcting: a save that fails changes nothing, and a save that repeats
+// appends nothing the second time.
+function appendNewRows_(name, headers, rows, base) {
   const sheet = getSheet_(name);
   const lastRow = sheet.getLastRow();
   // Write the header row when the tab is empty -- and ALSO widen it when a new
@@ -872,8 +929,14 @@ function appendNewRows_(name, headers, rows) {
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
   }
   const existingCount = Math.max(lastRow - 1, 0);
-  if (rows.length <= existingCount) return;
-  const newRows = rows.slice(existingCount);
+  // Where the tab's next row falls inside the caller's array.
+  const startAt = existingCount - (Math.floor(Number(base)) || 0);
+  if (startAt >= rows.length) return;
+  // A negative startAt means the tab holds FEWER rows than the client was told
+  // sat before its slice -- history was removed behind the app's back. Writing
+  // the whole held slice back is the honest response: this tab has no other
+  // repair path, and appending nothing would quietly accept the loss.
+  const newRows = rows.slice(Math.max(0, startAt));
   const data = newRows.map(row => headers.map(h => (row[h] === undefined || row[h] === null ? "" : row[h])));
   // See writeTable_'s comment — force text format so a date-like string doesn't
   // get silently converted to a real Date cell.
@@ -1205,7 +1268,14 @@ function handleAuthenticatedRead_(body, e) {
     const breakerRows = readTable_(SHEET_NAMES.breakers, BREAKER_FIELDS);
     const circuitRows = readTable_(SHEET_NAMES.circuits, CIRCUIT_FIELDS);
     const breakerTypeRows = readTable_(SHEET_NAMES.breakerTypes, BREAKER_TYPE_FIELDS);
-    const auditRows = readTable_(SHEET_NAMES.audit, AUDIT_FIELDS);
+    const allAuditRows = readTable_(SHEET_NAMES.audit, AUDIT_FIELDS);
+    // The most RECENT rows, which is the end of an append-only tab. Its append
+    // order is its chronological order -- the same fact the frontend's
+    // auditIndex relies on -- so the tail is the newest history without having
+    // to parse or sort a single date.
+    const auditRows = allAuditRows.length > AUDIT_READ_LIMIT
+      ? allAuditRows.slice(allAuditRows.length - AUDIT_READ_LIMIT)
+      : allAuditRows;
     // getSheet_ creates the tab if it is missing, so a sheet that predates v35
     // reads back an empty list here rather than throwing, and gets its header
     // row on the first photo save.
@@ -1216,7 +1286,24 @@ function handleAuthenticatedRead_(body, e) {
     const configRaw = {};
     configRows.forEach(r => {
       configRaw[r.key] = r.value;
-      config[r.key] = r.value ? JSON.parse(r.value) : null;
+      // NOT EVERY CONFIG ROW IS JSON, and v37 is where that stopped being true.
+      // writeTableIfChanged_ records a bare hex digest under `hash_<tab>`, and
+      // JSON.parse of a hex string throws -- so the first save after deploying
+      // v37 made EVERY subsequent read throw, Apps Script returned its HTML
+      // error page instead of JSON, and the app fell back to its cached
+      // snapshot and showed the "Saved copy" pill. The write side already
+      // skipped these keys; this side did not.
+      if (r.key && String(r.key).indexOf(TAB_HASH_KEY_PREFIX) === 0) return;
+      // And a value that will not parse no longer takes the whole read down
+      // with it. A single hand-edited Config cell -- or any future key that is
+      // not JSON -- used to break the app for everyone, with the failure
+      // surfacing as an unreachable backend rather than as a bad row.
+      if (!r.value) { config[r.key] = null; return; }
+      try {
+        config[r.key] = JSON.parse(r.value);
+      } catch (err) {
+        config[r.key] = null;
+      }
     });
 
     const assets = assetRows.map(a => {
@@ -1294,7 +1381,7 @@ function handleAuthenticatedRead_(body, e) {
     const photos = photoRows.map(ph => ({
       id: ph.id, ownerType: ph.ownerType, ownerId: ph.ownerId,
       url: ph.url, thumbUrl: ph.thumbUrl || "", storageKey: ph.storageKey || "",
-      // A row written before v37 has no kind cell and is an image by definition:
+      // A row written before v39 has no kind cell and is an image by definition:
       // nothing else could be uploaded then.
       kind: ph.kind || "image", fileName: ph.fileName || "",
       caption: ph.caption || "",
@@ -1310,6 +1397,11 @@ function handleAuthenticatedRead_(body, e) {
       scriptVersion: SCRIPT_VERSION,
       assets,
       auditLog,
+      // The TRUE row count, which is how the client knows `auditLog` above is a
+      // recent slice rather than everything. Absent on a pre-v37 backend, and
+      // the client reads absent as "this is the whole log" -- which is what
+      // keeps a newer frontend correct against an older backend.
+      auditTotal: allAuditRows.length,
       breakerTypes,
       photos,
       columns: config.columns || null,
@@ -1443,6 +1535,23 @@ function cloudinarySignature_(params, secret) {
 
 // Hands the browser a signature for ONE upload. Writes nothing, so it takes no
 // lock -- serializing uploads behind saves would be a needless queue.
+// An upper bound on one batch. Signing is cheap but not free, and `count` comes
+// from the client; without this a malformed or hostile request could ask for an
+// unbounded number of uuids and digests in one execution.
+const PHOTO_SIGN_MAX_BATCH = 25;
+
+// How many AuditLog rows an ordinary read returns (v37). The log is append-only
+// and never pruned, so it is the one part of the snapshot that grows without
+// bound -- at ~208 bytes a row that is ~2MB at 10k entries and ~10MB at 50k,
+// downloaded on every single load whether or not anyone opens an audit view.
+//
+// The read returns the most recent slice plus `auditTotal`, the true count, so
+// the client knows it has a partial log and can ask for the whole thing when
+// something actually needs it (op:"auditFull"). Nothing is hidden and nothing is
+// pruned -- PRUNING WOULD DESTROY HISTORY, which is the cheaper-sounding change
+// this one exists to avoid.
+const AUDIT_READ_LIMIT = 2000;
+
 function handlePhotoSign_(body) {
   const configMap = readConfigMap_();
   const auth = authorizeSession_(body.sessionId, configMap);
@@ -1481,43 +1590,91 @@ function handlePhotoSign_(body) {
   // The folder and the object name are decided HERE and never taken from the
   // request. A client that chose its own could overwrite an existing photo, or
   // another tenant's, simply by naming it -- a signature authorizes exactly one
-  // object, and deciding the name server-side is what makes that true.
+  // object, and deciding the name server-side is what makes that true. A BATCH
+  // does not weaken that: it is N independent signatures, each naming one
+  // server-chosen object, never one signature covering a folder or a prefix.
   const folder = props.getProperty("CLOUDINARY_FOLDER") || "assets";
-  const publicId = Utilities.getUuid();
   const timestamp = Math.floor(Date.now() / 1000);
-  // What may be uploaded at all, enforced HERE rather than only by the file
-  // picker's `accept` attribute (v37, when PDFs joined photos). A signed
-  // allowed_formats is refused by Cloudinary itself, so this is the rule and the
-  // frontend's own list is the early, friendlier refusal -- the same division
-  // the editor check already takes, where hiding a button is a courtesy and the
-  // server check is the control. Everything here renders through Cloudinary's
-  // image pipeline: a PDF is an "image" resource whose first page rasterizes on
-  // demand (f_jpg,pg_1), which is what gives a document a real thumbnail
-  // instead of a generic icon.
-  const params = {
-    folder: folder,
-    public_id: publicId,
-    timestamp: timestamp,
-    allowed_formats: PHOTO_ALLOWED_FORMATS,
-  };
 
-  return jsonOut_({
-    ok: true,
-    cloudName: cloudName,
-    apiKey: apiKey,
-    folder: folder,
-    publicId: publicId,
-    timestamp: timestamp,
-    // Named exactly as it is signed, because the client posts every signed
-    // parameter by reading it off this response (see signedParams below).
-    allowed_formats: PHOTO_ALLOWED_FORMATS,
-    signature: cloudinarySignature_(params, apiSecret),
-    // The exact parameter names that were signed. Cloudinary rejects the upload
-    // if the posted set differs from the signed set by even one entry, and says
-    // only that the signature is invalid -- so the client is told what to send
-    // rather than having to keep a duplicate list in step with this one.
-    signedParams: Object.keys(params).sort(),
-  });
+  // WHAT MAY BE UPLOADED is signed into every signature (v39, when PDFs joined
+  // photos), so Cloudinary enforces it rather than the browser: the frontend's
+  // own list is the early, friendlier refusal and this is the control, the same
+  // division the editor check already takes. It rides INSIDE the loop below
+  // rather than being sent once, because a signature covers exactly the
+  // parameters it was computed over -- a batch is N independent signatures, and
+  // each one carries its own copy of the rule.
+
+  // v37: one call signs a whole batch. Signing used to be a separate /exec round
+  // trip per file, which is ~1.5s each and was most of what made attaching four
+  // photos slow. Bounded because `count` arrives from the client and minting is
+  // not free; a client asking for more gets what it is given and says so rather
+  // than uploading against signatures it does not have.
+  const requested = Math.floor(Number(body.count) || 1);
+  const count = Math.max(1, Math.min(requested, PHOTO_SIGN_MAX_BATCH));
+
+  const signatures = [];
+  for (var i = 0; i < count; i++) {
+    var publicId = Utilities.getUuid();
+    var params = {
+      folder: folder,
+      public_id: publicId,
+      timestamp: timestamp,
+      allowed_formats: PHOTO_ALLOWED_FORMATS,
+    };
+    signatures.push({
+      cloudName: cloudName,
+      apiKey: apiKey,
+      folder: folder,
+      publicId: publicId,
+      timestamp: timestamp,
+      // Named exactly as it is signed, because the client posts every signed
+      // parameter by reading it back off this object (see signedParams below).
+      allowed_formats: PHOTO_ALLOWED_FORMATS,
+      signature: cloudinarySignature_(params, apiSecret),
+      // The exact parameter names that were signed. Cloudinary rejects the upload
+      // if the posted set differs from the signed set by even one entry, and says
+      // only that the signature is invalid -- so the client is told what to send
+      // rather than having to keep a duplicate list in step with this one.
+      signedParams: Object.keys(params).sort(),
+    });
+  }
+
+  // The first signature is ALSO spread at the top level, so a pre-v37 client --
+  // which reads `signature`/`publicId` from the response root and knows nothing
+  // about `signatures` -- keeps working unchanged against this backend. That is
+  // the backend-first release ordering doing its job: this must be deployable
+  // before the frontend that uses the array is merged.
+  return jsonOut_(Object.assign({ ok: true, signatures: signatures }, signatures[0]));
+}
+
+// Authenticated, read-only, and deliberately outside the write lock's critical
+// section for the reason handleAuthenticatedRead_ takes its own: the script lock
+// is not reentrant. It takes one anyway, because writeTable_ clear()s a tab
+// before rewriting it and an unlocked read landing mid-save can observe an empty
+// one -- though AuditLog is appended to rather than rewritten, so that is
+// belt-and-braces here rather than the live hazard it is for the other tabs.
+function handleAuditFull_(body, e) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const configMap = readConfigMap_();
+    const auth = authorizeSession_(body.sessionId, configMap);
+    if (!auth.ok) {
+      return respond_({
+        ok: false, authFailed: true, reason: auth.reason,
+        email: auth.email || "", error: auth.error, scriptVersion: SCRIPT_VERSION,
+      }, e);
+    }
+    const rows = readTable_(SHEET_NAMES.audit, AUDIT_FIELDS);
+    return respond_({
+      ok: true,
+      auditLog: rows.map(r => pickPublic_(r, AUDIT_FIELDS)),
+      auditTotal: rows.length,
+      scriptVersion: SCRIPT_VERSION,
+    }, e);
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function doPost(e) {
@@ -1550,6 +1707,15 @@ function doPost(e) {
     return handlePhotoSign_(body);
   }
 
+  // The WHOLE audit log, for the views that genuinely need all of it -- an
+  // asset's own history, the master Audit tab once it is paged past the loaded
+  // window, and the Excel export, which must never quietly drop rows. Ordinary
+  // reads return only the recent slice (AUDIT_READ_LIMIT), so this is the
+  // payload that used to be on every single load, now asked for on purpose.
+  if (body.op === "auditFull") {
+    return handleAuditFull_(body, e);
+  }
+
   // Sign out. Deliberately unconditional: an invalid or already-deleted session
   // still returns ok, because "this session is gone" is exactly what the caller
   // asked for and reporting failure would only invite a retry loop.
@@ -1573,6 +1739,12 @@ function doPost(e) {
     // backend sit under a v34 frontend without destroying photos, which is the
     // whole point of deploying the backend first.
     const dirty = body._dirty || { assets: true, config: true, breakerTypes: true, photos: true };
+
+    // Filled by writeTableIfChanged_ as it goes, written into Config at the end
+    // alongside the revision counters. A tab this save did not consider keeps
+    // whatever hash it already had, so an assets-only save does not invalidate
+    // the Photos tab's.
+    const nextTabHashes = {};
 
     // --- Optimistic concurrency check ---------------------------------------
     // Deliberately inside the LockService critical section that already guards
@@ -1686,7 +1858,7 @@ function doPost(e) {
       const assetRows_ = assets.map(a => (
         Array.isArray(a.personIds) ? Object.assign({}, a, { personIds: a.personIds.join(",") }) : a
       ));
-      writeTable_(SHEET_NAMES.assets, ASSET_FIELDS.concat(customColumnKeys_(body.columns, configMap)), assetRows_);
+      writeTableIfChanged_(SHEET_NAMES.assets, ASSET_FIELDS.concat(customColumnKeys_(body.columns, configMap)), assetRows_, configMap, nextTabHashes);
 
       // Child tables, flattened out with the parent asset's label as the key.
       const commentRows = [];
@@ -1739,12 +1911,12 @@ function doPost(e) {
           notes: c.notes || "",
         }));
       });
-      writeTable_(SHEET_NAMES.comments, ["assetLabel", "text", "at", "by"], commentRows);
-      writeTable_(SHEET_NAMES.changes, CHANGE_FIELDS, changeRows);
-      writeTable_(SHEET_NAMES.allocations, ["assetLabel", "room", "quantity"], allocationRows);
-      writeTable_(SHEET_NAMES.maintenance, MAINTENANCE_FIELDS, maintenanceRows);
-      writeTable_(SHEET_NAMES.breakers, BREAKER_FIELDS, breakerRows);
-      writeTable_(SHEET_NAMES.circuits, CIRCUIT_FIELDS, circuitRows);
+      writeTableIfChanged_(SHEET_NAMES.comments, ["assetLabel", "text", "at", "by"], commentRows, configMap, nextTabHashes);
+      writeTableIfChanged_(SHEET_NAMES.changes, CHANGE_FIELDS, changeRows, configMap, nextTabHashes);
+      writeTableIfChanged_(SHEET_NAMES.allocations, ["assetLabel", "room", "quantity"], allocationRows, configMap, nextTabHashes);
+      writeTableIfChanged_(SHEET_NAMES.maintenance, MAINTENANCE_FIELDS, maintenanceRows, configMap, nextTabHashes);
+      writeTableIfChanged_(SHEET_NAMES.breakers, BREAKER_FIELDS, breakerRows, configMap, nextTabHashes);
+      writeTableIfChanged_(SHEET_NAMES.circuits, CIRCUIT_FIELDS, circuitRows, configMap, nextTabHashes);
     }
 
     // Audit entries are only ever appended to client-side (never edited or
@@ -1753,14 +1925,15 @@ function doPost(e) {
     appendNewRows_(
       SHEET_NAMES.audit,
       AUDIT_FIELDS,
-      body.auditLog || []
+      body.auditLog || [],
+      body.auditBase
     );
 
     if (dirty.breakerTypes) {
       const breakerTypeRows = (body.breakerTypes || []).map(t => ({
         id: t.id, name: t.name, slotSpan: t.slotSpan, members: JSON.stringify(t.members || []),
       }));
-      writeTable_(SHEET_NAMES.breakerTypes, BREAKER_TYPE_FIELDS, breakerTypeRows);
+      writeTableIfChanged_(SHEET_NAMES.breakerTypes, BREAKER_TYPE_FIELDS, breakerTypeRows, configMap, nextTabHashes);
     }
 
     // Photos. A flat tab, written whole like every other -- but note it is NOT
@@ -1787,7 +1960,7 @@ function doPost(e) {
         at: ph.at,
         by: ph.by || "",
       }));
-      writeTable_(SHEET_NAMES.photos, PHOTO_FIELDS, photoRows);
+      writeTableIfChanged_(SHEET_NAMES.photos, PHOTO_FIELDS, photoRows, configMap, nextTabHashes);
     }
 
     // --- Config tab + revision counters -------------------------------------
@@ -1851,6 +2024,9 @@ function doPost(e) {
         Object.keys(configMap).forEach(k => {
           // Revision rows are re-added below with their new values.
           if (k.indexOf(REVISION_KEY_PREFIX) === 0) return;
+          // Tab hashes likewise: a tab written this save has a new one, and a
+          // tab that was not considered is re-added from configMap below.
+          if (k.indexOf(TAB_HASH_KEY_PREFIX) === 0) return;
           configRows.push({ key: k, value: String(configMap[k]) });
         });
       }
@@ -1858,6 +2034,16 @@ function doPost(e) {
       // invalidate a config snapshot someone else is holding.
       written.forEach(d => { revisions[d] = revisions[d] + 1; });
       REVISION_DOMAINS.forEach(d => configRows.push({ key: REVISION_KEY_PREFIX + d, value: String(revisions[d]) }));
+      // Every tab hash: the ones this save recomputed, plus the ones it never
+      // looked at, carried through from the stored config. Dropping the second
+      // group would make the next save rewrite those tabs for no reason -- which
+      // is merely the old behaviour, but silently and only sometimes.
+      const hashesOut = {};
+      Object.keys(configMap).forEach(k => {
+        if (k.indexOf(TAB_HASH_KEY_PREFIX) === 0) hashesOut[k.slice(TAB_HASH_KEY_PREFIX.length)] = String(configMap[k]);
+      });
+      Object.keys(nextTabHashes).forEach(name => { hashesOut[name] = nextTabHashes[name]; });
+      Object.keys(hashesOut).forEach(name => configRows.push({ key: TAB_HASH_KEY_PREFIX + name, value: hashesOut[name] }));
       writeTable_(SHEET_NAMES.config, ["key", "value"], configRows);
     }
 
@@ -2074,6 +2260,12 @@ function adminWriteConfig_(configMap, overrides) {
   Object.keys(configMap).forEach(k => {
     if (k in overrides) return;
     if (k.indexOf(REVISION_KEY_PREFIX) === 0) return;
+    // EVERY TAB HASH IS DROPPED, not copied through. Wipe and import both empty
+    // tabs behind writeTableIfChanged_'s back, so a surviving hash would match
+    // the data an open browser is still holding and the next save would decline
+    // to rebuild the tab it just emptied. A missing hash means "unknown", which
+    // always writes -- so dropping them is the self-healing answer.
+    if (k.indexOf(TAB_HASH_KEY_PREFIX) === 0) return;
     rows.push({ key: k, value: String(configMap[k]) });
   });
   const revisions = readRevisions_(configMap);

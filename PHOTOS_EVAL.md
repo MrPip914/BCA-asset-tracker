@@ -608,7 +608,7 @@ AuditLog (append-only, machine-written, and the one tab with no rewrite path).
 
 ---
 
-## 10. Decision 4 — other file types (2026-09-17, decided and built as v37)
+## 10. Decision 4 — other file types (2026-09-17, decided and built as v39)
 
 Asked after the feature had been live for a week: can a PDF attach the way a photo does — a
 vendor quote, a service report, an as-built panel schedule?

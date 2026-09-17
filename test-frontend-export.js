@@ -31,8 +31,13 @@ const check = (name, ok, detail) => {
 };
 
 // --- slice the function ------------------------------------------------------
-const start = src.indexOf('  function exportToExcel() {');
-if (start === -1) throw new Error('exportToExcel not found in index.html');
+// `async` since 2026-09-16, when xlsx became a dynamic import — matched either
+// way rather than pinned to one spelling, so the next signature change fails on
+// a real assertion below instead of on this slice.
+const DECL = ['  async function exportToExcel() {', '  function exportToExcel() {']
+  .map(d => ({ d, at: src.indexOf(d) })).find(x => x.at !== -1);
+if (!DECL) throw new Error('exportToExcel not found in index.html');
+const start = DECL.at;
 // Ends at the next line that is exactly two-space-indented "}".
 // index.html is CRLF; don't assume either.
 const NL = src.includes('\r\n') ? '\r\n' : '\n';
@@ -44,11 +49,23 @@ const fn = src.slice(start, end);
 // Bare `name(` only: a member call (`XLSX.utils.foo(`, `rows.map(`) resolves at
 // runtime against an object and is not this bug's shape.
 //
-// Quoted strings are stripped first, or a column header like "Slot(s)" reads as
+// LINE COMMENTS GO FIRST, and that ordering is the whole correctness of this
+// scan. An apostrophe in ordinary prose -- "you'd group by building" -- is
+// indistinguishable from an opening single quote, so the string stripper below
+// pairs it with the next apostrophe and blanks everything between, INCLUDING
+// real calls. That is not hypothetical: it silently hid two of them until
+// 2026-09-16, when unrelated text shifted the apostrophe parity and they
+// reappeared. A scan that quietly finds less than it should is worse than no
+// scan, so the prose is removed before the quotes are.
+//
+// Quoted strings are stripped next, or a column header like "Slot(s)" reads as
 // a call to `Slot`. Template literals are LEFT ALONE on purpose: their `${...}`
 // holes contain real calls, and dropping them would hide exactly the kind of
 // dead reference this test exists to find.
-const scannable = fn.replace(/"(?:[^"\\]|\\.)*"/g, '""').replace(/'(?:[^'\\]|\\.)*'/g, "''");
+const scannable = fn
+  .replace(/^[ \t]*\/\/.*$/gm, '')
+  .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+  .replace(/'(?:[^'\\]|\\.)*'/g, "''");
 const called = new Set();
 for (const m of scannable.matchAll(/(^|[^.\w$])([A-Za-z_$][\w$]*)\s*\(/g)) called.add(m[2]);
 
@@ -59,6 +76,16 @@ for (const m of src.matchAll(/^\s*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/gm)
 for (const m of src.matchAll(/^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/gm)) defined.add(m[1]);
 // Locals and destructured bindings declared inside the function itself.
 for (const m of fn.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g)) defined.add(m[1]);
+// Array destructuring, which is how every useState pair is bound:
+// `const [notice, setNotice] = useState(null)`. Module level as well as local,
+// since a handler here legitimately calls a setter declared at the top of the
+// component.
+for (const m of src.matchAll(/\b(?:const|let|var)\s*\[([^\]]*)\]\s*=/g)) {
+  m[1].split(',').forEach(part => {
+    const name = part.trim().split('=')[0].trim();
+    if (name) defined.add(name);
+  });
+}
 for (const m of fn.matchAll(/\b(?:const|let|var)\s*\{([^}]*)\}/g)) {
   m[1].split(',').forEach(part => {
     const name = part.split(':').pop().trim().split('=')[0].trim();
@@ -73,6 +100,8 @@ const BUILTINS = new Set([
   'Map', 'Set', 'Promise', 'Error', 'RegExp', 'parseFloat', 'parseInt',
   'isNaN', 'encodeURIComponent', 'decodeURIComponent', 'alert', 'confirm',
   'setTimeout', 'clearTimeout', 'require', 'await', 'new',
+  // `await import("xlsx")` -- a keyword form, not a function this file defines.
+  'import',
 ]);
 
 const missing = [...called].filter(n => !defined.has(n) && !BUILTINS.has(n));

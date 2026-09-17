@@ -17,10 +17,10 @@
 //   2. hiddenFromPublic being ignored, publishing a photo deliberately withheld.
 //   3. The public projection widening past the panel it belongs to.
 //   4. storageKey or `by` leaking onto the anonymous page.
-//   5. (v37) a DOCUMENT reaching that page. Eric's call was that photos publish
+//   5. (v39) a DOCUMENT reaching that page. Eric's call was that photos publish
 //      and documents never do, and a filter that silently stopped filtering
 //      would publish a quote or an invoice with no symptom at all.
-//   6. (v37) a signed upload parameter the client is never told to post.
+//   6. (v39) a signed upload parameter the client is never told to post.
 //      Cloudinary then refuses every upload with "invalid signature" and says
 //      nothing about which parameter, which reads as broken credentials.
 //
@@ -60,13 +60,18 @@ const eq = (name, got, want) => {
   ok ? pass++ : fail++;
 };
 
+// v37 routes every full-tab write through writeTableIfChanged_, which skips a
+// tab whose contents hash unchanged. The slice marker below names that call, and
+// matches the older spelling too so this file reads both.
+const TAB_WRITE_CALL = src.includes('writeTableIfChanged_(SHEET_NAMES.photos') ? 'writeTableIfChanged_' : 'writeTable_';
+
 // --- 1. the doPost -> doGet round trip --------------------------------------
 const writePhotos = new Function('body', `
   ${constSrc('PHOTO_FIELDS')}
   const SHEET_NAMES = { photos: 'Photos' };
   let out = null;
   const writeTable_ = (name, fields, rows) => { out = { name, fields, rows }; };
-  ${between('const photoRows = (body.photos || []).map(ph => ({', 'writeTable_(SHEET_NAMES.photos')}
+  ${between('const photoRows = (body.photos || []).map(ph => ({', TAB_WRITE_CALL + '(SHEET_NAMES.photos')}
   writeTable_(SHEET_NAMES.photos, PHOTO_FIELDS, photoRows);
   return out;
 `);
@@ -103,7 +108,7 @@ const pdfBack = readPhotos(writePhotos({ photos: [Object.assign({}, AUTHORED,
   { kind: 'pdf', fileName: 'boiler-quote.pdf' })] }).rows)[0];
 eq('round trip preserves kind: pdf', pdfBack.kind, 'pdf');
 eq('round trip preserves the original file name', pdfBack.fileName, 'boiler-quote.pdf');
-// Pre-v37 rows have no kind cell, and an image is the only thing that could
+// Pre-v39 rows have no kind cell, and an image is the only thing that could
 // have been uploaded then — so this default is known, not guessed.
 eq('a blank kind reads back as an image',
    readPhotos(writePhotos({ photos: [Object.assign({}, AUTHORED, { kind: undefined })] }).rows)[0].kind,
@@ -162,9 +167,9 @@ eq('a work entry photo is not published', published.some(p => p.id === 'a-work-e
 // through — only the kind filter stops them.
 eq('a document on the panel itself is not published', published.some(p => p.id === 'a-panel-pdf'), false);
 eq('a document on one of its breakers is not published', published.some(p => p.id === 'a-breaker-pdf'), false);
-// A row written before v37 has a blank kind and is an image; reading that as
+// A row written before v39 has a blank kind and is an image; reading that as
 // "not an image" would quietly unpublish every photo already on the sheet.
-eq('a pre-v37 row with no kind still publishes',
+eq('a pre-v39 row with no kind still publishes',
    projectPublic([row({ id: 'legacy', kind: undefined })], PANEL, BREAKERS, UNASSIGNED).map(p => p.id),
    ['legacy']);
 
@@ -211,7 +216,7 @@ eq('parameter order in the object does not change the signature',
    signMod.sign({ public_id: 'u', folder: 'f', timestamp: 2 }, 'S'),
    signMod.sign({ timestamp: 2, folder: 'f', public_id: 'u' }, 'S'));
 
-// --- 3b. what the sign handler hands the browser (v37) -----------------------
+// --- 3b. what the sign handler hands the browser (v39) -----------------------
 // Executed rather than read, because the property that matters is a RELATION:
 // every parameter folded into the signature must also be named in signedParams
 // AND present in the response under that exact name, since the client builds its
@@ -220,8 +225,8 @@ eq('parameter order in the object does not change the signature',
 // parameter is wrong.
 const signHandler = (() => {
   const mod = {};
-  new Function('Utilities', 'PropertiesService', 'ROLE_EDITOR', 'readConfigMap_',
-    'authorizeSession_', 'jsonOut_', 'module', `
+  new Function('Utilities', 'PropertiesService', 'ROLE_EDITOR', 'PHOTO_SIGN_MAX_BATCH',
+    'readConfigMap_', 'authorizeSession_', 'jsonOut_', 'module', `
     ${src.slice(src.indexOf('const PHOTO_ALLOWED_FORMATS'), src.indexOf(';', src.indexOf('const PHOTO_ALLOWED_FORMATS')) + 1)}
     ${grab('sha1Hex_')}
     ${grab('cloudinarySignature_')}
@@ -234,6 +239,7 @@ const signHandler = (() => {
       CLOUDINARY_API_SECRET: 'SECRET', CLOUDINARY_FOLDER: 'dev',
     }[k] || null) }) },
     'editor',
+    10,
     () => ({}),
     () => ({ ok: true, role: 'editor', email: 'eric@example.com' }),
     (o) => o,
@@ -263,6 +269,18 @@ eq('the allowlist is exactly jpg, png and pdf',
 // own could overwrite an existing photo, or another tenant's, by naming it.
 eq('the object name is server-chosen, never taken from the request',
    signHandler({ sessionId: 's', publicId: 'attacker-chosen', folder: 'bca' }).publicId, 'uuid-fixed');
+
+// A BATCH is N independent signatures, and the allowlist is part of what each
+// one covers -- so it has to ride inside the loop, not be sent once beside it.
+// Signed on the first and omitted from the rest would refuse every upload but
+// the first, which reads as a flaky host.
+const batch = signHandler({ sessionId: 's', count: 3 });
+eq('a batch signs three separate objects',
+   batch.signatures.map(x => x.publicId).length, 3);
+eq('every signature in a batch carries the format allowlist',
+   batch.signatures.every(x => x.allowed_formats === signed.allowed_formats), true);
+eq('and every one names it among its signed parameters',
+   batch.signatures.every(x => x.signedParams.includes('allowed_formats')), true);
 
 // --- 4. schema guards --------------------------------------------------------
 const PHOTO_FIELDS = new Function(`${constSrc('PHOTO_FIELDS')} return PHOTO_FIELDS;`)();

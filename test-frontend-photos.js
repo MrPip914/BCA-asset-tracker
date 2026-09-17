@@ -81,7 +81,7 @@ eq('a missing url stays empty rather than being invented', adoptPhoto({}).url, '
 eq('a blank ownerType is left blank, never guessed as "asset"', adoptPhoto({}).ownerType, '');
 eq('a real ownerType is untouched', adoptPhoto({ ownerType: 'change' }).ownerType, 'change');
 
-// kind, unlike ownerType, HAS a safe default: before v37 an image was the only
+// kind, unlike ownerType, HAS a safe default: before v39 an image was the only
 // thing that could be uploaded, so a blank cell is an image by fact rather than
 // by guess. Reading it as anything else would unpublish every photo already on
 // the sheet, since the public panel filter keys off this field.
@@ -142,7 +142,7 @@ const ownerIdsUsed = [...fixtureSrc.matchAll(/ownerId: "([^"]+)"/g)].map(m => m[
 eq('the fixture covers more than one owner kind',
    [...new Set(ownerTypesUsed)].sort(), ['asset', 'breaker', 'change', 'circuit']);
 // Sandbox is the only place this feature can be tried without a deploy, so a
-// fixture of photos alone would leave the whole v37 document path unexercised
+// fixture of photos alone would leave the whole v39 document path unexercised
 // there — tile fallback, PDF badge, Open, and a work entry holding both kinds.
 eq('the fixture carries at least one document', /kind: "pdf"/.test(fixtureSrc), true);
 eq('and at least one row with no kind at all, which adopts as an image',
@@ -252,11 +252,13 @@ eq('a work entry can own photos',
 // every list from the ORIGINAL array and each save would drop the ones before
 // it — N writes, one photo surviving. That failure looks like "only the last
 // photo uploaded", which reads as a flaky network rather than a bug.
-function runAttach({ files, failOn = [], ownerType = 'asset' }) {
-  const calls = { persist: [], persistAssets: [], errors: [], progress: [], busy: [] };
+function runAttach({ files, failOn = [], ownerType = 'asset', signFails = false, slow = [], emitBytes = [] }) {
+  const calls = { persist: [], persistAssets: [], errors: [], progress: [], busy: [], signCounts: [] };
   const fn = new Function(
     'savingRef', 'photoBusy', 'PHOTO_OWNER_TYPES', 'setPhotoError', 'setPhotoBusy',
-    'setPhotoProgress', 'preparePhotoRow', 'persist', 'photos', 'assets', 'module',
+    'setPhotoProgress', 'preparePhotoRow', 'persist', 'photos', 'assets',
+    // v37: the batch is signed once up front and uploads run in a bounded pool.
+    'sandboxMode', 'signPhotoUploads', 'PHOTO_UPLOAD_CONCURRENCY', 'module',
     grab('attachPhotos') + '\nmodule.f = attachPhotos;'
   );
   const mod = {};
@@ -267,20 +269,38 @@ function runAttach({ files, failOn = [], ownerType = 'asset' }) {
     (m) => calls.errors.push(m),
     (b) => calls.busy.push(b),
     (p) => calls.progress.push(p),
-    async (ownerType, ownerId, file) => {
+    async (ownerType, ownerId, file, sig, onProgress) => {
+      // A file named in `emitBytes` reports its bytes going out, the way the
+      // real upload's XHR progress events do. Everything else emits nothing --
+      // Sandbox makes no request at all, and a browser can decline to report a
+      // total -- so both paths are exercised.
+      if (emitBytes.includes(file.name) && onProgress) {
+        onProgress(0.5);
+        await new Promise(r => setTimeout(r, 0));
+      }
       if (failOn.includes(file.name)) throw new Error('nope');
+      // A file named in `slow` finishes last however early it started, which is
+      // what proves the result order follows the FILES rather than the finishes.
+      if (slow.includes(file.name)) await new Promise(r => setTimeout(r, 30));
       return { id: 'row-' + file.name, ownerType, ownerId };
     },
     async (a, overrides) => { calls.persist.push(overrides.photos); calls.persistAssets.push(a); },
     [{ id: 'existing' }],
     ASSETS,
+    false,
+    async (count) => {
+      calls.signCounts.push(count);
+      if (signFails) throw new Error('no permission');
+      return Array.from({ length: count }, (_, i) => ({ publicId: 'sig-' + i }));
+    },
+    3,
     mod
   );
   return mod.f(ownerType, 'owner-1', files).then(() => calls);
 }
 
 
-// ------------------------------------------------- preparing one row (v37)
+// ------------------------------------------------- preparing one row (v39)
 // preparePhotoRow is EXECUTED for the same reason attachPhotos is: what matters
 // is which PATH a file takes, and that cannot be read off the source. A PDF put
 // through the canvas step comes back a picture of nothing, or throws "could not
@@ -290,8 +310,8 @@ function runPrepare({ file, sandbox = false }) {
   const mod = {};
   new Function(
     'fileKindOf', 'PHOTO_MAX_BYTES', 'DOC_MAX_BYTES', 'downscalePhoto', 'sandboxMode',
-    'crypto', 'currentUser', 'signPhotoUpload', 'uploadPhotoToCloudinary', 'photoThumbUrl',
-    'URL', 'module',
+    'crypto', 'currentUser', 'uploadPhotoToCloudinary', 'photoThumbUrl',
+    'PHOTO_RESIZE_SHARE', 'URL', 'module',
     grab('preparePhotoRow') + '\nmodule.f = preparePhotoRow;'
   )(
     fileKindOf, 25 * 1024 * 1024, 10 * 1024 * 1024,
@@ -299,16 +319,19 @@ function runPrepare({ file, sandbox = false }) {
     sandbox,
     { randomUUID: () => 'new-uuid' },
     'Eric Stamage',
-    async () => ({ publicId: 'uuid-fixed' }),
-    async (blob, sig, uploadName) => {
+    async (blob, sig, uploadName, onProgress) => {
       seen.uploadNames.push(uploadName);
       return { secure_url: 'https://res.cloudinary.com/x/image/upload/v1/dev/uuid-fixed.pdf', public_id: 'dev/uuid-fixed', bytes: 404 };
     },
     photoThumbUrl,
+    0.15,
     { createObjectURL: () => 'blob:sandbox' },
     mod,
   );
-  return mod.f('asset', 'BCA0082', file).then(row => ({ row, seen }), err => ({ error: err.message, seen }));
+  // v37 signs the whole batch up front, so the signature arrives as an argument
+  // rather than being fetched in here; Sandbox is handed none and must not ask.
+  const sig = sandbox ? null : { publicId: 'uuid-fixed' };
+  return mod.f('asset', 'BCA0082', file, sig).then(row => ({ row, seen }), err => ({ error: err.message, seen }));
 }
 
 // The one array identity the assets-domain assertions below compare against.
@@ -317,6 +340,35 @@ function runPrepare({ file, sandbox = false }) {
 const ASSETS = [{ id: 'a1' }];
 
 const F = (name) => ({ name, size: 1000 });
+
+// --- v37: one signature call, parallel uploads, stable order -----------------
+// Signing used to be a round trip PER FILE -- ~1.5s each -- which was most of
+// what made a multi-photo batch slow. And once uploads overlap, the order they
+// FINISH in stops matching the order they were chosen in, which would silently
+// reorder a gallery.
+runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg'), F('d.jpg')] }).then(calls => {
+  eq('a four-photo batch asks for permission ONCE', calls.signCounts.length, 1);
+  eq('and asks for one signature per file', calls.signCounts[0], 4);
+});
+
+runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg')], slow: ['a.jpg'] }).then(calls => {
+  // a.jpg finishes last but was chosen first.
+  eq('the written rows follow the order the FILES were chosen, not finished',
+     (calls.persist[0] || []).map(r => r.id).join(','),
+     'existing,row-a.jpg,row-b.jpg,row-c.jpg');
+});
+
+runAttach({ files: [F('a.jpg'), F('b.jpg')], signFails: true }).then(calls => {
+  eq('a refused signing batch writes nothing', calls.persist.length, 0);
+  eq('and says so rather than failing silently', calls.errors.length > 0, true);
+});
+
+runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg')], failOn: ['b.jpg'] }).then(calls => {
+  eq('one bad file still lets the others through', (calls.persist[0] || []).length, 3);
+  eq('and the good rows keep their order',
+     (calls.persist[0] || []).map(r => r.id).join(','), 'existing,row-a.jpg,row-c.jpg');
+});
+
 
 runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg')] }).then(calls => {
   eq('three files produce exactly ONE snapshot write', calls.persist.length, 1);
@@ -416,6 +468,64 @@ runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg')] }).then(calls => {
      /ownerType: p\.ownerType \|\| "asset"/.test(src), false);
   eq('adoptPhoto leaves a blank ownerType blank',
      /ownerType: p\.ownerType \|\| ""/.test(src), true);
+
+  // ---- the progress indicator, which read as STUCK on a real batch ---------
+  // It said "Uploading 1 of 3" and never moved. The number was `done + 1` -- a
+  // serial reading of which file is in flight -- and it survived uploads moving
+  // into a bounded pool, where three files start together and land together, so
+  // it sat on 1 for the whole wait and then vanished. A file index cannot
+  // describe parallel work; only a fraction of the batch can.
+  eq('the button never reports a file INDEX, which a pool cannot honestly give',
+     /progress\.done \+ 1|Math\.min\(progress\.done/.test(src), false);
+  eq('it reports a percentage of the batch instead',
+     /progress\.pct \+ "%"/.test(src), true);
+  eq('and attachPhotos computes that percentage',
+     /pct: Math\.round\(100 \* sum \/ chosen\.length\)/.test(grab('attachPhotos')), true);
+  // The whole point of the XHR swap: fetch cannot report a request body's
+  // progress, so with fetch there is nothing to put in that percentage until a
+  // file finishes -- which is the frozen indicator all over again.
+  eq('the upload uses XHR so the bytes going out can be reported',
+     /xhr\.upload\.onprogress = /.test(grab('uploadPhotoToCloudinary')), true);
+  eq('and not fetch, which cannot report a request body at all',
+     /fetch\(/.test(grab('uploadPhotoToCloudinary')), false);
+  eq('and it reports 1 on load, so the bar cannot stop short of the response',
+     /if \(onProgress\) onProgress\(1\);/.test(grab('uploadPhotoToCloudinary')), true);
+  // The resize is worth a fixed slice of each file's share, which is what keeps
+  // the number moving where byte progress never arrives: a body small enough
+  // that the network stack swallows it whole and reports once at the end, a
+  // browser that gives no total, or Sandbox, which makes no request at all.
+  eq('the resize reports a share of its own',
+     /if \(onProgress\) onProgress\(PHOTO_RESIZE_SHARE\);/.test(grab('preparePhotoRow')), true);
+  eq('and the upload fills the REST of that file rather than restarting it',
+     /PHOTO_RESIZE_SHARE \+ \(1 - PHOTO_RESIZE_SHARE\) \* f/.test(grab('preparePhotoRow')), true);
+
+  // ONE file, so the only thing that can move the number before the end is that
+  // file's own bytes. With two files a half-finished one and a finished one
+  // average out to something between 0 and 100, and the check would pass with
+  // the byte reports thrown away entirely.
+  return runAttach({ files: [F('a.jpg')], emitBytes: ['a.jpg'] });
+}).then(calls => {
+  const pcts = calls.progress.filter(Boolean).map(p => p.pct);
+  eq('progress starts at 0 rather than claiming a file is already done',
+     pcts[0], 0);
+  eq('it MOVES while the upload is still in flight, not only as it finishes',
+     pcts.some(v => v > 0 && v < 100), true);
+  eq('and the mid-flight number is the fraction of bytes actually sent',
+     pcts.includes(50), true);
+
+  return runAttach({ files: [F('a.jpg'), F('b.jpg')], emitBytes: ['a.jpg'] });
+}).then(calls => {
+  const pcts = calls.progress.filter(Boolean).map(p => p.pct);
+  eq('a batch reaches 100 even though only one file reported any bytes',
+     pcts[pcts.length - 1], 100);
+
+  return runAttach({ files: [F('a.jpg'), F('bad.mov')], failOn: ['bad.mov'] });
+}).then(calls => {
+  const pcts = calls.progress.filter(Boolean).map(p => p.pct);
+  // A failed file is not coming back, so leaving its share empty would strand
+  // the number short of 100 with nothing left running to move it.
+  eq('a FAILED file still claims its share, so the batch finishes at 100',
+     pcts[pcts.length - 1], 100);
 
   // ---- the input and the wiring, which the execution above cannot see -------
   eq('the file input accepts several at once, photos and PDFs alike',

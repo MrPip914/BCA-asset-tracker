@@ -270,6 +270,136 @@ padding rather than shifting, `colLetter` past Z). It is the only place that log
 covered: Sandbox never contacts anything, and rehearsing a destructive write against a live
 Sheet is the thing being avoided.
 
+## Two caches in front of the load (2026-09-16)
+
+A refresh used to be ~3 seconds of client boot before the app drew anything, and
+then another ~1.5s of backend round trip before it drew anything USEFUL. Both are
+now cached. `RESPONSIVENESS_EVAL.md` holds the measurements and the options that
+were rejected; what follows is what shipped and why it is safe.
+
+**Neither cache is load-bearing. Every failure path is the old behaviour**, which
+is the property to preserve when touching either: no Cache Storage, no
+`crypto.subtle`, a corrupt entry, a full quota, an insecure context — all of them
+fall through to exactly what this file did before.
+
+### The transpile cache
+
+`index.html` is ~880KB of JSX that Babel turns into **~2.9MB** (the inline source
+map is most of it). Measured: 1.3–1.8s on a server-class CPU, so 4–8s on a phone,
+in front of EVERY load. Driving the real page in Chromium: **3.0s cold, 128ms
+warm.**
+
+- **The app source is `type="text/x-babel-source"`, NOT `text/babel`.** That is
+  what Babel Standalone's own auto-runner scans for; leaving it would transpile
+  the file twice and mount the app twice. A loader at the bottom of `<body>` owns
+  the job instead.
+- **Babel is no longer loaded in `<head>`** — it is fetched only on a cache miss.
+  That is 598KB over the wire and 2.87MB of parsing skipped on a hit, which is
+  most of what this buys.
+- **The key is a SHA-256 of the source, and that choice is the whole design.**
+  A stale entry here does not show a stale label, it runs the wrong code. Every
+  other versioning scheme in this project is hand-bumped and this file's history
+  is a list of hand-bumps that got forgotten. A content hash cannot be forgotten.
+  The honest limit: **the first load after any edit is unchanged**, which is the
+  right trade — nothing is lost on the load where the code is new.
+- **The transform options are Babel's auto-runner's, character for character**,
+  read out of `babel.min.js` rather than guessed. Its default `plugins` list is
+  NOT empty (`transform-class-properties`, `transform-object-rest-spread`,
+  `transform-flow-strip-types`); dropping it emits different code silently. Bump
+  `CACHE_NAME` if these ever change — the hash covers the source, not the options.
+- **Injected as an INLINE module script, exactly as Babel injects it.** Not a
+  blob URL: bare specifiers (`react`, `lucide-react`) resolve against the import
+  map in `<head>`, which is a property of this document.
+- **`waitForGoogleIdentity` stopped being belt-and-braces and became load-bearing.**
+  The GSI script tag's comment used to say Babel was always slow enough that GSI
+  won the race. On a cache hit the app can mount in milliseconds. Do not remove
+  that wait on the grounds that it never fires.
+- A start-up failure now says so in `#root` instead of leaving a blank page —
+  worth having once Babel is fetched lazily, and it is what caught the very first
+  test run.
+
+### `xlsx` is loaded on demand
+
+SheetJS is 175KB over the wire and ~433KB to parse, it is used by exactly one
+function (`exportToExcel`), and most sessions never press Export — so every page
+load was paying for it, including the many that only read the inventory. It is a
+dynamic `import("xlsx")` inside that function now.
+
+- **The browser's module map is the cache**, so a second export in the same
+  session costs nothing and there is no memo to maintain here.
+- **THE ONE BEHAVIOUR THIS CHANGES: a FIRST export while offline now fails**,
+  where before the module was already in memory from page load. That matters
+  more than it would have a week ago, because the snapshot cache means the app
+  itself now opens offline — so the export reports the cause instead of being a
+  button that does nothing. Once loaded, later exports work offline as before.
+- `test-frontend-export.js` slices the function by its declaration and had to
+  learn `async`; it now matches either spelling rather than being pinned to one,
+  so the next signature change fails on a real assertion instead of on the slice.
+
+### `readOnlyNotice` became `notice` (2026-09-16)
+
+The dismissible toast for "your click did something other than what you expected,
+and here is why". Three of its four uses had nothing to do with view-only access
+— a refused mass deletion, a write against an unconfirmed snapshot, and a failed
+export — and the rendering was always generic; only the name said otherwise.
+**A name that no longer says what the value is is a bug here, not a tidy-up**, and
+this one was drifting further with every feature that needed to say something.
+
+### The snapshot cache
+
+The last backend response, kept in Cache Storage so a refresh PAINTS IMMEDIATELY
+instead of watching a loading screen for the ~1.5s an `/exec` round trip costs at
+its very best.
+
+- **What makes it safe was already shipped.** A save posts per-domain revision
+  counters and `doPost` refuses a stale one — so the worst a stale snapshot can do
+  to the Sheet is nothing. This cache does not weaken optimistic concurrency, it
+  **relies** on it.
+- **Writes are blocked until revalidation lands anyway.** Being refused is not the
+  same as not being invited, and the window is about 1.5 seconds. That keeps the
+  cache a pure READ optimisation: nothing it paints can reach the Sheet before the
+  server's own copy has arrived.
+- **The RAW response is stored, never the derived state**, so every adoption and
+  migration in `applySnapshot()` runs identically on a cached load — including
+  migrations added after the entry was written. That is what stops a cache from
+  pinning the app to an old build's reading of the data.
+- **`applySnapshot()` was extracted from `loadData()` for exactly that reason.**
+  Two readers of one payload would drift.
+- **FOUR guards on the cached paint, each ruling out a case where server truth is
+  the point of the call**: not in sandbox (it has its own copy), not during a fresh
+  Google sign-in (`sessionId` may still name the EXPIRED session being replaced,
+  whose cache is not this user's), a session id to key on, and — the sharpest —
+  **`assets === null`, i.e. the FIRST load only**. The conflict handler reloads
+  *because* the state in memory is wrong; handing it a cache would defeat the
+  reload and leave the user looking at the edit that was just rejected.
+- **Keyed by tenant AND session.** The tenant is the `CLIENT.storageKey()` rule met
+  in a second store — one origin serves every school. The session is what makes
+  signing out and back in as someone else a MISS rather than a peek at the previous
+  person's inventory, since a new sign-in always mints a new session id.
+- **Stored AFTER `applySnapshot`**, deliberately: a sign-in adopts the session the
+  backend just issued, and `sessionId` is a module-level value read at call time,
+  so this keys the snapshot under the id the NEXT load will present.
+- **Cleared on sign-out and on any `authFailed`.** The session id is erased from
+  `localStorage` already; leaving the inventory it named in Cache Storage would
+  make "Sign out" mean less than it says.
+- **A FAILED revalidation keeps the cached view and says so** ("Saved copy" pill,
+  writes still blocked) rather than falling back to the blocking error screen. A
+  flaky connection is when a local copy is worth the most; throwing it away there
+  would mean the cache bought nothing in the one case it was for. Showing
+  unconfirmed data is honest, letting someone edit it is not.
+- The header pill gained two states rather than growing a second pill beside it —
+  they are mutually exclusive with the save states, since `persist()` refuses to
+  write while either load state is set.
+- **Covered by `test-frontend-cache.js`** for the structural properties, verified
+  by mutation that nine silent failures fail it (a conflict reload reading the
+  cache, `persist` losing its guard, sign-out leaving the inventory, a dropped
+  Babel plugin, Babel going eager again, a truncated entry being run, caching
+  before the session is adopted, a fresh sign-in reading the cache, and a stale
+  load falling back to the error screen). **The browser behaviour is browser
+  behaviour** — Cache Storage, module injection, the revalidate swap — and was
+  verified by driving the real page in Chromium against a mocked backend,
+  including a CONTROL case proving the harness can see a write at all.
+
 ## Local Sandbox mode
 
 A "Sandbox" pill in the top-right of the header (next to the name tag) toggles between
@@ -740,30 +870,173 @@ onboard one.
     - The scratch tab is **deleted once the write succeeds**, so no second copy of the
       inventory is left in the document for a later import to read by mistake. A failure to
       delete it is reported without claiming the import failed.
-- **Saving feedback is one flag, because `persist()` is the one choke point**: `isSaving`
-  (plus a `savingRef` mirror) is set at the top of `persist()` and cleared in a `finally`,
-  so it clears on success, on a network/backend failure, *and* on the conflict path that
-  reloads and opens the blocking modal — a spinner that never stops would be worse than
-  none. Since every write in the app funnels through `persist()`, that single flag covers
-  every form without per-form plumbing: it drives a "Saving…" pill in **both** headers
-  (list and detail) and puts every write control into a disabled *and visibly working*
-  state — label swapped to "Saving…", `C.border` background, spinner (`Loader2` +
-  the `.spin` keyframe) on the icon buttons. A disabled-but-otherwise-unchanged button
-  still reads as frozen, which is the exact confusion this exists to fix. Components
-  outside `AssetTracker` (`ListManagerModal`, `ChildEntityTable`, `BreakersTabContent`,
-  `PanelConfigForm`) take it as an `isSaving` prop.
-  Two things this is deliberately *not*: it is **not** a guard inside `persist()` — a few
-  write paths aren't gated on it (the bulk reassign/move toolbar), and refusing one of
-  those would silently drop a real edit; the guard is an `if (savingRef.current) return;`
-  at the top of each submit *handler* instead, catching the double-click that lands before
-  React re-renders the button as disabled. And it does **not** replace `writeQueueRef` —
-  that still serializes the POSTs; this stops the second identical submit from ever being
-  created, which the queue can't do (it would happily send both).
-  Sandbox mode needs no special case: its write never awaits, so `isSaving` goes true and
-  false inside one React batch and no "Saving…" frame is ever painted.
-  A failed save now shows a "Save failed" pill in that same slot. It used to be a bare
-  "Sync failed" tucked inside the name button on the *list* header only — i.e. invisible
-  on the detail page, where almost every edit is actually made.
+- **SAVES HAPPEN IN THE BACKGROUND, and the form closes immediately** (2026-09-16).
+  Measured by driving the real page against a backend held at 4 seconds: the edit
+  form now closes in **48ms**. `RESPONSIVENESS_EVAL.md` §1 has the reasoning.
+  - **`persist()` enqueues the write and returns; it does not await it.** The
+    optimistic `setState` has already painted the change, `writeQueueRef` already
+    serializes the POSTs, and the revision check already refuses a stale one — so
+    awaiting the round trip only ever bought a form frozen for the 1.5–5s it
+    takes, which was the whole complaint.
+  - **Every `await persist(...)` call site is UNCHANGED**, and that is deliberate:
+    persist still returns a promise, it just resolves now instead of in five
+    seconds. Making 23 handlers individually fire-and-forget would have been 23
+    chances to get one wrong.
+  - **`finishWrite()` handles the outcome**, because it now runs long after
+    persist() returned. Both the resolved and the rejected path land there.
+  - **`isSaving` drives the header pill and NOTHING ELSE now.** It used to disable
+    every write control and swap ~130 labels to "Saving…" — correct while each
+    handler awaited its own round trip, because the user was still looking at the
+    form it belonged to. Backgrounded, that same flag would have disabled the form
+    they moved ON to, for a write they had already forgotten about: the frozen
+    feeling relocated rather than removed. The disabled props and label swaps came
+    out with it.
+  - **`savingRef` is now the ONLY thing catching a double click**, and its scope is
+    the point: persist sets it and clears it on a **macrotask**, not when the write
+    lands. Holding it for the round trip is what would have let one background save
+    block every unrelated control — `attachPhotos` and `deletePhoto` read it too,
+    so attaching a photo would have been refused because someone renamed a room two
+    seconds ago. What it has to catch is the second click that lands before React
+    re-renders, and a macrotask is exactly that window.
+  - **`pendingWritesRef` is a COUNT**, since several writes can overlap once
+    nothing awaits them; the pill has to clear on the last one home, not the first.
+  - Sandbox needs no special case: it enqueues no write, so no pill is painted and
+    no failure can arrive later.
+
+- **A FAILED SAVE IS RECOVERABLE, because by the time it surfaces the user has
+  moved on** (2026-09-16). This is what made backgrounding acceptable rather than
+  merely faster — and it is a strictly better answer than the old blocking save,
+  which lost the typing too and only guaranteed you were standing on the right
+  page when it happened.
+  - **One modal for both failure kinds** — rejected by the revision check, or never
+    reached the Sheet. `saveConflict` and the separate conflict modal are gone;
+    `saveFailure` (`{ kind, domains, context }`) drives both.
+  - **`persist()` takes a `context`**: `{ assetId, restore: { mode, draft } }`.
+    Optional — a bulk action has no single subject and simply reports that it
+    failed. The asset edit form and the add form supply one.
+  - **It NAMES and LINKS the asset**, resolved through `nameOf()` at render, so a
+    rename between the failure and the click cannot leave a stale word on it.
+  - **Restoring puts the typing back in the FORM and stops. It never re-sends.**
+    That is the whole safety argument: on a conflict an automatic retry would
+    overwrite whoever saved first, which is the one thing the revision counters
+    exist to prevent. A person pressing Save on data they can see is the only
+    "try again" that is safe in both cases — so it is deliberately the SAME
+    recovery for both kinds, rather than a button that means different things.
+  - **It restores the DRAFT, never the failed payload**, and that distinction is
+    the whole of "does it restore one asset or everything". The payload is a full
+    snapshot; replaying it would carry every domain and silently overwrite whatever
+    arrived in between. The draft is one asset's fields, seeded onto freshly
+    reloaded data — exactly the retype it saves. **Verified in the browser**: after
+    a conflict caused by someone editing a DIFFERENT asset, the restored save
+    carries their value for their asset and the typing only for the one being
+    edited.
+  - **THE CONFLICT IS NOT A SAME-ASSET COLLISION**, and this is the thing to know
+    before reasoning about how rare it is. The revision domain is `assets` — the
+    whole domain — so a save is rejected when anyone saves ANY asset in the same
+    moment. In almost every such case the other person touched something unrelated
+    to what was typed, which is exactly why putting the draft back on top of the
+    reload is right.
+  - **The draft is captured into `saveFailure` BEFORE the conflict path closes
+    mid-edit forms**, or the thing being offered back would be discarded on the way.
+  - **The offer is dropped, not shown broken, when there is nothing to restore
+    onto** — the asset can have been deleted by whoever won the race.
+  - **Covered by `test-frontend-saves.js`**, verified by mutation that eight silent
+    failures fail it: the write awaited again, the submit lock held for the round
+    trip, the context dropped, the draft captured after the forms close, a restore
+    that re-sends, a restore that replays the payload, `isSaving` disabling a
+    control again, and the pill clearing on the first write home.
+
+- **A save rewrites only the tabs whose contents actually MOVED (backend v37).**
+  `dirty.assets` is one flag covering seven tabs, so editing a word of a comment
+  rewrote Breakers and Circuits too. `writeTableIfChanged_` hashes the rows it is
+  about to write and skips the tab when the hash matches what Config recorded.
+  - **The client is not asked which child tab it touched**, and that is the whole
+    design. That would be bookkeeping at ~85 `persist()` call sites where a flag
+    someone forgets is a SILENT non-write. The backend already builds every tab's
+    rows in memory, so it can notice that nothing moved without being told.
+  - **Headers are hashed WITH the rows.** A schema change can reorder or rename
+    columns without moving a single value, and that still has to write.
+  - **THE STORED ROW COUNT IS CHECKED AGAINST THE SHEET before skipping**, and
+    that is the guard against a stale hash rather than tidiness. Anything that
+    empties a tab behind this script — the admin wipe, `sheet.mjs`, a person
+    deleting rows by hand — would otherwise be masked by a hash that still
+    matches the data the app is holding, and the tab would never be rebuilt.
+  - **`adminWriteConfig_` DROPS every hash rather than copying it through**, and
+    `sheet.mjs` blanks them in the same batch as its revision bump, for that same
+    reason. A missing hash means "unknown", which always writes — so dropping
+    them is the self-healing answer. **Any future writer outside `doPost` must do
+    the same.**
+  - **NOT EVERY CONFIG ROW IS JSON ANY MORE, AND v37 IS WHERE THAT STOPPED BEING
+    TRUE — which broke every read until v38.** A hash is a bare hex digest, and
+    the read's config loop did `JSON.parse(r.value)` on every row. So the FIRST
+    SAVE after deploying v37 made every subsequent read throw: Apps Script
+    answers a thrown handler with its HTML error page rather than JSON, the
+    client's `res.json()` failed, and the app fell back to its cached snapshot
+    behind the "Saved copy" pill. The write side already skipped these keys;
+    only the read did not.
+    - **The general rule, which is the half "a new Config KEY is a release" does
+      not cover: a key whose VALUE is not JSON breaks the read for every
+      tenant.** Config is a key/value tab, so anything can be written into it —
+      what costs is whether the read can parse it back.
+    - **The parse is now defensive as well as prefix-skipping**, and that is the
+      part worth keeping: a value that will not parse reads as absent instead of
+      taking the whole read down. One hand-edited Config cell used to make the
+      backend look unreachable to everyone, which predates v37 entirely.
+    - **It surfaced as "the backend is down", which is the diagnostic lesson.**
+      Every `doGet` still worked, so `deploy.mjs --status` reported a healthy
+      v37 and the deploy looked clean. Only `doPost` threw. **A tenant that
+      reports its version correctly has not been shown to serve a read.**
+    - The snapshot cache is what kept dev usable through it rather than showing
+      a blocking error screen — the failure mode it was built for, arriving
+      sooner than expected.
+    - Covered by `test-backend-v37.js`, which EXECUTES the read's config loop
+      against a row carrying a hash and a row carrying malformed JSON. Verified
+      by mutation that restoring the unguarded parse, dropping the try/catch, or
+      hiding hashes from `configRaw` (which is what the write copies through)
+      all fail it.
+  - Worth stating plainly: since saves went to the background this is no longer a
+    change anyone can FEEL. What it buys is less work inside the Apps Script
+    quota, a narrower window for someone else's save to collide, and less lock
+    contention.
+
+- **An ordinary read returns only the most recent slice of the audit log
+  (backend v37).** The log is append-only and never pruned, so it was the one
+  part of the snapshot that grew without bound — ~2MB at 10k entries, ~10MB at
+  50k, downloaded on every load whether or not anyone opened an audit view.
+  `AUDIT_READ_LIMIT` is 2000.
+  - **NOTHING IS PRUNED.** Pruning is the cheaper-sounding change this one exists
+    to avoid: it destroys history, and this does not.
+  - **The tail is the newest history** because append order IS chronological
+    order on an append-only tab — the same fact `auditIndex` relies on. No date is
+    parsed or sorted to find it.
+  - **`auditTotal` is what tells the client it has a window.** Absent from a
+    pre-v37 backend, and absent reads as "this IS the whole log" — which is what
+    keeps a newer frontend correct against an older backend.
+  - **`op:"auditFull"` fetches the whole thing, once**, for the three views that
+    genuinely need it: an asset's own Audit tab, the master Audit tab, and the
+    Excel export. Fetching the WHOLE log rather than paging is deliberate — no
+    view has to learn about windows, and the export cannot quietly drop rows,
+    which is the worst thing an audit trail can do.
+  - **Both audit views SAY when they are showing a window.** An audit view
+    silently showing partial history is the one thing it must not do, and "still
+    loading" is a different statement from "this is everything".
+  - **THE APPEND IS THE DANGEROUS HALF, and the client sends an OFFSET rather
+    than "here are the new rows".** `appendNewRows_` decided newness by comparing
+    the client's array length against the tab's own row count; a client holding
+    only the tail would have appended nothing at all, silently, forever. It now
+    takes `auditBase` — how many rows sit before the client's first — and
+    compares against the tab as it always did. Deciding newness on the CLIENT
+    instead needs it to track what the server has stored, which two overlapping
+    saves and one failed retry get wrong in opposite directions: duplicated
+    history or lost history, both silent, in the one table with no rewrite path.
+    Comparing against the tab is self-correcting — a failed save changes nothing
+    and a repeated save appends nothing the second time.
+  - `auditBase` returns to 0 the moment the full log is fetched. Missing that is
+    how the next save would append from the wrong place.
+  - A tab holding FEWER rows than the client was told sat before its slice means
+    history was removed behind the app's back; the held slice is written back
+    rather than the loss being quietly accepted.
+
 - **Sheet schema**: Assets tab holds flat fields only (see `ASSET_FIELDS` in the .gs
   file). Comments, Changes (structured change log with type/vendor/cost), Allocations
   (bulk-item quantity assignments), and Maintenance (scheduled maintenance items) each
@@ -2479,7 +2752,7 @@ with the branch instead of outliving it here.
 
 Photos live in **Cloudinary**; the Sheet stores a reference and nothing else. The full
 evaluation and the three decisions behind it are in `PHOTOS_EVAL.md`. **PDFs join them in
-v37** — see "Documents" below, which is a small change resting entirely on this one.
+v39** — see "Documents" below, which is a small change resting entirely on this one.
 
 - **The bytes could never have gone in the Sheet, for three independent reasons.** Every
   save posts the entire state, so a base64 image would be re-sent on every unrelated edit;
@@ -2505,6 +2778,67 @@ v37** — see "Documents" below, which is a small change resting entirely on thi
   - **The folder and object name are chosen by the BACKEND, never taken from the request.**
     A client picking its own could overwrite an existing photo by naming it. A signature
     authorizes exactly one object, and deciding the name server-side is what makes that true.
+- **A batch is signed in ONE call and uploads run in a bounded pool (v37).**
+  Signing used to be a separate `/exec` round trip per file — ~1.5s each — so
+  four photos spent six seconds doing nothing but asking permission, serially.
+  - **A batch is N INDEPENDENT signatures, each naming one server-chosen
+    object.** It is never one signature covering a folder or a prefix, which
+    would give back exactly the overwrite-by-naming that deciding the name
+    server-side exists to prevent. `PHOTO_SIGN_MAX_BATCH` bounds it, since the
+    count arrives from the client.
+  - **The first signature is ALSO spread at the top level of the response**, so a
+    pre-v37 client reading `signature`/`publicId` from the root keeps working —
+    which is what makes this backend deployable BEFORE the frontend that reads
+    the array, as the release ordering requires. The client does the mirror
+    image: a response with no `signatures` array is read as a batch of one, so a
+    frontend that gets ahead of its backend still uploads a single photo rather
+    than failing in a plant room.
+  - **`PHOTO_UPLOAD_CONCURRENCY` is 3, not unlimited.** A phone re-encoding
+    several multi-megapixel images at once is its own stall, and most of the win
+    is overlapping one file's downscale with the previous file's upload.
+  - **Results are written to their own index rather than pushed**, so the rows
+    keep the order the files were chosen in however the uploads interleave —
+    otherwise a gallery would reorder itself by whichever photo finished first.
+  - **THE PROGRESS INDICATOR IS A PERCENTAGE OF THE BATCH, NEVER "FILE N OF M"**,
+    and that is a bug the pool caused rather than a preference. The label read
+    `done + 1` — which file is in flight — correct while uploads were serial and
+    a lie the moment three start together: with three photos and a pool of three
+    it sat on "Uploading 1 of 3" for the whole wait and then vanished, reported
+    as an indicator that never moved. **A file index cannot describe parallel
+    work.** Each file is an equal share of the whole and fills as its own bytes
+    go out.
+    - **`uploadPhotoToCloudinary` is XHR rather than fetch for exactly one
+      reason: fetch cannot report how much of a request body has gone out.**
+      Nothing else here wants XHR, so the error handling is deliberately the
+      same shape fetch had — status, then the host's own message, then a
+      fallback — plus one case fetch worded for us, a network failure, which now
+      says the upload never *reached* the host rather than that the host refused
+      it.
+    - **The RESIZE is worth a fixed slice of each file** (`PHOTO_RESIZE_SHARE`,
+      0.15) and the upload the rest. That is what keeps the number moving where
+      byte progress never arrives at all: Sandbox makes no request, a browser
+      can report no total, and a body small enough for the network stack to
+      swallow whole produces one event at the end. Small deliberately — the
+      resize is the short half, and a large slice would make the number jump
+      rather than travel.
+    - **A file that FINISHES claims its whole share whatever its byte events
+      said, including one that FAILED.** A failed file is not coming back, so
+      leaving its share empty strands the number short of 100 with nothing left
+      running to move it.
+    - **Byte-level progress is browser behaviour against a real network and is
+      NOT provable in a harness.** A Playwright-routed request never streams its
+      body to a socket, and ~900KB over loopback is buffered whole however
+      slowly the server reads — both report one event at the end. It was
+      verified by mapping `api.cloudinary.com` to a local TLS server (**CORS
+      headers are load-bearing there**: the browser withholds upload progress
+      from a cross-origin request it has not allowed, which looks exactly like
+      the app failing to report it). Nor is 100% reliably *painted*: against a
+      fast host the last report and the teardown land in the same flush.
+    - Covered by `test-frontend-photos.js`, verified by mutation that eight
+      silent failures fail it — among them the label returning to a file index,
+      the percentage reverting to a whole-file count, and either half of the
+      resize/upload split being dropped.
+
 - **`photos` is a revision domain of its own, not part of `assets`.** A photo can belong to
   a breaker or a work entry, so folding it in would make attaching one conflict with anyone
   editing any asset anywhere.
@@ -2565,7 +2899,7 @@ v37** — see "Documents" below, which is a small change resting entirely on thi
     load-time adoption exists, check the create path separately**; it is the one place the
     adoption cannot cover.
 
-**Documents attach too, and a PDF is a photo row with a different `kind`** (v37,
+**Documents attach too, and a PDF is a photo row with a different `kind`** (v39,
 2026-09-17). Everything above holds unchanged — the owner pair, the revision domain, the
 orphan story, the cascade on delete, the `_dirty` gate. What was added is two columns and
 three decisions.
@@ -2583,7 +2917,7 @@ three decisions.
   the device, and it is not decoration: the object at the host is a uuid this script chose,
   and "which quote is this" is answered by `boiler-quote.pdf` and by nothing else.
 - **A BLANK `kind` READS AS "image", AND THAT DEFAULT IS THE OPPOSITE CALL FROM
-  `ownerType`'s.** Both are blank on a pre-v37 row and only one may be guessed: before v37
+  `ownerType`'s.** Both are blank on a pre-v39 row and only one may be guessed: before v39
   an image was the only thing that COULD be uploaded, so the answer is known rather than
   assumed. Reading a blank as "not an image" would unpublish every photo already on a
   sheet, since the public panel filter keys off this very field.
@@ -2623,6 +2957,10 @@ three decisions.
   `signedParams` and present in the response under that name, because the client builds its
   form by reading each one back off it; break any of the three and Cloudinary refuses every
   upload as "invalid signature" without saying which parameter is wrong.
+  - **It rides INSIDE the batch loop, once per signature**, not sent once beside the array.
+    A signature covers exactly the parameters it was computed over, so an allowlist signed
+    onto the first signature and omitted from the rest would refuse every upload in a batch
+    but the first — which reads as a flaky host rather than as a missing parameter.
 - **The multipart part's FILENAME is what tells Cloudinary the format**, and it is not the
   user's file name. A photo is re-encoded to JPEG here, so it is announced as `upload.jpg`
   — sending the original `IMG_4821.HEIC` would declare a format those bytes no longer are.
