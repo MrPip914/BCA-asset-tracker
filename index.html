@@ -56,7 +56,7 @@ import {
   Monitor, Phone, Tv, Camera, HardDrive, HelpCircle, Columns3, Lock, Filter, Check, DoorOpen, Download,
   Wrench, UserCircle, Settings, History, Archive, ArchiveRestore, Building2, Package, Copy, Zap, Repeat, ArrowLeftRight, Menu,
   FlaskConical, RotateCcw, AlertTriangle, Loader2, Printer, MapPin, QrCode, Info, LogOut, Users,
-  ImagePlus, Eye, EyeOff, Home,
+  ImagePlus, Eye, EyeOff, Home, Paperclip, FileText, ExternalLink,
 } from "lucide-react";
 
 // Starter managed peripherals/users/bulk-item-type lists — empty until the school
@@ -2264,7 +2264,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v36";
+const FRONTEND_SCRIPT_VERSION = "v37";
 // The version of THIS file — shown in About (the account menu), so "is my browser
 // actually running the build I just deployed, or a cached one?" is answerable in
 // two clicks instead of by reading view-source.
@@ -2282,7 +2282,7 @@ const FRONTEND_SCRIPT_VERSION = "v36";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-15.6";
+const APP_VERSION = "2026-09-17.1";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -2531,10 +2531,19 @@ const SANDBOX_DATA_KEY = CLIENT.storageKey("asset-tracker-sandbox-data");
 // roomsServedIds, an allocation and two audit rows; BCA0001 is a leaf device whose
 // only referrers are its own audit history; BCA0084 is a sub-panel that is the
 // target of a feedsPanelLabel and the owner of 21 breaker panelLabels.
-// --- Photos ------------------------------------------------------------------
-// A photo is a REFERENCE. The bytes live at an image host (Cloudinary); the
+// --- Files (photos and documents) --------------------------------------------
+// A file is a REFERENCE. The bytes live at an image host (Cloudinary); the
 // Sheet stores a row saying which owner it belongs to and where to fetch it.
-// See PHOTOS_EVAL.md, and the Photos section of CLAUDE.md.
+// See PHOTOS_EVAL.md, and the Files section of CLAUDE.md.
+//
+// EVERYTHING IN HERE IS STILL NAMED `photo`, DELIBERATELY. PDFs joined photos in
+// v37, and what people READ says Files -- the tab, the buttons, the empty
+// states. The stored key did not move: the revision domain, the Sheet tab, the
+// `photos` array in every payload and the `?tab=photos` deep link all still say
+// photos, and renaming any of those is a schema change that would drop rows on
+// the next write for nothing. Same trade `changeType` takes against "Work type",
+// including keeping the code on the stored name rather than the read one, so
+// there is one word to grep for instead of two.
 
 // Long edge, in pixels, that an upload is downscaled to before it leaves the
 // browser, and the JPEG quality it is re-encoded at. ~1600px at q0.8 turns a
@@ -2545,6 +2554,29 @@ const PHOTO_JPEG_QUALITY = 0.8;
 // Refused before any work is done. Well above what a re-encoded phone photo
 // produces; this is a guard against someone picking a RAW file or a video.
 const PHOTO_MAX_BYTES = 25 * 1024 * 1024;
+// A DOCUMENT's cap is much lower and for a different reason: it is uploaded as
+// it stands, so nothing downstream shrinks it the way re-encoding rescues a 12MB
+// photo. Cloudinary's own free-plan limit is 10MB, and being refused THERE costs
+// the whole upload and reports it in the host's words rather than ours.
+const DOC_MAX_BYTES = 10 * 1024 * 1024;
+
+// What may be attached at all, and which pipeline it takes. The backend signs
+// the same allowlist into every upload (PHOTO_ALLOWED_FORMATS in the .gs), so
+// this list is the early, friendlier refusal and that one is the control -- the
+// same division `canEdit` already takes against the role check in doPost.
+//
+// Read from the MIME type first and the extension only when there is none: iOS
+// hands back a blank type for HEIC often enough that keying on it alone refuses
+// photos taken on half the phones in the building.
+function fileKindOf(file) {
+  const type = String((file && file.type) || "").toLowerCase();
+  const name = String((file && file.name) || "").toLowerCase();
+  if (type === "application/pdf") return "pdf";
+  if (type.indexOf("image/") === 0) return "image";
+  if (!type && /\.pdf$/.test(name)) return "pdf";
+  if (!type && /\.(jpe?g|png|gif|webp|heic|heif)$/.test(name)) return "image";
+  return "";
+}
 
 // Owner kinds a photo can attach to. Every one of these has a stable id --
 // assets since the key refactor, breakers and circuits always, work entries and
@@ -2569,6 +2601,11 @@ function adoptPhoto(p) {
     ownerId: p.ownerId || "",
     url: p.url || "",
     thumbUrl: p.thumbUrl || "",
+    // "image" unless the row says otherwise, and unlike ownerType above this
+    // default is KNOWN rather than guessed: before v37 an image was the only
+    // thing that could be uploaded, so every row written before then is one.
+    kind: p.kind || "image",
+    fileName: p.fileName || "",
     caption: p.caption || "",
     // The sheet stores the string "true"; doGet already converts, but a fixture
     // or a hand-edited row can still arrive either way.
@@ -2576,17 +2613,46 @@ function adoptPhoto(p) {
   };
 }
 
+// Inserts a Cloudinary transformation into a delivery URL, or hands the URL back
+// untouched when there is nowhere to put one -- a sandbox object URL, a data
+// URI, or a different host after a migration. Never mangles what it cannot read.
+function photoTransformUrl(photo, transform) {
+  const url = (photo && photo.url) || "";
+  const marker = "/image/upload/";
+  const at = url.indexOf(marker);
+  if (at === -1) return url;
+  return url.slice(0, at + marker.length) + transform + "/" + url.slice(at + marker.length);
+}
+
+// A PDF has no thumbnail of its own, so page 1 is RASTERIZED on demand by the
+// image host: f_jpg,pg_1 through the same pipeline a photo takes. That is the
+// whole reason a document is uploaded as an image resource rather than as a raw
+// file -- raw storage would have meant a generic icon and nothing else.
+//
+// ONE PER-TENANT SETTING RIDES ON THIS: Cloudinary ships accounts with PDF
+// delivery disabled (Settings > Security), and the ORIGINAL then 404s while this
+// derived preview still works. So "Open" failing while the tile looks right is a
+// checkbox, not a bug in here.
+const PHOTO_THUMB_TRANSFORM = "w_400,h_400,c_fill,q_auto,f_auto";
+const PDF_THUMB_TRANSFORM = "w_400,h_400,c_fill,q_auto,f_jpg,pg_1";
+const PDF_PREVIEW_TRANSFORM = "w_1200,c_limit,q_auto,f_jpg,pg_1";
+
 // A thumbnail URL, preferring the one stored at upload time and DERIVING one
 // from a Cloudinary delivery URL when it is missing. The stored value is what
 // makes a move to a different host a copy plus one column rewrite; the derive
 // is only a fallback for a row written before it was stored, or by hand.
 function photoThumbUrl(photo) {
   if (photo.thumbUrl) return photo.thumbUrl;
-  const url = photo.url || "";
-  const marker = "/image/upload/";
-  const at = url.indexOf(marker);
-  if (at === -1) return url;
-  return url.slice(0, at + marker.length) + "w_400,h_400,c_fill,q_auto,f_auto/" + url.slice(at + marker.length);
+  return photoTransformUrl(photo, photo.kind === "pdf" ? PDF_THUMB_TRANSFORM : PHOTO_THUMB_TRANSFORM);
+}
+
+// What the lightbox shows. A photo shows itself; a PDF shows its first page,
+// because a browser cannot be relied on to render one inline -- iOS in
+// particular refuses inside a frame -- and "Open" beside it goes to the file.
+function photoPreviewUrl(photo) {
+  if (!photo) return "";
+  if (photo.kind !== "pdf") return photo.url || "";
+  return photoTransformUrl(photo, PDF_PREVIEW_TRANSFORM);
 }
 
 // Downscales and re-encodes on a canvas before upload. Three things happen here
@@ -2642,9 +2708,19 @@ async function downscalePhoto(file) {
 // signedParams list rather than restated here: Cloudinary rejects the upload if
 // the posted set differs from the signed set by even one entry, and says only
 // that the signature is invalid.
-async function uploadPhotoToCloudinary(blob, sig) {
+// A PDF goes to the SAME /image/upload endpoint as a photo, which is what makes
+// its first page renderable later (see PDF_THUMB_TRANSFORM). Raw storage would
+// have been the obvious home for a document and would have left it thumbnailless.
+async function uploadPhotoToCloudinary(blob, sig, uploadName) {
   const form = new FormData();
-  form.append("file", blob);
+  // The third argument is the multipart part's filename, and its EXTENSION is
+  // what Cloudinary reads to name the format: a Blob posted without one arrives
+  // as "blob", and a PDF sent that way can be refused by the very
+  // allowed_formats list it satisfies. It is NOT the user's own file name --
+  // an image is re-encoded to JPEG here, so sending the original "IMG_1.HEIC"
+  // would announce a format these bytes no longer are. The stored object name
+  // is the uuid the backend chose either way.
+  form.append("file", blob, uploadName || "upload.jpg");
   form.append("api_key", sig.apiKey);
   form.append("signature", sig.signature);
   (sig.signedParams || ["folder", "public_id", "timestamp"]).forEach(k => {
@@ -2679,6 +2755,11 @@ const MOCK_PHOTO_IMG_B = "data:image/svg+xml;utf8," + encodeURIComponent(
 const MOCK_PHOTO_IMG_C = "data:image/svg+xml;utf8," + encodeURIComponent(
   '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300"><rect width="400" height="300" fill="#3f6b52"/><text x="200" y="160" font-family="sans-serif" font-size="26" fill="#fff" text-anchor="middle">Circuit</text></svg>');
 
+// A real (tiny) one-page PDF, so Sandbox's "Open" opens a document rather than
+// a broken tab. It is the smallest honest fixture: a fake URI would exercise
+// the tile and nothing else.
+const MOCK_PDF_DOC = "data:application/pdf;base64,JVBERi0xLjQKMSAwIG9iajw8L1R5cGUvQ2F0YWxvZy9QYWdlcyAyIDAgUj4+ZW5kb2JqCjIgMCBvYmo8PC9UeXBlL1BhZ2VzL0tpZHNbMyAwIFJdL0NvdW50IDE+PmVuZG9iagozIDAgb2JqPDwvVHlwZS9QYWdlL1BhcmVudCAyIDAgUi9NZWRpYUJveFswIDAgMjAwIDEyMF0vUmVzb3VyY2VzPDwvRm9udDw8L0YxIDQgMCBSPj4+Pi9Db250ZW50cyA1IDAgUj4+ZW5kb2JqCjQgMCBvYmo8PC9UeXBlL0ZvbnQvU3VidHlwZS9UeXBlMS9CYXNlRm9udC9IZWx2ZXRpY2E+PmVuZG9iago1IDAgb2JqPDwvTGVuZ3RoIDY2Pj5zdHJlYW0KQlQgL0YxIDEyIFRmIDE4IDY0IFRkIChTYW5kYm94IHF1b3RlIC0gbm90IGEgcmVhbCBkb2N1bWVudCkgVGogRVQKZW5kc3RyZWFtCmVuZG9iagp0cmFpbGVyPDwvUm9vdCAxIDAgUj4+";
+
 const MOCK_PHOTOS = [
   {
     id: "photo-1", ownerType: "asset", ownerId: "BCA0082",
@@ -2697,6 +2778,26 @@ const MOCK_PHOTOS = [
     url: MOCK_PHOTO_IMG_C, thumbUrl: MOCK_PHOTO_IMG_C, storageKey: "sandbox/circuit-outlets",
     caption: "North wall outlet run", width: 400, height: 300, bytes: 4096,
     hiddenFromPublic: false, at: "2026-09-01T17:26:00.000Z", by: "Eric Stamage",
+  },
+  // Two DOCUMENTS, so Sandbox exercises the v37 path rather than only the unit
+  // test: a document tile (which falls back to its icon here, since a data URI
+  // PDF has no host to rasterize page 1), an Open that really opens a PDF, and a
+  // work entry whose photos and paperwork sit side by side. Note neither of the
+  // image rows above carries `kind` at all -- that is deliberate, and is what
+  // keeps adoptPhoto's "a blank kind is an image" default exercised.
+  {
+    id: "photo-5", ownerType: "asset", ownerId: "BCA0082",
+    url: MOCK_PDF_DOC, thumbUrl: "", storageKey: "sandbox/panel-schedule",
+    kind: "pdf", fileName: "panel-schedule.pdf",
+    caption: "As-built panel schedule", width: 200, height: 120, bytes: 404,
+    hiddenFromPublic: false, at: "2026-09-02T15:10:00.000Z", by: "Eric Stamage",
+  },
+  {
+    id: "photo-6", ownerType: "change", ownerId: "chg-0086-coil-mar",
+    url: MOCK_PDF_DOC, thumbUrl: "", storageKey: "sandbox/hvac-invoice",
+    kind: "pdf", fileName: "central-coast-invoice-4471.pdf",
+    caption: "", width: 200, height: 120, bytes: 404,
+    hiddenFromPublic: false, at: "2026-03-02T18:06:00.000Z", by: "Eric Stamage",
   },
   {
     id: "photo-4", ownerType: "asset", ownerId: "BCA0082",
@@ -5763,7 +5864,7 @@ function AssetTracker() {
       if (added.length) await persist(assetsToWrite, { photos: [...photos, ...added] });
       if (failures.length) {
         setPhotoError(failures.length === 1 ? failures[0]
-          : failures.length + " of " + chosen.length + " photos failed — " + failures.join("; "));
+          : failures.length + " of " + chosen.length + " files failed — " + failures.join("; "));
       }
     } finally {
       setPhotoBusy(false);
@@ -5776,11 +5877,30 @@ function AssetTracker() {
   // accumulate-then-write-once rule cannot be broken by a future call site: this
   // returns a row and writes nothing.
   async function preparePhotoRow(ownerType, ownerId, file) {
-    if (file.size > PHOTO_MAX_BYTES) {
+    // Both caps are checked here rather than at the picker, because a file can
+    // also arrive from a drop or a share sheet that never consulted `accept`.
+    const kind = fileKindOf(file);
+    if (!kind) {
+      throw new Error("isn't a photo or a PDF — those are the only kinds this accepts.");
+    }
+    if (kind === "image" && file.size > PHOTO_MAX_BYTES) {
       throw new Error("too large — pick a photo rather than a video or a RAW file.");
     }
+    if (kind === "pdf" && file.size > DOC_MAX_BYTES) {
+      throw new Error("too large — a PDF has to be under " + Math.round(DOC_MAX_BYTES / 1024 / 1024)
+        + "MB, since nothing shrinks it on the way up.");
+    }
     {
-      const prepared = await downscalePhoto(file);
+      // An image is downscaled and re-encoded (which is also what drops its EXIF
+      // and its GPS); a PDF goes up exactly as it stands. There is nothing to
+      // re-encode a PDF into that is still a PDF, and stripping ITS metadata
+      // would need a PDF library — which this file, with no build step, does not
+      // get to have. So a document carries whatever its author put in it, and
+      // that is the reason documents do not publish on the public panel page.
+      const prepared = kind === "image"
+        ? await downscalePhoto(file)
+        : { blob: file, width: undefined, height: undefined };
+      const fileName = (file.name || "").slice(0, 200);
       let row;
       if (sandboxMode) {
         // Sandbox makes NO network call, here as everywhere. The object URL
@@ -5790,20 +5910,28 @@ function AssetTracker() {
           id: crypto.randomUUID(), ownerType: ownerType, ownerId: ownerId,
           url: URL.createObjectURL(prepared.blob), thumbUrl: "",
           storageKey: "sandbox/" + crypto.randomUUID(),
+          kind: kind, fileName: fileName,
           caption: "", width: prepared.width, height: prepared.height, bytes: prepared.blob.size,
           hiddenFromPublic: false,
           at: new Date().toISOString(), by: currentUser || "",
         };
       } else {
         const sig = await signPhotoUpload();
-        const uploaded = await uploadPhotoToCloudinary(prepared.blob, sig);
+        // Announces the bytes as they are NOW -- JPEG for a re-encoded photo,
+        // PDF for a document that was never touched. See uploadPhotoToCloudinary.
+        const uploadName = kind === "image" ? "upload.jpg"
+          : (/\.pdf$/i.test(fileName) ? fileName : "document.pdf");
+        const uploaded = await uploadPhotoToCloudinary(prepared.blob, sig, uploadName);
         row = {
           id: crypto.randomUUID(), ownerType: ownerType, ownerId: ownerId,
           url: uploaded.secure_url,
           // Stored rather than derived, so a later move to a different host is a
-          // copy plus one column rewrite instead of a code change.
-          thumbUrl: photoThumbUrl({ url: uploaded.secure_url, thumbUrl: "" }),
+          // copy plus one column rewrite instead of a code change. Derived HERE
+          // through the same helper the gallery would use, so a PDF's stored
+          // thumbnail is its page-1 render rather than the file itself.
+          thumbUrl: photoThumbUrl({ url: uploaded.secure_url, thumbUrl: "", kind: kind }),
           storageKey: uploaded.public_id || sig.publicId,
+          kind: kind, fileName: fileName,
           caption: "",
           width: uploaded.width || prepared.width,
           height: uploaded.height || prepared.height,
@@ -8371,7 +8499,7 @@ function AssetTracker() {
                     visit. Uploads land immediately; the entry itself still saves
                     on Save like every other field here. */}
                 <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 8 }}>Photos</div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 8 }}>Files</div>
                   <PhotoGallery
                     photos={photosForOwner("change", changeDraft.id)}
                     canEdit={canEdit}
@@ -8382,7 +8510,7 @@ function AssetTracker() {
                     onDelete={deletePhoto}
                     onToggleHidden={setPhotoHiddenFromPublic}
                     onOpen={openPhotoViewer}
-                    emptyText="No photos on this entry."
+                    emptyText="No files on this entry."
                   />
                 </div>
                 <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
@@ -8452,7 +8580,7 @@ function AssetTracker() {
                   </label>
                 </div>
                 <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 8 }}>Photos</div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 8 }}>Files</div>
                   <PhotoGallery
                     photos={photosForOwner("maintenance", maintenanceDraft.id)}
                     canEdit={canEdit}
@@ -8463,7 +8591,7 @@ function AssetTracker() {
                     onDelete={deletePhoto}
                     onToggleHidden={setPhotoHiddenFromPublic}
                     onOpen={openPhotoViewer}
-                    emptyText="No photos on this task."
+                    emptyText="No files on this task."
                   />
                 </div>
                 <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
@@ -8494,12 +8622,34 @@ function AssetTracker() {
               onClick={() => setPhotoViewer(null)}
               style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.86)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}
             >
-              <img
-                src={photoViewer.url}
-                alt={photoViewer.caption || "Photo"}
-                onClick={(e) => e.stopPropagation()}
-                style={{ maxWidth: "100%", maxHeight: "70vh", objectFit: "contain", borderRadius: 10, background: C.surface }}
-              />
+              {/* A photo shows itself. A DOCUMENT shows its first page and an
+                  Open beside it: no browser can be relied on to render a PDF
+                  inline -- iOS refuses inside a frame, which is the device this
+                  gets opened on in a mechanical room -- so the file opens in a
+                  tab of its own, where the platform's own viewer handles it. */}
+              {/* Wrapped so a click on the image (or on the icon standing in for
+                  one) does not fall through to the backdrop and close the
+                  viewer, which is what the bare <img> used to guard itself. */}
+              <div onClick={(e) => e.stopPropagation()} style={{ display: "flex", maxWidth: "100%" }}>
+                <AttachmentImage
+                  photo={photoViewer}
+                  src={photoPreviewUrl(photoViewer)}
+                  alt={photoViewer.caption || photoViewer.fileName || "Photo"}
+                  iconSize={48}
+                  style={{ maxWidth: "100%", maxHeight: "70vh", objectFit: "contain", borderRadius: 10, background: C.surface, minWidth: 220, minHeight: 160 }}
+                />
+              </div>
+              {photoViewer.kind === "pdf" && (
+                <a
+                  href={photoViewer.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  style={{ marginTop: 14, display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", background: C.brand, color: "#fff", borderRadius: 10, fontWeight: 600, fontSize: 13, textDecoration: "none" }}
+                >
+                  <ExternalLink size={14} /> Open {photoViewer.fileName || "PDF"}
+                </a>
+              )}
               {/* The caption is edited HERE rather than on the tile, because this
                   is the moment you are actually looking at the photo and can say
                   what it is. On a work entry that is the difference between a row
@@ -8510,7 +8660,7 @@ function AssetTracker() {
                     value={photoCaptionDraft}
                     onChange={(e) => setPhotoCaptionDraft(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Enter") savePhotoCaption(); }}
-                    placeholder="Describe this photo — receipt, before, after…"
+                    placeholder="Describe this file — receipt, before, after…"
                     style={{ flex: 1, padding: "8px 10px", border: "1px solid rgba(255,255,255,0.35)", background: "rgba(255,255,255,0.10)", color: "#fff", borderRadius: 10, fontSize: 13 }}
                   />
                   <button
@@ -8721,7 +8871,7 @@ function AssetTracker() {
               details: { label: "Details" },
               contents: { label: "Contents", count: contentsCount },
               maintenance: { label: "Maintenance", count: maintenanceItems.length, urgent: overdueMaintenanceCount > 0 },
-              photos: { label: "Photos", count: assetPhotos.length },
+              photos: { label: "Files", count: assetPhotos.length },
               comments: { label: "Comments", count: comments.length },
               audit: { label: "Audit", count: assetAuditEntries.length },
             }[key] || { label: ASSET_MODULES[key].label, count: ASSET_MODULES[key].count(selectedAsset) };
@@ -9435,13 +9585,19 @@ function AssetTracker() {
                                 <button
                                   key={ph.id}
                                   onClick={() => openPhotoViewer(ph)}
-                                  title={ph.caption || "Open photo"}
+                                  title={ph.caption || ph.fileName || (ph.kind === "pdf" ? "Open document" : "Open photo")}
                                   style={{ width: 54, height: 54, padding: 0, border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden", background: C.hover, cursor: "pointer" }}
                                 >
-                                  <img
+                                  {/* Through AttachmentImage like every other
+                                      tile: a receipt attached here is a PDF as
+                                      often as a photo, and at 54px a failed
+                                      render with no fallback is a grey square. */}
+                                  <AttachmentImage
+                                    photo={ph}
                                     src={photoThumbUrl(ph)}
-                                    alt={ph.caption || "Photo"}
-                                    loading="lazy"
+                                    alt={ph.caption || ph.fileName || "Photo"}
+                                    iconSize={18}
+                                    hideName
                                     style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
                                   />
                                 </button>
@@ -9477,7 +9633,7 @@ function AssetTracker() {
                 onDelete={deletePhoto}
                 onToggleHidden={setPhotoHiddenFromPublic}
                 onOpen={openPhotoViewer}
-                emptyText={canEdit ? "No photos yet. Add one to show what this actually looks like." : "No photos yet."}
+                emptyText={canEdit ? "No files yet. Add a photo of what this actually looks like, or the PDF that came with it." : "No files yet."}
               />
             </div>
           )}
@@ -14471,6 +14627,41 @@ function circuitSummary(circuit, assets) {
 // top-level component taking only the props it touches -- the same extraction
 // BreakersTabContent proved out -- so the same gallery serves an asset, a
 // breaker and a circuit without any of them knowing about the others.
+// A tile's (or the lightbox's) image, with an ICON FALLBACK. That fallback is a
+// real state rather than defensive decoration: a document's preview is page 1
+// rendered on demand by the image host, and a tenant whose Cloudinary account
+// still has PDF delivery switched off gets nothing back for it. A broken-image
+// glyph with no file name would read as a lost file.
+//
+// The reset on `src` matters because the lightbox reuses one instance for every
+// photo it opens: without it, one failed preview would leave every later one
+// showing an icon.
+function AttachmentImage({ photo, src, alt, style, iconSize, hideName }) {
+  const [failed, setFailed] = React.useState(false);
+  React.useEffect(() => { setFailed(false); }, [src]);
+  if (!src || failed) {
+    return (
+      <div style={{
+        ...style, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+        gap: 6, padding: 10, background: C.hover, color: C.muted, textAlign: "center",
+      }}>
+        <FileText size={iconSize || 28} color={C.muted} />
+        {/* Suppressed on the small strip tiles, where a file name is more
+            characters than the box has pixels and lands as a grey smear. */}
+        {!hideName && (
+          <span style={{ fontSize: 11, wordBreak: "break-all", lineHeight: 1.3 }}>
+            {(photo && photo.fileName) || (photo && photo.kind === "pdf" ? "PDF" : "Image unavailable")}
+          </span>
+        )}
+      </div>
+    );
+  }
+  return <img src={src} alt={alt} loading="lazy" onError={() => setFailed(true)} style={style} />;
+}
+
+// The gallery is called PhotoGallery and holds photos AND documents: the stored
+// key never moved when PDFs landed in v37, and the code follows the stored key.
+// See the Files section near the top of this file.
 function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onDelete, onToggleHidden, onOpen, emptyText }) {
   const [confirmDelete, setConfirmDelete] = React.useState(null);
   const inputRef = React.useRef(null);
@@ -14490,7 +14681,11 @@ function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onDelete,
     <div>
       {canEdit && (
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
-          <input ref={inputRef} type="file" accept="image/*" multiple onChange={pick} style={{ display: "none" }} />
+          {/* The picker's own filter, which is a courtesy and not the rule --
+              fileKindOf refuses anything else, and the backend signs the same
+              allowlist into every upload. A file can still arrive from a drop or
+              a share sheet that never read this attribute. */}
+          <input ref={inputRef} type="file" accept="image/*,application/pdf" multiple onChange={pick} style={{ display: "none" }} />
           <button
             onClick={() => inputRef.current && inputRef.current.click()}
             disabled={busy}
@@ -14501,7 +14696,7 @@ function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onDelete,
               cursor: busy ? "default" : "pointer",
             }}
           >
-            {busy ? <Loader2 size={14} className="spin" /> : <ImagePlus size={14} />}
+            {busy ? <Loader2 size={14} className="spin" /> : <Paperclip size={14} />}
             {/* Counts through a batch rather than saying "Uploading..." for a
                 minute with nothing moving. Reads 1-based: the first file is
                 "1 of 5", not "0 of 5". */}
@@ -14509,10 +14704,11 @@ function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onDelete,
               ? (progress && progress.total > 1
                   ? "Uploading " + Math.min(progress.done + 1, progress.total) + " of " + progress.total + "…"
                   : "Uploading…")
-              : "Add photos"}
+              : "Add files"}
           </button>
           <span style={{ fontSize: 11, color: C.muted }}>
-            Pick several at once. Resized and stripped of location data before they leave this device.
+            Photos or PDFs, several at once. Photos are resized and stripped of location data before they
+            leave this device; a PDF is uploaded as it is.
           </span>
         </div>
       )}
@@ -14524,23 +14720,33 @@ function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onDelete,
       )}
 
       {photos.length === 0 ? (
-        <div style={{ padding: "24px 0", color: C.empty, fontSize: 13 }}>{emptyText || "No photos yet."}</div>
+        <div style={{ padding: "24px 0", color: C.empty, fontSize: 13 }}>{emptyText || "No files yet."}</div>
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))", gap: 10 }}>
           {photos.map(ph => (
             <div key={ph.id} style={{ position: "relative", borderRadius: 10, overflow: "hidden", border: `1px solid ${C.border}`, background: C.surface }}>
               <button
                 onClick={() => onOpen(ph)}
-                title={ph.caption || "Open photo"}
+                title={ph.caption || ph.fileName || (ph.kind === "pdf" ? "Open document" : "Open photo")}
                 style={{ display: "block", width: "100%", aspectRatio: "1 / 1", padding: 0, border: "none", background: C.hover, cursor: "pointer" }}
               >
-                <img
+                <AttachmentImage
+                  photo={ph}
                   src={photoThumbUrl(ph)}
-                  alt={ph.caption || "Photo"}
-                  loading="lazy"
+                  alt={ph.caption || ph.fileName || "Photo"}
                   style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
                 />
               </button>
+              {/* A document says so on its face. Its tile is often its first
+                  page, which at thumbnail size is a grey rectangle that could be
+                  anything. */}
+              {ph.kind === "pdf" && (
+                <div
+                  style={{ position: "absolute", bottom: ph.caption || ph.fileName ? 28 : 6, left: 6, display: "flex", alignItems: "center", gap: 4, padding: "2px 6px", borderRadius: 6, background: "rgba(42,52,57,0.78)", color: "#fff", fontSize: 10, fontWeight: 700 }}
+                >
+                  <FileText size={11} /> PDF
+                </div>
+              )}
               {ph.hiddenFromPublic && (
                 <div
                   title="Hidden from the public QR page"
@@ -14561,16 +14767,24 @@ function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onDelete,
                   </button>
                   <button
                     onClick={() => setConfirmDelete(ph.id)}
-                    aria-label="Delete photo"
+                    aria-label="Delete file"
                     style={{ display: "flex", padding: 5, borderRadius: 6, border: "none", background: "rgba(42,52,57,0.78)", color: "#fff", cursor: "pointer" }}
                   >
                     <Trash2 size={12} />
                   </button>
                 </div>
               )}
-              {ph.caption && (
-                <div style={{ padding: "6px 8px", fontSize: 11, color: C.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {ph.caption}
+              {/* The file name stands in for a missing caption on a DOCUMENT,
+                  where it is usually the more useful of the two anyway --
+                  "central-coast-invoice-4471.pdf" says what a caption would. Not
+                  on a photo: "IMG_4821.HEIC" under every tile is noise, and a
+                  photo already shows what it is by being one. */}
+              {(ph.caption || (ph.kind === "pdf" && ph.fileName)) && (
+                <div
+                  title={ph.caption || ph.fileName}
+                  style={{ padding: "6px 8px", fontSize: 11, color: C.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                >
+                  {ph.caption || ph.fileName}
                 </div>
               )}
             </div>
@@ -14581,9 +14795,9 @@ function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onDelete,
       {confirmDelete && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20 }}>
           <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 340 }}>
-            <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Delete this photo?</div>
+            <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Delete this file?</div>
             <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>
-              The record is removed from the sheet. The image itself stays at the image host.
+              The record is removed from the sheet. The file itself stays at the host.
             </div>
             <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
               <button onClick={() => setConfirmDelete(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>

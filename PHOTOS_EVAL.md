@@ -605,3 +605,50 @@ naturally than anywhere else in the app.
 
 **What this does NOT include:** Allocations (a quantity per room — nothing to photograph) and
 AuditLog (append-only, machine-written, and the one tab with no rewrite path).
+
+---
+
+## 10. Decision 4 — other file types (2026-09-17, decided and built as v37)
+
+Asked after the feature had been live for a week: can a PDF attach the way a photo does — a
+vendor quote, a service report, an as-built panel schedule?
+
+**Yes, and it is a small change, because nothing above assumes an image.** A row is an owner
+pair plus a URL; §3's schema, §5's orphan story, the revision domain and the `_dirty` gate are
+all indifferent to what the bytes are. Two columns (`kind`, `fileName`) and three decisions.
+
+### 10.1 Documents do NOT publish on the public `?panel=` page
+
+Eric's call, and §7.4 had already written the argument: an open bucket protects bytes by URL
+unguessability, which is the right trade for photos of equipment and the wrong one for
+documents. A second fact, discovered in the building rather than the deciding: §4's downscale
+strips a photo's EXIF and GPS *as a side effect of re-encoding*, and **a PDF cannot be
+re-encoded** — it goes up exactly as its author wrote it, metadata, author name and all.
+Stripping that would need a PDF library, which a no-build-step file does not get to have.
+
+So the filter sits beside `hiddenFromPublic`, before the ownership scope, where a later change
+to the scoping rule cannot route around it.
+
+### 10.2 Image resource type, not raw storage
+
+Cloudinary can hold a PDF either way. Raw is the obvious home for a document and gives no
+derived assets — every document would be a generic icon. As an **image** resource its first
+page rasterizes on demand (`f_jpg,pg_1`), which is a real thumbnail through the pipeline the
+photos already use, and it keeps `photoThumbUrl` one function rather than two.
+
+**The cost, and it is a per-tenant setup step like the credentials in §8.5:** Cloudinary ships
+accounts with **PDF and ZIP delivery disabled** (Settings > Security). Until it is ticked, the
+page-1 preview renders and the original 404s — "the tile looks right, Open does nothing". The
+gallery's icon fallback makes that survivable rather than invisible, but the checkbox is the
+fix.
+
+### 10.3 The type allowlist is signed, not merely picked
+
+`allowed_formats` goes into every upload signature, so the host refuses anything outside it.
+The file picker's `accept` and `fileKindOf` are the early, friendlier refusal — the same
+division `canEdit` takes against the role check in `doPost`.
+
+**What would change this:** a request for Word or Excel attachments. Those are neither
+renderable nor previewable through an image pipeline, so they would want raw storage, an icon
+tile, and a decision about download-versus-view — i.e. 10.2 answered the other way for a
+second class of file, not a wider allowlist on this one.

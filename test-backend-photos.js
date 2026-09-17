@@ -17,6 +17,12 @@
 //   2. hiddenFromPublic being ignored, publishing a photo deliberately withheld.
 //   3. The public projection widening past the panel it belongs to.
 //   4. storageKey or `by` leaking onto the anonymous page.
+//   5. (v37) a DOCUMENT reaching that page. Eric's call was that photos publish
+//      and documents never do, and a filter that silently stopped filtering
+//      would publish a quote or an invoice with no symptom at all.
+//   6. (v37) a signed upload parameter the client is never told to post.
+//      Cloudinary then refuses every upload with "invalid signature" and says
+//      nothing about which parameter, which reads as broken credentials.
 //
 // Run: node test-backend-photos.js   (exits non-zero on failure)
 const fs = require('fs');
@@ -73,7 +79,7 @@ const AUTHORED = {
   id: 'p-1', ownerType: 'breaker', ownerId: 'brk-uuid-1',
   url: 'https://res.cloudinary.com/x/image/upload/v1/assets/abc.jpg',
   thumbUrl: 'https://res.cloudinary.com/x/image/upload/w_200/v1/assets/abc.jpg',
-  storageKey: 'assets/abc', caption: 'Main lugs',
+  storageKey: 'assets/abc', kind: 'image', fileName: 'IMG_4821.HEIC', caption: 'Main lugs',
   width: 1600, height: 1200, bytes: 301244,
   hiddenFromPublic: true, at: '2026-09-10T00:00:00.000Z', by: 'Eric',
 };
@@ -84,12 +90,25 @@ eq('the Photos tab is written with the declared schema', written.fields, JSON.pa
 // Every authored field has to survive the trip. This is the contract that fails
 // silently: a name written on one side and not read on the other simply vanishes.
 const back = readPhotos(written.rows)[0];
-['id', 'ownerType', 'ownerId', 'url', 'thumbUrl', 'storageKey', 'caption', 'at', 'by']
+['id', 'ownerType', 'ownerId', 'url', 'thumbUrl', 'storageKey', 'kind', 'fileName', 'caption', 'at', 'by']
   .forEach(k => eq(`round trip preserves ${k}`, back[k], AUTHORED[k]));
 eq('round trip preserves hiddenFromPublic as a real boolean', back.hiddenFromPublic, true);
 eq('a photo not hidden reads back false, not ""',
    readPhotos(writePhotos({ photos: [Object.assign({}, AUTHORED, { hiddenFromPublic: false })] }).rows)[0].hiddenFromPublic,
    false);
+// A PDF has to survive as a PDF. Losing `kind` on the way through would file a
+// document as an image, which renders as a broken tile AND publishes it on the
+// public panel page, since that filter reads this very field.
+const pdfBack = readPhotos(writePhotos({ photos: [Object.assign({}, AUTHORED,
+  { kind: 'pdf', fileName: 'boiler-quote.pdf' })] }).rows)[0];
+eq('round trip preserves kind: pdf', pdfBack.kind, 'pdf');
+eq('round trip preserves the original file name', pdfBack.fileName, 'boiler-quote.pdf');
+// Pre-v37 rows have no kind cell, and an image is the only thing that could
+// have been uploaded then — so this default is known, not guessed.
+eq('a blank kind reads back as an image',
+   readPhotos(writePhotos({ photos: [Object.assign({}, AUTHORED, { kind: undefined })] }).rows)[0].kind,
+   'image');
+
 // storageKey is the delete/migrate handle and is NOT derivable from a
 // transformed delivery URL, so losing it here would be unrecoverable.
 eq('storageKey survives a blank thumbUrl',
@@ -113,7 +132,7 @@ const UNASSIGNED = [{ id: 'cir-loose' }];
 const row = (over) => Object.assign({
   id: 'x', ownerType: 'asset', ownerId: PANEL, url: 'u', thumbUrl: 't',
   storageKey: 'assets/secret', caption: 'c', width: 1, height: 2, bytes: 3,
-  hiddenFromPublic: '', at: 'now', by: 'Eric Stamage',
+  hiddenFromPublic: '', kind: 'image', fileName: 'x.jpg', at: 'now', by: 'Eric Stamage',
 }, over);
 
 const published = projectPublic([
@@ -125,6 +144,8 @@ const published = projectPublic([
   row({ id: 'other-panel', ownerId: 'some-other-panel' }),
   row({ id: 'a-laptop', ownerId: 'laptop-uuid' }),
   row({ id: 'a-work-entry', ownerType: 'change', ownerId: 'change-uuid' }),
+  row({ id: 'a-panel-pdf', kind: 'pdf', fileName: 'panel-schedule.pdf' }),
+  row({ id: 'a-breaker-pdf', kind: 'pdf', ownerType: 'breaker', ownerId: 'brk-1' }),
 ], PANEL, BREAKERS, UNASSIGNED);
 
 eq('publishes exactly the panel, its breakers and its circuits',
@@ -136,6 +157,16 @@ eq('a photo marked hiddenFromPublic is withheld', published.some(p => p.id === '
 eq('another panel\'s photo is not published', published.some(p => p.id === 'other-panel'), false);
 eq('an asset photo is not published', published.some(p => p.id === 'a-laptop'), false);
 eq('a work entry photo is not published', published.some(p => p.id === 'a-work-entry'), false);
+// Eric's call, 2026-09-17: photos publish, documents never do. Both of these
+// are owned by something IN the payload, so the ownership scope would let them
+// through — only the kind filter stops them.
+eq('a document on the panel itself is not published', published.some(p => p.id === 'a-panel-pdf'), false);
+eq('a document on one of its breakers is not published', published.some(p => p.id === 'a-breaker-pdf'), false);
+// A row written before v37 has a blank kind and is an image; reading that as
+// "not an image" would quietly unpublish every photo already on the sheet.
+eq('a pre-v37 row with no kind still publishes',
+   projectPublic([row({ id: 'legacy', kind: undefined })], PANEL, BREAKERS, UNASSIGNED).map(p => p.id),
+   ['legacy']);
 
 // A leak here is permanent: these URLs are handed to anyone who guesses a code.
 const publicKeys = Object.keys(published[0]).sort();
@@ -179,6 +210,59 @@ eq('blank parameters are dropped before signing',
 eq('parameter order in the object does not change the signature',
    signMod.sign({ public_id: 'u', folder: 'f', timestamp: 2 }, 'S'),
    signMod.sign({ timestamp: 2, folder: 'f', public_id: 'u' }, 'S'));
+
+// --- 3b. what the sign handler hands the browser (v37) -----------------------
+// Executed rather than read, because the property that matters is a RELATION:
+// every parameter folded into the signature must also be named in signedParams
+// AND present in the response under that exact name, since the client builds its
+// upload form by reading sig[k] for each name. Break any one of the three and
+// Cloudinary refuses every upload as "invalid signature" without saying which
+// parameter is wrong.
+const signHandler = (() => {
+  const mod = {};
+  new Function('Utilities', 'PropertiesService', 'ROLE_EDITOR', 'readConfigMap_',
+    'authorizeSession_', 'jsonOut_', 'module', `
+    ${src.slice(src.indexOf('const PHOTO_ALLOWED_FORMATS'), src.indexOf(';', src.indexOf('const PHOTO_ALLOWED_FORMATS')) + 1)}
+    ${grab('sha1Hex_')}
+    ${grab('cloudinarySignature_')}
+    ${grab('handlePhotoSign_')}
+    module.f = handlePhotoSign_;
+  `)(
+    Object.assign({ getUuid: () => 'uuid-fixed' }, Utilities),
+    { getScriptProperties: () => ({ getProperty: (k) => ({
+      CLOUDINARY_CLOUD_NAME: 'school', CLOUDINARY_API_KEY: 'KEY',
+      CLOUDINARY_API_SECRET: 'SECRET', CLOUDINARY_FOLDER: 'dev',
+    }[k] || null) }) },
+    'editor',
+    () => ({}),
+    () => ({ ok: true, role: 'editor', email: 'eric@example.com' }),
+    (o) => o,
+    mod,
+  );
+  return mod.f;
+})();
+
+const signed = signHandler({ sessionId: 's' });
+eq('signing succeeds for an editor with credentials set', signed.ok, true);
+eq('every signed parameter is named in signedParams',
+   signed.signedParams, ['allowed_formats', 'folder', 'public_id', 'timestamp']);
+// The client reads each signed name straight off this response (public_id is the
+// one alias), so a name it cannot find is a parameter it silently omits.
+eq('every signed parameter is also present in the response under that name',
+   signed.signedParams.filter(k => (k === 'public_id' ? signed.publicId : signed[k]) === undefined), []);
+eq('the signature covers the format allowlist',
+   signed.signature,
+   sha1(`allowed_formats=${signed.allowed_formats}&folder=dev&public_id=uuid-fixed&timestamp=${signed.timestamp}SECRET`));
+// The list is deliberately NARROWER than the file picker's: a photo is
+// re-encoded to JPEG in the browser, so jpg covers every camera format there is.
+// png is the canvas fallback. Dropping either stops every photo upload; adding
+// a format nothing produces only widens what could be put in the account.
+eq('the allowlist is exactly jpg, png and pdf',
+   signed.allowed_formats.split(',').sort(), ['jpg', 'pdf', 'png']);
+// The object name stays this script's to choose. A client that could name its
+// own could overwrite an existing photo, or another tenant's, by naming it.
+eq('the object name is server-chosen, never taken from the request',
+   signHandler({ sessionId: 's', publicId: 'attacker-chosen', folder: 'bca' }).publicId, 'uuid-fixed');
 
 // --- 4. schema guards --------------------------------------------------------
 const PHOTO_FIELDS = new Function(`${constSrc('PHOTO_FIELDS')} return PHOTO_FIELDS;`)();

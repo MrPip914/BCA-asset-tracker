@@ -35,11 +35,20 @@ function grab(name) {
 }
 
 const mod = {};
-new Function('crypto', 'module',
-  grab('adoptPhoto') + grab('photoThumbUrl')
-  + '\nmodule.adoptPhoto = adoptPhoto; module.photoThumbUrl = photoThumbUrl;'
-)({ randomUUID: () => 'generated-uuid' }, mod);
-const { adoptPhoto, photoThumbUrl } = mod;
+new Function('crypto', 'module', `
+  ${src.slice(src.indexOf('const PHOTO_THUMB_TRANSFORM'), src.indexOf('const PDF_PREVIEW_TRANSFORM'))}
+  ${src.slice(src.indexOf('const PDF_PREVIEW_TRANSFORM'), src.indexOf(';', src.indexOf('const PDF_PREVIEW_TRANSFORM')) + 1)}
+  ${grab('adoptPhoto')}
+  ${grab('photoTransformUrl')}
+  ${grab('photoThumbUrl')}
+  ${grab('photoPreviewUrl')}
+  ${grab('fileKindOf')}
+  module.adoptPhoto = adoptPhoto;
+  module.photoThumbUrl = photoThumbUrl;
+  module.photoPreviewUrl = photoPreviewUrl;
+  module.fileKindOf = fileKindOf;
+`)({ randomUUID: () => 'generated-uuid' }, mod);
+const { adoptPhoto, photoThumbUrl, photoPreviewUrl, fileKindOf } = mod;
 
 let pass = 0, fail = 0;
 const eq = (name, got, want) => {
@@ -72,6 +81,14 @@ eq('a missing url stays empty rather than being invented', adoptPhoto({}).url, '
 eq('a blank ownerType is left blank, never guessed as "asset"', adoptPhoto({}).ownerType, '');
 eq('a real ownerType is untouched', adoptPhoto({ ownerType: 'change' }).ownerType, 'change');
 
+// kind, unlike ownerType, HAS a safe default: before v37 an image was the only
+// thing that could be uploaded, so a blank cell is an image by fact rather than
+// by guess. Reading it as anything else would unpublish every photo already on
+// the sheet, since the public panel filter keys off this field.
+eq('a blank kind is an image', adoptPhoto({}).kind, 'image');
+eq('a stored kind is kept', adoptPhoto({ kind: 'pdf' }).kind, 'pdf');
+eq('a missing fileName is blank rather than undefined', adoptPhoto({}).fileName, '');
+
 // ------------------------------------------------------------ photoThumbUrl
 const FULL = 'https://res.cloudinary.com/demo/image/upload/v1712345678/assets/abc.jpg';
 eq('a stored thumbUrl wins', photoThumbUrl({ url: FULL, thumbUrl: 'https://stored/thumb.jpg' }), 'https://stored/thumb.jpg');
@@ -87,6 +104,33 @@ eq('a data URI is returned unchanged',
    photoThumbUrl({ url: 'data:image/svg+xml;utf8,%3Csvg%3E', thumbUrl: '' }), 'data:image/svg+xml;utf8,%3Csvg%3E');
 eq('an empty photo does not throw', photoThumbUrl({}), '');
 
+// A PDF's tile is its FIRST PAGE, rasterized on demand by the image host. Lose
+// pg_1/f_jpg and the tile asks the browser to render a PDF inside an <img>,
+// which no browser does — every document in the app becomes a grey square.
+eq('a document derives a page-1 render rather than an image transform',
+   photoThumbUrl({ url: 'https://res.cloudinary.com/demo/image/upload/v1/assets/quote.pdf', thumbUrl: '', kind: 'pdf' }),
+   'https://res.cloudinary.com/demo/image/upload/w_400,h_400,c_fill,q_auto,f_jpg,pg_1/v1/assets/quote.pdf');
+eq('the lightbox shows a photo itself',
+   photoPreviewUrl({ url: FULL, kind: 'image' }), FULL);
+eq('the lightbox shows a document as a rendered page, not as the file',
+   photoPreviewUrl({ url: 'https://res.cloudinary.com/demo/image/upload/v1/assets/quote.pdf', kind: 'pdf' }),
+   'https://res.cloudinary.com/demo/image/upload/w_1200,c_limit,q_auto,f_jpg,pg_1/v1/assets/quote.pdf');
+// The Open button goes to `url` untouched, which is the whole point of showing
+// a render beside it rather than instead of it.
+eq('a sandbox document with no host to transform comes back unchanged',
+   photoPreviewUrl({ url: 'data:application/pdf;base64,AAA', kind: 'pdf' }), 'data:application/pdf;base64,AAA');
+
+// ---------------------------------------------------------------- fileKindOf
+// iOS hands back a BLANK type for HEIC often enough that keying on the MIME
+// type alone refuses photos taken on half the phones in the building.
+eq('a jpeg is an image', fileKindOf({ type: 'image/jpeg', name: 'a.jpg' }), 'image');
+eq('a pdf is a document', fileKindOf({ type: 'application/pdf', name: 'quote.pdf' }), 'pdf');
+eq('a typeless .heic is still an image', fileKindOf({ type: '', name: 'IMG_1.HEIC' }), 'image');
+eq('a typeless .pdf is still a document', fileKindOf({ type: '', name: 'Quote 4471.PDF' }), 'pdf');
+eq('a video is refused', fileKindOf({ type: 'video/quicktime', name: 'a.mov' }), '');
+eq('a word document is refused', fileKindOf({ type: 'application/msword', name: 'a.doc' }), '');
+eq('a nameless, typeless file is refused rather than assumed', fileKindOf({}), '');
+
 // ------------------------------------------------------------ fixture shape
 // MOCK_PHOTOS is Sandbox's only photo data, so its shape IS the shape this
 // feature gets exercised against. Read as source text rather than executed,
@@ -96,7 +140,14 @@ const ownerTypesUsed = [...fixtureSrc.matchAll(/ownerType: "([a-z]+)"/g)].map(m 
 const ownerIdsUsed = [...fixtureSrc.matchAll(/ownerId: "([^"]+)"/g)].map(m => m[1]);
 
 eq('the fixture covers more than one owner kind',
-   [...new Set(ownerTypesUsed)].sort(), ['asset', 'breaker', 'circuit']);
+   [...new Set(ownerTypesUsed)].sort(), ['asset', 'breaker', 'change', 'circuit']);
+// Sandbox is the only place this feature can be tried without a deploy, so a
+// fixture of photos alone would leave the whole v37 document path unexercised
+// there — tile fallback, PDF badge, Open, and a work entry holding both kinds.
+eq('the fixture carries at least one document', /kind: "pdf"/.test(fixtureSrc), true);
+eq('and at least one row with no kind at all, which adopts as an image',
+   fixtureSrc.split('\n').some(l => /storageKey: "sandbox\//.test(l)) && !/kind: "image"/.test(fixtureSrc), true);
+eq('a document carries its original file name', /fileName: "[^"]+\.pdf"/.test(fixtureSrc), true);
 // The whole point of a mixed fixture: one row must exercise the derive path.
 eq('at least one fixture photo has no stored thumbUrl',
    /thumbUrl: ""/.test(fixtureSrc), true);
@@ -228,6 +279,38 @@ function runAttach({ files, failOn = [], ownerType = 'asset' }) {
   return mod.f(ownerType, 'owner-1', files).then(() => calls);
 }
 
+
+// ------------------------------------------------- preparing one row (v37)
+// preparePhotoRow is EXECUTED for the same reason attachPhotos is: what matters
+// is which PATH a file takes, and that cannot be read off the source. A PDF put
+// through the canvas step comes back a picture of nothing, or throws "could not
+// be read as an image" on a file that is perfectly fine.
+function runPrepare({ file, sandbox = false }) {
+  const seen = { downscaled: 0, uploadNames: [] };
+  const mod = {};
+  new Function(
+    'fileKindOf', 'PHOTO_MAX_BYTES', 'DOC_MAX_BYTES', 'downscalePhoto', 'sandboxMode',
+    'crypto', 'currentUser', 'signPhotoUpload', 'uploadPhotoToCloudinary', 'photoThumbUrl',
+    'URL', 'module',
+    grab('preparePhotoRow') + '\nmodule.f = preparePhotoRow;'
+  )(
+    fileKindOf, 25 * 1024 * 1024, 10 * 1024 * 1024,
+    async (f) => { seen.downscaled++; return { blob: { size: 1234 }, width: 1600, height: 1200 }; },
+    sandbox,
+    { randomUUID: () => 'new-uuid' },
+    'Eric Stamage',
+    async () => ({ publicId: 'uuid-fixed' }),
+    async (blob, sig, uploadName) => {
+      seen.uploadNames.push(uploadName);
+      return { secure_url: 'https://res.cloudinary.com/x/image/upload/v1/dev/uuid-fixed.pdf', public_id: 'dev/uuid-fixed', bytes: 404 };
+    },
+    photoThumbUrl,
+    { createObjectURL: () => 'blob:sandbox' },
+    mod,
+  );
+  return mod.f('asset', 'BCA0082', file).then(row => ({ row, seen }), err => ({ error: err.message, seen }));
+}
+
 // The one array identity the assets-domain assertions below compare against.
 // persist() decides which tabs to rewrite by reference equality, so "did this
 // save carry the assets domain" is literally "is this a different array".
@@ -292,8 +375,40 @@ runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg')] }).then(calls => {
      calls.persistAssets[0], ASSETS);
 
   return runAttach({ files: [] });
-}).then(calls => {
+}).then(async (calls) => {
   eq('an empty pick does nothing and never sets busy', calls.busy.length, 0);
+
+  // ---- which pipeline a file takes ----------------------------------------
+  const asPdf = await runPrepare({ file: { name: 'Quote 4471.pdf', type: 'application/pdf', size: 900000 } });
+  eq('a PDF never goes through the canvas', asPdf.seen.downscaled, 0);
+  eq('a PDF is stored as a document', asPdf.row.kind, 'pdf');
+  eq('a PDF keeps the name it had on the device', asPdf.row.fileName, 'Quote 4471.pdf');
+  // Cloudinary reads the FORMAT off the posted part's filename, so this is what
+  // decides whether the upload is accepted at all.
+  eq('a PDF is announced to the host as a PDF', asPdf.seen.uploadNames, ['Quote 4471.pdf']);
+
+  const asJpg = await runPrepare({ file: { name: 'IMG_4821.HEIC', type: 'image/heic', size: 4000000 } });
+  eq('a photo is downscaled exactly once', asJpg.seen.downscaled, 1);
+  eq('a photo is stored as an image', asJpg.row.kind, 'image');
+  // The bytes are JPEG by the time they are posted; announcing the original
+  // HEIC name would declare a format these bytes no longer are.
+  eq('a photo is announced as the JPEG it has become', asJpg.seen.uploadNames, ['upload.jpg']);
+  eq('a photo still keeps its original name for display', asJpg.row.fileName, 'IMG_4821.HEIC');
+
+  // ---- what is refused, and before any work is done -----------------------
+  const mov = await runPrepare({ file: { name: 'walkthrough.mov', type: 'video/quicktime', size: 100 } });
+  eq('a video is refused by kind, not by size', /photo or a PDF/.test(mov.error), true);
+  eq('and nothing was prepared for it', mov.seen.downscaled, 0);
+  const bigPdf = await runPrepare({ file: { name: 'manual.pdf', type: 'application/pdf', size: 12 * 1024 * 1024 } });
+  // A photo that size is fine, because re-encoding shrinks it. Nothing shrinks
+  // a PDF, so the host would refuse it in its own words after a long upload.
+  eq('an oversized PDF is refused here rather than by the host', /under 10MB/.test(bigPdf.error), true);
+  eq('a 12MB PHOTO is still accepted, since re-encoding shrinks it',
+     (await runPrepare({ file: { name: 'a.jpg', type: 'image/jpeg', size: 12 * 1024 * 1024 } })).row.kind, 'image');
+
+  const sandboxPdf = await runPrepare({ file: { name: 'a.pdf', type: 'application/pdf', size: 10 }, sandbox: true });
+  eq('sandbox makes no network call for a document either', sandboxPdf.seen.uploadNames, []);
+  eq('and still records it as a document', sandboxPdf.row.kind, 'pdf');
 
   // A blank ownerType must not be guessed. Filing a work entry's photo in its
   // asset's gallery is the wrong photo shown confidently in the wrong place.
@@ -303,8 +418,8 @@ runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg')] }).then(calls => {
      /ownerType: p\.ownerType \|\| ""/.test(src), true);
 
   // ---- the input and the wiring, which the execution above cannot see -------
-  eq('the file input accepts several at once',
-     /type="file" accept="image\/\*" multiple/.test(src), true);
+  eq('the file input accepts several at once, photos and PDFs alike',
+     /type="file" accept="image\/\*,application\/pdf" multiple/.test(src), true);
   eq('pick hands over the whole FileList rather than just the first',
      /Array\.from\(e\.target\.files\)/.test(src), true);
   // The split exists so a future call site cannot reintroduce a per-file write.

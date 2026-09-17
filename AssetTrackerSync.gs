@@ -49,7 +49,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v36";
+const SCRIPT_VERSION = "v37";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -325,8 +325,19 @@ const AUDIT_FIELDS = [
 // "hiddenFromPublic" is the per-photo escape hatch for the QR panel page: the
 // photo that caught a person, a screen, or paperwork that was never its subject.
 // Stored as the string "true" or blank, like every other flag in this sheet.
+//
+// "kind" is "image" or "pdf" (v37, when attaching a document became possible).
+// A blank cell reads as "image", and that default is safe where ownerType's is
+// not: before v37 an image was the only thing that COULD be uploaded, so the
+// answer is known rather than guessed.
+//
+// "fileName" is the name the file had on the uploader's device. The object name
+// at the host is a uuid chosen by this script (see handlePhotoSign_), which is
+// the right identity and a useless thing to read -- "which quote is this" is
+// answered by "boiler-replacement-quote.pdf" and by nothing else here.
 const PHOTO_FIELDS = [
   "id", "ownerType", "ownerId", "url", "thumbUrl", "storageKey",
+  "kind", "fileName",
   "caption", "width", "height", "bytes", "hiddenFromPublic", "at", "by",
 ];
 
@@ -1057,6 +1068,15 @@ function publicPanelPayload_(requestedLabel) {
     // The per-photo escape hatch, checked BEFORE ownership so that a later
     // change to the scoping rule above cannot accidentally route around it.
     .filter(ph => String(ph.hiddenFromPublic) !== "true")
+    // A document never publishes here (Eric's call, 2026-09-17), and this sits
+    // BESIDE the hiddenFromPublic check rather than inside the ownership scope
+    // for the same reason: a later change to the scoping rule must not be able
+    // to route around it. PHOTOS_EVAL.md section 7.4 argued that protecting
+    // these bytes by URL unguessability is the right trade for photos of
+    // equipment and the wrong one for documents -- a quote, an invoice or a
+    // service report carries names, prices and signatures that the panel door
+    // it hangs off does not.
+    .filter(ph => (ph.kind || "image") === "image")
     .filter(ph => publicOwnerIds[ph.ownerId])
     .map(ph => pickPublic_(ph, PUBLIC_PHOTO_FIELDS));
 
@@ -1274,6 +1294,9 @@ function handleAuthenticatedRead_(body, e) {
     const photos = photoRows.map(ph => ({
       id: ph.id, ownerType: ph.ownerType, ownerId: ph.ownerId,
       url: ph.url, thumbUrl: ph.thumbUrl || "", storageKey: ph.storageKey || "",
+      // A row written before v37 has no kind cell and is an image by definition:
+      // nothing else could be uploaded then.
+      kind: ph.kind || "image", fileName: ph.fileName || "",
       caption: ph.caption || "",
       width: ph.width === "" ? undefined : ph.width,
       height: ph.height === "" ? undefined : ph.height,
@@ -1372,6 +1395,25 @@ function handleAuthenticatedRead_(body, e) {
 // not be used: the preset name would have to ship in index.html, which is
 // public, and anyone holding it can upload into the account.
 
+// What an upload may be, signed into every signature so Cloudinary enforces it
+// rather than the browser.
+//
+// NARROWER THAN WHAT THE PICKER ACCEPTS, DELIBERATELY. A photo is re-encoded to
+// JPEG in the browser before it is posted (downscalePhoto), so a HEIC or a WebP
+// chosen on a phone arrives here as "jpg" and nothing ever uploads those formats
+// under their own names -- listing them would widen what a hand-rolled client
+// could put in the account for no gain. `png` is here only because canvas
+// toBlob falls back to it if a browser ever refuses image/jpeg.
+//
+// PDFs ride the IMAGE pipeline rather than raw storage, which is what lets a
+// document have a real first-page thumbnail. ONE PER-TENANT SETTING GOES WITH
+// THAT: Cloudinary ships new accounts with PDF delivery disabled (Settings >
+// Security > "Allow delivery of PDF and ZIP files"), and until it is ticked the
+// original file 404s while its rasterized page-1 preview still works -- so the
+// symptom is "the thumbnail is there and Open does nothing", which reads as a
+// broken feature rather than a checkbox.
+const PHOTO_ALLOWED_FORMATS = "jpg,png,pdf";
+
 // SHA-1 as lowercase hex. Apps Script hands back SIGNED bytes, so -1 has to
 // become "ff" and not "-1" -- mask first, then pad. Getting either half wrong
 // produces a plausible-looking hex string that Cloudinary simply rejects, with
@@ -1416,7 +1458,7 @@ function handlePhotoSign_(body) {
   if (auth.role !== ROLE_EDITOR) {
     return jsonOut_({
       ok: false, authFailed: true, reason: "readonly",
-      error: "Your access is view-only, so photos can't be uploaded.",
+      error: "Your access is view-only, so files can't be uploaded.",
     });
   }
 
@@ -1443,7 +1485,21 @@ function handlePhotoSign_(body) {
   const folder = props.getProperty("CLOUDINARY_FOLDER") || "assets";
   const publicId = Utilities.getUuid();
   const timestamp = Math.floor(Date.now() / 1000);
-  const params = { folder: folder, public_id: publicId, timestamp: timestamp };
+  // What may be uploaded at all, enforced HERE rather than only by the file
+  // picker's `accept` attribute (v37, when PDFs joined photos). A signed
+  // allowed_formats is refused by Cloudinary itself, so this is the rule and the
+  // frontend's own list is the early, friendlier refusal -- the same division
+  // the editor check already takes, where hiding a button is a courtesy and the
+  // server check is the control. Everything here renders through Cloudinary's
+  // image pipeline: a PDF is an "image" resource whose first page rasterizes on
+  // demand (f_jpg,pg_1), which is what gives a document a real thumbnail
+  // instead of a generic icon.
+  const params = {
+    folder: folder,
+    public_id: publicId,
+    timestamp: timestamp,
+    allowed_formats: PHOTO_ALLOWED_FORMATS,
+  };
 
   return jsonOut_({
     ok: true,
@@ -1452,6 +1508,9 @@ function handlePhotoSign_(body) {
     folder: folder,
     publicId: publicId,
     timestamp: timestamp,
+    // Named exactly as it is signed, because the client posts every signed
+    // parameter by reading it off this response (see signedParams below).
+    allowed_formats: PHOTO_ALLOWED_FORMATS,
     signature: cloudinarySignature_(params, apiSecret),
     // The exact parameter names that were signed. Cloudinary rejects the upload
     // if the posted set differs from the signed set by even one entry, and says
@@ -1716,6 +1775,8 @@ function doPost(e) {
         url: ph.url,
         thumbUrl: ph.thumbUrl || "",
         storageKey: ph.storageKey || "",
+        kind: ph.kind || "image",
+        fileName: ph.fileName || "",
         caption: ph.caption || "",
         width: ph.width || "",
         height: ph.height || "",

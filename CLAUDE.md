@@ -2475,10 +2475,11 @@ with the branch instead of outliving it here.
   *match* against a script missing half the change. They were merged into one version rather
   than renumbered, because renumbering alone leaves the same trap somewhere else.
 
-### Photos attach by reference, never by value
+### Files attach by reference, never by value
 
 Photos live in **Cloudinary**; the Sheet stores a reference and nothing else. The full
-evaluation and the three decisions behind it are in `PHOTOS_EVAL.md`.
+evaluation and the three decisions behind it are in `PHOTOS_EVAL.md`. **PDFs join them in
+v37** — see "Documents" below, which is a small change resting entirely on this one.
 
 - **The bytes could never have gone in the Sheet, for three independent reasons.** Every
   save posts the entire state, so a base64 image would be re-sent on every unrelated edit;
@@ -2563,6 +2564,81 @@ evaluation and the three decisions behind it are in `PHOTOS_EVAL.md`.
     the FIRST id-less item, so two new schedules meant editing the wrong one. **Where a
     load-time adoption exists, check the create path separately**; it is the one place the
     adoption cannot cover.
+
+**Documents attach too, and a PDF is a photo row with a different `kind`** (v37,
+2026-09-17). Everything above holds unchanged — the owner pair, the revision domain, the
+orphan story, the cascade on delete, the `_dirty` gate. What was added is two columns and
+three decisions.
+
+- **WHAT PEOPLE READ SAYS FILES; THE STORED KEY IS STILL `photos`.** The tab, the button,
+  the empty states and the delete confirmation all say file; the revision domain, the Sheet
+  tab, the `photos` array in every payload, the `?tab=photos` deep link, `PhotoGallery`,
+  `attachPhotos` and every other identifier do not. Same trade `changeType` takes against
+  "Work type", **including keeping the CODE on the stored name** — renaming the stored half
+  drops rows on the next write for nothing, and renaming only the code leaves one concept
+  wearing two words to grep for. The detail tab's key is the `"breakers"`/"Layout" rule
+  again: links outlive the label that produced them.
+- **`kind` ("image" or "pdf") and `fileName` are two new columns on the Photos tab**, so
+  this cost a version and a deploy to every tenant. `fileName` is the name the file had on
+  the device, and it is not decoration: the object at the host is a uuid this script chose,
+  and "which quote is this" is answered by `boiler-quote.pdf` and by nothing else.
+- **A BLANK `kind` READS AS "image", AND THAT DEFAULT IS THE OPPOSITE CALL FROM
+  `ownerType`'s.** Both are blank on a pre-v37 row and only one may be guessed: before v37
+  an image was the only thing that COULD be uploaded, so the answer is known rather than
+  assumed. Reading a blank as "not an image" would unpublish every photo already on a
+  sheet, since the public panel filter keys off this very field.
+- **A document NEVER publishes on the public `?panel=` page** (Eric's call). The filter sits
+  BESIDE the `hiddenFromPublic` check rather than inside the ownership scope, for the reason
+  that one does: a later change to the scoping rule must not be able to route around it.
+  `PHOTOS_EVAL.md` §7.4 had already drawn this line — protecting bytes by URL
+  unguessability is the right trade for photos of equipment and the wrong one for documents
+  — and a second fact now backs it: a photo is re-encoded on the way out of the browser,
+  which strips its EXIF and its GPS, while **a PDF is uploaded exactly as it stands**,
+  metadata and all. Stripping a PDF's would need a PDF library, which a file with no build
+  step does not get to have.
+- **A PDF is uploaded as an IMAGE resource, not as a raw file**, which is what gives it a
+  real thumbnail: page 1 is rasterized on demand (`f_jpg,pg_1`) through the same pipeline a
+  photo takes. Raw storage was the obvious home for a document and would have left every
+  one of them a generic icon.
+  - **ONE PER-TENANT CLOUDINARY SETTING RIDES ON THAT.** Accounts ship with PDF delivery
+    disabled (Settings > Security > "Allow delivery of PDF and ZIP files"). Until it is
+    ticked the page-1 preview still renders while the ORIGINAL 404s — so the symptom is
+    "the tile looks right and Open does nothing", which reads as a broken feature rather
+    than as a checkbox. Tick it per tenant, alongside the three Script Properties.
+  - **The lightbox shows the page-1 render and OPENS the file in a new tab.** No browser can
+    be relied on to display a PDF inline — iOS refuses inside a frame, and a phone in a
+    mechanical room is exactly the case — so the platform's own viewer does it.
+  - **Every tile goes through `AttachmentImage`, whose icon fallback is a real state** and
+    not defensive decoration: the un-ticked setting above, a data-URI fixture with no host
+    to transform, and a host outage all land there. A broken-image glyph with no file name
+    would read as a lost file.
+- **The allowlist is SIGNED, so the host enforces it.** `handlePhotoSign_` folds
+  `allowed_formats` into every signature; `fileKindOf` in the frontend is the early,
+  friendlier refusal. **The signed list is NARROWER than the picker's** — `jpg,png,pdf` —
+  because a photo is re-encoded to JPEG before it is posted, so a HEIC chosen on a phone
+  arrives as `jpg` and listing HEIC would only widen what a hand-rolled client could put in
+  the account. `png` is there for one reason: `toBlob` falls back to it if a browser ever
+  refuses `image/jpeg`. Same division as `canEdit` against the role check in `doPost` — one is
+  a courtesy, the other is the control. A signed parameter must also be NAMED in
+  `signedParams` and present in the response under that name, because the client builds its
+  form by reading each one back off it; break any of the three and Cloudinary refuses every
+  upload as "invalid signature" without saying which parameter is wrong.
+- **The multipart part's FILENAME is what tells Cloudinary the format**, and it is not the
+  user's file name. A photo is re-encoded to JPEG here, so it is announced as `upload.jpg`
+  — sending the original `IMG_4821.HEIC` would declare a format those bytes no longer are.
+  A document is announced as its own `.pdf`.
+- **A document's size cap is 10MB against a photo's 25MB**, and the asymmetry is the point:
+  a 12MB photo is fine because re-encoding shrinks it to ~300KB, while nothing downstream
+  shrinks a PDF. The host's own free-plan limit is 10MB, and being refused THERE costs the
+  whole upload and reports it in Cloudinary's words rather than ours.
+- **Covered by the existing two test files rather than a third**, since every rule above is
+  a new branch in a path they already own. Verified by mutation that seven silent failures
+  fail them: the public filter ceasing to filter, `allowed_formats` signed but not reported
+  to the client, a thumbnail that ignores `kind`, a PDF sent through the canvas, `adoptPhoto`
+  dropping the "image" default, a fixture with no document in it, and an upload announcing a
+  re-encoded photo under its original name. `MOCK_SNAPSHOT` carries two documents — one on an
+  asset, one on a work entry beside its own history — while every image row still carries no
+  `kind` at all, so Sandbox exercises the adoption and both kinds rather than one.
 
 **Where a photo's gallery lives follows what the photo is FOR** (2026-09-11), and the two
 work-item cases deliberately differ:
