@@ -1315,12 +1315,39 @@ const SHIPPED_RESTRICTED_FIELDS = new Set(
 
 const STATUS_OPTIONS = ["Active", "Archived"];
 const STATUS_FILTER_OPTIONS = ["All statuses", "Active", "Archived"];
+// THE TWO TASK KINDS, DECLARED HERE AND NOT BESIDE THE TASK HELPERS BELOW,
+// BECAUSE THIS FILE IS ONE MODULE BODY EVALUATED TOP TO BOTTOM AND
+// TASK_KIND_FILTER_OPTIONS NAMES THEM. Declaration order IS dependency order:
+// leaving them down with taskKindOf() -- which is where they obviously belong,
+// and where they were first written -- is a temporal-dead-zone ReferenceError
+// that white-screens the app at load. Exactly the trap `C` must be declared
+// after `CLIENT` to avoid, met a second time and caught the same way: by
+// loading the real page, not by reading the diff.
+const TASK_KIND_SCHEDULED = "scheduled";
+const TASK_KIND_ONEOFF = "oneoff";
+
+// The Status filter on the Tasks table. "Open" is the DEFAULT and is not a
+// status -- it means "everything that is not done", which is what keeps
+// completed one-offs from accumulating in a triage view forever. A schedule
+// never reaches "done", so this default hides nothing that recurs.
+const MAINTENANCE_STATUS_OPEN = "__open";
 const MAINTENANCE_STATUS_FILTER_OPTIONS = [
+  { value: MAINTENANCE_STATUS_OPEN, label: "Open" },
   { value: "All statuses", label: "All statuses" },
   { value: "overdue", label: "Overdue" },
   { value: "due-soon", label: "Due soon" },
   { value: "ok", label: "On track" },
   { value: "never", label: "Never done" },
+  { value: "undated", label: "No date" },
+  { value: "done", label: "Done" },
+];
+// The Kind filter, which is what separates the two kinds of task inside ONE
+// list rather than across two sub-tabs. "What do I owe this building" is one
+// question; splitting it in two makes the overdue badge answer half of it.
+const TASK_KIND_FILTER_OPTIONS = [
+  { value: "All kinds", label: "All kinds" },
+  { value: TASK_KIND_SCHEDULED, label: "Scheduled" },
+  { value: TASK_KIND_ONEOFF, label: "One-off" },
 ];
 
 // The tenant this page is serving, resolved in clients.js from ?client= before
@@ -1422,24 +1449,105 @@ function localDateString(d) {
     String(dt.getMonth() + 1).padStart(2, "0") + "-" +
     String(dt.getDate()).padStart(2, "0");
 }
-// Next-due date for a maintenance item, or null if it's never been performed
-// (so there's nothing to count forward from) or has no known interval.
-function nextMaintenanceDue(item) {
+// ---------- TASKS: SCHEDULED AND ONE-OFF (v40) ----------
+// The Tasks tab holds two kinds of record. A SCHEDULED task recurs: it counts
+// forward from `lastPerformed` by `frequencyDays` to a next-due date, and being
+// performed starts the next interval. A ONE-OFF task (a job, a project) happens
+// once: it carries its own `dueDate`, and being performed ENDS it.
+//
+// A BLANK `kind` READS AS "scheduled", and that default is known rather than
+// guessed -- before v40 a recurring item was the only thing that could exist, so
+// every stored row really is one. Read-time rather than a load-time adoption
+// precisely because nothing needs writing: an unedited legacy row resolves
+// correctly forever without a save, which is one fewer reason to mark a domain
+// dirty. (A photo's `kind` is adopted at load instead, because adoptPhoto is
+// already normalising that row.)
+// TASK_KIND_SCHEDULED / TASK_KIND_ONEOFF are declared far ABOVE, beside the
+// filter options that name them -- see the note there. The functions below are
+// declarations and so are hoisted; the constants are not, which is the whole
+// reason they could not live here.
+function taskKindOf(item) {
+  return (item && item.kind === TASK_KIND_ONEOFF) ? TASK_KIND_ONEOFF : TASK_KIND_SCHEDULED;
+}
+function isOneOffTask(item) { return taskKindOf(item) === TASK_KIND_ONEOFF; }
+// THERE IS NO `doneOn` COLUMN, AND THAT IS DELIBERATE. A one-off with a
+// non-empty `lastPerformed` is done; an empty one is open. `lastPerformed`
+// holds one fact in both cases -- the date this was last performed -- and only
+// the derivation below branches on kind. So completing a one-off is the
+// IDENTICAL write to completing a schedule (submitMaintenanceComplete needs no
+// branch at all), and there is no second copy of the date to fall out of step.
+//
+// What this does not cover is a project worked on repeatedly without being
+// finished, where "last performed" and "done" come apart in a way they never do
+// for a schedule. The answer to that is a STATE ("in progress", "blocked"), not
+// a second date; a date would half-build it in a shape that cannot express it.
+function taskIsDone(item) {
+  return isOneOffTask(item) && !!dateOnly(item && item.lastPerformed);
+}
+// When this task is due, or null when nothing says. A scheduled task counts
+// forward from its last completion; a one-off answers its own `dueDate`, which
+// is a real optional -- "some day" is a legitimate thing for a project to be.
+// A schedule's due date stays DERIVED and never reads `dueDate`, or the two
+// would disagree the first time a completion is back-dated.
+function taskDueDate(item) {
+  if (!item) return null;
+  if (isOneOffTask(item)) {
+    const d = dateOnly(item.dueDate);
+    if (!d) return null;
+    const due = new Date(d + "T00:00:00");
+    return isNaN(due.getTime()) ? null : due;
+  }
   if (!item.lastPerformed || !item.frequencyDays) return null;
   const last = new Date(dateOnly(item.lastPerformed) + "T00:00:00");
   if (isNaN(last.getTime())) return null;
   return new Date(last.getTime() + item.frequencyDays * 86400000);
 }
-// "never" (no lastPerformed yet — needs attention), "overdue", "due-soon"
-// (within 14 days), or "ok".
+// "overdue", "due-soon" (within 14 days) and "ok" mean the same thing for both
+// kinds. The two that do not are the point of this function:
+//
+//   "never"   — a SCHEDULE with no lastPerformed. Needs attention: it has been
+//               set up and not once done.
+//   "undated" — a ONE-OFF with no dueDate. Says nothing about urgency; it is a
+//               someday item, and treating it as "never" would pin every
+//               undated project to the top of the overdue list.
+//   "done"    — a completed one-off. A schedule never reaches this; being
+//               performed only starts its next interval.
 function maintenanceStatusOf(item) {
-  if (!item.lastPerformed) return "never";
-  const due = nextMaintenanceDue(item);
-  if (!due) return "never";
+  const oneOff = isOneOffTask(item);
+  if (oneOff && taskIsDone(item)) return "done";
+  const due = taskDueDate(item);
+  if (!due) return oneOff ? "undated" : "never";
   const daysUntil = Math.floor((due.getTime() - Date.now()) / 86400000);
   if (daysUntil < 0) return "overdue";
   if (daysUntil <= 14) return "due-soon";
   return "ok";
+}
+// How the two lists order themselves when nobody has picked a column sort.
+//
+// A NULL DUE DATE MEANS TWO OPPOSITE THINGS, which is why this is a named
+// function and not the inline `due ? getTime() : -Infinity` it replaced. That
+// expression was right while every row was a schedule -- never-performed pins
+// to the top because it needs attention -- and is exactly backwards for an
+// undated one-off, which would otherwise sit above everything actually overdue.
+// Done sinks below both.
+function maintenanceSortKey(row) {
+  if (row.status === "done") return Number.MAX_SAFE_INTEGER;
+  if (row.status === "never") return -Infinity;
+  if (!row.due) return Number.MAX_SAFE_INTEGER - 1;
+  return row.due.getTime();
+}
+// Every status as it renders, in one place: the two card lists and the
+// site-wide table all read it, so a new status cannot reach one and miss
+// another. Colour comes from the palette at call time, hence the getter.
+function maintenanceStatusMeta(status) {
+  return {
+    overdue: { label: "Overdue", color: C.danger },
+    "due-soon": { label: "Due soon", color: C.accent },
+    ok: { label: "On track", color: C.success },
+    never: { label: "Not yet done", color: C.muted },
+    undated: { label: "No date", color: C.muted },
+    done: { label: "Done", color: C.success },
+  }[status] || { label: status || "", color: C.muted };
 }
 // ---------- AUDIT: ASSOCIATED RESOURCES ----------
 // An audit entry is stamped with the asset it happened TO (`assetLabel`), but
@@ -2357,7 +2465,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v39";
+const FRONTEND_SCRIPT_VERSION = "v40";
 // The version of THIS file — shown in About (the account menu), so "is my browser
 // actually running the build I just deployed, or a cached one?" is answerable in
 // two clicks instead of by reading view-source.
@@ -2375,7 +2483,7 @@ const FRONTEND_SCRIPT_VERSION = "v39";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-17.1";
+const APP_VERSION = "2026-09-19.1";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -3027,7 +3135,12 @@ const MOCK_SNAPSHOT = {
     { label: "BCC0001", type: "Campus", name: "Brookside Christian Academy", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "The school site.", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
     { label: "BCC0002", type: "Campus", name: "Kramer Campus", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "Separate residential site — sample data behind the Electrical Map panel.", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
     { label: "BCB0001", type: "Building", name: "Building 100", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
-    { label: "BCB0002", type: "Building", name: "Building 200", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    // v40 fixture shape 2 of 4: an OPEN, DATED one-off, hanging off a PLACE --
+    // the case that makes site-wide work expressible without an asset-less task.
+    { label: "BCB0002", type: "Building", name: "Building 200", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active",
+      maintenanceItems: [
+        { id: "mnt-b200-repaint", kind: "oneoff", task: "Repaint the south exterior wall", notes: "Two quotes in. Waiting on the district to confirm the colour before scheduling.", frequencyLabel: "", frequencyDays: "", dueDate: "2026-10-15", lastPerformed: "", owner: "Eric", at: "", by: "" },
+      ] },
     { label: "BCB0003", type: "Building", name: "Building 300", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
     { label: "BCB0004", type: "Building", name: "Building 400", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
     // ---- People. A User is an asset (v28) and its name is TWO FIELDS (v36):
@@ -3058,7 +3171,22 @@ const MOCK_SNAPSHOT = {
     { label: "BCR0014", type: "Room", name: "Room 400", parentId: "BCB0004", person: "Kelly Mackinga", personIds: ["BCA0111"], notes: "", status: "Active" },
     { label: "BCR0002", type: "Room", name: "Kitchen", parentId: "BCB0001", person: "", notes: "A shared room -- deliberately assigned to nobody. It read \"Multiple teachers\" while the User field was a free string; there is no such person, and one legacy name with no User record behind it holds the WHOLE fixture in pre-v28 name mode.", status: "Active" },
     { label: "BCR0018", type: "Room", name: "Storage Room", parentId: "BCB0001", person: "", notes: "", status: "Active" },
-    { label: "BCR0020", type: "Room", name: "Room 101", parentId: "BCB0001", person: "Dillon Jacobsma", personIds: ["27b4f0a9-6c31-4d8e-95af-1e7208cb3d56"], notes: "", status: "Active" },
+    // v40 fixture shapes 3 and 4: an UNDATED one-off and a COMPLETED one.
+    //
+    // The undated row is the one that matters most. The default sort used to be
+    // `due ? getTime() : -Infinity`, which is right for a never-performed
+    // SCHEDULE (it needs attention) and exactly backwards here -- without this
+    // row nothing would ever have shown that a someday project was being pinned
+    // above everything genuinely overdue. See maintenanceSortKey.
+    //
+    // The completed row carries NO done flag, because there is none: a one-off
+    // with a non-empty lastPerformed is finished. It is what keeps the "Show
+    // completed" toggle and the "Open" status filter exercised in Sandbox.
+    { label: "BCR0020", type: "Room", name: "Room 101", parentId: "BCB0001", person: "Dillon Jacobsma", personIds: ["27b4f0a9-6c31-4d8e-95af-1e7208cb3d56"], notes: "", status: "Active",
+      maintenanceItems: [
+        { id: "mnt-r101-projector", kind: "oneoff", task: "Replace the projector", notes: "Lamp hours past 4000 and the image has gone yellow. No date yet -- budget question.", frequencyLabel: "", frequencyDays: "", dueDate: "", lastPerformed: "", owner: "", at: "", by: "" },
+        { id: "mnt-r101-blinds", kind: "oneoff", task: "Rehang the window blinds", notes: "", frequencyLabel: "", frequencyDays: "", dueDate: "2026-08-29", lastPerformed: "2026-09-02", owner: "Eric", at: "", by: "" },
+      ] },
     // Deliberately PRE-conversion: every assignment is still a legacy `person`
     // name and there are no User records. That is the state a real sheet is in
     // the moment v28 ships, so the sandbox exercises the conversion button
@@ -3792,7 +3920,7 @@ function AssetTracker() {
   const [newVendorName, setNewVendorName] = useState("");
   const [allocationDraft, setAllocationDraft] = useState({ roomId: "", quantity: "", error: "" });
   const [confirmAllocationRemove, setConfirmAllocationRemove] = useState(null);
-  const [maintenanceDraft, setMaintenanceDraft] = useState({ id: "", task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
+  const [maintenanceDraft, setMaintenanceDraft] = useState({ id: "", kind: TASK_KIND_SCHEDULED, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, dueDate: "", lastPerformed: "", owner: "" });
   const [editingMaintenanceId, setEditingMaintenanceId] = useState(null);
   const [maintenanceEditDraft, setMaintenanceEditDraft] = useState(null);
   const [confirmMaintenanceDelete, setConfirmMaintenanceDelete] = useState(null);
@@ -3809,6 +3937,10 @@ function AssetTracker() {
   // the link between them invisible.
   const [maintenanceSubTab, setMaintenanceSubTab] = useState("scheduled");
   const [showMaintenanceAdd, setShowMaintenanceAdd] = useState(false);
+  // Whether the asset's Tasks tab also lists its finished one-offs. Per-view
+  // and deliberately not persisted -- it is the card list's answer to the
+  // site-wide table's "Open" status filter, not a preference.
+  const [showCompletedTasks, setShowCompletedTasks] = useState(false);
   // null when closed; { mode: "add" } or { mode: "edit", changeId }. The draft
   // itself stays in changeDraft, which both modes fill.
   const [changeModal, setChangeModal] = useState(null);
@@ -3930,7 +4062,8 @@ function AssetTracker() {
     try { localStorage.setItem(NAME_ORDER_STORAGE_KEY, order); } catch (e) { /* non-fatal — just won't remember across reloads */ }
   }
   const [maintenanceQuery, setMaintenanceQuery] = useState("");
-  const [maintenanceStatusFilter, setMaintenanceStatusFilter] = useState("All statuses");
+  const [maintenanceStatusFilter, setMaintenanceStatusFilter] = useState(MAINTENANCE_STATUS_OPEN);
+  const [maintenanceKindFilter, setMaintenanceKindFilter] = useState("All kinds");
   const [maintenanceFrequencyFilter, setMaintenanceFrequencyFilter] = useState("All frequencies");
   const [maintenanceOwnerFilter, setMaintenanceOwnerFilter] = useState("All owners");
   const [maintenanceSortConfig, setMaintenanceSortConfig] = useState(null); // { key, dir: "asc" | "desc" } | null — null means the default due-date-ascending order
@@ -5225,7 +5358,7 @@ function AssetTracker() {
       if ((a.status || "Active") === "Archived") return;
       const assetName = nameOf(a);
       (a.maintenanceItems || []).forEach(item => {
-        rows.push({ asset: a, assetName, item, status: maintenanceStatusOf(item), due: nextMaintenanceDue(item) });
+        rows.push({ asset: a, assetName, item, status: maintenanceStatusOf(item), due: taskDueDate(item) });
       });
     });
     return rows;
@@ -5233,6 +5366,9 @@ function AssetTracker() {
     // previous order's spelling until `assets` itself changed.
   }, [assets, personNameOrder]);
   const maintenanceOverdueTotal = allMaintenanceRows.filter(r => r.status === "overdue").length;
+  // The top-level Tasks badge counts what is OPEN. A count that grew with every
+  // finished job would stop answering the only question a badge is for.
+  const allOpenMaintenanceRows = allMaintenanceRows.filter(r => r.status !== "done");
 
   // The History table's rows: every change entry on every active asset,
   // flattened the same way allMaintenanceRows flattens schedules. Archived
@@ -5314,6 +5450,11 @@ function AssetTracker() {
       options: MAINTENANCE_STATUS_FILTER_OPTIONS.map(o => o.value),
       labelForOption: v => (MAINTENANCE_STATUS_FILTER_OPTIONS.find(o => o.value === v) || {}).label || v,
     },
+    kind: {
+      label: "Kind", value: maintenanceKindFilter, setValue: setMaintenanceKindFilter,
+      options: TASK_KIND_FILTER_OPTIONS.map(o => o.value),
+      labelForOption: v => (TASK_KIND_FILTER_OPTIONS.find(o => o.value === v) || {}).label || v,
+    },
   };
   // Maps a sortable column key to its comparable value on a row — used by both
   // the header's plain-sort columns (task/asset/lastPerformed/nextDue) and the
@@ -5322,6 +5463,7 @@ function AssetTracker() {
     switch (key) {
       case "task": return row.item.task || "";
       case "asset": return row.assetName || "";
+      case "kind": return isOneOffTask(row.item) ? "One-off" : "Scheduled";
       case "frequency": return row.item.frequencyLabel || "";
       case "owner": return row.item.owner || "";
       case "lastPerformed": return dateOnly(row.item.lastPerformed);
@@ -5336,11 +5478,16 @@ function AssetTracker() {
       // Scope applies here exactly as it does on the Assets tab and to History:
       // narrowing to a building should narrow every view, not just one.
       if (scopeId && !ancestorsOf(r.asset, assets).some(pa => pa.id === scopeId)) return false;
-      if (maintenanceStatusFilter !== "All statuses" && r.status !== maintenanceStatusFilter) return false;
+      // "Open" is not a status -- it is every status but done, and it is the
+      // default so a finished job leaves the triage view without being deleted.
+      if (maintenanceStatusFilter === MAINTENANCE_STATUS_OPEN) {
+        if (r.status === "done") return false;
+      } else if (maintenanceStatusFilter !== "All statuses" && r.status !== maintenanceStatusFilter) return false;
+      if (maintenanceKindFilter !== "All kinds" && taskKindOf(r.item) !== maintenanceKindFilter) return false;
       if (maintenanceFrequencyFilter !== "All frequencies" && r.item.frequencyLabel !== maintenanceFrequencyFilter) return false;
       if (maintenanceOwnerFilter !== "All owners" && r.item.owner !== maintenanceOwnerFilter) return false;
       if (!q) return true;
-      return [r.item.task, r.item.owner, r.asset.tag, nameOf(r.asset, typesList), roomNameOf(r.asset, assets), typeNameOf(r.asset.type, typesList)]
+      return [r.item.task, r.item.notes, r.item.owner, r.asset.tag, nameOf(r.asset, typesList), roomNameOf(r.asset, assets), typeNameOf(r.asset.type, typesList)]
         .some(v => (v || "").toLowerCase().includes(q));
     });
     if (maintenanceSortConfig) {
@@ -5354,11 +5501,13 @@ function AssetTracker() {
       });
     } else {
       // Default view (no explicit sort): due-soonest first, with never-performed
-      // items surfaced at the very top since they need attention most.
-      list.sort((a, b) => (a.due ? a.due.getTime() : -Infinity) - (b.due ? b.due.getTime() : -Infinity));
+      // schedules surfaced at the very top since they need attention most, and
+      // undated one-offs and finished jobs sunk below everything dated. See
+      // maintenanceSortKey -- a null due date means opposite things by kind.
+      list.sort((a, b) => maintenanceSortKey(a) - maintenanceSortKey(b));
     }
     return list;
-  }, [allMaintenanceRows, assets, scopeId, maintenanceQuery, maintenanceStatusFilter, maintenanceFrequencyFilter, maintenanceOwnerFilter, maintenanceSortConfig]);
+  }, [allMaintenanceRows, assets, scopeId, maintenanceQuery, maintenanceStatusFilter, maintenanceKindFilter, maintenanceFrequencyFilter, maintenanceOwnerFilter, maintenanceSortConfig]);
 
   // ---- the site-wide Audit tab ----
   // One row per auditLog entry, with its subject resolved once. `assets.find`
@@ -6675,7 +6824,7 @@ function AssetTracker() {
     // out. That is worse than no link: it makes an overdue item read healthy.
     // Hence the separate date, which is the same field the completion modal has
     // and for the same reason. It can also move lastPerformed BACKWARDS, since
-    // nextMaintenanceDue reads it and nothing else -- correct when you are
+    // taskDueDate reads it and nothing else -- correct when you are
     // recording a visit you had not logged yet, and the reason the date is
     // editable rather than pinned to today.
     //
@@ -6788,37 +6937,54 @@ function AssetTracker() {
     setWorkDialogAssetId(assetId === undefined ? null : assetId);
     // Minted on OPEN so a photo can name this schedule while the form is still
     // being filled in -- the same rule openChangeAdd follows.
-    setMaintenanceDraft({ id: crypto.randomUUID(), task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_SCHEDULED, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, dueDate: "", lastPerformed: "", owner: "" });
     setShowMaintenanceAdd(true);
   }
 
   async function addMaintenanceItem() {
     if (savingRef.current) return; // double-submit guard, see savingRef
     if (!maintenanceDraft.task.trim() || !workTarget) return;
+    const oneOff = maintenanceDraft.kind === TASK_KIND_ONEOFF;
     const freq = MAINTENANCE_FREQUENCIES.find(f => f.label === maintenanceDraft.frequency) || MAINTENANCE_FREQUENCIES[1];
     const item = {
       // Was absent entirely until 2026-09-11, which was a bug: rows key on
       // item.id and every handler takes one, so an id-less row could not be
       // addressed until a reload minted it. See BUGS.md.
       id: maintenanceDraft.id || crypto.randomUUID(),
+      kind: oneOff ? TASK_KIND_ONEOFF : TASK_KIND_SCHEDULED,
       task: maintenanceDraft.task.trim(),
-      frequencyLabel: freq.label,
-      frequencyDays: freq.days,
-      lastPerformed: maintenanceDraft.lastPerformed || "",
+      notes: (maintenanceDraft.notes || "").trim(),
+      // The two halves are mutually exclusive and the unused one is written
+      // BLANK rather than left off: a one-off carrying a frequency would get a
+      // derived next-due date out of taskDueDate the moment its kind was
+      // flipped back, and a schedule carrying a dueDate is a second answer to
+      // a question its interval already answers.
+      frequencyLabel: oneOff ? "" : freq.label,
+      frequencyDays: oneOff ? "" : freq.days,
+      dueDate: oneOff ? (maintenanceDraft.dueDate || "") : "",
+      lastPerformed: oneOff ? "" : (maintenanceDraft.lastPerformed || ""),
       owner: maintenanceDraft.owner.trim(),
       at: new Date().toISOString(),
       by: currentUser || "",
     };
     const next = assets.map(a => (a.id === workTargetId ? { ...a, maintenanceItems: [...(a.maintenanceItems || []), item] } : a));
     await persist(next, { columns });
-    setMaintenanceDraft({ id: crypto.randomUUID(), task: "", frequency: freq.label, lastPerformed: "", owner: "" });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: maintenanceDraft.kind, task: "", notes: "", frequency: freq.label, dueDate: "", lastPerformed: "", owner: "" });
     setShowMaintenanceAdd(false);
   }
 
   function startEditMaintenance(itemId) {
     const item = (selectedAsset.maintenanceItems || []).find(m => m && m.id === itemId);
     if (!item) return;
-    setMaintenanceEditDraft({ task: item.task, frequency: item.frequencyLabel, lastPerformed: dateOnly(item.lastPerformed), owner: item.owner || "" });
+    setMaintenanceEditDraft({
+      kind: taskKindOf(item),
+      task: item.task,
+      notes: item.notes || "",
+      frequency: item.frequencyLabel || MAINTENANCE_FREQUENCIES[1].label,
+      dueDate: dateOnly(item.dueDate),
+      lastPerformed: dateOnly(item.lastPerformed),
+      owner: item.owner || "",
+    });
     setEditingMaintenanceId(itemId);
   }
 
@@ -6835,12 +7001,23 @@ function AssetTracker() {
     const items = selectedAsset.maintenanceItems || [];
     const original = items.find(m => m && m.id === editingMaintenanceId);
     if (!original) { cancelEditMaintenance(); return; }
+    const oneOff = maintenanceEditDraft.kind === TASK_KIND_ONEOFF;
     const freq = MAINTENANCE_FREQUENCIES.find(f => f.label === maintenanceEditDraft.frequency) || MAINTENANCE_FREQUENCIES[1];
     const updated = {
       ...original,
+      // Always written, never left to the blank-means-scheduled default: an
+      // edit that turned a legacy row into a one-off would otherwise store a
+      // dueDate under a kind that still read as "scheduled", and taskDueDate
+      // would keep deriving from an interval the form had just cleared.
+      kind: oneOff ? TASK_KIND_ONEOFF : TASK_KIND_SCHEDULED,
       task: maintenanceEditDraft.task.trim(),
-      frequencyLabel: freq.label,
-      frequencyDays: freq.days,
+      notes: (maintenanceEditDraft.notes || "").trim(),
+      frequencyLabel: oneOff ? "" : freq.label,
+      frequencyDays: oneOff ? "" : freq.days,
+      dueDate: oneOff ? (maintenanceEditDraft.dueDate || "") : "",
+      // Clearing this on a one-off is how a finished job is REOPENED -- there
+      // is no separate done flag to unset, and the change is audited below
+      // like any other field edit.
       lastPerformed: maintenanceEditDraft.lastPerformed || "",
       owner: maintenanceEditDraft.owner.trim(),
     };
@@ -6849,11 +7026,21 @@ function AssetTracker() {
       assetType: selectedAsset.type, action: "maintenance_edited", field: `${original.task} — ${field}`, from, to,
     });
     const entries = [];
+    const kindWord = k => (k === TASK_KIND_ONEOFF ? "One-off" : "Scheduled");
+    if (taskKindOf(original) !== taskKindOf(updated)) entries.push(mkEntry("Kind", kindWord(taskKindOf(original)), kindWord(taskKindOf(updated))));
     if (original.task !== updated.task) entries.push(mkEntry("Task", original.task, updated.task));
-    if (original.frequencyLabel !== updated.frequencyLabel) entries.push(mkEntry("Frequency", original.frequencyLabel, updated.frequencyLabel));
+    if ((original.notes || "") !== (updated.notes || "")) entries.push(mkEntry("Notes", original.notes || "—", updated.notes || "—"));
+    if ((original.frequencyLabel || "") !== (updated.frequencyLabel || "")) entries.push(mkEntry("Frequency", original.frequencyLabel || "—", updated.frequencyLabel || "—"));
+    if ((original.dueDate || "") !== (updated.dueDate || "")) {
+      entries.push(mkEntry("Due date", formatDateOnly(original.dueDate) || "—", formatDateOnly(updated.dueDate) || "—"));
+    }
     if ((original.owner || "") !== (updated.owner || "")) entries.push(mkEntry("Owner", original.owner || "—", updated.owner || "—"));
     if ((original.lastPerformed || "") !== (updated.lastPerformed || "")) {
-      entries.push(mkEntry("Last performed", formatDateOnly(original.lastPerformed) || "—", formatDateOnly(updated.lastPerformed) || "—"));
+      // "Last performed" is the same fact under both kinds, but a one-off's is
+      // its completion, so the audit sentence says so rather than describing a
+      // finished job as having been "last performed".
+      const dateField = isOneOffTask(updated) ? "Completed" : "Last performed";
+      entries.push(mkEntry(dateField, formatDateOnly(original.lastPerformed) || "—", formatDateOnly(updated.lastPerformed) || "—"));
     }
     const nextItems = items.map(it => (it && it.id === original.id ? updated : it));
     const next = assets.map(a => (a.id === selectedId ? { ...a, maintenanceItems: nextItems } : a));
@@ -9101,7 +9288,7 @@ function AssetTracker() {
                       costs a Computer's change form nothing. */}
                   {(workTarget?.maintenanceItems || []).length > 0 && (
                   <PickerField
-                    label="Maintenance task"
+                    label="Task"
                     value={changeDraft.maintenanceId}
                     onChange={v => setChangeDraft({ ...changeDraft, maintenanceId: v })}
                     options={["", ...(workTarget?.maintenanceItems || []).map(m => m.id)]}
@@ -9110,7 +9297,7 @@ function AssetTracker() {
                       const m = (workTarget?.maintenanceItems || []).find(x => x && x.id === id);
                       return m ? m.task : "(deleted schedule)";
                     }}
-                    title="Link to a maintenance task"
+                    title="Link to a task"
                   />
                   )}
                 </div>
@@ -9134,7 +9321,13 @@ function AssetTracker() {
                       onChange={e => setChangeDraft({ ...changeDraft, markPerformed: e.target.checked })}
                       style={{ width: 16, height: 16, cursor: "pointer" }}
                     />
-                    Mark this task performed
+                    {/* "Performed" is right for a schedule, where being done
+                        starts the next interval, and wrong for a one-off, where
+                        ticking this FINISHES the job. Same write either way --
+                        it stamps lastPerformed -- so only the wording branches. */}
+                    {isOneOffTask((workTarget && workTarget.maintenanceItems || []).find(m => m && m.id === changeDraft.maintenanceId))
+                      ? "Mark this task complete"
+                      : "Mark this task performed"}
                   </label>
                   {changeDraft.markPerformed && changeDraft.performedOn && (
                     <span style={{ fontSize: 13, color: C.muted }}>on {formatDateOnly(changeDraft.performedOn)}</span>
@@ -9189,7 +9382,9 @@ function AssetTracker() {
           {showMaintenanceAdd && (
             <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20, padding: 16 }}>
               <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 520, maxHeight: "90vh", overflowY: "auto" }}>
-                <div style={{ fontWeight: 700, marginBottom: 16, color: C.brandDark }}>Add maintenance task</div>
+                <div style={{ fontWeight: 700, marginBottom: 16, color: C.brandDark }}>
+                  {maintenanceDraft.kind === TASK_KIND_ONEOFF ? "Add one-off task" : "Add scheduled task"}
+                </div>
                   {workDialogAssetId !== null && (
                   <div style={{ marginBottom: 12 }}>
                     <AssetPickerField
@@ -9201,32 +9396,71 @@ function AssetTracker() {
                   />
                   </div>
                   )}
+                {/* The kind is chosen HERE and the fields below follow it,
+                    because the two halves are mutually exclusive: a repeating
+                    task is described by an interval and its last completion, a
+                    one-off by a single due date. Offering all four at once
+                    would let someone fill in a pair the app then ignores. */}
+                <TaskKindToggle
+                  value={maintenanceDraft.kind}
+                  onChange={k => setMaintenanceDraft({ ...maintenanceDraft, kind: k })}
+                />
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
                   <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
                     <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Task</span>
                     <input
                       value={maintenanceDraft.task}
                       onChange={e => setMaintenanceDraft({ ...maintenanceDraft, task: e.target.value })}
-                      placeholder="e.g. Replace HVAC filter"
+                      placeholder={maintenanceDraft.kind === TASK_KIND_ONEOFF ? "e.g. Replace the Room 101 projector" : "e.g. Replace HVAC filter"}
                       style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
                     />
                   </label>
-                  <PickerField
-                    label="Frequency"
-                    value={maintenanceDraft.frequency}
-                    onChange={v => setMaintenanceDraft({ ...maintenanceDraft, frequency: v })}
-                    options={MAINTENANCE_FREQUENCIES.map(f => f.label)}
-                    title="Select frequency"
-                  />
-                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Last performed</span>
-                    <input
-                      type="date"
-                      value={maintenanceDraft.lastPerformed}
-                      onChange={e => setMaintenanceDraft({ ...maintenanceDraft, lastPerformed: e.target.value })}
-                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                  {/* A schedule survives on its task string because "Filter
+                      clean" says everything. A project does not. */}
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Notes</span>
+                    <textarea
+                      value={maintenanceDraft.notes}
+                      onChange={e => setMaintenanceDraft({ ...maintenanceDraft, notes: e.target.value })}
+                      rows={2}
+                      placeholder="What's involved, what's been agreed, what it's waiting on…"
+                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, fontFamily: "inherit", resize: "vertical" }}
                     />
                   </label>
+                  {maintenanceDraft.kind === TASK_KIND_ONEOFF ? (
+                    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Due date</span>
+                      <input
+                        type="date"
+                        value={maintenanceDraft.dueDate}
+                        onChange={e => setMaintenanceDraft({ ...maintenanceDraft, dueDate: e.target.value })}
+                        style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                      />
+                      {/* Optional on purpose: "some day" is a legitimate state
+                          for a project, and an undated one sorts to the bottom
+                          rather than being refused. */}
+                      <span style={{ fontSize: 11, color: C.placeholder }}>Optional</span>
+                    </label>
+                  ) : (
+                    <>
+                      <PickerField
+                        label="Frequency"
+                        value={maintenanceDraft.frequency}
+                        onChange={v => setMaintenanceDraft({ ...maintenanceDraft, frequency: v })}
+                        options={MAINTENANCE_FREQUENCIES.map(f => f.label)}
+                        title="Select frequency"
+                      />
+                      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Last performed</span>
+                        <input
+                          type="date"
+                          value={maintenanceDraft.lastPerformed}
+                          onChange={e => setMaintenanceDraft({ ...maintenanceDraft, lastPerformed: e.target.value })}
+                          style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                        />
+                      </label>
+                    </>
+                  )}
                   <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Owner</span>
                     <input
@@ -9259,7 +9493,7 @@ function AssetTracker() {
                     disabled={!maintenanceDraft.task.trim() || !workTarget}
                     style={{ padding: "8px 14px", background: (maintenanceDraft.task.trim() && workTarget) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                   >
-                    {"Schedule"}
+                    {maintenanceDraft.kind === TASK_KIND_ONEOFF ? "Add task" : "Schedule"}
                   </button>
                 </div>
               </div>
@@ -9388,9 +9622,17 @@ function AssetTracker() {
     // Never-performed items sort first (need scheduling attention); the rest by
     // ascending next-due date, which naturally puts the most-overdue on top.
     const maintenanceItems = (selectedAsset.maintenanceItems || [])
-      .map(item => ({ item, status: maintenanceStatusOf(item), due: nextMaintenanceDue(item) }))
-      .sort((a, b) => (a.due ? a.due.getTime() : -Infinity) - (b.due ? b.due.getTime() : -Infinity));
+      .map(item => ({ item, status: maintenanceStatusOf(item), due: taskDueDate(item) }))
+      .sort((a, b) => maintenanceSortKey(a) - maintenanceSortKey(b));
     const overdueMaintenanceCount = maintenanceItems.filter(m => m.status === "overdue").length;
+    // The detail list has no status filter (it is cards, not a table), so this
+    // is its equivalent: finished one-offs would otherwise pile up on the tab
+    // forever. Hidden by default, counted so they are never merely gone, and
+    // the tab's own badge counts what is OPEN -- a count that included finished
+    // work would stop answering "is there anything I have to do".
+    const doneMaintenanceItems = maintenanceItems.filter(m => m.status === "done");
+    const openMaintenanceItems = maintenanceItems.filter(m => m.status !== "done");
+    const shownMaintenanceItems = showCompletedTasks ? maintenanceItems : openMaintenanceItems;
     // The header prints selectedAsset.tag immediately to the left of this, so
     // the name only earns a spot here when it's actually a name — nameOf() falls
     // back to the label, and "BCA0082  BCA0082" helps nobody. Generalizing the
@@ -9528,7 +9770,7 @@ function AssetTracker() {
             const meta = {
               details: { label: "Details" },
               contents: { label: "Contents", count: contentsCount },
-              maintenance: { label: "Maintenance", count: maintenanceItems.length, urgent: overdueMaintenanceCount > 0 },
+              maintenance: { label: "Tasks", count: openMaintenanceItems.length, urgent: overdueMaintenanceCount > 0 },
               photos: { label: "Files", count: assetPhotos.length },
               comments: { label: "Comments", count: comments.length },
               audit: { label: "Audit", count: assetAuditEntries.length },
@@ -9945,7 +10187,7 @@ function AssetTracker() {
           {detailTab === "maintenance" && (
             <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
               {[
-                { key: "scheduled", label: "Scheduled", count: maintenanceItems.length, urgent: overdueMaintenanceCount > 0 },
+                { key: "scheduled", label: "Open", count: openMaintenanceItems.length, urgent: overdueMaintenanceCount > 0 },
                 { key: "history", label: "History", count: changeEntries.length },
               ].map(st => {
                 const active = maintenanceSubTab === st.key;
@@ -9985,20 +10227,35 @@ function AssetTracker() {
               </div>
               )}
 
-              {maintenanceItems.length === 0 ? (
-                <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>No maintenance scheduled yet.</div>
+              {doneMaintenanceItems.length > 0 && (
+                <div style={{ marginBottom: 10 }}>
+                  <button
+                    onClick={() => setShowCompletedTasks(!showCompletedTasks)}
+                    style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 6px", background: "none", border: "none", borderRadius: 8, color: C.muted, fontWeight: 600, fontSize: 12, cursor: "pointer" }}
+                    aria-expanded={showCompletedTasks}
+                  >
+                    {showCompletedTasks ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                    {showCompletedTasks ? "Hide" : "Show"} completed ({doneMaintenanceItems.length})
+                  </button>
+                </div>
+              )}
+              {shownMaintenanceItems.length === 0 ? (
+                <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>
+                  {maintenanceItems.length === 0 ? "No tasks yet." : "Nothing open — every task here is done."}
+                </div>
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                  {maintenanceItems.map(({ item, status, due }) => {
-                    const statusMeta = {
-                      overdue: { label: "Overdue", color: C.danger },
-                      "due-soon": { label: "Due soon", color: C.accent },
-                      ok: { label: "On track", color: C.success },
-                      never: { label: "Not yet done", color: C.muted },
-                    }[status];
+                  {shownMaintenanceItems.map(({ item, status, due }) => {
+                    const statusMeta = maintenanceStatusMeta(status);
+                    const oneOff = isOneOffTask(item);
+                    const done = status === "done";
                     if (editingMaintenanceId === item.id) {
                       return (
                         <div key={item.id} style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)" }}>
+                          <TaskKindToggle
+                            value={maintenanceEditDraft.kind}
+                            onChange={k => setMaintenanceEditDraft({ ...maintenanceEditDraft, kind: k })}
+                          />
                           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
                             <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
                               <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Task</span>
@@ -10008,22 +10265,62 @@ function AssetTracker() {
                                 style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
                               />
                             </label>
-                            <PickerField
-                              label="Frequency"
-                              value={maintenanceEditDraft.frequency}
-                              onChange={v => setMaintenanceEditDraft({ ...maintenanceEditDraft, frequency: v })}
-                              options={MAINTENANCE_FREQUENCIES.map(f => f.label)}
-                              title="Select frequency"
-                            />
-                            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Last performed</span>
-                              <input
-                                type="date"
-                                value={maintenanceEditDraft.lastPerformed}
-                                onChange={e => setMaintenanceEditDraft({ ...maintenanceEditDraft, lastPerformed: e.target.value })}
-                                style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                            <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
+                              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Notes</span>
+                              <textarea
+                                value={maintenanceEditDraft.notes}
+                                onChange={e => setMaintenanceEditDraft({ ...maintenanceEditDraft, notes: e.target.value })}
+                                rows={2}
+                                style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, fontFamily: "inherit", resize: "vertical" }}
                               />
                             </label>
+                            {maintenanceEditDraft.kind === TASK_KIND_ONEOFF ? (
+                              <>
+                                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Due date</span>
+                                  <input
+                                    type="date"
+                                    value={maintenanceEditDraft.dueDate}
+                                    onChange={e => setMaintenanceEditDraft({ ...maintenanceEditDraft, dueDate: e.target.value })}
+                                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                                  />
+                                </label>
+                                {/* Clearing this REOPENS a finished job. There
+                                    is no done flag to unset -- the date is the
+                                    whole of "is this done" -- so the field that
+                                    records the completion is also the control
+                                    that undoes it. */}
+                                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Completed</span>
+                                  <input
+                                    type="date"
+                                    value={maintenanceEditDraft.lastPerformed}
+                                    onChange={e => setMaintenanceEditDraft({ ...maintenanceEditDraft, lastPerformed: e.target.value })}
+                                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                                  />
+                                  <span style={{ fontSize: 11, color: C.placeholder }}>Clear to reopen</span>
+                                </label>
+                              </>
+                            ) : (
+                              <>
+                                <PickerField
+                                  label="Frequency"
+                                  value={maintenanceEditDraft.frequency}
+                                  onChange={v => setMaintenanceEditDraft({ ...maintenanceEditDraft, frequency: v })}
+                                  options={MAINTENANCE_FREQUENCIES.map(f => f.label)}
+                                  title="Select frequency"
+                                />
+                                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Last performed</span>
+                                  <input
+                                    type="date"
+                                    value={maintenanceEditDraft.lastPerformed}
+                                    onChange={e => setMaintenanceEditDraft({ ...maintenanceEditDraft, lastPerformed: e.target.value })}
+                                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                                  />
+                                </label>
+                              </>
+                            )}
                             <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                               <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Owner</span>
                               <input
@@ -10069,11 +10366,24 @@ function AssetTracker() {
                           </div>
                         </div>
                         <div style={{ fontSize: 13, color: C.muted, marginBottom: 4 }}>
-                          {[item.frequencyLabel, item.owner].filter(Boolean).join(" · ") || "—"}
+                          {[oneOff ? "One-off" : item.frequencyLabel, item.owner].filter(Boolean).join(" · ") || "—"}
                         </div>
+                        {item.notes && (
+                          <div style={{ fontSize: 13, color: C.ink, whiteSpace: "pre-wrap", marginBottom: 6 }}>{item.notes}</div>
+                        )}
+                        {/* The same stored field reads differently by kind:
+                            a schedule's lastPerformed is the start of its next
+                            interval, a one-off's is the end of it. */}
                         <div style={{ fontSize: 13, color: C.ink, marginBottom: 8 }}>
-                          Last performed: {item.lastPerformed ? formatDateOnly(item.lastPerformed) : "Never"}
-                          {due && <> · Next due: <span style={{ color: statusMeta.color, fontWeight: 600 }}>{formatDateOnly(localDateString(due))}</span></>}
+                          {oneOff ? (
+                            done ? <>Completed: {formatDateOnly(item.lastPerformed)}</>
+                                 : <>Due: {due ? <span style={{ color: statusMeta.color, fontWeight: 600 }}>{formatDateOnly(localDateString(due))}</span> : "No date set"}</>
+                          ) : (
+                            <>
+                              Last performed: {item.lastPerformed ? formatDateOnly(item.lastPerformed) : "Never"}
+                              {due && <> · Next due: <span style={{ color: statusMeta.color, fontWeight: 600 }}>{formatDateOnly(localDateString(due))}</span></>}
+                            </>
+                          )}
                         </div>
                         {/* A FULL gallery here, not the read-only strip a work
                             entry gets. A work entry is written once and its
@@ -10111,11 +10421,17 @@ function AssetTracker() {
                           const open = openMaintenanceHistory === item.id;
                           return (
                             <>
-                              {(canEdit || history.length > 0) && (
+                              {((canEdit && !done) || history.length > 0) && (
                               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                                {canEdit && (
+                                {/* Hidden on a finished one-off: there is
+                                    nothing left to complete, and re-offering it
+                                    would read as a way to log a SECOND
+                                    completion of a job that happens once.
+                                    Reopening is clearing the date in the edit
+                                    form, which is audited like any field. */}
+                                {canEdit && !done && (
                                 <button onClick={() => openMaintenanceComplete(item.id)} style={{ padding: "6px 12px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 12 }}>
-                                  {"Log completion…"}
+                                  {oneOff ? "Mark complete…" : "Log completion…"}
                                 </button>
                                 )}
                                 {history.length > 0 && (
@@ -11147,7 +11463,7 @@ function AssetTracker() {
         <div style={{ display: "flex", gap: 4, overflowX: "auto", overflowY: "hidden" }}>
           {[
             { key: "assets", label: "Assets" },
-            { key: "maintenance", label: "Maintenance", count: allMaintenanceRows.length, urgent: maintenanceOverdueTotal > 0 },
+            { key: "maintenance", label: "Tasks", count: allOpenMaintenanceRows.length, urgent: maintenanceOverdueTotal > 0 },
             // No count, deliberately. Maintenance's says how much there is to
             // DO; the audit log only ever grows, so "Audit (11482)" is a number
             // that answers nothing and gets longer forever.
@@ -11657,7 +11973,7 @@ function AssetTracker() {
 
           <div style={{ display: "flex", gap: 6, marginBottom: 16, alignItems: "center", flexWrap: "wrap" }}>
             {[
-              { key: "scheduled", label: "Scheduled", count: filteredMaintenanceRows.length, urgent: maintenanceOverdueTotal > 0 },
+              { key: "scheduled", label: "Open", count: filteredMaintenanceRows.length, urgent: maintenanceOverdueTotal > 0 },
               { key: "history", label: "History", count: filteredWorkRows.length },
             ].map(st => {
               const active = mainMaintenanceSubTab === st.key;
@@ -11775,13 +12091,17 @@ function AssetTracker() {
             headerTop={LIST_TABLE_HEADER_TOP}
             style={{ border: `1px solid ${C.border}`, background: C.surface, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)" }}
             header={(
-              <div style={{ display: "grid", gridTemplateColumns: "220px 170px 110px 130px 130px 130px 120px", background: C.brandDark, color: C.onBrand, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", minWidth: "max-content" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "220px 170px 100px 110px 130px 130px 130px 120px", background: C.brandDark, color: C.onBrand, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", minWidth: "max-content" }}>
                 {[
                   { key: "task", label: "Task" },
                   { key: "asset", label: "Asset" },
+                  { key: "kind", label: "Kind" },
                   { key: "frequency", label: "Frequency" },
                   { key: "owner", label: "Owner" },
-                  { key: "lastPerformed", label: "Last Performed" },
+                  // "Last Performed" is wrong on a one-off, where the same
+                  // stored value is its completion. One header serves both
+                  // rather than the column branching per row, which it cannot.
+                  { key: "lastPerformed", label: "Last Done" },
                   { key: "nextDue", label: "Next Due" },
                   { key: "status", label: "Status" },
                 ].map(c => (
@@ -11801,31 +12121,27 @@ function AssetTracker() {
 
               {filteredMaintenanceRows.length === 0 && (
                 <div style={{ padding: 32, textAlign: "center", color: C.empty, fontSize: 14, minWidth: "max-content" }}>
-                  {allMaintenanceRows.length === 0 ? "No maintenance scheduled yet." : "No scheduled items match your search."}
+                  {allMaintenanceRows.length === 0 ? "No tasks yet." : "No tasks match your search."}
                 </div>
               )}
 
               {filteredMaintenanceRows.map(({ asset, assetName, item, status, due }) => {
-                const statusMeta = {
-                  overdue: { label: "Overdue", color: C.danger },
-                  "due-soon": { label: "Due soon", color: C.accent },
-                  ok: { label: "On track", color: C.success },
-                  never: { label: "Not yet done", color: C.muted },
-                }[status];
+                const statusMeta = maintenanceStatusMeta(status);
                 const AssetIcon = iconFor(asset.type);
                 return (
                   <div
                     key={`${asset.id}-${item.id}`}
                     className="row-body"
                     onClick={() => openDetail(asset, "maintenance")}
-                    style={{ display: "grid", gridTemplateColumns: "220px 170px 110px 130px 130px 130px 120px", alignItems: "center", cursor: "pointer", background: C.surface, borderTop: `1px solid ${C.border}` }}
+                    style={{ display: "grid", gridTemplateColumns: "220px 170px 100px 110px 130px 130px 130px 120px", alignItems: "center", cursor: "pointer", background: C.surface, borderTop: `1px solid ${C.border}` }}
                   >
                     <div style={{ padding: "12px 14px", fontSize: 13, color: C.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.task}</div>
                     <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted, display: "flex", alignItems: "center", gap: 6, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       <AssetIcon size={14} style={{ flexShrink: 0, color: C.brand }} />
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{assetName}</span>
                     </div>
-                    <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted }}>{item.frequencyLabel}</div>
+                    <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted }}>{isOneOffTask(item) ? "One-off" : "Scheduled"}</div>
+                    <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted }}>{item.frequencyLabel || "—"}</div>
                     <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.owner || "—"}</div>
                     <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted }}>{item.lastPerformed ? formatDateOnly(item.lastPerformed) : "Never"}</div>
                     <div style={{ padding: "12px 14px", fontSize: 13, fontWeight: 600, color: statusMeta.color }}>{due ? formatDateOnly(localDateString(due)) : "—"}</div>
@@ -12173,6 +12489,43 @@ function Field({ label, value, onChange, placeholder, wide, dataType, options, e
       />
       {foot}
     </label>
+  );
+}
+
+// Does this task repeat? Two buttons rather than a PickerField, for the same
+// reason the Circuit form's serves-rooms/feeds-sub-panel pair is a toggle: it
+// is a binary that CHANGES WHICH FIELDS ARE BELOW IT, and a modal picker hides
+// that consequence behind a tap. Both options are visible at once, and the
+// fields under them redraw as the choice moves.
+function TaskKindToggle({ value, onChange }) {
+  const opts = [
+    { key: TASK_KIND_SCHEDULED, label: "Repeats", hint: "On a schedule" },
+    { key: TASK_KIND_ONEOFF, label: "One-off", hint: "A job or project" },
+  ];
+  return (
+    <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+      {opts.map(o => {
+        const active = value === o.key;
+        return (
+          <button
+            key={o.key}
+            type="button"
+            onClick={() => onChange(o.key)}
+            aria-pressed={active}
+            style={{
+              flex: 1, padding: "8px 12px", borderRadius: 10, textAlign: "left",
+              background: active ? C.brand : "transparent",
+              color: active ? "#fff" : C.ink,
+              border: `1.5px solid ${active ? C.brand : C.border}`,
+              fontWeight: active ? 700 : 500, fontSize: 13, cursor: "pointer",
+            }}
+          >
+            {o.label}
+            <span style={{ display: "block", fontSize: 11, fontWeight: 500, color: active ? "rgba(255,255,255,0.8)" : C.placeholder }}>{o.hint}</span>
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

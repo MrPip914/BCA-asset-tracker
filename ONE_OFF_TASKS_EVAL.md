@@ -1,7 +1,8 @@
 # One-off tasks and projects
 
-Proposal, 2026-09-19. Nothing here is built. It exists so the shape can be argued
-about before a backend version is spent on it.
+Proposal, 2026-09-19. **BUILT the same day as backend v40** — this file is kept as
+the reasoning record; `CLAUDE.md` has the shipped behaviour. Two corrections made
+during the build are marked below.
 
 ## The gap, stated as a quadrant
 
@@ -182,7 +183,13 @@ next year. Completion drops it out of the default view and nothing more.
   *Mark this task performed* checkbox, which reads as *complete* on a one-off.
 - **The status filter defaults to hiding done**, or completed tasks accumulate in
   the triage view forever.
-- The Excel export's Maintenance sheet takes the four new columns.
+- ~~The Excel export's Maintenance sheet takes the new columns.~~ **CORRECTION:
+  there is no Maintenance sheet in the export.** The workbook has Assets,
+  Changes, Comments, Allocations, Breakers, Circuits and Audit Log; schedules
+  have never been exported at all. Adding a Tasks sheet is real new capability
+  rather than "take the new columns", so it was left out of this change and is
+  Eric's call. The Changes sheet's resolved *Maintenance task* column, which is
+  what makes project spend pivotable, is untouched and still works.
 
 ## Four traps that will bite
 
@@ -204,6 +211,22 @@ next year. Completion drops it out of the default view and nothing more.
    covers exactly this mutation class for the v34 columns — extend it rather than
    writing a new file.
 
+## The trap the proposal missed, found by loading the page
+
+`TASK_KIND_SCHEDULED` was written beside the task helpers, where it obviously
+belongs, and `TASK_KIND_FILTER_OPTIONS` — declared ~150 lines earlier with the
+other filter vocabularies — names it. `index.html` is one module body evaluated
+top to bottom, so that is a temporal-dead-zone `ReferenceError` and the app
+white-screens at load with nothing rendered and nothing in `#root` but the
+start-up failure notice.
+
+**This is exactly the trap `C` must be declared after `CLIENT` to avoid**, met a
+second time in a second place, and caught the same way it was the first time: by
+driving the real page, not by reading the diff. Every unit test passed against
+the broken build, because the helpers are sliced out and evaluated in isolation
+where the ordering does not exist. The constants now sit above their first use
+with a comment saying why they are not where they look like they belong.
+
 ## Fixtures and tests
 
 `MOCK_SNAPSHOT` needs all four shapes, not one: a legacy row with no `kind` at
@@ -212,11 +235,26 @@ completed one. A uniform fixture exercises half the code — that is the
 `personIds` lesson, and the reason Sandbox could not reproduce the assignment
 wipe that reached the live sheet.
 
-New `test-frontend-tasks.js` for the derived logic — due date by kind, status by
-kind, the sort placement of an undated one-off, the overdue count excluding done.
-Extend `test-backend-fields.js` and `test-backend-maintenance-link.js` for the
-columns. The completion flow itself is browser-verified in Sandbox, as the
-existing one was.
+`test-frontend-tasks.js` (47 assertions) covers the derived logic — due date by
+kind, status by kind, the sort placement of an undated one-off, done excluded
+from both badges — plus the source-level wiring the helpers cannot show. It
+slices the shipped helpers out of `index.html` rather than reimplementing them,
+and it reads `MAINTENANCE_FIELDS` out of the .gs so the two halves of the backend
+contract cannot drift apart silently.
+
+Verified by mutation that fifteen silent failures fail it, among them: a blank
+kind read as a one-off, `taskIsDone` losing its one-off guard so a schedule
+reports done, an undated one-off reporting "never", the sort reverting to the
+pre-v40 inline expression, the status filter defaulting back to "All statuses",
+either badge counting finished work, the detail list ceasing to hide completed
+tasks, a column dropped from `MAINTENANCE_FIELDS`, and the fixture losing its
+undated one-off. **Two of those mutations initially SURVIVED**, and both were the
+same mistake: a presence test (`/frequencyLabel: oneOff \? ""/`) passes while one
+of the two write paths still matches it, so changing add OR edit back on its own
+went unnoticed. Those assertions count occurrences now.
+
+The completion flow, the add dialog, the kind toggle and the ordering were
+browser-verified by driving the real page in Chromium against Sandbox.
 
 ## Release
 

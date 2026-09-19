@@ -2387,6 +2387,113 @@ points at the record, and not before.**
   migration, and two browsers minting different ids is caught by the revision check.
 - `MOCK_SNAPSHOT` stays MIXED: three work entries carry explicit ids, the rest are adopted,
   so both paths are exercised by the fixture rather than only by a unit test.
+**A task is SCHEDULED or ONE-OFF, and they are one record type (backend v40).**
+The tab used to hold only recurring maintenance. A non-recurring job — replace
+the Room 101 projector, repaint Building 200 — had nowhere to live: "Log work" is
+retrospective, so the prospective one-time quadrant was simply empty, and those
+jobs lived in a comment where nothing counted them, sorted them by urgency or
+turned the tab red when they slipped. `ONE_OFF_TASKS_EVAL.md` holds the options
+that were rejected.
+
+- **Three columns, not a new subsystem**: `kind`, `dueDate`, `notes` on
+  `MAINTENANCE_FIELDS`. That inherits the completion flow, the `maintenanceId`
+  work-entry link, the schedule's photo gallery, the site-wide table, the overdue
+  badge, the scope filter and the search, all unchanged.
+- **A PROJECT IS A ONE-OFF WITH SEVERAL WORK ENTRIES UNDER IT.** No third
+  concept. The v34 link already makes that a dated, costed, authored,
+  photographed journal, and the export's Changes sheet already resolves it into a
+  column — so "what did the Room 300 rebuild cost" is a pivot table.
+- **Every task hangs off an asset, and there is deliberately no asset-less task**
+  (Eric's call). Room, Building and Campus are assets, so site-wide work has a
+  home. Work about nothing physical does not; that is a separate top-level
+  `tasks` domain and was judged not worth four times the release for a second
+  mechanism that looks exactly like the first.
+- **A BLANK `kind` READS AS "scheduled"**, and that default is KNOWN rather than
+  guessed: before v40 a recurring item was the only thing this tab could hold. It
+  is resolved at READ time (`taskKindOf`) rather than by a load-time adoption,
+  because nothing needs writing — a legacy row stays correct forever without a
+  save, which is one fewer reason to mark a domain dirty. Contrast `adoptPhoto`,
+  which is already normalising its row anyway.
+- **THERE IS NO COMPLETION COLUMN. A one-off with a non-empty `lastPerformed` is
+  done.** An earlier draft added `doneOn`; Eric caught that it duplicated a date
+  the record already held. It is not a second meaning in an existing column —
+  `lastPerformed` holds one fact under both kinds (the date this was last
+  performed), and only the DERIVATION branches: a schedule counts forward from it
+  to a next-due date, a one-off has nothing to count forward to, so the same
+  stamp is terminal. **So `submitMaintenanceComplete` needs no branch at all**;
+  it already wrote that one date into `item.lastPerformed` and the linked work
+  entry's `performedOn` from a single value, and a one-off completion is the
+  identical write. Only `maintenanceStatusOf` reads it differently.
+  - **What that does NOT cover is a project worked on repeatedly without being
+    finished**, where "last performed" and "done" come apart in a way they never
+    do for a schedule. The answer is a STATE ("in progress", "blocked"), which is
+    deferred — a date would half-build it in a shape that cannot express it.
+  - **Clearing the date REOPENS a finished job.** There is no flag to unset, so
+    the field that records the completion is the control that undoes it, and the
+    change is audited like any other field edit. The complete button is hidden
+    once a one-off is done, or it would read as a way to log a second completion
+    of a job that happens once.
+- **A ONE-OFF'S `dueDate` IS ITS OWN; A SCHEDULE'S STAYS DERIVED.** A schedule
+  never reads `dueDate` and a one-off never reads `frequencyDays`, whatever is
+  stored in the other half — the KIND decides which half is read, never which
+  half happens to be filled in. Both save paths write the unused half BLANK, or
+  flipping a kind resurrects a finished job as a recurring one. Deriving a
+  schedule's due date is what keeps it honest the first time a completion is
+  back-dated.
+- **A NULL DUE DATE MEANS TWO OPPOSITE THINGS, and that is the sharpest thing
+  here.** The default sort was `due ? due.getTime() : -Infinity` — correct while
+  every row was a schedule, where a null means never-performed and needs
+  attention, and exactly backwards for an undated one-off, which would sit above
+  everything genuinely overdue. `maintenanceSortKey` names the four cases
+  instead: `never` first, then by date, then `undated`, then `done` last. The
+  status vocabulary carries the same split — `never` is a schedule that has never
+  been done, `undated` is a one-off with no date and says nothing about urgency.
+- **ONE LIST WITH A KIND FILTER, NOT A THIRD SUB-TAB** (Eric's call). "What do I
+  owe this building" is one question, and splitting it across two tabs makes the
+  overdue badge answer half of it. The sub-tabs stay future/past.
+- **The Status filter defaults to "Open", which is not a status** — it is every
+  status but done. A completed task is KEPT (its photos hang off its id, its work
+  entries name it, and a finished job is what you want to find again next year),
+  so something has to stop it accumulating in a triage view. The detail card list
+  has no status filter, so it gets the same job done by a "Show completed (N)"
+  toggle. **Both badges count OPEN items only** — a count that grew with every
+  finished job stops answering the only question a badge is for.
+- **The tab reads "Tasks"; the stored key is still `maintenance`.** LABELS ONLY —
+  the revision domain, the Sheet tab, `maintenanceItems`, `maintenanceId`,
+  `?tab=maintenance` and every other identifier are unmoved. Same trade
+  `changeType`/"Work type" and `breakers`/"Layout" take, **including keeping the
+  CODE on the stored name**. The sub-tabs are now Open/History.
+  - **"Last Performed" became "Last Done" in the site-wide table**, because one
+    header has to serve both kinds and a column cannot branch per row. The detail
+    card does branch, and reads "Completed:" on a finished one-off.
+  - **An audit row still says "Completed maintenance …— last done <date>"** for a
+    one-off, which reads slightly off. Left alone deliberately: `describeAudit`
+    renders STORED rows at read time and the row carries no kind, so rewording it
+    would change how past entries read. A known rough edge, not a bug.
+- **`TASK_KIND_SCHEDULED` is declared far above the task helpers, beside the
+  filter options that name it, and moving it back white-screens the app.**
+  `index.html` is one module body evaluated top to bottom, so declaration order is
+  dependency order — **exactly the trap `C` must be declared after `CLIENT` to
+  avoid**, met a second time. Every unit test passed against the broken build,
+  because the helpers are sliced out and evaluated where the ordering does not
+  exist. Caught by loading the real page, which is the only place it exists.
+- **Covered by `test-frontend-tasks.js`**, verified by mutation that fifteen
+  silent failures fail it — among them a blank kind read as a one-off, an undated
+  one-off reporting "never", the sort reverting to the inline expression, either
+  badge counting finished work, and a column dropped from `MAINTENANCE_FIELDS`.
+  **Two mutations initially survived**, both the same mistake: a presence test
+  passes while one of the two write paths still matches it, so changing add OR
+  edit back alone went unnoticed. Those assertions count occurrences now.
+- **`MOCK_SNAPSHOT` carries all four shapes** — legacy rows with no `kind` at all,
+  an open dated one-off on a Building (the site-wide case), an UNDATED one-off
+  (the sort trap, which nothing else would have exposed) and a COMPLETED one. A
+  uniform fixture exercises half the code; that is the `personIds` lesson.
+- **The Excel export gained NOTHING, and it is worth knowing why**: there is no
+  Maintenance sheet in the workbook and never has been. Adding a Tasks sheet is
+  real new capability rather than a column change, so it was left out and is
+  Eric's call. The Changes sheet's resolved *Maintenance task* column is
+  untouched.
+
 **A completion is a change-log entry, linked by `change.maintenanceId` (v34).** Marking a
 task done and logging a change used to be two unconnected acts: "Mark done today" stamped
 `lastPerformed` and wrote one audit row, so what a service visit actually cost, who did it

@@ -49,7 +49,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v39";
+const SCRIPT_VERSION = "v40";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -287,8 +287,30 @@ const CHANGE_FIELDS = ["assetLabel", "id", "changeType", "vendor", "cost", "note
 // re-point every change entry referencing them. Same reasoning that gave
 // Breakers and Circuits a UUID. Blank on every row written before v34; the
 // frontend adopts one at load and it lands on the next save.
+// v40 added `kind`, `dueDate` and `notes`, which is what lets this tab hold a
+// non-recurring task or a project as well as a recurring schedule.
+//
+// A BLANK `kind` READS AS "scheduled", and that default is known rather than
+// guessed: before v40 a recurring item was the only thing this tab could hold,
+// so every stored row really is one. Same call as a photo's blank `kind`
+// meaning "image", and the opposite of a photo's blank `ownerType`, which is
+// left unresolved because a blank THERE can only come from a hand edit.
+//
+// There is deliberately NO completion column. A one-off with a non-empty
+// `lastPerformed` is done; an empty one is open. That is not a second meaning
+// smuggled into an existing column -- `lastPerformed` holds one fact either way
+// (the date this was last performed), and only what the frontend DERIVES from
+// it branches on kind: a schedule counts forward to a next-due date, a one-off
+// has nothing to count forward to, so the same stamp is terminal. Storing that
+// date a second time under another name is how two copies of one fact get out
+// of step.
+//
+// `dueDate` is the one-off's own due date, and a scheduled row leaves it blank:
+// a schedule's due date is DERIVED from lastPerformed + frequencyDays and must
+// stay derived, or the two disagree the first time a completion is back-dated.
 const MAINTENANCE_FIELDS = [
-  "assetLabel", "id", "task", "frequencyLabel", "frequencyDays", "lastPerformed", "owner", "at", "by",
+  "assetLabel", "id", "kind", "task", "notes", "frequencyLabel", "frequencyDays",
+  "dueDate", "lastPerformed", "owner", "at", "by",
 ];
 
 // AuditLog's columns. `related` is LAST and any future column must be too: this
@@ -1323,7 +1345,9 @@ function handleAuthenticatedRead_(body, e) {
         })),
         allocations: allocationRows.filter(al => al.assetLabel === label).map(al => ({ roomId: al.room, quantity: al.quantity })),
         maintenanceItems: maintenanceRows.filter(m => m.assetLabel === label).map(m => ({
-          id: m.id || "", task: m.task, frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
+          id: m.id || "", kind: m.kind || "", task: m.task, notes: m.notes || "",
+          frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
+          dueDate: m.dueDate || "",
           lastPerformed: m.lastPerformed, owner: m.owner, at: m.at, by: m.by,
         })),
         // Only meaningful for Electrical Panel assets, but attached unconditionally
@@ -1878,8 +1902,13 @@ function doPost(e) {
           id: c.id || "", maintenanceId: c.maintenanceId || "", performedOn: c.performedOn || "",
         }));
         (a.allocations || []).forEach(al => allocationRows.push({ assetLabel: key, room: al.roomId, quantity: al.quantity }));
+        // Both projections move together or the column reads back as undefined
+        // with no error and no version mismatch -- the mutation class
+        // test-backend-maintenance-link.js exists to catch.
         (a.maintenanceItems || []).forEach(m => maintenanceRows.push({
-          assetLabel: key, id: m.id || "", task: m.task, frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
+          assetLabel: key, id: m.id || "", kind: m.kind || "", task: m.task, notes: m.notes || "",
+          frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
+          dueDate: m.dueDate || "",
           lastPerformed: m.lastPerformed || "", owner: m.owner || "", at: m.at, by: m.by || "",
         }));
         // panelLabel is derived from the parent asset here (not trusted from the
