@@ -28,13 +28,14 @@ already fills the other prospective cell.
 ### A. A task is a maintenance item that does not repeat — RECOMMENDED
 
 `maintenanceItems` grows a `kind` ("scheduled" | "oneoff"), a `dueDate` and a
-`doneOn`. A one-off is a row with no frequency, its own due date, and a
-completion stamp instead of a moving `lastPerformed`. Everything else — the
+`notes`. A one-off is a row with no frequency and its own due date, whose
+existing `lastPerformed` stamp is terminal rather than the start of the next
+interval. Everything else — the
 owner, the completion flow, the work-entry link, the photo gallery, the site-wide
 table, the overdue badge, the scope filter, the search — is already built and
 already applies.
 
-Cost: four columns on a tab `writeTable_` rewrites every save, so no migration.
+Cost: three columns on a tab `writeTable_` rewrites every save, so no migration.
 One backend version. Frontend work is real but mostly widening existing code
 paths rather than adding surfaces.
 
@@ -97,7 +98,7 @@ any of this is built.
 
 ## The data
 
-Four columns on `MAINTENANCE_FIELDS` (backend v40):
+Three columns on `MAINTENANCE_FIELDS` (backend v40):
 
 - **`kind`** — `"scheduled"` or `"oneoff"`. **A blank reads as "scheduled"**, and
   that default is known rather than guessed: before v40 a recurring item was the
@@ -107,10 +108,41 @@ Four columns on `MAINTENANCE_FIELDS` (backend v40):
 - **`dueDate`** — the one-off's own due date. A scheduled item leaves it blank;
   its due date is derived from `lastPerformed + frequencyDays` and must stay
   derived, or the two would disagree the first time a completion is back-dated.
-- **`doneOn`** — the completion date. Blank means open. A scheduled item never
-  sets it; that is what `lastPerformed` is for.
 - **`notes`** — a description. A schedule survives on a `task` string because
   "Filter clean" says everything; a project does not.
+
+### There is no `doneOn`, because `lastPerformed` already answers it
+
+An earlier draft of this proposal added a fourth column for the completion date.
+It was redundant and is dropped. **A one-off with a non-empty `lastPerformed` is
+done**; an empty one is open.
+
+That is not a second meaning smuggled into an existing column. `lastPerformed`
+holds one fact in both cases — the date this was last performed. What differs is
+only what the app DERIVES from it, and that derivation already has to branch on
+`kind` anyway: a schedule counts forward from it to a next-due date, a one-off
+has nothing to count forward to, so the same stamp is terminal. Storing the same
+date twice under two names is how two copies of one fact get out of step, which
+this project has paid for before.
+
+It also means `submitMaintenanceComplete` needs no branch at all. It already
+writes that one date into two places — `item.lastPerformed` and the linked work
+entry's `performedOn` — from a single value, with a comment saying they are the
+same fact and must not be allowed to disagree. A one-off completion is the
+identical write. The only thing that changes is what `maintenanceStatusOf` makes
+of it afterwards.
+
+**The case this does NOT cover, and why it is still right:** a project can be
+worked on repeatedly without being finished, so "last performed" and "done" come
+apart in a way they never do for a schedule. But the answer to that is a STATE
+("in progress", "blocked"), not a second date — and a state is on the deferred
+list below, where it should stay until a real project proves it is needed.
+Adding `doneOn` now would half-build it, in the shape of a date that cannot
+express the state it is standing in for.
+
+The one visible consequence is a label: the **Last Performed** column and form
+field read wrong on a one-off, where the same value means "completed". Label it
+per kind, or retitle the column to something honest for both.
 
 `frequencyLabel`/`frequencyDays` stay blank on a one-off rather than gaining a
 sentinel "One-time" frequency. `MAINTENANCE_FREQUENCIES` exists because every
@@ -120,26 +152,34 @@ mechanism this list exists for".
 
 **A completed task is kept, never deleted.** Its photos hang off its id, its work
 entries name it, and a finished job is exactly the thing you want to find again
-next year. Completion flips `doneOn` and drops it out of the default view.
+next year. Completion drops it out of the default view and nothing more.
 
 ## What has to change in the frontend
 
 - **`nextMaintenanceDue` generalises**: a one-off answers `dueDate`, a scheduled
   item answers as it does now. Every caller already treats the result as "when is
   this due", so the call sites are unchanged.
-- **`maintenanceStatusOf` gains `done`** and loses `never` for one-offs: an
-  undated one-off is not urgent, it is undated.
-- **One list, not a third sub-tab.** Scheduled and one-off rows share the
-  Scheduled table (retitled), separated by a **Kind** column filter through the
-  existing `ColumnHeaderCell`/`ColumnFilterModal` pattern. "What do I owe this
-  building" is one question; splitting it across two tabs makes the overdue badge
-  answer half of it. The sub-tabs stay Scheduled/History — past and future.
+- **`maintenanceStatusOf` gains `done`** — a non-empty `lastPerformed` on a
+  one-off — **and loses `never`** there: an empty `lastPerformed` on a schedule
+  means never-performed and needs attention, while on a one-off it is simply the
+  open state and says nothing about urgency. Its status comes from `dueDate`, and
+  an undated one-off is not urgent, it is undated.
+- **One list, not a third sub-tab** (decided). Scheduled and one-off rows share
+  one table, separated by a **Kind** column filter through the existing
+  `ColumnHeaderCell`/`ColumnFilterModal` pattern. "What do I owe this building" is
+  one question; splitting it across two tabs makes the overdue badge answer half
+  of it. The sub-tabs stay Scheduled/History — past and future.
+- **The tab is renamed "Tasks"** (decided). LABELS ONLY: the stored key stays
+  `maintenance`, as do the domain, `maintenanceItems`, `maintenanceId` and the
+  `?tab=maintenance` deep link. Same trade `changeType`/"Work type" and
+  `breakers`/"Layout" already take, including keeping the CODE on the stored
+  name. The Scheduled sub-tab becomes something that covers both kinds.
 - **The add dialog gains a "Repeats" toggle**: frequency picker when on, due date
   when off. One dialog, one draft, as the add/edit change dialog already is.
-- **"Log completion…" branches on kind** — it stamps `doneOn` for a one-off and
-  moves `lastPerformed` for a schedule. Both still write the linked work entry
-  with its cost, vendor, note and photos, and both still write one audit row in
-  one `persist()`.
+- **"Log completion…" needs no branch** — it stamps `lastPerformed` and writes
+  the linked work entry with its cost, vendor, note and photos, exactly as it
+  does today. Only its wording changes per kind, along with the Log work dialog's
+  *Mark this task performed* checkbox, which reads as *complete* on a one-off.
 - **The status filter defaults to hiding done**, or completed tasks accumulate in
   the triage view forever.
 - The Excel export's Maintenance sheet takes the four new columns.
@@ -154,7 +194,9 @@ next year. Completion flips `doneOn` and drops it out of the default view.
    including on the site-wide tab, where the badge is the whole point of the tab.
 3. **`MAINTENANCE_STATUS_FILTER_OPTIONS` stores values that differ from their
    labels** (`"due-soon"` → "Due soon") through `labelForOption`; the new statuses
-   have to be added there and not only to the filter's option list.
+   have to be added there and not only to the filter's option list. `never` is
+   the one to watch — it stays meaningful for schedules and must not be offered
+   as though it described an open one-off.
 4. **Both halves of the backend contract move together.** The read projection and
    the write projection are separate literal objects in the .gs; a field added to
    `MAINTENANCE_FIELDS` and to only one of them reads back as undefined with no
@@ -194,13 +236,9 @@ merge second: deploy the branch to dev, try it, deploy to the school, then merge
   and cheap now that people are assets, but it is a change to schedules too, so
   it belongs in its own pass.
 
-## Decisions needed before building
+## Decisions taken (2026-09-19)
 
-1. **Is the asset-less case real?** If most of what you want to track is not
-   about a physical thing, build B instead.
-2. **Does "Maintenance" stay the tab's name?** Once it holds projects it is the
-   wrong word. Renaming what people read is free and this project has done it
-   twice (`changeType` → "Work type", `breakers` → "Layout"); the stored key,
-   the domain and the `?tab=maintenance` deep link would not move.
-3. **One list with a Kind filter, or separate sub-tabs?** The recommendation is
-   one list, for the reason above.
+1. **No asset-less work.** Every task hangs off an asset; Room, Building and
+   Campus carry the site-wide jobs. Shape B is not built.
+2. **One list with a Kind filter**, not separate sub-tabs.
+3. **The tab is renamed "Tasks"** — the label only, per the rule above.
