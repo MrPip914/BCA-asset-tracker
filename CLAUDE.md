@@ -39,7 +39,7 @@ not the default.
 
 - **`dev` is unattended.** Trigger it, watch the run, say what happened. Do not ask first
   for a dev deploy of work that is already built — that is the tenant's whole purpose.
-- **A school waits for Eric's approval**, in the `gas-school` environment. Trigger it when
+- **A client tenant waits for Eric's approval**, in the `gas-client` environment. Trigger it when
   the release order calls for it, then say plainly that it is sitting on his approval and
   which tenant it will touch. The tap is the confirmation; do not also paste a block.
 - **The inputs are tenant, ref and allow_downgrade.** `ref` is the branch — pass the

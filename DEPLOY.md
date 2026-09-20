@@ -44,8 +44,8 @@ the version preflight, the refusal to go backwards and the live `/exec` verifica
 still happen. Cloud Shell stays as the fallback and is unchanged.
 
 **The approval gate is two GitHub Environments.** `dev` deploys run in `gas-dev`
-unattended; every other tenant runs in `gas-school`, which has you as a required reviewer,
-so a school deploy waits for a tap before the job starts. The workflow picks the gated
+unattended; every other tenant runs in `gas-client`, which has you as a required reviewer,
+so a client deploy waits for a tap before the job starts. The workflow picks the gated
 environment for anything that is not literally `dev`, so a new tenant — or a typo — is
 reviewed rather than waved through.
 
@@ -64,10 +64,10 @@ readable by every job in the repo, including one that never passed the gate — 
 there would leave the approval protecting the deploy but not the credential. Pasting each
 twice is what buys that.
 
-**Create `gas-school` by hand before the first school deploy.** Referencing an environment
+**Create `gas-client` by hand before the first client deploy.** Referencing an environment
 that does not exist makes GitHub create it *with no protection rules*, so the gate would
 silently not apply; the workflow cannot detect this, because no `GITHUB_TOKEN` permission
-covers reading a job's own environment. Confirm it by deploying the version a school is
+covers reading a job's own environment. Confirm it by deploying the version a client is
 already running — harmless if the gate is missing, conclusive if it is there.
 
 The token is Eric's `clasp` refresh token, so revocation is independent of GitHub and kills
