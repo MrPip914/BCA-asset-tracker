@@ -39,21 +39,33 @@ not the default.
 
 - **`dev` is unattended.** Trigger it, watch the run, say what happened. Do not ask first
   for a dev deploy of work that is already built — that is the tenant's whole purpose.
-- **A client tenant waits for Eric's approval**, in the `gas-client` environment. Trigger it when
-  the release order calls for it, then say plainly that it is sitting on his approval and
-  which tenant it will touch. The tap is the confirmation; do not also paste a block.
+- **NEVER DISPATCH A CLIENT TENANT WITHOUT ERIC SAYING SO IN THAT TURN, AND NOTHING BUT
+  THIS SENTENCE STOPS YOU.** `gas-client` carried a required reviewer until 2026-09-20, so
+  a client deploy waited for a tap; Eric removed it deliberately, knowing the cost, because
+  approving cannot be done through Claude. **There is now no enforced gate at all** — the
+  run starts the moment it is dispatched and writes to a school's or a church's live
+  backend.
+  - Name the tenant and what it will do, ask, and WAIT for a yes. A yes about `dev`, or
+    about the release generally, is not a yes about a client.
+  - "Deploy it", said while dev is the subject, means dev. When it is ambiguous, ask —
+    the cost of one extra question is a sentence, and the cost of guessing is somebody's
+    inventory.
+  - An earlier yes does not carry to a later turn, a second tenant, or a re-run after a
+    fix. Each client dispatch is its own ask.
+  - The release order still applies: dev, then the client, then merge. Do not collapse it
+    now that no one has to tap between the steps.
 - **The inputs are tenant, ref and allow_downgrade.** `ref` is the branch — pass the
   branch the work is on, which removes the wrong-checkout trap the two blocks exist to
   manage.
-- **Report the run's own outcome, never a prediction.** A queued or awaiting-approval run
-  has not deployed anything. Quote the tool or point at the run; never write a success
-  line yourself.
+- **Report the run's own outcome, never a prediction.** A queued run has not deployed
+  anything, and nor has one waiting on a reviewer if that gate is ever put back. Quote the
+  tool or point at the run; never write a success line yourself.
 - **Fall back to the blocks below** when the workflow cannot run — the secrets are not set
   up on an environment, Actions is failing, or Eric asks for Cloud Shell. The fallback is
   unchanged and still correct.
 
-`DEPLOY.md` carries the setup, the gate and why the credential lives in two environment
-secrets rather than one repository secret.
+`DEPLOY.md` carries the setup, how to put the enforced gate back, and why the credential
+lives in two environment secrets rather than one repository secret.
 
 **Deploying the backend is otherwise Eric's job, done from his phone, and you hand him
 this verbatim — never the Apps Script editor steps.** `AssetTrackerSync.gs` changes are dead

@@ -43,11 +43,24 @@ It reimplements none of the guards — it is the same tool with its stdout in a 
 the version preflight, the refusal to go backwards and the live `/exec` verification all
 still happen. Cloud Shell stays as the fallback and is unchanged.
 
-**The approval gate is two GitHub Environments.** `dev` deploys run in `gas-dev`
-unattended; every other tenant runs in `gas-client`, which has you as a required reviewer,
-so a client deploy waits for a tap before the job starts. The workflow picks the gated
-environment for anything that is not literally `dev`, so a new tenant — or a typo — is
-reviewed rather than waved through.
+**Nothing enforces who may deploy to a client.** `gas-client` carried a required reviewer
+until 2026-09-20 — a client deploy waited for a tap before the job started — and Eric
+removed it, having been shown what it costs: approving cannot be done through Claude, so
+the tap meant opening the Actions tab, and that friction was judged not worth it for how
+rarely a client is released to.
+
+**What replaced it is a rule in `CLAUDE.md` and nothing else:** Claude asks in chat before
+dispatching a client tenant and waits for a yes. That is a convention, not a control. It
+holds while the rule is followed, and a mistaken dispatch now reaches a client's backend
+with nothing in the way. `deploy.mjs`'s downgrade refusal is the only remaining guard that
+depends on nobody reading anything.
+
+**To put it back:** Settings > Environments > `gas-client` > Required reviewers > add
+yourself > Save protection rules. The workflow needs no change — it already sends anything
+that is not literally `dev` to that environment, which is also what scopes the credential.
+GitHub auto-creates a referenced environment with *no* protection rules and a job cannot
+read its own, so confirm a re-added gate by deploying the version a client already runs
+rather than by reading a file.
 
 **Setting it up is four pastes, once.** Both environments need both secrets:
 
@@ -60,15 +73,9 @@ Read them in Cloud Shell once step 2 and step 3 below have been done, then save 
 Settings > Environments > *&lt;env&gt;* > Environment secrets.
 
 **They must be ENVIRONMENT secrets, not repository secrets.** A repository secret is
-readable by every job in the repo, including one that never passed the gate — storing them
-there would leave the approval protecting the deploy but not the credential. Pasting each
-twice is what buys that.
-
-**Create `gas-client` by hand before the first client deploy.** Referencing an environment
-that does not exist makes GitHub create it *with no protection rules*, so the gate would
-silently not apply; the workflow cannot detect this, because no `GITHUB_TOKEN` permission
-covers reading a job's own environment. Confirm it by deploying the version a client is
-already running — harmless if the gate is missing, conclusive if it is there.
+readable by every job in the repo; an environment secret is reachable only by a job naming
+that environment. That is a separate property from who may start a deploy, so it survives
+the gate's removal and is why the two environments are still worth having.
 
 The token is Eric's `clasp` refresh token, so revocation is independent of GitHub and kills
 every copy at once: <https://myaccount.google.com/permissions> > clasp > Remove access. It

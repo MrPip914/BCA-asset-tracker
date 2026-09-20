@@ -15,10 +15,10 @@
 # Google's Apps Script API refuses service accounts, so a deploy can only ever act
 # as Eric. `clasp login` mints a long-lived refresh token in ~/.clasprc.json; this
 # workflow presents that token rather than signing in. Two GitHub Environments
-# hold it, and the split is the approval gate:
+# hold it:
 #
-#   gas-dev      no reviewers. Deploys to the dev tenant run unattended.
-#   gas-client   Required reviewers: MrPip914. Every client deploy waits for a tap.
+#   gas-dev      the dev tenant.
+#   gas-client   every other tenant, i.e. somebody's live data.
 #
 # Each environment needs BOTH secrets (Settings > Environments > <env> >
 # Environment secrets):
@@ -27,17 +27,30 @@
 #   DEPLOY_CONFIG       the contents of ~/.bca-asset-tracker-deploy.json
 #
 # THEY MUST BE ENVIRONMENT SECRETS, NOT REPOSITORY SECRETS. A repository secret is
-# readable by every job in the repo, including one that never passed the gate — so
-# storing them at repo level would leave the approval protecting the deploy but not
-# the credential. Pasting each twice is what buys that.
+# readable by every job in the repo; an environment secret is reachable only by a
+# job that names that environment. That is why the split survives the gate being
+# removed — it scopes the credential, which is a separate property from who may
+# start a deploy.
 #
-# !! IF `gas-client` DOES NOT EXIST, GITHUB CREATES IT ON FIRST USE WITH NO
-#    PROTECTION RULES AT ALL, and a client deploy would proceed unapproved. The
-#    environment cannot be created from here, and a job cannot read its own
-#    protection rules to check (GITHUB_TOKEN has no permission that covers
-#    environments). So create it by hand FIRST, and confirm the gate by deploying
-#    the version a client is already running: harmless if the gate is missing,
-#    conclusive if it is there.
+# !! NOTHING ENFORCES WHO MAY DEPLOY TO A CLIENT ANY MORE (2026-09-20, Eric's call,
+#    made after being shown what it costs). `gas-client` carried a required
+#    reviewer, so a client deploy waited for a tap before the job started; that
+#    reviewer was removed deliberately, because approving through Claude is not
+#    possible and walking to the Actions tab was the friction being paid.
+#
+#    WHAT REPLACES IT IS A RULE IN CLAUDE.md AND NOTHING ELSE: Claude asks in
+#    chat before dispatching a client tenant, and waits for a yes. That holds
+#    exactly as long as the rule is followed — it is not a control, and a
+#    mistaken dispatch now reaches a client's backend with nothing in the way.
+#    `deploy.mjs` still refuses a downgrade, which is the only guard left that
+#    does not depend on anyone reading anything.
+#
+#    To put the gate back: Settings > Environments > gas-client > Required
+#    reviewers > add MrPip914 > Save protection rules. Nothing here changes.
+#    Note GitHub AUTO-CREATES a referenced environment with NO protection rules,
+#    and a job cannot read its own (no GITHUB_TOKEN permission covers
+#    environments) — so a re-added gate is confirmed by deploying the version a
+#    client already runs, not by reading this file.
 #
 # Revoking access is independent of GitHub and kills every copy of the token at
 # once: myaccount.google.com/permissions > clasp > Remove access.
@@ -65,7 +78,7 @@ on:
   workflow_dispatch:
     inputs:
       tenant:
-        description: "Tenant to deploy to (dev is unattended; a client waits for approval)"
+        description: "Tenant to deploy to — anything but dev writes to a client's live backend"
         required: true
         type: choice
         default: dev
@@ -101,9 +114,11 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
 
-    # The gate. Anything that is not literally "dev" lands in the reviewed
-    # environment — so a new tenant, or a typo, is gated rather than waved
-    # through. The unattended path is the narrow case and has to be named.
+    # Anything that is not literally "dev" lands in `gas-client` — so a new
+    # tenant, or a typo, is treated as somebody's live data rather than waved
+    # through. This chose the REVIEWED environment while one existed and is kept
+    # unchanged: it is what a re-added required reviewer would hang off, and it
+    # still scopes which credential the job can reach.
     environment:
       name: ${{ inputs.tenant == 'dev' && 'gas-dev' || 'gas-client' }}
 
