@@ -31,8 +31,32 @@ over the thread costs him that. The one exception is a genuine blocker: say so
 explicitly and name *which part* it blocks, not the whole task. Pass this instruction on
 to any session you spawn; they inherit the same tendency.
 
-**Deploying the backend is Eric's job, done from his phone, and you hand him this
-verbatim — never the Apps Script editor steps.** `AssetTrackerSync.gs` changes are dead
+**DEPLOY IT YOURSELF — the `Deploy backend` workflow is the first choice now**
+(2026-09-20). `.github/workflows/deploy-backend.yml` runs the same
+`node deploy.mjs <tenant>`, so Claude Code can start a deploy instead of handing Eric
+commands to paste. Trigger it and report the outcome; the blocks below are the fallback,
+not the default.
+
+- **`dev` is unattended.** Trigger it, watch the run, say what happened. Do not ask first
+  for a dev deploy of work that is already built — that is the tenant's whole purpose.
+- **A school waits for Eric's approval**, in the `gas-school` environment. Trigger it when
+  the release order calls for it, then say plainly that it is sitting on his approval and
+  which tenant it will touch. The tap is the confirmation; do not also paste a block.
+- **The inputs are tenant, ref and allow_downgrade.** `ref` is the branch — pass the
+  branch the work is on, which removes the wrong-checkout trap the two blocks exist to
+  manage.
+- **Report the run's own outcome, never a prediction.** A queued or awaiting-approval run
+  has not deployed anything. Quote the tool or point at the run; never write a success
+  line yourself.
+- **Fall back to the blocks below** when the workflow cannot run — the secrets are not set
+  up on an environment, Actions is failing, or Eric asks for Cloud Shell. The fallback is
+  unchanged and still correct.
+
+`DEPLOY.md` carries the setup, the gate and why the credential lives in two environment
+secrets rather than one repository secret.
+
+**Deploying the backend is otherwise Eric's job, done from his phone, and you hand him
+this verbatim — never the Apps Script editor steps.** `AssetTrackerSync.gs` changes are dead
 until deployed, so whenever you change that file (or notice `SCRIPT_VERSION` here is ahead
 of the live `/exec`), end your response with a deploy block.
 

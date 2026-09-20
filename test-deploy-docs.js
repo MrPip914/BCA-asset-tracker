@@ -31,7 +31,15 @@ const DOCS = [
   'DEPLOY.md',
   'cloudshell-deploy.md',
   '.claude/commands/deploy.md',
+  // The workflow runs the procedure rather than describing it to a person, but it
+  // is still a file that says how to deploy — and the one that will be copied from
+  // if a second automated path is ever added. Same list, same rules.
+  '.github/workflows/deploy-backend.yml',
 ];
+
+// The workflow is also checked on its own terms further down; named here so those
+// checks and the DOCS entry cannot drift apart.
+const WORKFLOW = '.github/workflows/deploy-backend.yml';
 
 const DEPLOY_SRC = read('deploy.mjs');
 
@@ -55,7 +63,10 @@ const TENANTS = (() => {
 })();
 
 // Placeholders a doc may legitimately write instead of a real tenant id.
-const PLACEHOLDERS = ['<tenant>', '<TENANT>', '<id>'];
+// `"$TENANT"` is the workflow's placeholder: the value is a validated choice
+// input, and deploy.mjs refuses anything clients.js does not define, so it cannot
+// resolve to the bare invocation this check exists to catch.
+const PLACEHOLDERS = ['<tenant>', '<TENANT>', '<id>', '"$TENANT"'];
 const FLAGS = ['--all', '--status', '--dry-run'];
 
 const TICK = '✓';
@@ -238,6 +249,62 @@ check('no doc claims what version is live (run --status instead)', (() => {
         }
       }
     });
+  }
+  return problems;
+})());
+
+// ------------------------------------- 6. the workflow offers every tenant
+
+// The workflow's tenant dropdown is a hand-written copy of the registry, which is
+// the one thing about it that can go stale. A tenant missing from the list is a
+// school that cannot be deployed to from here at all — and the symptom is an
+// absence in a dropdown, which nothing else would ever catch.
+check('the deploy workflow offers exactly the tenants in clients.js', (() => {
+  const text = read(WORKFLOW);
+  // The `options:` block belonging to the tenant input: its `- value` lines, up to
+  // the first line that is not one.
+  const m = text.match(/\n\s*options:\n((?:\s*-\s*[^\n]+\n)+)/);
+  if (!m) return [`${WORKFLOW} — could not find the tenant input's "options:" list.`];
+  const offered = m[1]
+    .split('\n')
+    .map((l) => (l.match(/^\s*-\s*(.+?)\s*$/) || [])[1])
+    .filter(Boolean)
+    .map((v) => v.replace(/^["']|["']$/g, ''));
+
+  const problems = [];
+  for (const t of TENANTS) {
+    if (!offered.includes(t)) problems.push(`${WORKFLOW} — tenant "${t}" is in clients.js but not offered.`);
+  }
+  for (const o of offered) {
+    if (!TENANTS.includes(o)) problems.push(`${WORKFLOW} — offers "${o}", which is not a tenant in clients.js.`);
+  }
+  return problems;
+})());
+
+// -------------------------------- 7. the workflow cannot be triggered by a fork
+
+// This repo is PUBLIC and the workflow holds a Google credential. A pull request
+// from a fork gets no secrets and cannot dispatch a workflow — but
+// `pull_request_target` and `workflow_run` both run THIS file's secrets against
+// code from a pull request, which is the single way a stranger could reach the
+// token. Adding one would look like an ordinary convenience ("let CI deploy a PR
+// to dev") and would be silent until it was abused.
+check('the deploy workflow is dispatch-only (no fork-reachable trigger)', (() => {
+  const text = read(WORKFLOW);
+  const problems = [];
+  const body = text.replace(/^\s*#.*$/gm, '');          // comments may name them
+  const on = body.match(/\non:\n([\s\S]*?)\n(?=[a-z_]+:)/);
+  if (!on) return [`${WORKFLOW} — could not find its "on:" block.`];
+  for (const trigger of ['pull_request_target', 'workflow_run', 'pull_request', 'issue_comment']) {
+    if (new RegExp(`(^|\\s)${trigger}:`).test(on[1])) {
+      problems.push(
+        `${WORKFLOW} — triggers on "${trigger}". Only workflow_dispatch may hold the ` +
+        `deploy credential; see the threat notes at the top of that file.`
+      );
+    }
+  }
+  if (!/(^|\s)workflow_dispatch:/.test(on[1])) {
+    problems.push(`${WORKFLOW} — no workflow_dispatch trigger; nothing could start a deploy.`);
   }
   return problems;
 })());
