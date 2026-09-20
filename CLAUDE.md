@@ -1495,9 +1495,9 @@ no backend change at all, and the exception is the one worth remembering.
   the same sentence twice; each render site read correctly on its own, which is why only the
   browser caught it. The add form's separate `addError` state is gone with it.
 
-- **What the editor can't do, and why.** An icon is stored as a NAME from a curated map
-  (`TYPE_ICON_CHOICES`), since a React component can't survive JSON; an unknown name falls back
-  to the shipped icon. A ticked field enters `onlyFields` only when it is *already* restricted
+- **What the editor can't do, and why.** An icon is stored as a NAME from the catalog
+  (`ICON_GROUPS`, flattened to `TYPE_ICON_CHOICES` — see "The icon catalog" below), since a
+  React component can't survive JSON; an unknown name falls back to the shipped icon. A ticked field enters `onlyFields` only when it is *already* restricted
   app-wide (`SHIPPED_RESTRICTED_FIELDS`) — the editor must not mint a new restricted field,
   because that would restrict it app-wide and quietly strip it from every type that hadn't
   opted in — that hazard is about EXISTING columns, which is why a field the editor creates
@@ -1505,6 +1505,71 @@ no backend change at all, and the exception is the one worth remembering.
   Modules stay uneditable: a tab body needs a render branch, so it can't be switched on by data.
 - **Editing is allowed on locked types.** `locked` means the app depends on the type *existing*
   — its tabs, its field rules — which is about the id, not what it's called or what it holds.
+
+**The icon catalog is 166 icons in 17 groups, behind a shortcut row (2026-09-20).** The picker
+was a flat wrap of 15, which is why two Facilities types shipped as question marks and "People"
+had no person in it. `ICON_GROUPS` is the catalog, `TYPE_ICON_CHOICES` is it flattened for
+lookup, and the type editor shows FAVORITES plus a **More…** button that opens the whole thing.
+
+- **A bigger catalog costs nothing over the wire, and that is what made it the cheap option.**
+  esm.sh serves `lucide-react` as ONE 558KB module, so every icon is already downloaded and
+  parsed on every load whether the app names 50 of them or 200. Check that before assuming the
+  opposite about any other esm.sh package — it is why the old "deliberately a small curated
+  set" reasoning did not survive contact with the facts.
+- **THE KEY IS STORED DATA, AND SIX KEYS DELIBERATELY DO NOT MATCH THEIR COMPONENT.**
+  `Computer` is HardDrive, `TV` is Tv, `Door` is DoorOpen, `Building` is Building2, `Campus` is
+  MapPin, `Unknown` is HelpCircle — the aliases the picker shipped with, sitting in
+  `typeSettings[id].iconName` for every type anyone has edited. Renaming one drops that type
+  silently back to its shipped icon. The corollary: lucide's OWN `Computer` and `Building`
+  glyphs are ABSENT, because a second key meaning nearly the same word is a trap for whoever
+  reads a stored value next.
+- **`Map` is excluded for a different reason entirely** — importing it would shadow the global
+  `Map` constructor, which `auditIndex` is built on. Worth checking any future icon name against
+  the globals before adding it; `Battery`, `Container`, `Network`, `Server` and `Table` were
+  checked and are safe.
+- **THE GROUP NAME IS SEARCHABLE, which is how synonyms work here without a keyword list.**
+  "hvac" finds Fan and Snowflake, "people" finds GraduationCap, "water" finds Bath — because of
+  the group they sit in. Tokens are ANDed, so a second word narrows. A camelCase split was in
+  here first and came out when a mutation showed it changed no answer: substring matching
+  already finds "snowflake" inside ThermometerSnowflake.
+- **Favorites are PER-DEVICE `localStorage`**, the same class as column visibility and the name
+  order, and for the same reasons: nothing stored changes, every icon stays reachable through
+  More whatever the row holds, and a Config key of its own would be a backend release — a lot
+  to spend on the order of a row of buttons. The trade is that two people curate two rows.
+- **A DEVICE THAT HAS CUSTOMISED ITS ROW REPLACES THE SHIPPED LIST RATHER THAN TOPPING IT UP**,
+  the opposite of what `ensureShippedLabels` does with a newly shipped label — deliberately. A
+  label vocabulary is shared data that has to stay complete; a shortcut row is one person's
+  curation, and injecting icons into a row someone has pruned is the app arguing with them.
+- **An explicitly EMPTY row is respected; an unreadable one falls back.** `sanitizeIconFavorites`
+  keeps `[]` (someone cleared it, and re-seeding would make "remove" undo itself on the next
+  load — the same rule an explicitly-empty tag and an empty label list each had to be taught)
+  but treats a non-empty list that resolves to nothing as a list from another build.
+- **THE SELECTED ICON IS APPENDED TO THE ROW WHEN IT IS NOT A FAVORITE.** Without that, a type
+  whose icon came from the catalog shows a row with nothing selected — so the icon reads as
+  unset and the next tap silently replaces a choice the user could not see they had made.
+- **The browser is a FOURTH VIEW of the type-manager modal, not an overlay**, for the reason the
+  label manager is a third one: it is reached from the type editor, which is opened from inside
+  a picker, so an overlay would be four layers deep — and this is the view that wants the most
+  room. Tiles carry TWO affordances, the shape `HierarchyBrowserModal`'s rows use: the body
+  chooses and closes, the star only toggles the row and stays put, so several can be starred in
+  one visit. The star is always rendered rather than shown on hover, because there is no hover
+  on a phone.
+- **A favorite appears twice — in the Favorites section and in its real group — deliberately.**
+  Un-starring is what needs it: without one place holding all of them, removing a favorite means
+  remembering which group it came from.
+- Covered by `test-frontend-icons.js`, which EXECUTES the real catalog, the real sanitiser and
+  the real section-building memo. Verified by mutation that 21 silent failures fail it — among
+  them a renamed alias key, a catalog entry naming an unimported component (a React error, so a
+  broken picker rather than a missing icon), one key in two groups, the selection no longer
+  appended, an empty row re-seeded, the search losing the group name or ANDing, and the row
+  going back to enumerating the whole catalog. **Two assertions initially survived and were
+  replaced**, both the same mistake: they read the source where they should have run the code.
+  The browser half — More opening, the star writing storage, the row changing, all of it
+  surviving a reload — was driven in Chromium against Sandbox.
+- **`MOCK_SNAPSHOT` names two icons and they are deliberately MIXED**: Mini Split's is in the
+  shipped row, Condenser's is not, so Sandbox exercises both the ordinary selected tile and the
+  appended one. Every other type names none and resolves through its registry icon. That is the
+  `personIds` lesson again.
 - Name and settings save in ONE `persist()`: both are the config domain, so two calls would mean
   two full snapshot writes and a chance for the second to be rejected as a conflict with the
   first.
