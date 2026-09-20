@@ -402,11 +402,41 @@ its very best.
 
 ## Local Sandbox mode
 
-A "Sandbox" pill in the top-right of the header (next to the name tag) toggles between
-the real Google Sheet and a local fixture (`MOCK_SNAPSHOT` in `index.html`) — added so
-UI iteration doesn't have to touch live data or wait on Apps Script redeploys/cold
-starts. OFF by default (talks to the real Sheet); the toggle state is remembered
-per-device via `localStorage` (`SANDBOX_MODE_KEY`).
+Sandbox swaps the real Google Sheet for a local fixture (`MOCK_SNAPSHOT` in
+`index.html`) — added so UI iteration doesn't have to touch live data or wait on Apps
+Script redeploys/cold starts. OFF by default (talks to the real Sheet); the state is
+remembered per-device via `localStorage` (`SANDBOX_MODE_KEY`).
+
+**THE WAY IN AND THE WAY OUT ARE TWO DIFFERENT CONTROLS, AND EXACTLY ONE EXISTS AT A
+TIME** (2026-09-20). In production, "Enter sandbox" is a row in the account menu. In
+Sandbox, a pill in the header is the way out. It used to be one permanent two-state
+toggle pinned in the header — reading "Sandbox" and doing nothing, on every screen, in
+every session — which spent the most valuable space in the app on a developer
+affordance almost nobody uses, and left "start editing fake data" one stray tap from a
+teacher's thumb.
+- **The pill earns its place precisely BECAUSE it is conditional.** While it is there
+  it is a state banner first and a control second: it answers "why does this inventory
+  look wrong?" before anyone goes looking. An always-present pill cannot do that — a
+  control that is always on screen stops being read.
+- **Splitting it in two is what keeps them from reading as two features.** The gates
+  are exact opposites (`sandboxMode` / `!sandboxMode`), so there is never a pill saying
+  SANDBOX beside a menu row offering to enter it. **Reset lives inside the pill's own
+  conditional**, since it has no meaning outside Sandbox.
+- **The sign-in screen's "Continue in Sandbox" link is now MORE load-bearing, not
+  less.** It was already the only entry point from a signed-out browser, because the
+  header sits behind the gate; the account menu does not exist until someone is signed
+  in at all. Remove it and local iteration is unreachable for anyone whose sandbox is
+  off, which is everyone by default.
+- **Entering is offered to VIEWERS**, deliberately and unchanged: Sandbox makes no
+  network call, so it grants nothing on the real Sheet, and a viewer wanting a safe
+  place to look around is exactly who it is for. Gating it on `canEdit` would take it
+  from the people most likely to want it.
+- **Covered by `test-frontend-sandbox.js`**, verified by mutation that six silent
+  failures fail it: an unconditional pill, a menu row that appears while already in
+  Sandbox, the sign-in link removed, the row renamed out from under its gate, Reset
+  escaping the pill's conditional, and the View-only badge disappearing. Both modes and
+  both transitions were driven in Chromium — production needs a mocked backend, since
+  Sandbox makes no network call and so cannot show the menu row at all.
 
 - **When ON**: `loadData()` reads `MOCK_SNAPSHOT` (or, after the first edit, the
   saved-over copy in `localStorage` under `SANDBOX_DATA_KEY`) instead of fetching
@@ -1162,6 +1192,10 @@ onboard one.
   Access (editors, real backend only), About, Sign out. Sandbox and signed-in are the same
   menu rather than two, which is what let sandbox's "Set name" stop being a second
   person-shaped button in the corner.
+  - **"Enter sandbox" joined the menu on 2026-09-20**, directly above About — About is
+    the row that REPORTS which data source you are on, so the control and the readout
+    sit together. See "Local Sandbox mode" for why the pill is no longer a permanent
+    two-state toggle beside it.
   - **The `View only` badge deliberately stayed OUTSIDE the menu.** It exists to explain why
     the edit controls a viewer expects aren't there, and an explanation you have to open a
     menu to find doesn't do that. The menu shows the role too; the duplication is the point.
