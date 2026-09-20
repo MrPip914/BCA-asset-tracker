@@ -32,6 +32,54 @@ Script ID are entered **once ever** — later visits go straight to Step 3.
 It also works on your own machine. Same commands, same result — the only difference is
 where the sign-in is stored.
 
+## Deploying from GitHub Actions (no terminal)
+
+`.github/workflows/deploy-backend.yml` runs the same `node deploy.mjs <tenant>` from a
+button, so a deploy can be started **by Claude Code**, or by you from a phone, with
+nothing checked out and no commands pasted. Actions tab > Deploy backend > Run workflow,
+or ask Claude.
+
+It reimplements none of the guards — it is the same tool with its stdout in a run log, so
+the version preflight, the refusal to go backwards and the live `/exec` verification all
+still happen. Cloud Shell stays as the fallback and is unchanged.
+
+**The approval gate is two GitHub Environments.** `dev` deploys run in `gas-dev`
+unattended; every other tenant runs in `gas-client`, which has you as a required reviewer,
+so a client deploy waits for a tap before the job starts. The workflow picks the gated
+environment for anything that is not literally `dev`, so a new tenant — or a typo — is
+reviewed rather than waved through.
+
+**Setting it up is four pastes, once.** Both environments need both secrets:
+
+| Secret | What to paste |
+|---|---|
+| `CLASP_CREDENTIALS` | the contents of `~/.clasprc.json` |
+| `DEPLOY_CONFIG` | the contents of `~/.bca-asset-tracker-deploy.json` |
+
+Read them in Cloud Shell once step 2 and step 3 below have been done, then save them under
+Settings > Environments > *&lt;env&gt;* > Environment secrets.
+
+**They must be ENVIRONMENT secrets, not repository secrets.** A repository secret is
+readable by every job in the repo, including one that never passed the gate — storing them
+there would leave the approval protecting the deploy but not the credential. Pasting each
+twice is what buys that.
+
+**Create `gas-client` by hand before the first client deploy.** Referencing an environment
+that does not exist makes GitHub create it *with no protection rules*, so the gate would
+silently not apply; the workflow cannot detect this, because no `GITHUB_TOKEN` permission
+covers reading a job's own environment. Confirm it by deploying the version a client is
+already running — harmless if the gate is missing, conclusive if it is there.
+
+The token is Eric's `clasp` refresh token, so revocation is independent of GitHub and kills
+every copy at once: <https://myaccount.google.com/permissions> > clasp > Remove access. It
+also dies on a password change or after months unused; the run goes red and the fix is
+re-pasting the secret.
+
+This repo is public, which does not expose the secrets — they are encrypted and cannot be
+read back out of the UI — but it does mean run logs are world-readable and anyone can open
+a pull request. The workflow's own header carries the threat notes that follow from that,
+and `test-deploy-docs.js` fails the build if it ever grows a fork-reachable trigger.
+
 ## One-time setup
 
 1. **Turn on the Apps Script API** for your Google account (once, ever):

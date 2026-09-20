@@ -1,0 +1,209 @@
+# Deploys AssetTrackerSync.gs to a tenant's Apps Script project, from a button
+# rather than from a terminal — so a deploy can be started by Claude Code, or by
+# Eric from a phone, without checking anything out or pasting any commands.
+#
+# It runs the SAME `node deploy.mjs <tenant>` the Cloud Shell walkthrough runs.
+# That is the whole design: every guard lives in deploy.mjs and none of them are
+# reimplemented here. The version preflight, the refusal to go backwards, and the
+# fetch of the live /exec that proves the deploy landed all still happen, because
+# this is the same tool with its stdout pointed at a run log.
+#
+# Cloud Shell remains the fallback and is unchanged. See DEPLOY.md.
+#
+# ---------------------------------------------------------------- ONE-TIME SETUP
+#
+# Google's Apps Script API refuses service accounts, so a deploy can only ever act
+# as Eric. `clasp login` mints a long-lived refresh token in ~/.clasprc.json; this
+# workflow presents that token rather than signing in. Two GitHub Environments
+# hold it, and the split is the approval gate:
+#
+#   gas-dev      no reviewers. Deploys to the dev tenant run unattended.
+#   gas-client   Required reviewers: MrPip914. Every client deploy waits for a tap.
+#
+# Each environment needs BOTH secrets (Settings > Environments > <env> >
+# Environment secrets):
+#
+#   CLASP_CREDENTIALS   the contents of ~/.clasprc.json from Cloud Shell
+#   DEPLOY_CONFIG       the contents of ~/.bca-asset-tracker-deploy.json
+#
+# THEY MUST BE ENVIRONMENT SECRETS, NOT REPOSITORY SECRETS. A repository secret is
+# readable by every job in the repo, including one that never passed the gate — so
+# storing them at repo level would leave the approval protecting the deploy but not
+# the credential. Pasting each twice is what buys that.
+#
+# !! IF `gas-client` DOES NOT EXIST, GITHUB CREATES IT ON FIRST USE WITH NO
+#    PROTECTION RULES AT ALL, and a client deploy would proceed unapproved. The
+#    environment cannot be created from here, and a job cannot read its own
+#    protection rules to check (GITHUB_TOKEN has no permission that covers
+#    environments). So create it by hand FIRST, and confirm the gate by deploying
+#    the version a client is already running: harmless if the gate is missing,
+#    conclusive if it is there.
+#
+# Revoking access is independent of GitHub and kills every copy of the token at
+# once: myaccount.google.com/permissions > clasp > Remove access.
+#
+# ------------------------------------------------------------------- THREAT NOTES
+#
+# This repo is PUBLIC, which does not expose the secrets (they are encrypted, and
+# are not readable back out of the UI) but does widen what surrounds them:
+#
+#   * `workflow_dispatch` is the ONLY trigger, deliberately. A fork's pull request
+#     gets no secrets and cannot dispatch. Never add `pull_request_target` or
+#     `workflow_run` here — those run this workflow's secrets against code from a
+#     pull request, which is the one way a stranger could reach the token.
+#   * Run logs on a public repo are world-readable. GitHub masks a secret's exact
+#     value, but masking is literal — a reformatted or re-encoded copy would not be
+#     masked. So nothing here ever writes a credential to stdout, and there is no
+#     `set -x`. Keep it that way.
+#   * Every `uses:` is somebody else's code running in a job that holds the token.
+#     actions/checkout is the only one, on purpose; Node comes from the runner
+#     image rather than from a second action.
+
+name: Deploy backend
+
+on:
+  workflow_dispatch:
+    inputs:
+      tenant:
+        description: "Tenant to deploy to (dev is unattended; a client waits for approval)"
+        required: true
+        type: choice
+        default: dev
+        # These must match the tenants in clients.js. test-deploy-docs.js fails the
+        # build if they drift, because a tenant missing from this list is a client
+        # that quietly cannot be deployed to from here.
+        options:
+          - dev
+          - bca
+          - 3c
+      ref:
+        description: "Branch to deploy from (a branch is the normal case for unmerged work)"
+        required: true
+        type: string
+        default: main
+      allow_downgrade:
+        description: "Deploy even if older than what is live — DROPS COLUMNS, see DEPLOY.md"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# One deploy at a time per tenant, and never cancel one in flight: a run killed
+# between `clasp push` and `update-deployment` leaves the project holding new code
+# that no version serves, which reads as a deploy that silently did nothing.
+concurrency:
+  group: deploy-backend-${{ inputs.tenant }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    # The gate. Anything that is not literally "dev" lands in the reviewed
+    # environment — so a new tenant, or a typo, is gated rather than waved
+    # through. The unattended path is the narrow case and has to be named.
+    environment:
+      name: ${{ inputs.tenant == 'dev' && 'gas-dev' || 'gas-client' }}
+
+    steps:
+      - name: Check out the ref being deployed
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Check the runner's Node is new enough
+        run: |
+          set -euo pipefail
+          major="$(node -p 'process.versions.node.split(".")[0]')"
+          echo "node $(node --version)"
+          if [ "$major" -lt 18 ]; then
+            echo "::error::deploy.mjs needs Node 18+ for fetch(); runner has $(node --version)."
+            exit 1
+          fi
+
+      # Secrets arrive through `env:` rather than being interpolated into the
+      # script text, so the value never becomes part of a command line.
+      - name: Install the credential
+        env:
+          CLASP_CREDENTIALS: ${{ secrets.CLASP_CREDENTIALS }}
+          DEPLOY_CONFIG: ${{ secrets.DEPLOY_CONFIG }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${CLASP_CREDENTIALS:-}" ]; then
+            echo "::error::CLASP_CREDENTIALS is not set on this environment. See the setup notes at the top of this workflow."
+            exit 1
+          fi
+          if [ -z "${DEPLOY_CONFIG:-}" ]; then
+            echo "::error::DEPLOY_CONFIG is not set on this environment. See the setup notes at the top of this workflow."
+            exit 1
+          fi
+
+          umask 077
+          printf '%s' "$CLASP_CREDENTIALS" > "$HOME/.clasprc.json"
+          printf '%s' "$DEPLOY_CONFIG"     > "$HOME/.bca-asset-tracker-deploy.json"
+
+          # Validate shape without ever echoing content. python3's JSON errors
+          # report a position and not the text at it, and stderr is dropped
+          # anyway — a malformed secret must not be able to print itself.
+          check_json () {
+            python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$1" 2>/dev/null \
+              || { echo "::error::$2 is not valid JSON. Re-copy it whole, including the outer braces."; exit 1; }
+          }
+          check_json "$HOME/.clasprc.json" CLASP_CREDENTIALS
+          check_json "$HOME/.bca-asset-tracker-deploy.json" DEPLOY_CONFIG
+
+          echo "Credential and tenant config installed."
+
+      - name: Deploy
+        env:
+          TENANT: ${{ inputs.tenant }}
+          ALLOW_DOWNGRADE: ${{ inputs.allow_downgrade && '1' || '' }}
+        run: |
+          set -euo pipefail
+          node deploy.mjs "$TENANT"
+
+      # Informational only. --status exits non-zero whenever ANY tenant is on a
+      # different version, which is the normal state mid-release, so it must not
+      # decide whether this run passed. The deploy step's own verification is the
+      # authority on whether this deploy landed.
+      - name: Where every tenant stands now
+        if: always()
+        continue-on-error: true
+        run: node deploy.mjs --status
+
+      - name: Forget the credential
+        if: always()
+        run: rm -f "$HOME/.clasprc.json" "$HOME/.bca-asset-tracker-deploy.json"
+
+      # Inputs go through `env:` rather than into the script text. `ref` is free
+      # text, and an interpolated `${{ }}` becomes part of the command itself —
+      # only a writer can dispatch this, so it is not an escalation, but a value
+      # that can rewrite the script it appears in is not a pattern to keep.
+      - name: Summary
+        if: always()
+        continue-on-error: true
+        env:
+          TENANT: ${{ inputs.tenant }}
+          REF: ${{ inputs.ref }}
+          ALLOW_DOWNGRADE_INPUT: ${{ inputs.allow_downgrade }}
+        run: |
+          set -euo pipefail
+          # The checkout can fail before this exists; a summary is never worth
+          # turning a clear failure into a confusing second one.
+          version="unknown"
+          if [ -f AssetTrackerSync.gs ]; then
+            version="$(sed -n 's/^const SCRIPT_VERSION = "\([^"]*\)".*/\1/p' AssetTrackerSync.gs | head -1)"
+          fi
+          {
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Tenant | \`${TENANT}\` |"
+            echo "| Ref | \`${REF}\` |"
+            echo "| Version in that ref | \`${version}\` |"
+            echo "| Downgrade allowed | \`${ALLOW_DOWNGRADE_INPUT}\` |"
+            echo ""
+            echo "Read the deploy step's own last line for the outcome."
+          } >> "$GITHUB_STEP_SUMMARY"
