@@ -2644,7 +2644,7 @@ const FRONTEND_SCRIPT_VERSION = "v40";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-21.1";
+const APP_VERSION = "2026-09-21.2";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -3202,6 +3202,18 @@ const MOCK_PHOTOS = [
     kind: "pdf", fileName: "central-coast-invoice-4471.pdf",
     caption: "", width: 200, height: 120, bytes: 404,
     hiddenFromPublic: false, at: "2026-03-02T18:06:00.000Z", by: "Eric Stamage",
+  },
+  {
+    // A SCHEDULE's own file -- reference material, not evidence of a visit:
+    // where the filter lives, what it looks like when it needs doing. Its
+    // gallery on the task card is READ-ONLY (adding moved into the task
+    // dialog on 2026-09-21), so without a row of this shape the fixture
+    // renders that card without its only content and the strip goes
+    // unexercised in the one place it can be tried. The personIds lesson.
+    id: "photo-7", ownerType: "maintenance", ownerId: "mnt-0086-filter",
+    url: MOCK_PHOTO_IMG_C, thumbUrl: MOCK_PHOTO_IMG_C, storageKey: "sandbox/filter-access",
+    caption: "Filter access panel — left side", width: 400, height: 300, bytes: 4096,
+    hiddenFromPublic: false, at: "2026-05-28T16:10:00.000Z", by: "Eric Stamage",
   },
   {
     id: "photo-4", ownerType: "asset", ownerId: "BCA0082",
@@ -7271,6 +7283,13 @@ function AssetTracker() {
     setWorkDialogAssetId(assetId === undefined ? null : assetId);
     setMaintenanceCompleteModal({
       itemId,
+      // The id of the work entry this will write, minted on OPEN so a photo of
+      // the visit can name it while the form is still being filled in -- the
+      // rule openChangeAdd and openMaintenanceAdd both follow, and the reason
+      // the completion form can offer files at all. The accepted cost is the
+      // same one: uploads start when a file is picked, so cancelling afterwards
+      // strands bytes at the host rather than leaving a row whose image 404s.
+      changeId: crypto.randomUUID(),
       date: localDateString(),
       // Seeded only if the type actually exists -- it ships in
       // DEFAULT_CHANGE_TYPES but the list is user-managed and can be renamed or
@@ -7289,7 +7308,7 @@ function AssetTracker() {
   async function submitMaintenanceComplete() {
     if (savingRef.current) return; // double-submit guard, see savingRef
     if (!maintenanceCompleteModal || !workTarget) return;
-    const { itemId, date, changeType, vendor, cost, note } = maintenanceCompleteModal;
+    const { itemId, changeId, date, changeType, vendor, cost, note } = maintenanceCompleteModal;
     const items = workTarget.maintenanceItems || [];
     const item = items.find(m => m && m.id === itemId);
     if (!item) return;
@@ -7305,7 +7324,11 @@ function AssetTracker() {
     // The link. The item's id is guaranteed present by the adoption in
     // loadData(), so this never writes an empty reference.
     const change = {
-      id: crypto.randomUUID(),
+      // The id the form has been attaching files to since it opened. Minting a
+      // fresh one here would strand every one of them against an entry that
+      // never reaches the sheet. The fallback covers a modal opened by an older
+      // build of this state object and nothing else.
+      id: changeId || crypto.randomUUID(),
       changeType,
       vendor: vendor.trim(),
       cost: cost.trim(),
@@ -9977,6 +10000,28 @@ function AssetTracker() {
                   rows={3}
                   style={{ width: "100%", padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, resize: "vertical", color: C.ink }}
                 />
+                {/* The files belong to the WORK ENTRY this writes, not to the
+                    schedule: they are evidence of one visit -- the receipt, the
+                    part that failed, the before and after -- which is what a
+                    work entry is for, and they then show on its History row and
+                    in this schedule's service history. A reference photo OF the
+                    schedule ("the filter is behind this panel") is a different
+                    thing and is added in the task dialog. */}
+                <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 8 }}>Files</div>
+                  <PhotoGallery
+                    photos={photosForOwner("change", maintenanceCompleteModal.changeId)}
+                    canEdit={canEdit}
+                    busy={photoBusy}
+                    progress={photoProgress}
+                    error={photoError}
+                    onAdd={(files) => attachPhotos("change", maintenanceCompleteModal.changeId, files)}
+                    onDelete={deletePhoto}
+                    onToggleHidden={setPhotoHiddenFromPublic}
+                    onOpen={openPhotoViewer}
+                    emptyText="No files on this entry."
+                  />
+                </div>
                 {maintenanceCompleteModal.error && (
                   <div style={{ color: C.danger, fontSize: 13, marginTop: 8 }}>{maintenanceCompleteModal.error}</div>
                 )}
@@ -10783,26 +10828,21 @@ function AssetTracker() {
                             </>
                           )}
                         </div>
-                        {/* A FULL gallery here, not the read-only strip a work
-                            entry gets. A work entry is written once and its
-                            photos belong to that moment, so they live in its
-                            dialog. A schedule is long-lived and its reference
-                            photos -- where the access panel is, what the filter
-                            looks like when it needs doing -- get added later,
-                            when someone is finally standing in front of the
-                            thing. So the add control has to be where the
-                            schedule is READ, not behind an edit form. */}
-                        {(canEdit || photosForOwner("maintenance", item.id).length > 0) && (
+                        {/* READ-ONLY here, the same shape a work entry's
+                            History row has. This card carried the full gallery
+                            until 2026-09-21: an Add files button and its two
+                            lines of explanation on EVERY task, on every visit,
+                            whether or not anyone had a file to attach -- which
+                            on an asset with several tasks is most of the tab.
+                            The files themselves stay, because seeing them is
+                            the point of putting them here; adding and removing
+                            them moved into the task dialog and the completion
+                            form, both one tap away. */}
+                        {photosForOwner("maintenance", item.id).length > 0 && (
                           <div style={{ marginBottom: 8 }}>
                             <PhotoGallery
                               photos={photosForOwner("maintenance", item.id)}
-                              canEdit={canEdit}
-                              busy={photoBusy}
-                              progress={photoProgress}
-                              error={photoError}
-                              onAdd={(files) => attachPhotos("maintenance", item.id, files)}
-                              onDelete={deletePhoto}
-                              onToggleHidden={setPhotoHiddenFromPublic}
+                              canEdit={false}
                               onOpen={openPhotoViewer}
                               emptyText=""
                             />

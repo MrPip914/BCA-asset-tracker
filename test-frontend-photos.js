@@ -140,7 +140,7 @@ const ownerTypesUsed = [...fixtureSrc.matchAll(/ownerType: "([a-z]+)"/g)].map(m 
 const ownerIdsUsed = [...fixtureSrc.matchAll(/ownerId: "([^"]+)"/g)].map(m => m[1]);
 
 eq('the fixture covers more than one owner kind',
-   [...new Set(ownerTypesUsed)].sort(), ['asset', 'breaker', 'change', 'circuit']);
+   [...new Set(ownerTypesUsed)].sort(), ['asset', 'breaker', 'change', 'circuit', 'maintenance']);
 // Sandbox is the only place this feature can be tried without a deploy, so a
 // fixture of photos alone would leave the whole v39 document path unexercised
 // there — tile fallback, PDF badge, Open, and a work entry holding both kinds.
@@ -249,9 +249,36 @@ eq('openMaintenanceEdit mints no id of its own',
 eq('addMaintenanceItem writes an id rather than leaving it to the next load',
    /id: maintenanceDraft\.id \|\| crypto\.randomUUID\(\)/.test(src), true);
 eq('a maintenance schedule can own photos',
-   src.includes('attachPhotos("maintenance", item.id, files)'), true);
+   src.includes('attachPhotos("maintenance", maintenanceDraft.id, files)'), true);
 eq('a work entry can own photos',
    src.includes('attachPhotos("change", changeDraft.id, files)'), true);
+
+// Where the ADD control lives, per task (2026-09-21). The card carried a full
+// gallery, so every task on the tab showed an Add files button and its two
+// lines of explanation whether or not anyone had a file. The files stay
+// visible there; adding and removing them moved into the two forms.
+eq('a task card shows its files read-only, with no add control',
+   /photosForOwner\("maintenance", item\.id\)\.length > 0 && \([\s\S]{0,400}?canEdit=\{false\}/.test(src), true);
+eq('no task card can attach a file directly any more',
+   src.includes('attachPhotos("maintenance", item.id, files)'), false);
+
+// The completion form writes a work entry, and its files belong to THAT --
+// evidence of one visit. Its id is minted when the form opens, or a file
+// picked while filling it in would name an entry that does not exist yet.
+eq('the completion form mints its work entry id on open',
+   /function openMaintenanceComplete[\s\S]{0,900}?changeId: crypto\.randomUUID\(\)/.test(src), true);
+eq('the completion form attaches to that entry, not to the schedule',
+   src.includes('attachPhotos("change", maintenanceCompleteModal.changeId, files)'), true);
+// The silent one: minting a second id at write time strands every file the
+// form has already uploaded against an entry that never reaches the sheet.
+// The card's read-only strip is now the ONLY place a schedule's own files are
+// shown outside its dialog, and the fixture is the only place it can be tried:
+// without a row of this shape that card renders empty and the strip is
+// unexercised. The personIds lesson.
+eq('MOCK_PHOTOS carries a file owned by a maintenance schedule',
+   /ownerType: "maintenance", ownerId: "mnt-[a-z0-9-]+"/.test(fixtureSrc), true);
+eq('the completion WRITES the id its files were attached to',
+   /id: changeId \|\| crypto\.randomUUID\(\),/.test(src), true);
 
 // ------------------------------------------------- multi-file upload
 // attachPhotos is EXECUTED here, not pattern-matched, because the rule that

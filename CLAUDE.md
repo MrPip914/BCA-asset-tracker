@@ -3290,10 +3290,34 @@ work-item cases deliberately differ:
   photo only reachable through an edit form is nearly useless, and a second set of write
   controls out there would be a second thing to keep in step.
 - **A schedule's photos are REFERENCE material** — where the access panel is, what the
-  filter looks like when it actually needs doing — so the full gallery, add control
-  included, sits on the Scheduled row where the schedule is READ. The photo that matters
-  gets taken later, when someone is finally standing in front of the thing, and putting the
-  control behind an edit form would be putting it where nobody is.
+  filter looks like when it actually needs doing. They SHOW on the Scheduled row, read-only,
+  the same shape a work entry's History row has; **adding and removing them moved into the
+  task dialog on 2026-09-21** (Eric's call).
+  - **This bullet used to say the opposite**, and the reasoning it gave — "putting the
+    control behind an edit form would be putting it where nobody is" — was true of the
+    inline edit form it was written against, which you had to go looking for. **Tapping a
+    task now opens the dialog**, so the control is one tap from where the schedule is read
+    and the premise is gone. Keep the reasoning attached to what it rests on: it was right
+    until the navigation changed under it.
+  - **What it cost was paid on every visit.** An Add files button and its two lines of
+    upload blurb rendered on EVERY task, whether or not anyone had a file — on an asset
+    with several tasks, most of the tab. The files themselves are what people came to see,
+    and they stayed.
+- **A COMPLETION's files belong to the work entry it writes, not to the schedule**
+  (2026-09-21). The completion form is a work-entry form — it is where the receipt, the
+  failed part and the after-photo are — so `maintenanceCompleteModal` mints a **`changeId`
+  when it OPENS** and the gallery attaches to that, exactly as `openChangeAdd` does. Same
+  accepted cost: cancelling afterwards strands bytes at the host.
+  - **`submitMaintenanceComplete` must WRITE that id** rather than minting a fresh one at
+    save time, which is the silent failure here — every file already uploaded would name an
+    entry that never reaches the sheet. The `|| crypto.randomUUID()` beside it covers a
+    modal opened by an older build of that state object and nothing else.
+  - So the two kinds stay apart: a photo OF the schedule goes in the task dialog, a photo
+    of one VISIT goes in the completion. They meet again in the schedule's service history.
+- **`MOCK_PHOTOS` carries a `maintenance`-owned row**, added when the card's strip became
+  the only read-only view of a schedule's files. It had none, so that card rendered without
+  its only content and the strip was unexercised in the one place it can be tried. The
+  `personIds` lesson, met again.
 
 - **The lightbox renders from `renderWorkDialogs`, not the detail view**, and that is a
   fixed bug rather than a preference: the work dialogs render from BOTH views, so once one
