@@ -2399,10 +2399,18 @@ function fullPathOf(asset, assets) {
 // quietly lose a field. The key is the tiebreak: unique by construction, and
 // both halves build this from the same `columns`, so they cannot disagree about
 // which header means which field.
+// WHERE THE SHEET'S HEADER DIFFERS FROM THE COLUMN'S LABEL, and there is one.
+// The `parent` column is called "Path" in the app, which is right there — the
+// list renders the whole chain and you read it as a breadcrumb. In a file you
+// EDIT it is the field that places the asset, and "Path" does not say so:
+// Eric read an export and asked where the parent column was. The header says
+// what you put in it, and the value it holds is unchanged.
+const IMPORT_HEADER_OVERRIDES = { parent: "Parent Path" };
+
 function importHeadersFor(columns) {
   const used = new Set([IMPORT_KEY_HEADER]);
   return (columns || []).map(c => {
-    const label = String(c.label || "").trim();
+    const label = String(IMPORT_HEADER_OVERRIDES[c.key] || c.label || "").trim();
     const header = !label || used.has(label) ? c.key : label;
     used.add(header);
     return { header, key: c.key, col: c };
@@ -2486,22 +2494,46 @@ function importRowsFromGrid(grid) {
 // a typo and the second is two rooms sharing a name, and silently taking the
 // first would move equipment into the wrong building with nothing on screen
 // saying so.
+// DEDUPED BY ID, not by object identity, because a row in the file and the
+// asset it updates are two different objects describing one asset — and an
+// entry appearing twice would read as "two matches", i.e. ambiguous, which is
+// the one answer that must mean something else.
+function addImportRef(m, k, a) {
+  const key = String(k || "").trim().toLowerCase();
+  if (!key) return;
+  if (!m.has(key)) m.set(key, []);
+  const list = m.get(key);
+  if (!list.some(x => x.id === a.id)) list.push(a);
+}
+
 function buildImportRefIndex(assets) {
   const idx = { path: new Map(), name: new Map(), id: new Map(), tag: new Map() };
-  const add = (m, k, a) => {
-    const key = String(k || "").trim().toLowerCase();
-    if (!key) return;
-    if (!m.has(key)) m.set(key, []);
-    const list = m.get(key);
-    if (!list.includes(a)) list.push(a);
-  };
   (assets || []).forEach(a => {
-    add(idx.path, fullPathOf(a, assets), a);
-    add(idx.name, nameOf(a), a);
-    add(idx.id, a.id, a);
-    add(idx.tag, a.tag, a);
+    addImportRef(idx.path, fullPathOf(a, assets), a);
+    addImportRef(idx.name, nameOf(a), a);
+    addImportRef(idx.id, a.id, a);
+    addImportRef(idx.tag, a.tag, a);
   });
   return idx;
+}
+
+// A ROW IN THE FILE IS A CANDIDATE PARENT TOO, which is what lets one file
+// create a Building and the Rooms inside it — the whole point of importing a
+// structure rather than typing it in one asset at a time.
+//
+// IT NEEDS NO ITERATION AND NO DEPENDENCY GRAPH, however deep the file nests,
+// and that falls straight out of the column holding a FULL PATH rather than a
+// bare parent name: a row's Path cell IS its parent's complete address, so the
+// row's own address is that cell plus its own name — computable from the two
+// cells alone, without resolving anything. A bare-name parent column would have
+// forced a topological sort over the file instead.
+function indexImportRow(idx, row, pathText) {
+  const own = String(pathText || "").trim();
+  const name = nameOf(row);
+  addImportRef(idx.path, own ? own + PATH_SEPARATOR + name : name, row);
+  addImportRef(idx.name, name, row);
+  addImportRef(idx.id, row.id, row);
+  addImportRef(idx.tag, row.tag, row);
 }
 
 function resolveImportRef(text, idx) {
@@ -2610,6 +2642,11 @@ function planAssetImport(parsed, ctx) {
   });
   (columns || []).forEach(c => {
     if (!headerForKey.has(c.key) && present.includes(c.key)) headerForKey.set(c.key, c.key);
+    // The column's own LABEL, for a file written before a header override
+    // existed (or exported by an older build). A file outlives the wording of
+    // the header that produced it, the same rule `?tab=changes` follows.
+    const label = String(c.label || "").trim();
+    if (!headerForKey.has(c.key) && label && present.includes(label)) headerForKey.set(c.key, label);
   });
   const cellOf = (values, key) => {
     const header = headerForKey.get(key);
@@ -2650,6 +2687,8 @@ function planAssetImport(parsed, ctx) {
 
   const seenKeys = new Map(), seenTags = new Map();
   let archivedTouched = 0, adoptedKeys = 0;
+  // Every row, read but not yet classified — see the second pass below.
+  const records = [];
 
   parsed.rows.forEach(({ row, values }) => {
     const at = msg => `Row ${row}: ${msg}`;
@@ -2710,6 +2749,10 @@ function planAssetImport(parsed, ctx) {
     // Values this row would introduce to a managed list, held until it is known
     // whether the row is written at all.
     const rowPeripherals = [], rowSubTypes = [];
+    // The Path cell, read in the first pass and resolved in the second.
+    // `undefined` means the file carries no parent column for this row at all,
+    // which is different from a blank cell (that one means Unassigned).
+    let parentCell, pathCell;
     // Records a field move. `from`/`to` are DISPLAY text, because an audit row's
     // wording is written once and kept forever — resolving an id at render time
     // is not an option for a row that outlives the asset it names.
@@ -2740,25 +2783,14 @@ function planAssetImport(parsed, ctx) {
       }
 
       if (col.key === "parent") {
-        const before = String(target ? target.parentId || "" : "");
-        if (!text || text.toLowerCase() === UNASSIGNED_LABEL.toLowerCase()) {
-          if (before !== "") setField("parentId", "", "Parent", parentNameFor(before, assets) || UNASSIGNED_LABEL, UNASSIGNED_LABEL, relate({ from: before, to: "" }));
-          else next.parentId = "";
-          return;
-        }
-        const hit = resolveImportRef(text, refIndex);
-        if (hit.status === "ambiguous") {
-          errors.push(at(`"${text}" matches more than one asset. Use the full path (e.g. "Building 100${PATH_SEPARATOR}Room 101") so there is only one answer.`));
-          return;
-        }
-        if (!hit.asset) {
-          errors.push(at(`"${text}" isn't an asset in this inventory, so nothing can sit inside it.`));
-          return;
-        }
-        if (hit.asset.id === before) { next.parentId = before; return; }
-        setField("parentId", hit.asset.id, "Parent",
-          parentNameFor(before, assets) || UNASSIGNED_LABEL, nameOf(hit.asset, typesList),
-          relate({ from: before, to: hit.asset.id }));
+        // DEFERRED to the second pass below, because the parent may be a row
+        // further down THIS FILE that has not been read yet. Resolving here is
+        // what made a file describing a new Building and its Rooms fail on
+        // every child row.
+        parentCell = text;
+        // Held so the row's own address can be indexed from its cells.
+        pathCell = text;
+        next.parentId = String(target ? target.parentId || "" : "");
         return;
       }
 
@@ -2839,32 +2871,86 @@ function planAssetImport(parsed, ctx) {
       setField(col.key, value, col.label, before, value);
     });
 
-    // Adopted only now, and only for a row that is genuinely being written.
+    // NAMED BEFORE THE ROW IS INDEXED, not at classification time, because the
+    // name is half of the address other rows find this one by. A row left
+    // blank takes the same suggestion the add form shows as its placeholder,
+    // rather than relying on nameOf()'s last-resort fallback (a short uuid)
+    // forever. A person type has no `name` at all.
+    if (!target && fieldAppliesTo("name", typeId) && !String(next.name || "").trim()) {
+      next.name = suggestedNameFor(next, assets, typesList);
+    }
+
+    // CLASSIFICATION WAITS FOR THE SECOND PASS, since a row whose only change
+    // is its parent cannot be told from an unchanged one until that parent has
+    // been resolved.
+    records.push({ row, at, next, target, typeId, changes, rowPeripherals, rowSubTypes, parentCell, pathCell });
+  });
+
+  // ---- SECOND PASS: parents, now that every row in the file is known --------
+  // Every row is indexed, not only the creates: a file that renames a Building
+  // and fills it with rooms names the NEW name in its children's Path cells,
+  // and the existing index only knows the old one. Adding an unchanged row is
+  // harmless — addImportRef dedupes on id, so it does not read as ambiguous
+  // with its own entry in the existing index.
+  records.forEach(r => indexImportRow(refIndex, r.next, r.pathCell));
+
+  records.forEach(r => {
+    if (r.parentCell === undefined) return;        // no parent column in the file
+    const before = String(r.target ? r.target.parentId || "" : "");
+    const text = r.parentCell;
+    const setParent = (id, toText, related) => {
+      r.next.parentId = id;
+      if (r.target && id !== before) {
+        r.changes.push({
+          key: "parentId", label: "Parent",
+          from: parentNameFor(before, assets) || UNASSIGNED_LABEL,
+          to: toText, related: related || "",
+        });
+      }
+    };
+    if (!text || text.toLowerCase() === UNASSIGNED_LABEL.toLowerCase()) {
+      setParent("", UNASSIGNED_LABEL, relate({ from: before, to: "" }));
+      return;
+    }
+    const hit = resolveImportRef(text, refIndex);
+    if (hit.status === "ambiguous") {
+      errors.push(r.at(`"${text}" matches more than one asset. Use the full path (e.g. "Building 100${PATH_SEPARATOR}Room 101") so there is only one answer.`));
+      return;
+    }
+    if (!hit.asset) {
+      errors.push(r.at(`"${text}" is not an asset here and no row in this file creates it. Check the spelling, or add a row for it.`));
+      return;
+    }
+    // A row cannot be its own parent. Caught here rather than by the cycle
+    // check below, which would report it as a loop and send someone looking
+    // for a second row that does not exist.
+    if (hit.asset.id === r.next.id) {
+      errors.push(r.at(`"${text}" is this row itself — an asset cannot sit inside itself.`));
+      return;
+    }
+    setParent(hit.asset.id, nameOf(hit.asset, typesList), relate({ from: before, to: hit.asset.id }));
+  });
+
+  records.forEach(r => {
+    // Adopted only for a row that is genuinely being written.
     const adoptManagedValues = () => {
-      rowPeripherals.forEach(p => {
+      r.rowPeripherals.forEach(p => {
         if (knownPeripherals.has(p.toLowerCase())) return;
         knownPeripherals.add(p.toLowerCase());
         plan.newPeripherals.push(p);
       });
-      rowSubTypes.forEach(t => {
+      r.rowSubTypes.forEach(t => {
         if (knownSubTypes.has(t.toLowerCase())) return;
         knownSubTypes.add(t.toLowerCase());
         plan.newSubTypes.push(t);
       });
     };
-
-    if (target) {
-      if (target.status === "Archived") archivedTouched++;
-      if (changes.length) { plan.updates.push({ asset: target, next, changes }); adoptManagedValues(); }
+    if (r.target) {
+      if (r.target.status === "Archived") archivedTouched++;
+      if (r.changes.length) { plan.updates.push({ asset: r.target, next: r.next, changes: r.changes }); adoptManagedValues(); }
       else plan.unchanged++;
     } else {
-      // Left blank, a new asset takes the same suggestion the add form shows as
-      // its placeholder, rather than relying on nameOf()'s last-resort fallback
-      // (a short uuid) forever. A person type has no `name` at all.
-      if (fieldAppliesTo("name", typeId) && !String(next.name || "").trim()) {
-        next.name = suggestedNameFor(next, assets, typesList);
-      }
-      plan.creates.push({ row, next });
+      plan.creates.push({ row: r.row, next: r.next });
       adoptManagedValues();
     }
   });
@@ -3219,7 +3305,7 @@ const FRONTEND_SCRIPT_VERSION = "v40";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-21.3";
+const APP_VERSION = "2026-09-21.4";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.

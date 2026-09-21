@@ -3007,6 +3007,53 @@ change, no version bump, no deploy.** Nothing about what is stored moved.
   resolving names to ids there would hand the asset an assignment the rest of the app cannot
   see — the v28 data loss from a new direction.
 
+### A file can build a hierarchy that does not exist yet (2026-09-21)
+
+**THIS IS WHAT THE WHOLE FEATURE IS FOR** — Eric's words: "import all the buildings and
+rooms and detail how they are connected." The first version could not do it. A parent
+reference resolved against the CURRENT inventory alone, so a file describing a new
+Building and the Rooms inside it failed on every child row, and the one job the import
+existed for was the one job it refused.
+
+- **Rows in the file are candidate parents too**, indexed alongside the existing assets.
+  A row may name a parent created by a row further DOWN the sheet: resolution is a second
+  pass over every row, not a first-pass lookup, so **file order does not matter**. Sorting
+  the sheet by name must not break somebody's own import.
+- **IT NEEDS NO ITERATION AND NO DEPENDENCY GRAPH, and that falls straight out of the
+  column holding a FULL PATH rather than a bare parent name.** A row's Path cell IS its
+  parent's complete address, so the row's own address is that cell plus its own name —
+  computable from two cells, without resolving anything, however deep the file nests. A
+  bare-name parent column would have forced a topological sort over the file. That is the
+  strongest argument for the full-path format, and it was not the reason it was chosen.
+- **EVERY row is indexed, not only the creates.** A file that renames a Building and fills
+  it names the NEW name in its children's Path cells, and the existing index only knows the
+  old one. Safe because `addImportRef` dedupes **on id**, not on object identity — the row
+  and the asset it updates are two objects describing one asset, and a second entry would
+  read as "two matches", which is the one answer that has to mean something else.
+- **A row is NAMED before anything is indexed**, since the name is half the address other
+  rows find it by. Currently unobservable — the only rows whose two spellings differ carry
+  a tag and no name, and every shipped place type excludes the tag field — but the type
+  editor lets a school switch tags on for Rooms, at which point it stops being a no-op. Kept
+  deliberately rather than by accident; `test-frontend-import.js` says so rather than
+  faking a test for it.
+- **Classification waits for the second pass.** A row whose only change is its parent
+  cannot be told from an unchanged one until that parent has resolved, so updates, creates
+  and unchanged are decided after parents, not during the read.
+- **A row naming ITSELF is caught as itself**, not reported as a loop — otherwise someone
+  goes looking for a second row that does not exist. A loop among rows that are ALL new is
+  still caught, by the projected-inventory check, which already saw creates.
+- **"Not an asset here" became "not an asset here and no row in this file creates it"**,
+  which is the only honest reading once the file is itself a source of parents.
+
+**The column is called `Parent Path` in the sheet, and it is called `Path` in the app.**
+`IMPORT_HEADER_OVERRIDES` is the one place the two differ and exists for one reason: Eric
+read an export and asked where the parent column was. "Path" is right in the LIST, which
+renders the chain and is read as a breadcrumb; in a file you EDIT it is the field that
+places the asset, and the header has to say what you put in it. **The stored key, the
+column and the value are all unchanged** — labels only, the same trade `changeType`/"Work
+type" takes. **A file carrying the old `Path` header still lands**, because a file outlives
+the wording of the header that produced it — the rule `?tab=changes` already follows.
+
 ### What the import refuses, and what it only warns about
 
 **ERRORS REFUSE THE WHOLE FILE** (Eric's call). A spreadsheet is edited as a whole and
@@ -3091,6 +3138,17 @@ tier from the name tier, and two rows that already cycle today cannot show a cro
 to: the new one was written by copying the shape of the old, and a bare identifier is only
 resolved when the line RUNS. The browser half — the menu, the download, the review modal,
 applying, and the audit rows that follow — was driven in Chromium against Sandbox.
+
+The hierarchy work added ten more mutations, all killed, among them file rows ceasing to be
+candidate parents, only the CREATES being indexed, the id-dedupe reverting to object
+identity, classification running before parents resolve, and the header override dropped.
+**Two survived at first and each named a missing fixture shape rather than a missing
+assertion** — the same lesson a third and fourth time: a file that only creates cannot show
+that an updated row must be indexed too, and a uniquely-named parent cannot show a rename.
+**A third "survivor" turned out to be a genuine no-op** and was recorded as one instead of
+being papered over with a contorted test. Driven in Chromium: a four-row sheet listing a PC,
+two Rooms and their Building **in that order** — every child above its parent — imported
+clean and landed the PC three levels down.
 
 ## Known constraints / things to watch
 

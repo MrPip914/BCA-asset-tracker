@@ -116,13 +116,16 @@ const code = [
   grabConst('const DEFAULT_COLUMNS = [', 'custom: false }));'),
   // The feature under test.
   grabConst('const IMPORT_KEY_HEADER', ';'),
+  grabConst('const IMPORT_HEADER_OVERRIDES', ';'),
   grabFn('fullPathOf'),
   grabFn('importHeadersFor'),
   grabFn('importCellFor'),
   grabFn('assetToImportRow'),
   grabFn('importCellText'),
   grabFn('importRowsFromGrid'),
+  grabFn('addImportRef'),
   grabFn('buildImportRefIndex'),
+  grabFn('indexImportRow'),
   grabFn('resolveImportRef'),
   grabFn('resolveImportType'),
   grabFn('buildImportPeopleIndex'),
@@ -265,18 +268,18 @@ const planFor = (list, edits, over = {}) =>
 {
   // Two rooms called "Room 101". The export writes the full path, so this must
   // land on the one in Building 200 -- not on whichever is first.
-  const plan = planFor([A('c-1')], { 'c-1': { Path: 'Main Campus › Building 200 › Room 101' } });
+  const plan = planFor([A('c-1')], { 'c-1': { 'Parent Path': 'Main Campus › Building 200 › Room 101' } });
   check('a parent given as a full path picks the right one of two same-named rooms',
         plan.errors.length === 0 && plan.updates.length === 1
         && plan.updates[0].next.parentId === 'r-101b',
         `errors: ${plan.errors.join(' | ')} parentId=${(plan.updates[0] || {}).next && plan.updates[0].next.parentId}`);
 
-  const bare = planFor([A('c-1')], { 'c-1': { Path: 'Room 101' } });
+  const bare = planFor([A('c-1')], { 'c-1': { 'Parent Path': 'Room 101' } });
   check('a bare name matching two assets is REFUSED, not guessed at',
         bare.errors.length === 1 && /matches more than one/.test(bare.errors[0]),
         bare.errors.join(' | '));
 
-  const unique = planFor([A('c-1')], { 'c-1': { Path: 'Science Lab' } });
+  const unique = planFor([A('c-1')], { 'c-1': { 'Parent Path': 'Science Lab' } });
   check('a bare name matching exactly one asset resolves',
         unique.errors.length === 0 && unique.updates[0].next.parentId === 'r-lab',
         unique.errors.join(' | '));
@@ -286,18 +289,19 @@ const planFor = (list, edits, over = {}) =>
   // rooms. An exact, complete address is the more specific answer, so the path
   // tier has to win -- try the name tier first and this reads as "ambiguous",
   // i.e. a parent that can be typed in but can never be resolved.
-  const tiers = planFor([A('c-1')], { 'c-1': { Path: 'Storage' } });
+  const tiers = planFor([A('c-1')], { 'c-1': { 'Parent Path': 'Storage' } });
   check('an exact full-path match beats a name that matches several',
         tiers.errors.length === 0 && tiers.updates.length === 1
         && tiers.updates[0].next.parentId === 'r-loose',
         `${tiers.errors.join(' | ')} parentId=${(tiers.updates[0] || {}).next && tiers.updates[0].next.parentId}`);
 
-  const missing = planFor([A('c-1')], { 'c-1': { Path: 'Room 999' } });
+  const missing = planFor([A('c-1')], { 'c-1': { 'Parent Path': 'Room 999' } });
   check('a parent that names nothing is refused',
-        missing.errors.length === 1 && /isn't an asset in this inventory/.test(missing.errors[0]),
+        missing.errors.length === 1
+        && /no row in this file creates it/.test(missing.errors[0]),
         missing.errors.join(' | '));
 
-  const cleared = planFor([A('c-1')], { 'c-1': { Path: '' } });
+  const cleared = planFor([A('c-1')], { 'c-1': { 'Parent Path': '' } });
   check('a blank Path unassigns rather than being ignored',
         cleared.errors.length === 0 && cleared.updates.length === 1
         && cleared.updates[0].next.parentId === '',
@@ -348,7 +352,7 @@ const planFor = (list, edits, over = {}) =>
   const grid = gridFrom([]);
   grid.push(headers.map(h => ({
     Type: 'Computer', Name: 'New Laptop', 'Asset ID': 'BCA0500',
-    Path: 'Main Campus › Building 100 › Storage', Serial: 'SN-NEW',
+    'Parent Path': 'Main Campus › Building 100 › Storage', Serial: 'SN-NEW',
     Peripherals: 'Dock/Stylus',
   }[h] || '')));
   const plan = planAssetImport(importRowsFromGrid(grid), ctx);
@@ -448,8 +452,8 @@ const planFor = (list, edits, over = {}) =>
   // result is circular, which is exactly why this cannot be checked row by row
   // against the current assets.
   const plan = planFor([A('r-lab'), A('r-storage')], {
-    'r-lab': { Path: 'Main Campus › Building 100 › Storage' },
-    'r-storage': { Path: 'Main Campus › Building 200 › Science Lab' },
+    'r-lab': { 'Parent Path': 'Main Campus › Building 100 › Storage' },
+    'r-storage': { 'Parent Path': 'Main Campus › Building 200 › Science Lab' },
   });
   check('a parent loop that exists only in the projected result is refused',
         plan.errors.length > 0 && /inside itself/.test(plan.errors.join(' ')),
@@ -459,7 +463,7 @@ const planFor = (list, edits, over = {}) =>
   // Without it the assertion above would pass just as well on a planner that
   // refused every parent move there is.
   const fine = planFor([A('r-lab')], {
-    'r-lab': { Path: 'Main Campus › Building 100 › Storage' },
+    'r-lab': { 'Parent Path': 'Main Campus › Building 100 › Storage' },
   });
   check('one of those two moves on its own is fine',
         fine.errors.length === 0 && fine.updates.length === 1
@@ -557,10 +561,168 @@ const planFor = (list, edits, over = {}) =>
   const child = A('c-1');                       // Front Office PC in Room 101 (B100)
   const parent = A('r-101a');
   check("a child's exported Path equals its parent's own full path",
-        rowFor(child).Path === fullPathOf(parent, assets),
-        `${rowFor(child).Path} !== ${fullPathOf(parent, assets)}`);
+        rowFor(child)['Parent Path'] === fullPathOf(parent, assets),
+        `${rowFor(child)['Parent Path']} !== ${fullPathOf(parent, assets)}`);
   check('resolving that string back finds the parent',
-        resolveImportRef(rowFor(child).Path, buildImportRefIndex(assets)).asset === parent);
+        resolveImportRef(rowFor(child)['Parent Path'], buildImportRefIndex(assets)).asset === parent);
+}
+
+// --- 18. A FILE THAT BUILDS A HIERARCHY FROM NOTHING -------------------------
+// THE POINT OF THE WHOLE FEATURE, in Eric's words: "import all the buildings
+// and rooms and detail how they are connected". Every child row here names a
+// parent that does not exist yet and is created by a LATER row in the same
+// file, which the first version refused outright -- it resolved parents against
+// the existing inventory alone, so the one thing the import was for was the one
+// thing it could not do.
+{
+  const bare = [{ id: 'BCC0001', type: 'Campus', name: 'Main Campus', status: 'Active' }];
+  const grid = [headers,
+    // Deliberately OUT OF ORDER: the Computer comes first, naming a Room that
+    // is three rows below it, and the Building is last. Nothing may depend on
+    // a parent being defined earlier in the file -- a person sorting the sheet
+    // by name would otherwise break their own import.
+    headers.map(h => ({ Type: 'Computer', Name: 'Lab PC',
+      'Parent Path': 'Main Campus › Building 400 › Room 401' }[h] || '')),
+    headers.map(h => ({ Type: 'Room', Name: 'Room 401',
+      'Parent Path': 'Main Campus › Building 400' }[h] || '')),
+    headers.map(h => ({ Type: 'Room', Name: 'Room 402',
+      'Parent Path': 'Main Campus › Building 400' }[h] || '')),
+    headers.map(h => ({ Type: 'Building', Name: 'Building 400',
+      'Parent Path': 'Main Campus' }[h] || '')),
+  ];
+  const plan = planAssetImport(importRowsFromGrid(grid), { ...ctx, assets: bare });
+  const byName = n => (plan.creates.find(c => c.next.name === n) || {}).next;
+  const b400 = byName('Building 400'), r401 = byName('Room 401'),
+        r402 = byName('Room 402'), pc = byName('Lab PC');
+  check('a file can create a Building and the Rooms inside it in one go',
+        plan.errors.length === 0 && plan.creates.length === 4,
+        plan.errors.join(' | '));
+  check('a row resolves a parent defined LATER in the same file',
+        !!b400 && !!r401 && r401.parentId === b400.id,
+        `Room 401 parent=${r401 && r401.parentId} Building 400 id=${b400 && b400.id}`);
+  check('two rows naming one new parent get the SAME id, not two copies',
+        !!r402 && r401 && r401.parentId === r402.parentId,
+        `${r401 && r401.parentId} vs ${r402 && r402.parentId}`);
+  check('nesting is unlimited — a device sits inside a room inside a new building',
+        !!pc && !!r401 && pc.parentId === r401.id,
+        `Lab PC parent=${pc && pc.parentId} Room 401 id=${r401 && r401.id}`);
+  check('a parent that already exists still resolves alongside the new ones',
+        !!b400 && b400.parentId === 'BCC0001', b400 && b400.parentId);
+
+  // The failure this must still catch: a typo in a child's path is now
+  // "nothing here and nothing in the file creates it", which is the only
+  // honest reading once the file itself is a source of parents.
+  const typo = [headers,
+    headers.map(h => ({ Type: 'Room', Name: 'Room 401',
+      'Parent Path': 'Main Campus › Building 999' }[h] || '')),
+    headers.map(h => ({ Type: 'Building', Name: 'Building 400',
+      'Parent Path': 'Main Campus' }[h] || '')),
+  ];
+  const bad = planAssetImport(importRowsFromGrid(typo), { ...ctx, assets: bare });
+  check('a child naming a parent NO row creates is still refused',
+        bad.errors.length === 1 && /no row in this file creates it/.test(bad.errors[0])
+        && bad.creates.length === 0,
+        bad.errors.join(' | '));
+
+  // A loop built entirely out of NEW rows. The cycle check runs over the
+  // projected inventory, so it sees these even though neither exists yet.
+  const loop = [headers,
+    headers.map(h => ({ Type: 'Room', Name: 'Ring A', 'Parent Path': 'Ring B' }[h] || '')),
+    headers.map(h => ({ Type: 'Room', Name: 'Ring B', 'Parent Path': 'Ring A' }[h] || '')),
+  ];
+  const looped = planAssetImport(importRowsFromGrid(loop), { ...ctx, assets: bare });
+  check('a loop among rows that are ALL new is refused',
+        looped.errors.length > 0 && looped.creates.length === 0,
+        looped.errors.join(' | '));
+
+  // A row pointing at itself. Caught as itself rather than reported as a loop,
+  // or someone goes looking for a second row that does not exist.
+  const selfRef = [headers,
+    headers.map(h => ({ Type: 'Room', Name: 'Room 500', 'Parent Path': 'Room 500' }[h] || '')),
+  ];
+  const selfed = planAssetImport(importRowsFromGrid(selfRef), { ...ctx, assets: bare });
+  check('a row naming itself as its parent says so plainly',
+        selfed.errors.length === 1 && /is this row itself/.test(selfed.errors[0]),
+        selfed.errors.join(' | '));
+}
+
+// --- 19. an existing asset can move into a newly created parent -------------
+{
+  const movedRow = { ...rowFor(A('c-1')), 'Parent Path': 'Main Campus › Building 100 › New Closet' };
+  const grid = [headers, headers.map(h => (movedRow[h] === undefined ? '' : movedRow[h]))];
+  grid.push(headers.map(h => ({ Type: 'Room', Name: 'New Closet',
+    'Parent Path': 'Main Campus › Building 100' }[h] || '')));
+  const plan = planAssetImport(importRowsFromGrid(grid), ctx);
+  const closet = (plan.creates[0] || {}).next;
+  const moved = plan.updates.find(u => u.asset.id === 'c-1');
+  check('an EXISTING asset can be moved into a room the same file creates',
+        plan.errors.length === 0 && !!closet && !!moved
+        && moved.next.parentId === closet.id,
+        `${plan.errors.join(' | ')} closet=${closet && closet.id} moved=${moved && moved.next.parentId}`);
+  check('that move is audited as a Parent change like any other',
+        !!moved && moved.changes.some(c => c.key === 'parentId' && c.label === 'Parent'),
+        JSON.stringify(moved && moved.changes));
+}
+
+// --- 20. the old header still lands ------------------------------------------
+// A file exported before the header was renamed, or one somebody kept. Files
+// outlive the wording of the header that produced them -- the same rule
+// `?tab=changes` follows for deep links.
+{
+  const oldHeaders = headers.map(h => (h === 'Parent Path' ? 'Path' : h));
+  const grid = [oldHeaders, oldHeaders.map(h =>
+    ({ 'Asset Key': 'c-1', Type: 'Computer', Name: 'Front Office PC',
+       Path: 'Main Campus › Building 200 › Room 101' }[h] || ''))];
+  const plan = planAssetImport(importRowsFromGrid(grid), ctx);
+  check('a file using the OLD "Path" header still sets the parent',
+        plan.errors.length === 0 && plan.updates.length === 1
+        && plan.updates[0].next.parentId === 'r-101b',
+        `${plan.errors.join(' | ')} ${JSON.stringify((plan.updates[0] || {}).next && plan.updates[0].next.parentId)}`);
+}
+
+// --- 21. an EXISTING asset renamed in the file is findable by its NEW name ---
+// Indexing only the created rows is the obvious shortcut and it is wrong: the
+// existing index knows this building by the name it had before the file was
+// edited, so a room placed under the new name resolves against nothing.
+// Renaming a building and filling it in one sheet is an ordinary thing to do.
+{
+  const renamed = { ...rowFor(A('BCB0001')), Name: 'Building 100 (Annex)' };
+  const grid = [headers, headers.map(h => (renamed[h] === undefined ? '' : renamed[h]))];
+  grid.push(headers.map(h => ({ Type: 'Room', Name: 'Annex Store',
+    'Parent Path': 'Main Campus › Building 100 (Annex)' }[h] || '')));
+  const plan = planAssetImport(importRowsFromGrid(grid), ctx);
+  const store = (plan.creates[0] || {}).next;
+  check('a room resolves a building this same file RENAMED',
+        plan.errors.length === 0 && !!store && store.parentId === 'BCB0001',
+        `${plan.errors.join(' | ')} parent=${store && store.parentId}`);
+}
+
+// --- 22. a created row is NAMED before anything looks for it ----------------
+// The name is half the address other rows find a row by, so a created row must
+// not still be nameless when the file is indexed. A blank one would also
+// render as a bare uuid in the list forever.
+//
+// NOTE ON WHAT THIS DOES *NOT* COVER. Naming before indexing rather than after
+// is currently unobservable: the only rows whose two spellings differ are ones
+// carrying a tag and no name, and every shipped place type EXCLUDES the tag
+// field -- so an unnamed Room resolves to "Room <short id>" whichever order
+// runs, and a type that may carry a tag cannot be a parent. It stops being a
+// no-op the moment a school switches tags on for Rooms, which the type editor
+// allows, so the ordering is kept deliberately rather than by accident.
+{
+  const grid = [headers,
+    headers.map(h => ({ Type: 'Room',
+      'Parent Path': 'Main Campus › Building 100' }[h] || '')),
+  ];
+  const plan = planAssetImport(importRowsFromGrid(grid), ctx);
+  const room = (plan.creates[0] || {}).next;
+  check('a created row with no Name is given one rather than left blank',
+        plan.errors.length === 0 && !!room && !!String(room.name || '').trim()
+        && room.name.startsWith('Room '),
+        `${plan.errors.join(' | ')} name=${JSON.stringify(room && room.name)}`);
+  check('and it is findable in the file under exactly that name',
+        resolveImportRef(room.name, buildImportRefIndex([room])).asset === room,
+        room && room.name);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
