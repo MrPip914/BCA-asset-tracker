@@ -30,20 +30,30 @@ const check = (name, ok, detail) => {
   ok ? pass++ : fail++;
 };
 
-// --- slice the function ------------------------------------------------------
+// --- slice the functions -----------------------------------------------------
 // `async` since 2026-09-16, when xlsx became a dynamic import — matched either
 // way rather than pinned to one spelling, so the next signature change fails on
 // a real assertion below instead of on this slice.
-const DECL = ['  async function exportToExcel() {', '  function exportToExcel() {']
-  .map(d => ({ d, at: src.indexOf(d) })).find(x => x.at !== -1);
-if (!DECL) throw new Error('exportToExcel not found in index.html');
-const start = DECL.at;
-// Ends at the next line that is exactly two-space-indented "}".
 // index.html is CRLF; don't assume either.
 const NL = src.includes('\r\n') ? '\r\n' : '\n';
-const end = src.indexOf(NL + '  }' + NL, start);
-if (end === -1) throw new Error('end of exportToExcel not found');
-const fn = src.slice(start, end);
+function slice(name) {
+  const DECL = [`  async function ${name}() {`, `  function ${name}() {`]
+    .map(d => ({ d, at: src.indexOf(d) })).find(x => x.at !== -1);
+  if (!DECL) throw new Error(`${name} not found in index.html`);
+  // Ends at the next line that is exactly two-space-indented "}".
+  const end = src.indexOf(NL + '  }' + NL, DECL.at);
+  if (end === -1) throw new Error(`end of ${name} not found`);
+  return src.slice(DECL.at, end);
+}
+// EXPORTASSETSSHEET IS SCANNED TOO, and it has to be: it is a second function
+// built out of the same resolved-place helpers, written by copying the shape of
+// the first, and it fails in exactly the way this file was created for — a bare
+// identifier is resolved only when the line RUNS, and nothing runs until
+// somebody presses Export. Adding the function without adding it here would
+// have left the new half of the feature covered by nothing at all.
+const fnExcel = slice('exportToExcel');
+const fnSheet = slice('exportAssetsSheet');
+const fn = fnExcel + NL + fnSheet;
 
 // --- what it calls -----------------------------------------------------------
 // Bare `name(` only: a member call (`XLSX.utils.foo(`, `rows.map(`) resolves at
@@ -106,7 +116,7 @@ const BUILTINS = new Set([
 
 const missing = [...called].filter(n => !defined.has(n) && !BUILTINS.has(n));
 
-check('every function exportToExcel calls actually exists', missing.length === 0,
+check('every function the two export paths call actually exists', missing.length === 0,
       missing.length ? `undefined: ${missing.join(', ')}` : '');
 
 // The specific regression, named, so the reason this file exists survives even
@@ -128,10 +138,45 @@ check('displayRoom (deleted in b4a7ed1) is not called anywhere',
 // works perfectly, the file is correct, and it lands in a downloads folder
 // calling itself another client's inventory. Nothing on screen says so.
 {
-  const call = (fn.match(/XLSX\.writeFile\([^)]*\)/) || [])[0] || '';
-  check('the export filename is built from the tenant, not hardcoded',
-        /CLIENT\.(id|appName|orgName)/.test(call),
-        `XLSX.writeFile call does not mention CLIENT: ${call || '(not found)'}`);
+  const calls = fn.match(/XLSX\.writeFile\([^)]*\)/g) || [];
+  check('BOTH exports name the tenant in the filename, not a hardcoded school',
+        calls.length === 2 && calls.every(c => /CLIENT\.(id|appName|orgName)/.test(c)),
+        `writeFile calls: ${calls.join(' | ') || '(none found)'}`);
+  // The two land in one downloads folder and only ONE of them can be imported
+  // back. Identical names would make "which of these is the importable one?"
+  // unanswerable without opening both.
+  check('the two exports write DIFFERENT filenames',
+        calls.length === 2 && calls[0] !== calls[1], calls.join(' | '));
+}
+
+// The Assets tab exports WHAT IS SHOWN. Reading `assets` there instead of
+// `filtered` is a silent failure of exactly the kind this file exists for: the
+// file is well-formed, imports cleanly, and simply contains the wrong four
+// hundred rows -- and the only way to notice is to count them.
+{
+  check('exportAssetsSheet builds its rows from `filtered`, not from `assets`',
+        /\bfiltered\.map\(/.test(fnSheet) && !/\bassets\.map\(/.test(fnSheet),
+        'expected filtered.map(...) and no assets.map(...) in exportAssetsSheet');
+}
+
+// The header row must come from the same function the IMPORT resolves headers
+// through. Two lists that merely happen to agree today is how a column lands
+// under the wrong heading later, and the import then writes serials into
+// hostnames without a word.
+{
+  check('the Assets sheet header is built by importHeadersFor, not written out',
+        /importHeadersFor\(columns\)/.test(fnSheet) && /IMPORT_KEY_HEADER/.test(fnSheet),
+        'exportAssetsSheet should build its header from IMPORT_KEY_HEADER + importHeadersFor(columns)');
+  check('every row is built by assetToImportRow, the import\'s own reader',
+        /assetToImportRow\(/.test(fnSheet));
+}
+
+// A result of zero must still produce a header row: an empty file is useless,
+// while a header-only one is a template somebody can type new assets into.
+{
+  check('an empty result still writes a header row',
+        /aoa_to_sheet\(\[header\]\)/.test(fnSheet),
+        'expected an aoa_to_sheet([header]) fallback when no assets matched');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

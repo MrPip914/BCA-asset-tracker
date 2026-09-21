@@ -69,7 +69,7 @@ import {
   Monitor, Phone, Tv, Camera, HardDrive, HelpCircle, Columns3, Lock, Filter, Check, DoorOpen, Download,
   Wrench, UserCircle, Settings, History, Archive, ArchiveRestore, Building2, Package, Copy, Zap, Repeat, ArrowLeftRight, Menu,
   FlaskConical, RotateCcw, AlertTriangle, Loader2, Printer, MapPin, QrCode, Info, LogOut, Users,
-  ImagePlus, Eye, EyeOff, Home, Paperclip, FileText, ExternalLink,
+  ImagePlus, Eye, EyeOff, Home, Paperclip, FileText, ExternalLink, Upload,
   // Star is the favorite toggle in the icon browser, not a type icon.
   Star,
   // THE TYPE-ICON CATALOG (see ICON_GROUPS). Adding these costs NOTHING over the
@@ -2354,6 +2354,581 @@ function validateParentChoice(childId, childType, parentId, assets, typesList) {
   return null;
 }
 
+// ---------- THE IMPORTABLE ASSET SHEET ----------
+// The Assets tab's Export writes a sheet of whatever is CURRENTLY SHOWN, in a
+// shape this same file can read back. Everything below is the contract between
+// those two halves, kept at module level and in one place precisely so they
+// cannot drift: the export builds its headers from `importHeadersFor`, and the
+// import resolves headers through the same function over the same `columns`.
+//
+// WHAT MAKES IT ROUND-TRIP is that every reference is written as the thing a
+// person reads and resolved back on the way in — a type by NAME, a parent by
+// its own full PATH, a user by their NAME — with one exception: `Asset Key`,
+// the asset's own `id`, which is the only column here that is not for reading.
+// It is what makes "export, edit in Excel, import back" UPDATE rows instead of
+// duplicating them, and it survives a rename, a retag and a move, which no
+// readable value does.
+//
+// The import is a MERGE and never a replace: a row updates the asset its key
+// names, a row with no match creates one, and an asset the file does not
+// mention is untouched. That is forced by the export being FILTERED — a file of
+// ten rows describes ten assets, not an inventory of ten.
+const IMPORT_KEY_HEADER = "Asset Key";
+// How many problems the review lists before it stops. A file with a wrong
+// column produces one complaint PER ROW, so a 400-row sheet would otherwise
+// render a wall nobody reads and scroll the buttons off the screen. The first
+// dozen say what is wrong; the count says how much of it there is.
+const IMPORT_MESSAGE_LIMIT = 12;
+
+// An asset's own chain INCLUDING itself, which is what `pathOf` deliberately
+// isn't (it renders the chain ABOVE an asset, so an asset is never repeated in
+// its own path). That asymmetry is exactly what makes the round-trip exact: the
+// Path cell written for a child IS its parent's full path, so resolving one
+// back is a lookup on this string and not a reconstruction.
+function fullPathOf(asset, assets) {
+  if (!asset) return "";
+  const above = pathOf(asset, assets);
+  return above ? above + PATH_SEPARATOR + nameOf(asset) : nameOf(asset);
+}
+
+// The header each column carries in the importable sheet.
+//
+// A LABEL IS WHAT A PERSON READS, so it is the header — but two columns CAN
+// share one (a custom column called "Notes"), and a spreadsheet row is an
+// object, so the second would silently overwrite the first and the export would
+// quietly lose a field. The key is the tiebreak: unique by construction, and
+// both halves build this from the same `columns`, so they cannot disagree about
+// which header means which field.
+function importHeadersFor(columns) {
+  const used = new Set([IMPORT_KEY_HEADER]);
+  return (columns || []).map(c => {
+    const label = String(c.label || "").trim();
+    const header = !label || used.has(label) ? c.key : label;
+    used.add(header);
+    return { header, key: c.key, col: c };
+  });
+}
+
+// One asset's cell for one column. The reference fields resolve to display text
+// here and are resolved BACK by the planner below; everything else is the
+// stored string.
+function importCellFor(asset, key, ctx) {
+  const { assets, typesList } = ctx;
+  // Name is resolved BEFORE the fieldAppliesTo gate, the same exception the
+  // full-workbook export makes and for the same reason: a person type has no
+  // stored `name` (it is in User's excludedFields), so the gate would blank the
+  // one column the sheet is scanned by for every person in the file.
+  if (key === "name") return nameOf(asset, typesList);
+  if (!fieldAppliesTo(key, asset.type)) return "";
+  if (key === "type") return typeNameOf(asset.type, typesList);
+  // The PARENT, written as the parent's own full path — which is what
+  // pathOf(asset) already is. Readable, unique for a well-formed hierarchy, and
+  // the exact string resolveImportRef matches first.
+  if (key === "parent") return pathOf(asset, assets);
+  // SLASH-JOINED, not the comma-joined display string personTextOf builds, and
+  // this is not a style choice. Under the "Last, First" name format a single
+  // person IS "Cantrell, Aaron" — so a comma-separated list of people cannot be
+  // split back into people at all, and "Aaron" and "Cantrell" both resolve to
+  // nobody. Slash is already this app's stored separator for several people
+  // (the legacy `person` column), so the export simply writes what is stored.
+  if (key === "person") return personNamesOf(asset, assets).join("/");
+  const v = asset[key];
+  return v === undefined || v === null ? "" : String(v);
+}
+
+function assetToImportRow(asset, ctx) {
+  const row = { [IMPORT_KEY_HEADER]: asset.id || "" };
+  importHeadersFor(ctx.columns).forEach(({ header, key }) => {
+    row[header] = importCellFor(asset, key, ctx);
+  });
+  return row;
+}
+
+// One cell as text. A DATE ARRIVES AS A REAL DATE OBJECT once anyone has edited
+// that column in Excel (the file is read with cellDates), and stringifying one
+// gives "Mon Sep 21 2026 …" — which every date field here would then refuse.
+// Written back as yyyy-MM-dd, in LOCAL parts: toISOString shifts the day for
+// anyone west of Greenwich, which is this whole app's timezone.
+function importCellText(v) {
+  if (v === undefined || v === null) return "";
+  if (v instanceof Date) return isNaN(v.getTime()) ? "" : localDateString(v);
+  return String(v).trim();
+}
+
+// A 2D grid (row 1 = headers) as {header: text} rows, carrying the SHEET ROW
+// NUMBER with each. Every message this file produces names that number, because
+// the file is fixed in Excel and "row 43" is the only address that means
+// anything there.
+function importRowsFromGrid(grid) {
+  if (!grid || !grid.length) return { headers: [], rows: [] };
+  const headers = (grid[0] || []).map(h => importCellText(h));
+  const rows = [];
+  grid.slice(1).forEach((cells, i) => {
+    const line = cells || [];
+    // A blank row is skipped, not refused. Excel leaves them behind constantly
+    // — a deleted row, a stray selection — and refusing the whole file over one
+    // would be the least useful possible reading of an empty line.
+    if (!line.some(c => importCellText(c) !== "")) return;
+    const values = {};
+    headers.forEach((h, idx) => { if (h) values[h] = importCellText(line[idx]); });
+    rows.push({ row: i + 2, values });
+  });
+  return { headers, rows };
+}
+
+// Every way a parent can be named, in TIERS. The tiers are the whole
+// correctness of the lookup: the export writes a full path, so that tier
+// round-trips exactly and is tried first, and the rest exist for a value
+// somebody typed by hand ("Room 101", a tag off a sticker).
+//
+// A TIER MAPS TO A LIST, NEVER TO ONE ASSET, because "no match" and "two
+// matches" are different answers that must not be reported as one: the first is
+// a typo and the second is two rooms sharing a name, and silently taking the
+// first would move equipment into the wrong building with nothing on screen
+// saying so.
+function buildImportRefIndex(assets) {
+  const idx = { path: new Map(), name: new Map(), id: new Map(), tag: new Map() };
+  const add = (m, k, a) => {
+    const key = String(k || "").trim().toLowerCase();
+    if (!key) return;
+    if (!m.has(key)) m.set(key, []);
+    const list = m.get(key);
+    if (!list.includes(a)) list.push(a);
+  };
+  (assets || []).forEach(a => {
+    add(idx.path, fullPathOf(a, assets), a);
+    add(idx.name, nameOf(a), a);
+    add(idx.id, a.id, a);
+    add(idx.tag, a.tag, a);
+  });
+  return idx;
+}
+
+function resolveImportRef(text, idx) {
+  const key = String(text || "").trim().toLowerCase();
+  if (!key) return { asset: null, status: "empty" };
+  for (const tier of [idx.path, idx.name, idx.id, idx.tag]) {
+    const hits = tier.get(key);
+    if (!hits || !hits.length) continue;
+    if (hits.length > 1) return { asset: null, status: "ambiguous" };
+    return { asset: hits[0], status: "ok" };
+  }
+  return { asset: null, status: "missing" };
+}
+
+// A type by the NAME people read, falling back to its id. Add and rename both
+// refuse a duplicate name, so a single match is the normal case; two means a
+// hand-edited config, and guessing between them would file assets under a type
+// nobody chose.
+function resolveImportType(text, typesList) {
+  const key = String(text || "").trim().toLowerCase();
+  if (!key) return "";
+  const named = (typesList || []).filter(t => String(t.name || "").trim().toLowerCase() === key);
+  if (named.length === 1) return named[0].id;
+  if (named.length > 1) return "";
+  const byId = (typesList || []).find(t => String(t.id || "").trim().toLowerCase() === key);
+  return byId ? byId.id : "";
+}
+
+// People by an ORDER-INDEPENDENT key, never by the display string. The Name
+// format setting spells a person "John Smith" or "Smith, John" and the export
+// writes whichever is live — so comparing the raw text would stop matching
+// anybody the moment somebody flipped that setting between the export and the
+// import. personMatchKey is the app-wide answer to "is this the same person".
+function buildImportPeopleIndex(assets) {
+  const idx = new Map();
+  (assets || []).filter(a => isPersonType(a.type)).forEach(a => {
+    const key = personMatchKey(a);
+    if (!key) return;
+    if (!idx.has(key)) idx.set(key, []);
+    idx.get(key).push(a);
+  });
+  return idx;
+}
+
+// A multi-valued cell. Peripherals are stored slash-joined, and somebody
+// hand-editing a spreadsheet will reach for whichever separator they feel like,
+// so both are accepted here and the stored shape is imposed on the way out.
+function splitImportList(text) {
+  return String(text || "").split(/[,/]/).map(s => s.trim()).filter(Boolean);
+}
+
+// PEOPLE SPLIT ON SLASH AND NOTHING ELSE, and the comma's absence is the whole
+// point: under the "Last, First" name format one person is written
+// "Cantrell, Aaron", so a comma is part of a NAME and splitting on it tears one
+// person into two that resolve to nobody. Found by a round-trip test, which is
+// the only place it shows — the export and the import each read fine alone.
+function splitImportPeople(text) {
+  return String(text || "").split("/").map(s => s.trim()).filter(Boolean);
+}
+
+// How an asset is NAMED in an import message. The tag is what a person would
+// look for on a sticker, so it leads when there is one; the type is what makes
+// "Room 101" legible when two things share a name.
+function describeImportAsset(a, ctx) {
+  const name = nameOf(a, ctx.typesList);
+  const type = typeNameOf(a.type, ctx.typesList);
+  const tag = String(a.tag || "").trim();
+  return `${name} (${type}${tag ? `, ${tag}` : ""})${a.status === "Archived" ? ", archived" : ""}`;
+}
+
+// Reads an uploaded sheet against the CURRENT inventory and says what WOULD
+// happen. It writes nothing, and it never half-applies: the caller shows this,
+// and only applies it once someone has said yes to it.
+//
+// ERRORS REFUSE THE WHOLE FILE (Eric's call). A spreadsheet is edited as a whole
+// and re-imported as a whole, so importing the good half leaves the inventory in
+// a state nobody chose and the file on screen no longer describing what landed.
+//
+// EVERY CHECK RUNS AGAINST THE WHOLE INVENTORY, not just the rows in the file,
+// and that is the other half of the same call. A merge import can only see its
+// own rows, so the collision that matters most — a tag in the file already worn
+// by an asset the file does not mention — is invisible from inside it and would
+// otherwise be discovered as a refused save long after the fact.
+//
+// REQUIRED FIELDS ARE DELIBERATELY NOT ENFORCED HERE, which is not an oversight:
+// required is a FORM rule in this app and every bulk path bypasses it
+// (duplicateAsset, convertUsersToAssets, the toolbar actions, the Sheet's own
+// admin import). Enforcing it here alone would make a spreadsheet of forty
+// perfectly good rows unimportable over a rule none of the other bulk paths
+// apply.
+function planAssetImport(parsed, ctx) {
+  const { assets, columns, typesList, peripheralsList, bulkItemTypes, usersAreAssets } = ctx;
+  const errors = [], warnings = [];
+  const present = (parsed.headers || []).filter(Boolean);
+  const plan = {
+    errors, warnings, updates: [], creates: [], unchanged: 0,
+    newPeripherals: [], newSubTypes: [],
+  };
+
+  // Which header in THIS file carries each column. The export writes labels; a
+  // file written by hand, or by a build whose labels differed, may carry raw
+  // keys, so both are accepted.
+  const headerForKey = new Map();
+  importHeadersFor(columns).forEach(({ header, key }) => {
+    if (present.includes(header)) headerForKey.set(key, header);
+  });
+  (columns || []).forEach(c => {
+    if (!headerForKey.has(c.key) && present.includes(c.key)) headerForKey.set(c.key, c.key);
+  });
+  const cellOf = (values, key) => {
+    const header = headerForKey.get(key);
+    return header === undefined ? undefined : (values[header] === undefined ? "" : values[header]);
+  };
+
+  // THE FILE HAS TO BE RECOGNISABLE AS AN ASSET SHEET BEFORE ANY OF IT IS READ
+  // AS ONE. Without this a wrong file — a bank statement, the workbook's own
+  // Changes sheet — parses into rows with no type and refuses with a hundred
+  // identical complaints instead of one sentence saying what happened.
+  if (!parsed.rows.length) {
+    errors.push("That file has no data rows.");
+    return plan;
+  }
+  if (!present.includes(IMPORT_KEY_HEADER) && !headerForKey.has("type")) {
+    errors.push(`This doesn't look like an asset export — it has no "${IMPORT_KEY_HEADER}" column and no "Type" column. Use Export on the Assets tab to get a file in the right shape.`);
+    return plan;
+  }
+
+  const known = new Set([IMPORT_KEY_HEADER, ...headerForKey.values()]);
+  const unknown = present.filter(h => !known.has(h));
+  if (unknown.length) {
+    warnings.push(`${unknown.length} column${unknown.length === 1 ? "" : "s"} in the file ${unknown.length === 1 ? "isn't" : "aren't"} a field here and will be ignored: ${unknown.join(", ")}.`);
+  }
+
+  const byId = new Map();
+  const byTag = new Map();
+  (assets || []).forEach(a => {
+    const id = String(a.id || "").trim();
+    if (id) byId.set(id, a);
+    const tag = String(a.tag || "").trim().toLowerCase();
+    if (tag && !byTag.has(tag)) byTag.set(tag, a);
+  });
+  const refIndex = buildImportRefIndex(assets);
+  const peopleIndex = buildImportPeopleIndex(assets);
+  const knownPeripherals = new Set((peripheralsList || []).map(p => String(p).trim().toLowerCase()));
+  const knownSubTypes = new Set((bulkItemTypes || []).map(p => String(p).trim().toLowerCase()));
+
+  const seenKeys = new Map(), seenTags = new Map();
+  let archivedTouched = 0, adoptedKeys = 0;
+
+  parsed.rows.forEach(({ row, values }) => {
+    const at = msg => `Row ${row}: ${msg}`;
+    const keyCell = String(values[IMPORT_KEY_HEADER] || "").trim();
+    const tagCell = String(cellOf(values, "tag") || "").trim();
+
+    // Matched by KEY first and by tag only as a fallback, which is the order
+    // that makes a retag work: change the Asset ID cell of a row that carries
+    // its key and the asset is RETAGGED, where matching on the tag first would
+    // have made it a stranger and created a second copy of it.
+    let target = keyCell ? byId.get(keyCell) || null : null;
+    if (!target && !keyCell && tagCell) target = byTag.get(tagCell.toLowerCase()) || null;
+
+    if (keyCell) {
+      if (seenKeys.has(keyCell)) {
+        errors.push(at(`${IMPORT_KEY_HEADER} "${keyCell}" is also on row ${seenKeys.get(keyCell)}. Each asset may appear once.`));
+      } else seenKeys.set(keyCell, row);
+      if (!target) adoptedKeys++;
+    }
+    if (tagCell) {
+      const tk = tagCell.toLowerCase();
+      if (seenTags.has(tk)) {
+        errors.push(at(`Asset ID "${tagCell}" is also on row ${seenTags.get(tk)}. Asset IDs must be unique.`));
+      } else seenTags.set(tk, row);
+      // THE WHOLE-INVENTORY CHECK. This collision is invisible from inside the
+      // file: the asset already wearing the tag need not be in it at all.
+      const holder = byTag.get(tk);
+      if (holder && (!target || holder.id !== target.id)) {
+        errors.push(at(`Asset ID "${tagCell}" is already on ${describeImportAsset(holder, ctx)}, which this file doesn't cover. Asset IDs must be unique.`));
+      }
+    }
+
+    // The TYPE decides every field rule below it, so it is resolved before
+    // anything else and a row with none is abandoned rather than read under a
+    // guess about what it is.
+    const typeCell = cellOf(values, "type");
+    let typeId = target ? target.type : "";
+    if (typeCell !== undefined && String(typeCell).trim()) {
+      const resolved = resolveImportType(typeCell, typesList);
+      if (!resolved) {
+        errors.push(at(`"${String(typeCell).trim()}" isn't a type in this inventory.`));
+        return;
+      }
+      typeId = resolved;
+    }
+    if (!typeId) {
+      errors.push(at("no Type, and this row doesn't match an existing asset — there is nothing to inherit one from."));
+      return;
+    }
+
+    const next = target
+      ? { ...target, type: typeId }
+      : {
+          id: keyCell || crypto.randomUUID(), type: typeId, status: "Active",
+          comments: [], changes: [], allocations: [], personIds: [],
+        };
+    const changes = [];
+    // Values this row would introduce to a managed list, held until it is known
+    // whether the row is written at all.
+    const rowPeripherals = [], rowSubTypes = [];
+    // Records a field move. `from`/`to` are DISPLAY text, because an audit row's
+    // wording is written once and kept forever — resolving an id at render time
+    // is not an option for a row that outlives the asset it names.
+    const setField = (key, value, label, from, to, related) => {
+      next[key] = value;
+      if (!target) return;
+      changes.push({ key, label, from, to, related: related || "" });
+    };
+
+    (columns || []).forEach(col => {
+      const raw = cellOf(values, col.key);
+      if (raw === undefined) return;            // the file doesn't carry this column
+      if (col.key === "type") return;           // resolved above
+      const text = String(raw).trim();
+
+      if (!fieldAppliesTo(col.key, typeId)) {
+        // A field this type doesn't have is NOT an error — one sheet covers
+        // every type, so a Room's row necessarily carries a blank Serial. A
+        // non-blank one is worth a word, because the value is being dropped.
+        // The one silent case is a person's Name: the export writes the
+        // composed string for readability while First/Last are the real fields
+        // and travel in their own columns, so warning about it would fire on
+        // every person in every file.
+        if (text && !(col.key === "name" && isPersonType(typeId))) {
+          warnings.push(at(`${col.label} isn't a field on a ${typeNameOf(typeId, typesList)} — "${text}" ignored.`));
+        }
+        return;
+      }
+
+      if (col.key === "parent") {
+        const before = String(target ? target.parentId || "" : "");
+        if (!text || text.toLowerCase() === UNASSIGNED_LABEL.toLowerCase()) {
+          if (before !== "") setField("parentId", "", "Parent", parentNameFor(before, assets) || UNASSIGNED_LABEL, UNASSIGNED_LABEL, relate({ from: before, to: "" }));
+          else next.parentId = "";
+          return;
+        }
+        const hit = resolveImportRef(text, refIndex);
+        if (hit.status === "ambiguous") {
+          errors.push(at(`"${text}" matches more than one asset. Use the full path (e.g. "Building 100${PATH_SEPARATOR}Room 101") so there is only one answer.`));
+          return;
+        }
+        if (!hit.asset) {
+          errors.push(at(`"${text}" isn't an asset in this inventory, so nothing can sit inside it.`));
+          return;
+        }
+        if (hit.asset.id === before) { next.parentId = before; return; }
+        setField("parentId", hit.asset.id, "Parent",
+          parentNameFor(before, assets) || UNASSIGNED_LABEL, nameOf(hit.asset, typesList),
+          relate({ from: before, to: hit.asset.id }));
+        return;
+      }
+
+      if (col.key === "person") {
+        // Only in id mode. In legacy name mode nothing writes personIds and
+        // `person` is the source of truth, so resolving to ids here would hand
+        // the asset an assignment the rest of the app cannot read — the exact
+        // shape of the v28 data loss, met from a new direction.
+        if (!usersAreAssets) {
+          const before = String(target ? target.person || "" : "");
+          const after = splitImportPeople(text).join("/");
+          if (after !== before) setField("person", after, col.label, before || "—", after || "—");
+          else next.person = before;
+          return;
+        }
+        const wanted = splitImportPeople(text);
+        const ids = [];
+        let bad = false;
+        wanted.forEach(nameText => {
+          const hits = peopleIndex.get(personMatchKey(nameText)) || [];
+          if (hits.length === 1) { if (!ids.includes(hits[0].id)) ids.push(hits[0].id); return; }
+          bad = true;
+          errors.push(at(hits.length
+            ? `"${nameText}" matches ${hits.length} people. Assign this one from the asset's own page instead.`
+            : `"${nameText}" isn't a person in this inventory.`));
+        });
+        if (bad) return;
+        const before = personLabelsOf(target || {});
+        if (before.join(",") === ids.join(",")) { next.personIds = before; return; }
+        const nameFor = id => {
+          const u = (assets || []).find(x => x.id === id);
+          return u ? nameOf(u, typesList) : "(deleted user)";
+        };
+        next.personIds = ids;
+        // `person` trails `personIds` exactly as it does on the edit path, so
+        // the legacy column stays truthful for as long as it is still written.
+        next.person = ids.map(nameFor).join("/");
+        if (target) {
+          changes.push({
+            key: "personIds", label: "User",
+            from: before.map(nameFor).join(", ") || "—",
+            to: ids.map(nameFor).join(", ") || "—",
+            related: relate({
+              unassigned: before.filter(id => !ids.includes(id)),
+              assigned: ids.filter(id => !before.includes(id)),
+            }),
+          });
+        }
+        return;
+      }
+
+      let value = text;
+      if (col.key === "peripherals") {
+        value = splitImportList(text).join("/");
+        // NOTED, NOT ADOPTED YET. A managed-list addition rides on the row
+        // actually being WRITTEN (below) -- a file whose rows all already match
+        // writes nothing, so promising to extend the list there would be a
+        // warning about a change that can never happen. It reads as a real one:
+        // Sandbox ships assets carrying peripherals its empty managed list has
+        // never heard of, so an untouched re-import listed four of them.
+        splitImportList(text).forEach(p => {
+          if (!knownPeripherals.has(p.toLowerCase())) rowPeripherals.push(p);
+        });
+      } else if (col.key === "subType") {
+        if (value && !knownSubTypes.has(value.toLowerCase())) rowSubTypes.push(value);
+      } else {
+        // The column's own data type, checked exactly as the edit form checks
+        // it. This is the path that catches a date typed into a number column
+        // or a "N/A" in a date one — neither of which any form would have let
+        // through, and both of which a spreadsheet makes easy.
+        const message = validateColumnValue(col, value);
+        if (message) { errors.push(at(message)); return; }
+        if (columnDataType(col) === "date") value = dateOnly(value);
+      }
+
+      const before = String((target && target[col.key]) || "");
+      if (value === before) { next[col.key] = target ? target[col.key] : value; return; }
+      setField(col.key, value, col.label, before, value);
+    });
+
+    // Adopted only now, and only for a row that is genuinely being written.
+    const adoptManagedValues = () => {
+      rowPeripherals.forEach(p => {
+        if (knownPeripherals.has(p.toLowerCase())) return;
+        knownPeripherals.add(p.toLowerCase());
+        plan.newPeripherals.push(p);
+      });
+      rowSubTypes.forEach(t => {
+        if (knownSubTypes.has(t.toLowerCase())) return;
+        knownSubTypes.add(t.toLowerCase());
+        plan.newSubTypes.push(t);
+      });
+    };
+
+    if (target) {
+      if (target.status === "Archived") archivedTouched++;
+      if (changes.length) { plan.updates.push({ asset: target, next, changes }); adoptManagedValues(); }
+      else plan.unchanged++;
+    } else {
+      // Left blank, a new asset takes the same suggestion the add form shows as
+      // its placeholder, rather than relying on nameOf()'s last-resort fallback
+      // (a short uuid) forever. A person type has no `name` at all.
+      if (fieldAppliesTo("name", typeId) && !String(next.name || "").trim()) {
+        next.name = suggestedNameFor(next, assets, typesList);
+      }
+      plan.creates.push({ row, next });
+      adoptManagedValues();
+    }
+  });
+
+  // PARENTAGE IS CHECKED AGAINST THE PROJECTED INVENTORY, NOT THE CURRENT ONE,
+  // and that is the only way a cycle spanning two ROWS can be seen: a file that
+  // puts A inside B and B inside A is legal on each row read alone, and each is
+  // legal against the assets as they stand right now. Checked here, once the
+  // whole file has been read, against what it would leave behind.
+  if (!errors.length) {
+    const projected = [
+      ...(assets || []).map(a => {
+        const u = plan.updates.find(x => x.asset.id === a.id);
+        return u ? u.next : a;
+      }),
+      ...plan.creates.map(c => c.next),
+    ];
+    const rowOf = new Map();
+    plan.creates.forEach(c => rowOf.set(c.next.id, c.row));
+    projected.forEach(a => {
+      const touched = plan.updates.some(u => u.next.id === a.id) || rowOf.has(a.id);
+      if (!touched) return;
+      const message = validateParentChoice(a.id, a.type, a.parentId, projected, typesList);
+      if (message) {
+        const where = rowOf.has(a.id) ? `Row ${rowOf.get(a.id)}` : describeImportAsset(a, ctx);
+        errors.push(`${where}: ${message}`);
+      }
+    });
+  }
+
+  if (plan.creates.length) {
+    warnings.push(plan.creates.length === 1
+      ? "1 row matches nothing here and will be created as a new asset."
+      : `${plan.creates.length} rows match nothing here and will be created as new assets.`);
+  }
+  if (adoptedKeys) {
+    warnings.push(`${adoptedKeys} row${adoptedKeys === 1 ? " carries an" : "s carry"} ${IMPORT_KEY_HEADER} that no asset here has. ${adoptedKeys === 1 ? "It" : "They"} will be created keeping that key — check the file is from this inventory.`);
+  }
+  if (archivedTouched) {
+    warnings.push(`${archivedTouched} of the assets this file updates ${archivedTouched === 1 ? "is" : "are"} archived.`);
+  }
+  if (plan.newPeripherals.length) {
+    warnings.push(`New peripherals will be added to the managed list: ${plan.newPeripherals.join(", ")}.`);
+  }
+  if (plan.newSubTypes.length) {
+    warnings.push(`New sub-types will be added to the managed list: ${plan.newSubTypes.join(", ")}.`);
+  }
+
+  // ALL OR NOTHING IS MADE STRUCTURAL HERE rather than left as a promise the
+  // caller keeps. The caller does refuse to apply a plan carrying errors, but a
+  // plan that still held the eleven good rows of a twelve-row file would be one
+  // forgotten guard away from importing them -- and a partial import is the
+  // thing this design exists to rule out. A refused file describes no write at
+  // all, so the plan carries none.
+  if (errors.length) {
+    plan.updates = [];
+    plan.creates = [];
+    plan.unchanged = 0;
+    plan.newPeripherals = [];
+    plan.newSubTypes = [];
+  }
+  return plan;
+}
+
 // Buckets the read-only detail view's fields into labeled sections instead of
 // one flat list. Any column not named here (custom user-added columns) falls
 // into a trailing "Custom Fields" group rather than being dropped.
@@ -2644,7 +3219,7 @@ const FRONTEND_SCRIPT_VERSION = "v40";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-21.2";
+const APP_VERSION = "2026-09-21.3";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -4288,6 +4863,20 @@ function AssetTracker() {
   const [moveTarget, setMoveTarget] = useState("");
   const [activeFilterCol, setActiveFilterCol] = useState(null);
   const [showToolbarMenu, setShowToolbarMenu] = useState(false);
+  // WHAT AN IMPORT WOULD DO, held between choosing a file and saying yes to it.
+  // `null` when no file is being reviewed; otherwise the whole plan
+  // (planAssetImport's return, plus the file's name), which is a pure
+  // description of a write that has not happened. Nothing is applied until the
+  // review's own button is pressed, so closing this modal is a complete undo.
+  const [importReview, setImportReview] = useState(null);
+  // Reading and planning the file, which needs `xlsx` fetched first — a second
+  // or two on a cold load, in front of a click that otherwise looks ignored.
+  const [importBusy, setImportBusy] = useState(false);
+  // The file input lives in the tree permanently and hidden, because a menu
+  // item cannot open a file picker on its own. Cleared after every pick, or
+  // choosing the SAME file twice in a row fires no change event the second time
+  // — which reads as the app refusing a file it accepted a moment ago.
+  const importInputRef = useRef(null);
   // Collapsed by default: contents activity is context, not the asset's own
   // history, and on a building it can be far longer than the history above it.
   const [showContentsAudit, setShowContentsAudit] = useState(false);
@@ -8259,6 +8848,149 @@ function AssetTracker() {
     persist(assets, { breakerTypes: breakerTypes.filter(t => t.id !== id) });
   }
 
+  // ---------- THE ASSETS TAB'S EXPORT, AND ITS WAY BACK IN ----------
+  // ONE SHEET OF WHAT IS CURRENTLY SHOWN, in the shape planAssetImport reads
+  // back (Eric's call, 2026-09-21). Deliberately NOT the full workbook, which
+  // the Maintenance and Audit tabs still offer: those carry resolved, derived
+  // and counted columns — Campus/Building/Room, "Comments logged", a whole
+  // audit trail — none of which can be read back in, and a file that is half
+  // round-trippable is worse than one that is wholly one thing or the other.
+  //
+  // WHAT IS SHOWN MEANS `filtered`: the hierarchy scope, every column filter,
+  // the search box and the sort, exactly as on screen. That is the whole point
+  // of the change — "fix the serials on these eleven monitors" starts by
+  // narrowing to them, and an export of all four hundred assets is not a
+  // starting point for that.
+  //
+  // EVERY COLUMN IS WRITTEN, not just the visible ones. Column visibility is a
+  // per-device reading preference; letting it decide what a file carries would
+  // make the round trip silently lossy in a way nobody would connect back to a
+  // checkbox they ticked a month ago.
+  async function exportAssetsSheet() {
+    let XLSX;
+    try {
+      XLSX = await import("xlsx");
+    } catch (e) {
+      setNotice("Couldn't load the spreadsheet export tool. Check your connection and try Export again.");
+      return;
+    }
+    const ctx = { assets, columns, typesList };
+    const rows = filtered.map(a => assetToImportRow(a, ctx));
+    // A header row even when nothing matched, so an empty result is still a
+    // template someone can type new assets into rather than an empty file.
+    const header = [IMPORT_KEY_HEADER, ...importHeadersFor(columns).map(h => h.header)];
+    const ws = rows.length
+      ? XLSX.utils.json_to_sheet(rows, { header })
+      : XLSX.utils.aoa_to_sheet([header]);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Assets");
+    // Named apart from the full workbook's "-asset-inventory", because the two
+    // land in the same downloads folder and only one of them can be imported.
+    XLSX.writeFile(wb, CLIENT.id + "-assets.xlsx");
+  }
+
+  // Reads the chosen file and works out what importing it WOULD do. Writes
+  // nothing — the review modal is what offers to.
+  async function reviewImportFile(file) {
+    if (!file) return;
+    setImportBusy(true);
+    try {
+      let XLSX;
+      try {
+        XLSX = await import("xlsx");
+      } catch (e) {
+        setNotice("Couldn't load the spreadsheet tool. Check your connection and try Import again.");
+        return;
+      }
+      let grid;
+      try {
+        const data = await file.arrayBuffer();
+        // cellDates, so a column somebody has edited in Excel arrives as a real
+        // Date rather than as the serial number 46001 — which every date field
+        // here would refuse, naming a value nobody typed.
+        const wb = XLSX.read(data, { type: "array", cellDates: true });
+        const sheetName = wb.SheetNames[0];
+        // The FIRST sheet, whatever it is called. The export writes exactly one,
+        // and insisting on the name "Assets" would refuse a file somebody had
+        // perfectly reasonably renamed.
+        grid = sheetName
+          ? XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, defval: "", raw: true, blankrows: false })
+          : null;
+      } catch (e) {
+        setNotice("That file couldn't be read as a spreadsheet. Export from the Assets tab to get one in the right shape.");
+        return;
+      }
+      if (!grid || !grid.length) {
+        setNotice("That file is empty.");
+        return;
+      }
+      const parsed = importRowsFromGrid(grid);
+      const plan = planAssetImport(parsed, {
+        assets, columns, typesList, peripheralsList, bulkItemTypes, usersAreAssets,
+      });
+      setImportReview({ ...plan, fileName: file.name || "the file" });
+    } finally {
+      setImportBusy(false);
+    }
+  }
+
+  // ONE persist() for the whole file, which is what makes "all or nothing" true
+  // of the write and not only of the validation: every save here is a full
+  // snapshot behind a revision check, so splitting an import into one save per
+  // row would be N round trips, N chances for someone else's edit to land in
+  // the middle, and a half-applied file with no way to say which half.
+  async function applyAssetImport() {
+    const plan = importReview;
+    if (!plan || plan.errors.length) return;
+    if (savingRef.current) return;
+    const stamp = new Date().toISOString();
+    const entries = [];
+    const replaced = new Map();
+    plan.updates.forEach(u => {
+      replaced.set(u.asset.id, u.next);
+      // PER FIELD, exactly as an edit through the form logs it — not one
+      // "imported" row per asset. An import moves real values, so the history
+      // has to say which ones; a single row naming the file would leave every
+      // asset's own page unable to answer what changed about it.
+      u.changes.forEach(ch => entries.push({
+        at: stamp, by: currentUser || "", assetLabel: u.asset.id,
+        assetType: u.next.type, action: "edited", field: ch.label,
+        from: ch.from || "—", to: ch.to || "—", related: ch.related || "",
+      }));
+    });
+    const created = plan.creates.map(c => c.next);
+    created.forEach(a => entries.push({
+      at: stamp, by: currentUser || "", assetLabel: a.id,
+      assetType: a.type, action: "created", related: relate({ at: a.parentId }),
+    }));
+    if (!entries.length) {
+      setImportReview(null);
+      setNotice("Nothing to import — every row already matches what's here.");
+      return;
+    }
+    // Existing assets keep their position; created ones go on the end. An
+    // import must not reorder the tab, or every row of the Assets sheet moves
+    // and the next diff of the Sheet's own version history is unreadable.
+    const nextAssets = [...(assets || []).map(a => replaced.get(a.id) || a), ...created];
+    const nextNumber = created.reduce((n, a) => {
+      const used = assetNumberFromTag(a.tag);
+      return used ? Math.max(n, used + 1) : n;
+    }, peekAssetNumber());
+    const overrides = { auditLog: logAudit(entries), nextAssetNumber: nextNumber };
+    // A value the pickers cannot offer back is the trap this avoids: an
+    // imported peripheral missing from the managed list renders as a chip no
+    // form can re-select, which reads as the field being broken.
+    if (plan.newPeripherals.length) overrides.peripheralsList = [...peripheralsList, ...plan.newPeripherals];
+    if (plan.newSubTypes.length) overrides.bulkItemTypes = [...bulkItemTypes, ...plan.newSubTypes];
+    setImportReview(null);
+    await persist(nextAssets, overrides);
+    const bits = [];
+    if (plan.updates.length) bits.push(`${plan.updates.length} updated`);
+    if (created.length) bits.push(`${created.length} created`);
+    if (plan.unchanged) bits.push(`${plan.unchanged} unchanged`);
+    setNotice(`Imported ${plan.fileName}: ${bits.join(", ")}.`);
+  }
+
   // Async ONLY because of the dynamic import below; everything after it is the
   // same synchronous workbook build it always was.
   async function exportToExcel() {
@@ -11715,6 +12447,118 @@ function AssetTracker() {
       {typesManagerModal}
       {breakerTypesManagerModal}
 
+      {/* A menu item cannot open a file picker, so the real input lives here,
+          hidden and permanently mounted. `value` is cleared on every pick —
+          without it, choosing the SAME file twice in a row fires no change
+          event the second time, which reads as the app refusing a file it
+          accepted a moment ago. */}
+      <input
+        ref={importInputRef}
+        type="file"
+        accept=".xlsx,.xls,.csv"
+        style={{ display: "none" }}
+        onChange={e => {
+          const file = e.target.files && e.target.files[0];
+          e.target.value = "";
+          reviewImportFile(file);
+        }}
+      />
+
+      {/* WHAT THE FILE WOULD DO, before it does any of it. The whole point of
+          this screen is that there is a moment between choosing a file and
+          changing the inventory — closing it is a complete undo, because
+          nothing has been written.
+
+          ERRORS AND WARNINGS ARE DIFFERENT SCREENS, not two lists with
+          different colours. An error means nothing can be imported at all
+          (Eric's call: all or nothing), so the only button is Close and the
+          file is the thing to go and fix. A warning means it WILL import and
+          here is what you might not have meant. */}
+      {importReview && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 40, padding: 16 }}>
+          <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 620, maxHeight: "90vh", display: "flex", flexDirection: "column" }}>
+            <div style={{ fontWeight: 700, marginBottom: 4, color: importReview.errors.length ? C.danger : C.brandDark }}>
+              {importReview.errors.length ? "This file can't be imported" : "Import this file?"}
+            </div>
+            <div style={{ fontSize: 12, color: C.muted, marginBottom: 14, wordBreak: "break-all" }}>{importReview.fileName}</div>
+
+            <div style={{ overflowY: "auto", minHeight: 0 }}>
+              {importReview.errors.length > 0 ? (
+                <>
+                  <div style={{ background: C.dangerSurface, border: `1px solid ${C.danger}`, borderRadius: 10, padding: "10px 12px", fontSize: 13, color: C.ink, lineHeight: 1.5, marginBottom: 12 }}>
+                    Nothing was changed. {importReview.errors.length === 1 ? "One row has" : `${importReview.errors.length} rows have`} a problem, and an
+                    import is all or nothing — fix the spreadsheet and try again.
+                  </div>
+                  <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: C.ink, lineHeight: 1.6 }}>
+                    {importReview.errors.slice(0, IMPORT_MESSAGE_LIMIT).map((m, i) => <li key={i}>{m}</li>)}
+                  </ul>
+                  {importReview.errors.length > IMPORT_MESSAGE_LIMIT && (
+                    <div style={{ fontSize: 12, color: C.muted, marginTop: 8 }}>
+                      …and {importReview.errors.length - IMPORT_MESSAGE_LIMIT} more.
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: importReview.warnings.length ? 14 : 4 }}>
+                    {[
+                      { n: importReview.updates.length, label: "to update" },
+                      { n: importReview.creates.length, label: "to create" },
+                      { n: importReview.unchanged, label: "already match" },
+                    ].map(({ n, label }) => (
+                      <div key={label} style={{ flex: "1 1 120px", border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 12px" }}>
+                        <div style={{ fontSize: 22, fontWeight: 700, color: n ? C.brandDark : C.empty }}>{n}</div>
+                        <div style={{ fontSize: 12, color: C.muted }}>{label}</div>
+                      </div>
+                    ))}
+                  </div>
+                  {importReview.warnings.length > 0 && (
+                    <>
+                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, marginBottom: 6 }}>
+                        Worth checking
+                      </div>
+                      <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: C.ink, lineHeight: 1.6 }}>
+                        {importReview.warnings.slice(0, IMPORT_MESSAGE_LIMIT).map((m, i) => <li key={i}>{m}</li>)}
+                      </ul>
+                      {importReview.warnings.length > IMPORT_MESSAGE_LIMIT && (
+                        <div style={{ fontSize: 12, color: C.muted, marginTop: 8 }}>
+                          …and {importReview.warnings.length - IMPORT_MESSAGE_LIMIT} more.
+                        </div>
+                      )}
+                    </>
+                  )}
+                  {/* Assets the file does not mention are untouched, and saying
+                      so is the single most useful sentence here: the export is
+                      FILTERED, so a ten-row file always describes a fraction of
+                      the inventory, and "will this wipe everything else?" is
+                      the first thing anyone thinks. */}
+                  <div style={{ fontSize: 12, color: C.muted, marginTop: 14, lineHeight: 1.5 }}>
+                    Assets this file doesn't mention are left exactly as they are — nothing is archived or deleted.
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18, paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
+              <button
+                onClick={() => setImportReview(null)}
+                style={{ padding: "8px 14px", borderRadius: 8, border: `1.5px solid ${C.border}`, background: C.surface, color: C.ink, fontSize: 14, cursor: "pointer" }}
+              >
+                {importReview.errors.length ? "Close" : "Cancel"}
+              </button>
+              {importReview.errors.length === 0 && (importReview.updates.length > 0 || importReview.creates.length > 0) && (
+                <button
+                  onClick={applyAssetImport}
+                  style={{ padding: "8px 14px", borderRadius: 8, border: "none", background: C.brandDark, color: C.onBrand, fontSize: 14, fontWeight: 600, cursor: "pointer" }}
+                >
+                  Import {importReview.updates.length + importReview.creates.length} asset{importReview.updates.length + importReview.creates.length === 1 ? "" : "s"}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Shown when an action was refused or could not be completed, and the
           refusal is the only evidence the click happened at all — a view-only
           save, a refused mass deletion, a write against an unconfirmed snapshot,
@@ -11893,18 +12737,38 @@ function AssetTracker() {
                     >
                       <Columns3 size={15} /> Columns
                     </button>
+                    {/* WHAT IS ON SCREEN, not the whole inventory, and one
+                        sheet rather than the workbook — because this is the
+                        file Import reads back. The Maintenance and Audit tabs
+                        still export the full workbook; see exportAssetsSheet
+                        for why the two cannot be the same file. */}
                     <button
-                      onClick={() => { setShowToolbarMenu(false); exportToExcel(); }}
+                      onClick={() => { setShowToolbarMenu(false); exportAssetsSheet(); }}
                       className="icon-btn"
                       style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
+                      title={`Exports the ${filtered.length} asset${filtered.length === 1 ? "" : "s"} shown, in a file you can edit and import back.`}
                     >
-                      <Download size={15} /> Export
+                      <Download size={15} /> Export shown
                     </button>
                     {/* Columns and Export stay available to viewers: Columns is
                         mostly per-device visibility (never persisted), and Export
-                        is a read. Add asset used to sit here and is now a button
-                        of its own below the breadcrumb, matching Maintenance's
-                        Add task / Log work — the menu holds no everyday write. */}
+                        is a read. Import is not — it writes the inventory, so it
+                        is gated like every other write, and it sits directly
+                        under the export whose file it reads.
+                        Add asset used to sit here and is now a button of its own
+                        below the breadcrumb, matching Maintenance's Add task /
+                        Log work. */}
+                    {canEdit && (
+                    <button
+                      onClick={() => { setShowToolbarMenu(false); if (importInputRef.current) importInputRef.current.click(); }}
+                      disabled={importBusy}
+                      className="icon-btn"
+                      style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: importBusy ? C.muted : C.ink, textAlign: "left", borderRadius: 6 }}
+                      title="Reads an exported sheet back in: rows update the assets they name, rows that match nothing are created. You see what it would do before anything is saved."
+                    >
+                      <Upload size={15} /> {importBusy ? "Reading\u2026" : "Import\u2026"}
+                    </button>
+                    )}
                     {/* The one-time users conversion. It lived only behind the
                         gear on the User field, which is inside the EDIT form —
                         so a setup action nobody had a reason to open an asset to

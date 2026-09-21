@@ -2947,6 +2947,151 @@ array position can't serve as identity once things move.
   `snake_case` action names: `breaker_added`, `breaker_edited`, `breaker_swapped`,
   `breaker_removed`, `circuit_added`, `circuit_edited`, `circuit_reassigned`, `circuit_removed`.
 
+
+## The Assets tab exports what is SHOWN, and reads it back (2026-09-21)
+
+Export on the Assets tab writes **one sheet of `filtered`** — the hierarchy scope, every
+column filter, the search box and the sort, exactly as on screen — in a shape **Import**
+reads back. "Fix the serials on these eleven monitors" starts by narrowing to them, and a
+dump of four hundred assets is not a starting point for that. **Frontend only: no backend
+change, no version bump, no deploy.** Nothing about what is stored moved.
+
+- **THE TWO EXPORTS ARE DIFFERENT FILES AND HAVE TO BE** (Eric's call). The Tasks and Audit
+  tabs still export the full workbook, which carries resolved, derived and counted columns —
+  Campus/Building/Room, "Comments logged", a whole audit trail — none of which can be read
+  back in. A file that is half round-trippable is worse than one that is wholly one thing or
+  the other, so the Assets sheet is the importable one and the workbook stays a report. They
+  are named apart (`<tenant>-assets.xlsx` against `<tenant>-asset-inventory.xlsx`) because
+  they land in the same downloads folder and only one of them can be imported.
+  - The cost, stated plainly: the full workbook is now only reachable from the other two
+    tabs. `test-frontend-export.js` asserts the two filenames differ, since identical ones
+    would make "which of these is the importable one" unanswerable without opening both.
+- **EVERY COLUMN IS WRITTEN, not just the visible ones.** Column visibility is a per-device
+  reading preference; letting it decide what a file carries would make the round trip
+  silently lossy in a way nobody would connect back to a checkbox ticked a month ago.
+- **`importHeadersFor(columns)` is the contract, and both halves build from it.** Two lists
+  that merely happen to agree today is how a column lands under the wrong heading later, and
+  the import then writes serials into hostnames without a word. A label is the header, and a
+  label already taken (a custom column called "Notes") falls back to the column's KEY — a
+  spreadsheet row is an object, so two identical headers mean the second silently overwrites
+  the first and that field is never exported at all.
+- **Every reference is written as the thing a person READS and resolved back on the way in**
+  — a type by name, a parent by its own full path, a user by their name. The exception is
+  **`Asset Key`, the asset's own `id`**, the one column here that is not for reading: it is
+  what makes "export, edit in Excel, import back" UPDATE rows instead of duplicating them,
+  and it survives a rename, a retag and a move, which no readable value does.
+  - **Matched by key FIRST and by tag only as a fallback**, which is the order that makes a
+    retag work at all: change the Asset ID cell of a row carrying its key and the asset is
+    RETAGGED, where matching on the tag first would make it a stranger and create a second
+    copy of it.
+- **`fullPathOf` exists because `pathOf` deliberately isn't it.** `pathOf(a)` renders the
+  chain ABOVE an asset, so the Path cell written for a child IS its parent's complete
+  address — resolving one back is a lookup, not a reconstruction. If `pathOf` ever starts
+  including the asset itself, every parent in every exported file shifts down a level and
+  the import silently re-parents the inventory; that identity is asserted directly.
+- **A parent resolves in TIERS — full path, then name, then id, then tag — and the order is
+  the whole correctness of it.** The export writes a full path, so that tier round-trips
+  exactly; the rest is for a value somebody typed by hand. **A tier maps to a LIST, never to
+  one asset**: "no match" and "two matches" are different answers, one a typo and the other
+  two rooms sharing a name, and taking the first would move equipment into the wrong
+  building with nothing on screen saying so.
+- **The User column is SLASH-joined, not the comma-joined display string.** Under the
+  "Last, First" name format one person IS "Cantrell, Aaron", so a comma-separated list of
+  people cannot be split back into people — "Aaron" and "Cantrell" both resolve to nobody.
+  Slash is already this app's stored separator for several people (the legacy `person`
+  column), so the export simply writes what is stored. **Found by a round-trip test and by
+  nothing else**: the export and the import each read perfectly well alone, it round-trips
+  under "First Last", and it only breaks once somebody changes a reading preference in the
+  account menu. Peripherals accept either separator, since no peripheral contains a comma.
+- **`personIds` are only written in id mode.** In legacy name mode nothing reads them, so
+  resolving names to ids there would hand the asset an assignment the rest of the app cannot
+  see — the v28 data loss from a new direction.
+
+### What the import refuses, and what it only warns about
+
+**ERRORS REFUSE THE WHOLE FILE** (Eric's call). A spreadsheet is edited as a whole and
+re-imported as a whole, so importing the good half leaves the inventory in a state nobody
+chose and the file on screen no longer describing what landed. **That is made STRUCTURAL
+rather than left as a promise the caller keeps**: a plan carrying errors carries no updates
+and no creates either, so a forgotten guard cannot import eleven rows of a twelve-row file.
+
+**EVERY CHECK RUNS AGAINST THE WHOLE INVENTORY, not just the rows in the file**, which is
+the other half of that call. A merge import can only see its own rows, so the collision that
+matters most — a tag in the file already worn by an asset the file does not mention — is
+invisible from inside it and would otherwise surface as a refused save long afterwards.
+
+- **It is a MERGE and never a replace**, forced by the export being FILTERED: a ten-row file
+  describes ten assets, not an inventory of ten. A row updates the asset its key names, a row
+  matching nothing creates one, and an asset the file omits is untouched. The review says so
+  in as many words, because "will this wipe everything else?" is the first thing anyone
+  thinks looking at it.
+- **REQUIRED FIELDS ARE DELIBERATELY NOT ENFORCED**, and that is not an oversight: required
+  is a FORM rule here and every bulk path bypasses it (`duplicateAsset`,
+  `convertUsersToAssets`, the toolbar actions, the Sheet's own admin import). Enforcing it
+  here alone would make a spreadsheet of forty perfectly good rows unimportable over a rule
+  none of the other bulk paths apply. A column's **data type** IS checked, through the same
+  `validateColumnValue` the edit form uses — that is the path that catches a date typed into
+  a number column, which no form would ever have let through.
+- **PARENTAGE IS CHECKED AGAINST THE PROJECTED INVENTORY, NOT THE CURRENT ONE.** A file that
+  puts A inside B and B inside A is legal on each row read alone AND legal against the assets
+  as they stand, so a per-row check cannot see it. Checked once, after the whole file is
+  read, against what it would leave behind.
+- **A file that is not an asset sheet says so ONCE.** Without that check a bank statement
+  parses into rows with no type and refuses with a hundred identical complaints instead of
+  one sentence saying what happened. `IMPORT_MESSAGE_LIMIT` caps the rest: one wrong column
+  produces a complaint per row, and a wall nobody reads scrolls the buttons off screen.
+- **A managed-list addition rides on the row actually being WRITTEN.** An unchanged row must
+  not extend `peripheralsList`, or a file whose rows all already match advertises a change it
+  can never apply — not hypothetical, since Sandbox ships an EMPTY peripherals list beside
+  assets carrying several, and an untouched re-import advertised four of them. When a row IS
+  written, its new values are adopted: an imported peripheral missing from the managed list
+  renders as a chip no form can re-select, which reads as the field being broken.
+- **A field the row's type doesn't have is a WARNING, not an error** — one sheet covers every
+  type, so a Room's row necessarily carries a blank Serial. A non-blank one is worth a word,
+  since the value is being dropped. The one silent case is a **person's Name**: the export
+  writes the composed string for readability while First/Last are the real fields and travel
+  in their own columns, so warning would fire on every person in every file.
+
+### Applying it
+
+- **ONE `persist()` for the whole file**, which is what makes all-or-nothing true of the
+  WRITE and not only of the validation: every save is a full snapshot behind a revision
+  check, so one save per row would be N round trips, N chances for someone else's edit to
+  land in the middle, and a half-applied file with no way to say which half.
+- **AUDITED PER FIELD, exactly as an edit through the form is** — not one "imported" row per
+  asset. An import moves real values, so the history has to say which ones; a single row
+  naming the file would leave every asset's own page unable to answer what changed about it.
+  A parent move carries its `related` ids, so it lands in both rooms' histories like any
+  other move.
+- **Existing assets keep their position and created ones go on the end**, or every row of the
+  Assets tab moves and the next diff of the Sheet's own version history is unreadable.
+- **Import is gated on `canEdit` and goes through `persist()`** like every other write, so
+  the view-only rule, the revision check and the failed-save recovery all apply unchanged.
+  It works in Sandbox, which is the safe place to try it.
+- **The review modal is a moment, not a progress bar.** Closing it is a complete undo,
+  because nothing has been written. Errors and warnings are different SCREENS rather than
+  two lists in different colours: an error means nothing can be imported at all, so the only
+  button is Close and the file is the thing to go and fix.
+- **The file input is permanently mounted and hidden**, since a menu item cannot open a file
+  picker, and its `value` is cleared on every pick — without that, choosing the same file
+  twice in a row fires no change event the second time, which reads as the app refusing a
+  file it accepted a moment ago.
+
+Covered by `test-frontend-import.js`, which runs the REAL registry, field rules, naming and
+validation against a fixture shaped like an inventory — two rooms sharing a name, a
+parentless room whose whole address is also a name, a device with TWO people on it, a
+user-created type with a uuid id. Verified by mutation that 22 silent failures fail it, among
+them the comma-joined User column, the tier order reversed, the whole-inventory tag check
+dropped, a bad row no longer discarding the good ones, the loop check run against the current
+assets, and an unchanged row extending the managed list. **Three mutations initially survived
+and each named a missing fixture shape rather than a missing assertion** — one person on a
+device cannot show a separator a name can contain, a unique-named room cannot tell the path
+tier from the name tier, and two rows that already cycle today cannot show a cross-row cycle.
+`test-frontend-export.js` scans BOTH export functions for dead references now, which it has
+to: the new one was written by copying the shape of the old, and a bare identifier is only
+resolved when the line RUNS. The browser half — the menu, the download, the review modal,
+applying, and the audit rows that follow — was driven in Chromium against Sandbox.
+
 ## Known constraints / things to watch
 
 **Nothing here records what is deployed, or what is on a live Sheet.** Both are one
