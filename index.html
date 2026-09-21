@@ -2644,7 +2644,7 @@ const FRONTEND_SCRIPT_VERSION = "v40";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-20.2";
+const APP_VERSION = "2026-09-21.1";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -4090,9 +4090,17 @@ function AssetTracker() {
   const [newVendorName, setNewVendorName] = useState("");
   const [allocationDraft, setAllocationDraft] = useState({ roomId: "", quantity: "", error: "" });
   const [confirmAllocationRemove, setConfirmAllocationRemove] = useState(null);
+  // The draft behind the task dialog, filled by BOTH modes -- `id` is the item
+  // the dialog acts on, minted on open in add mode so a photo can name the task
+  // while the form is still being filled in.
   const [maintenanceDraft, setMaintenanceDraft] = useState({ id: "", kind: TASK_KIND_SCHEDULED, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, dueDate: "", lastPerformed: "", owner: "" });
-  const [editingMaintenanceId, setEditingMaintenanceId] = useState(null);
-  const [maintenanceEditDraft, setMaintenanceEditDraft] = useState(null);
+  // null when closed; { mode: "add" } or { mode: "edit", itemId }. ONE dialog
+  // for both, the shape changeModal already uses and for the same reason: a
+  // separate edit form is a second copy of the same fields to keep in step, and
+  // this file has been bitten by that before. It replaced an inline edit form
+  // that lived in the asset's own card list -- which is why a task opened from
+  // the site-wide list had nowhere to be edited at all.
+  const [maintenanceModal, setMaintenanceModal] = useState(null);
   const [confirmMaintenanceDelete, setConfirmMaintenanceDelete] = useState(null);
   // v34: null when closed; otherwise the completion form for ONE maintenance
   // item -- { itemId, date, changeType, vendor, cost, note, error }. One object
@@ -4106,7 +4114,6 @@ function AssetTracker() {
   // is this due" and "what has been done to it" from two different places made
   // the link between them invisible.
   const [maintenanceSubTab, setMaintenanceSubTab] = useState("scheduled");
-  const [showMaintenanceAdd, setShowMaintenanceAdd] = useState(false);
   // Whether the asset's Tasks tab also lists its finished one-offs. Per-view
   // and deliberately not persisted -- it is the card list's answer to the
   // site-wide table's "Open" status filter, not a preference.
@@ -5952,15 +5959,17 @@ function AssetTracker() {
     setConfirmArchive(null);
     setAllocationDraft({ roomId: "", quantity: "", error: "" });
     setConfirmAllocationRemove(null);
-    setMaintenanceDraft({ id: crypto.randomUUID(), task: "", frequency: MAINTENANCE_FREQUENCIES[1].label, lastPerformed: "", owner: "" });
-    setEditingMaintenanceId(null);
-    setMaintenanceEditDraft(null);
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_SCHEDULED, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, dueDate: "", lastPerformed: "", owner: "" });
     setConfirmMaintenanceDelete(null);
     setMaintenanceCompleteModal(null);
     setOpenMaintenanceHistory(null);
     setMaintenanceSubTab(wantedSub);
-    setShowMaintenanceAdd(false);
+    setMaintenanceModal(null);
     setChangeModal(null);
+    // Every dialog here is closed on arrival, so the asset they would have
+    // written to has to be cleared with them -- a value left over from a dialog
+    // opened on the main page would silently outlive its dialog.
+    setWorkDialogAssetId(null);
     setSwapModal(null);
     setMoveCircuitModal(null);
     setBreakerModal(null);
@@ -7125,7 +7134,34 @@ function AssetTracker() {
     // Minted on OPEN so a photo can name this schedule while the form is still
     // being filled in -- the same rule openChangeAdd follows.
     setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_SCHEDULED, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, dueDate: "", lastPerformed: "", owner: "" });
-    setShowMaintenanceAdd(true);
+    setMaintenanceModal({ mode: "add" });
+  }
+
+  // Open one existing task in that same dialog. `assetId` follows the rule every
+  // work-dialog opener follows: omitted means the asset that is open (the detail
+  // card's pencil), and the site-wide Tasks table passes the row's own asset,
+  // because on the main page there is no open asset to fall back to.
+  //
+  // The draft's id is the ITEM's id, not a fresh one -- the dialog's gallery is
+  // keyed on it, so minting one here would show an empty gallery and file the
+  // next photo against a task that does not exist.
+  function openMaintenanceEdit(itemId, assetId) {
+    const ownerId = assetId === undefined || assetId === null ? selectedId : assetId;
+    const asset = assets ? assets.find(a => a.id === ownerId) : null;
+    const item = asset ? (asset.maintenanceItems || []).find(m => m && m.id === itemId) : null;
+    if (!item) return;
+    setWorkDialogAssetId(assetId === undefined ? null : assetId);
+    setMaintenanceDraft({
+      id: item.id,
+      kind: taskKindOf(item),
+      task: item.task,
+      notes: item.notes || "",
+      frequency: item.frequencyLabel || MAINTENANCE_FREQUENCIES[1].label,
+      dueDate: dateOnly(item.dueDate),
+      lastPerformed: dateOnly(item.lastPerformed),
+      owner: item.owner || "",
+    });
+    setMaintenanceModal({ mode: "edit", itemId });
   }
 
   async function addMaintenanceItem() {
@@ -7157,39 +7193,22 @@ function AssetTracker() {
     const next = assets.map(a => (a.id === workTargetId ? { ...a, maintenanceItems: [...(a.maintenanceItems || []), item] } : a));
     await persist(next, { columns });
     setMaintenanceDraft({ id: crypto.randomUUID(), kind: maintenanceDraft.kind, task: "", notes: "", frequency: freq.label, dueDate: "", lastPerformed: "", owner: "" });
-    setShowMaintenanceAdd(false);
-  }
-
-  function startEditMaintenance(itemId) {
-    const item = (selectedAsset.maintenanceItems || []).find(m => m && m.id === itemId);
-    if (!item) return;
-    setMaintenanceEditDraft({
-      kind: taskKindOf(item),
-      task: item.task,
-      notes: item.notes || "",
-      frequency: item.frequencyLabel || MAINTENANCE_FREQUENCIES[1].label,
-      dueDate: dateOnly(item.dueDate),
-      lastPerformed: dateOnly(item.lastPerformed),
-      owner: item.owner || "",
-    });
-    setEditingMaintenanceId(itemId);
-  }
-
-  function cancelEditMaintenance() {
-    setEditingMaintenanceId(null);
-    setMaintenanceEditDraft(null);
+    setMaintenanceModal(null);
   }
 
   // Mutating an existing schedule (unlike adding one) loses the prior value, so
   // it's logged field-by-field — same approach as the main asset edit diff.
   async function saveMaintenanceEdit() {
     if (savingRef.current) return; // double-submit guard, see savingRef
-    if (!maintenanceEditDraft.task.trim() || !selectedAsset) return;
-    const items = selectedAsset.maintenanceItems || [];
-    const original = items.find(m => m && m.id === editingMaintenanceId);
-    if (!original) { cancelEditMaintenance(); return; }
-    const oneOff = maintenanceEditDraft.kind === TASK_KIND_ONEOFF;
-    const freq = MAINTENANCE_FREQUENCIES.find(f => f.label === maintenanceEditDraft.frequency) || MAINTENANCE_FREQUENCIES[1];
+    // workTarget, not selectedAsset: the dialog is reachable from the site-wide
+    // Tasks table, where no asset is open and the row's own asset is the one
+    // being written to.
+    if (!maintenanceDraft.task.trim() || !workTarget || !maintenanceModal) return;
+    const items = workTarget.maintenanceItems || [];
+    const original = items.find(m => m && m.id === maintenanceModal.itemId);
+    if (!original) { setMaintenanceModal(null); return; }
+    const oneOff = maintenanceDraft.kind === TASK_KIND_ONEOFF;
+    const freq = MAINTENANCE_FREQUENCIES.find(f => f.label === maintenanceDraft.frequency) || MAINTENANCE_FREQUENCIES[1];
     const updated = {
       ...original,
       // Always written, never left to the blank-means-scheduled default: an
@@ -7197,20 +7216,20 @@ function AssetTracker() {
       // dueDate under a kind that still read as "scheduled", and taskDueDate
       // would keep deriving from an interval the form had just cleared.
       kind: oneOff ? TASK_KIND_ONEOFF : TASK_KIND_SCHEDULED,
-      task: maintenanceEditDraft.task.trim(),
-      notes: (maintenanceEditDraft.notes || "").trim(),
+      task: maintenanceDraft.task.trim(),
+      notes: (maintenanceDraft.notes || "").trim(),
       frequencyLabel: oneOff ? "" : freq.label,
       frequencyDays: oneOff ? "" : freq.days,
-      dueDate: oneOff ? (maintenanceEditDraft.dueDate || "") : "",
+      dueDate: oneOff ? (maintenanceDraft.dueDate || "") : "",
       // Clearing this on a one-off is how a finished job is REOPENED -- there
       // is no separate done flag to unset, and the change is audited below
       // like any other field edit.
-      lastPerformed: maintenanceEditDraft.lastPerformed || "",
-      owner: maintenanceEditDraft.owner.trim(),
+      lastPerformed: maintenanceDraft.lastPerformed || "",
+      owner: maintenanceDraft.owner.trim(),
     };
     const mkEntry = (field, from, to) => ({
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId,
-      assetType: selectedAsset.type, action: "maintenance_edited", field: `${original.task} — ${field}`, from, to,
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: workTargetId,
+      assetType: workTarget.type, action: "maintenance_edited", field: `${original.task} — ${field}`, from, to,
     });
     const entries = [];
     const kindWord = k => (k === TASK_KIND_ONEOFF ? "One-off" : "Scheduled");
@@ -7230,9 +7249,9 @@ function AssetTracker() {
       entries.push(mkEntry(dateField, formatDateOnly(original.lastPerformed) || "—", formatDateOnly(updated.lastPerformed) || "—"));
     }
     const nextItems = items.map(it => (it && it.id === original.id ? updated : it));
-    const next = assets.map(a => (a.id === selectedId ? { ...a, maintenanceItems: nextItems } : a));
+    const next = assets.map(a => (a.id === workTargetId ? { ...a, maintenanceItems: nextItems } : a));
     await persist(next, { auditLog: entries.length ? logAudit(entries) : auditLog });
-    cancelEditMaintenance();
+    setMaintenanceModal(null);
   }
 
   // Completing a maintenance item (v34). This replaced a one-click "Mark done
@@ -7244,7 +7263,12 @@ function AssetTracker() {
   // The form opens PREFILLED, so a routine filter clean is still one click: the
   // date is today and the work type is Maintenance where that type exists. The
   // fields are simply there for the visit that had something worth recording.
-  function openMaintenanceComplete(itemId) {
+  // `assetId` follows the same rule as every other work-dialog opener: omitted
+  // means the open asset, and the task dialog passes its own (which is null on
+  // the detail page and the row's asset on the site-wide table) straight back
+  // through, so completing from inside it cannot retarget the write.
+  function openMaintenanceComplete(itemId, assetId) {
+    setWorkDialogAssetId(assetId === undefined ? null : assetId);
     setMaintenanceCompleteModal({
       itemId,
       date: localDateString(),
@@ -7264,9 +7288,9 @@ function AssetTracker() {
   // reasoning as saveBreakerUnit and the type editor's name+settings.
   async function submitMaintenanceComplete() {
     if (savingRef.current) return; // double-submit guard, see savingRef
-    if (!maintenanceCompleteModal || !selectedAsset) return;
+    if (!maintenanceCompleteModal || !workTarget) return;
     const { itemId, date, changeType, vendor, cost, note } = maintenanceCompleteModal;
-    const items = selectedAsset.maintenanceItems || [];
+    const items = workTarget.maintenanceItems || [];
     const item = items.find(m => m && m.id === itemId);
     if (!item) return;
     if (!date) {
@@ -7295,7 +7319,7 @@ function AssetTracker() {
       maintenanceId: item.id || "",
     };
     const entry = {
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId, assetType: selectedAsset.type,
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: workTargetId, assetType: workTarget.type,
       action: "maintenance_completed", field: item.task,
       // `to` is the chosen date, not always today -- back-dating a completion is
       // the point of the date field, and an audit row claiming today would be a
@@ -7303,7 +7327,7 @@ function AssetTracker() {
       from: item.lastPerformed ? formatDateOnly(item.lastPerformed) : "never", to: formatDateOnly(date),
     };
     const next = assets.map(a => (
-      a.id === selectedId
+      a.id === workTargetId
         ? { ...a, maintenanceItems: nextItems, changes: [...(a.changes || []), change] }
         : a
     ));
@@ -7312,22 +7336,30 @@ function AssetTracker() {
     // change or a comment. An audit row on top would say the same thing twice.
     await persist(next, { auditLog: logAudit([entry]) });
     setMaintenanceCompleteModal(null);
+    // And the task dialog with it, when the completion was logged from inside
+    // one. Leaving it open would leave a draft holding the PREVIOUS
+    // lastPerformed on screen, and its Save would write that back over the
+    // completion just logged -- silently, since the form looks untouched.
+    setMaintenanceModal(null);
   }
 
   async function deleteMaintenanceItem(itemId) {
     if (savingRef.current) return; // double-submit guard, see savingRef
-    if (!selectedAsset) return;
-    const items = selectedAsset.maintenanceItems || [];
+    if (!workTarget) return;
+    const items = workTarget.maintenanceItems || [];
     const item = items.find(m => m && m.id === itemId);
     if (!item) { setConfirmMaintenanceDelete(null); return; }
     const nextItems = items.filter(m => !m || m.id !== itemId);
-    const next = assets.map(a => (a.id === selectedId ? { ...a, maintenanceItems: nextItems } : a));
+    const next = assets.map(a => (a.id === workTargetId ? { ...a, maintenanceItems: nextItems } : a));
     const entry = {
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId,
-      assetType: selectedAsset.type, action: "maintenance_removed", field: item.task,
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: workTargetId,
+      assetType: workTarget.type, action: "maintenance_removed", field: item.task,
     };
     await persist(next, { auditLog: logAudit([entry]) });
     setConfirmMaintenanceDelete(null);
+    // Deleting from inside the task dialog leaves it open over a record that no
+    // longer exists, which renders as an empty form.
+    setMaintenanceModal(null);
   }
 
   // ---------- Breakers / Circuits (Electrical Panel assets only) ----------
@@ -9606,15 +9638,66 @@ function AssetTracker() {
               </div>
             </div>
           )}
-          {/* Add a maintenance schedule -- the same fields as the form this
-              replaced, moved into a dialog. */}
-          {showMaintenanceAdd && (
+          {/* ONE dialog for adding a task and for opening an existing one. The
+              edit half replaced an inline form inside the asset's own card
+              list, which is why a task tapped on the site-wide Tasks table had
+              to navigate to its asset before it could be touched at all -- the
+              row now opens the task itself, and the asset is a link inside it.
+              A second copy of these fields is what this shape exists to avoid;
+              changeModal took it first, for the same reason. */}
+          {maintenanceModal && (() => {
+            const editing = maintenanceModal.mode === "edit";
+            // The stored record behind an edit. The draft holds what is being
+            // typed; this is what is on the sheet, and it is what the status,
+            // the dates and the completion button read.
+            const taskItem = editing && workTarget
+              ? (workTarget.maintenanceItems || []).find(m => m && m.id === maintenanceModal.itemId)
+              : null;
+            if (editing && !taskItem) return null;
+            const taskDone = taskItem ? taskIsDone(taskItem) : false;
+            const taskStatusMeta = taskItem ? maintenanceStatusMeta(maintenanceStatusOf(taskItem)) : null;
+            // Only ever shown for a dialog opened somewhere OTHER than the
+            // asset's own page -- workDialogAssetId is null exactly when the
+            // asset is already open, where a link to it would lead nowhere.
+            const linkAsset = editing && workDialogAssetId !== null ? workTarget : null;
+            const LinkAssetIcon = linkAsset ? iconFor(linkAsset.type) : null;
+            // This item's own service history, newest first. Read off the
+            // target asset rather than changesByMaintenance, which is built
+            // from the OPEN asset and is empty on the main page.
+            const taskHistory = taskItem
+              ? (workTarget.changes || []).filter(c => c && c.maintenanceId === taskItem.id)
+                  .sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")))
+              : [];
+            return (
             <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20, padding: 16 }}>
               <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 520, maxHeight: "90vh", overflowY: "auto" }}>
-                <div style={{ fontWeight: 700, marginBottom: 16, color: C.brandDark }}>
-                  {maintenanceDraft.kind === TASK_KIND_ONEOFF ? "Add one-off task" : "Add scheduled task"}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, marginBottom: 16 }}>
+                  <div style={{ fontWeight: 700, color: C.brandDark }}>
+                    {editing
+                      ? (maintenanceDraft.kind === TASK_KIND_ONEOFF ? "One-off task" : "Scheduled task")
+                      : (maintenanceDraft.kind === TASK_KIND_ONEOFF ? "Add one-off task" : "Add scheduled task")}
+                  </div>
+                  {taskStatusMeta && (
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: taskStatusMeta.color, flexShrink: 0 }}>
+                      {taskStatusMeta.label}
+                    </span>
+                  )}
                 </div>
-                  {workDialogAssetId !== null && (
+                {/* The way out to the asset. Optional by design: the task is
+                    what was tapped, and the asset is one tap further only if
+                    it is wanted. It closes the dialog first, or the app would
+                    navigate underneath an open form. */}
+                {linkAsset && (
+                  <button
+                    onClick={() => { setMaintenanceModal(null); openDetail(linkAsset, "maintenance"); }}
+                    style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", padding: "8px 10px", marginBottom: 12, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 13, fontWeight: 600, color: C.brandDark, cursor: "pointer", textAlign: "left" }}
+                  >
+                    <LinkAssetIcon size={14} style={{ flexShrink: 0, color: C.brand }} />
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{nameOf(linkAsset)}</span>
+                    <ChevronRight size={14} style={{ marginLeft: "auto", flexShrink: 0, color: C.muted }} />
+                  </button>
+                )}
+                  {workDialogAssetId !== null && !editing && (
                   <div style={{ marginBottom: 12 }}>
                     <AssetPickerField
                       label="Asset"
@@ -9657,6 +9740,7 @@ function AssetTracker() {
                     />
                   </label>
                   {maintenanceDraft.kind === TASK_KIND_ONEOFF ? (
+                    <>
                     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Due date</span>
                       <input
@@ -9670,6 +9754,27 @@ function AssetTracker() {
                           rather than being refused. */}
                       <span style={{ fontSize: 11, color: C.placeholder }}>Optional</span>
                     </label>
+                    {/* Editing only: a task being created has no completion to
+                        record, and offering the field would invite someone to
+                        log a job as done in the act of adding it.
+
+                        Clearing this REOPENS a finished job. There is no done
+                        flag to unset -- the date is the whole of "is this
+                        done" -- so the field that records the completion is
+                        also the control that undoes it. */}
+                    {editing && (
+                    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Completed</span>
+                      <input
+                        type="date"
+                        value={maintenanceDraft.lastPerformed}
+                        onChange={e => setMaintenanceDraft({ ...maintenanceDraft, lastPerformed: e.target.value })}
+                        style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                      />
+                      <span style={{ fontSize: 11, color: C.placeholder }}>Clear to reopen</span>
+                    </label>
+                    )}
+                    </>
                   ) : (
                     <>
                       <PickerField
@@ -9715,19 +9820,179 @@ function AssetTracker() {
                     emptyText="No files on this task."
                   />
                 </div>
-                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
-                  <button onClick={() => setShowMaintenanceAdd(false)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                {/* What has actually been done, read-only. A completion logged
+                    from here lands in it, so the dialog answers "is this due?"
+                    without having to leave for the asset's own card. */}
+                {taskHistory.length > 0 && (
+                  <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 8 }}>
+                      Service history ({taskHistory.length})
+                      {taskHistory.reduce((sum, c) => sum + (parseFloat(c.cost) || 0), 0) > 0 && (
+                        <span style={{ color: C.placeholder, fontWeight: 500 }}>
+                          {" · $" + taskHistory.reduce((sum, c) => sum + (parseFloat(c.cost) || 0), 0).toFixed(2)}
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8, borderLeft: `2px solid ${C.border}`, paddingLeft: 12 }}>
+                      {taskHistory.map((ch, hi) => (
+                        <div key={ch.id || hi}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+                            <span style={{ fontWeight: 600, fontSize: 12, color: C.brandDark }}>{ch.changeType}</span>
+                            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: C.placeholder, flexShrink: 0 }}>{formatDateOnly(changePerformedOn(ch))}</span>
+                          </div>
+                          <div style={{ fontSize: 12, color: C.muted }}>
+                            {[ch.vendor, ch.cost && `$${parseFloat(ch.cost).toFixed(2)}`, ch.by].filter(Boolean).join(" · ") || "—"}
+                          </div>
+                          {ch.note && <div style={{ fontSize: 13, color: C.ink, whiteSpace: "pre-wrap", marginTop: 2 }}>{ch.note}</div>}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "flex-end", marginTop: 16, flexWrap: "wrap" }}>
+                  {/* Delete sits at the far left, away from Save, and still goes
+                      through its own confirmation. */}
+                  {editing && (
+                    <button
+                      onClick={() => setConfirmMaintenanceDelete(maintenanceModal.itemId)}
+                      style={{ marginRight: "auto", padding: "8px 12px", background: "transparent", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.danger, cursor: "pointer" }}
+                    >
+                      Delete
+                    </button>
+                  )}
+                  {/* Hidden on a finished one-off, for the reason the card's own
+                      button is: there is nothing left to complete, and offering
+                      it would read as a way to log a SECOND completion of a job
+                      that happens once. */}
+                  {editing && !taskDone && (
+                    <button
+                      onClick={() => openMaintenanceComplete(maintenanceModal.itemId, workDialogAssetId)}
+                      style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brand}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.brand }}
+                    >
+                      {maintenanceDraft.kind === TASK_KIND_ONEOFF ? "Mark complete…" : "Log completion…"}
+                    </button>
+                  )}
+                  <button onClick={() => setMaintenanceModal(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                   <button
-                    onClick={addMaintenanceItem}
+                    onClick={editing ? saveMaintenanceEdit : addMaintenanceItem}
                     disabled={!maintenanceDraft.task.trim() || !workTarget}
                     style={{ padding: "8px 14px", background: (maintenanceDraft.task.trim() && workTarget) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                   >
-                    {maintenanceDraft.kind === TASK_KIND_ONEOFF ? "Add task" : "Schedule"}
+                    {editing ? "Save changes" : (maintenanceDraft.kind === TASK_KIND_ONEOFF ? "Add task" : "Schedule")}
+                  </button>
+                </div>
+              </div>
+            </div>
+            );
+          })()}
+
+          {/* Both of these render HERE, not in the detail view, for the reason
+              the work dialogs do: the task dialog above is reachable from the
+              site-wide Tasks table, so a confirmation or a completion form it
+              opens has to be reachable from there too. Rendered after it, so a
+              confirmation lands on top of the dialog that raised it. */}
+          {confirmMaintenanceDelete !== null && (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20 }}>
+              <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 340 }}>
+                <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Delete this task?</div>
+                <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>This can't be undone.</div>
+                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                  <button onClick={() => setConfirmMaintenanceDelete(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                  <button
+                    onClick={() => deleteMaintenanceItem(confirmMaintenanceDelete)}
+                    style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  >
+                    {"Delete"}
                   </button>
                 </div>
               </div>
             </div>
           )}
+
+          {/* v34: the maintenance completion form. Opens prefilled, so a routine
+              filter clean is still effectively one click -- but the fields that
+              used to have nowhere to go (what it cost, who did it, what they
+              found) are right here, and what gets written is linked back to the
+              schedule rather than floating loose in the work history. */}
+          {maintenanceCompleteModal && (() => {
+            // workTarget, not selectedAsset: this is reachable from the main page,
+            // where the asset comes from the row rather than from the open one.
+            const item = ((workTarget && workTarget.maintenanceItems) || []).find(m => m && m.id === maintenanceCompleteModal.itemId);
+            if (!item) return null;
+            const set = patch => setMaintenanceCompleteModal({ ...maintenanceCompleteModal, ...patch, error: "" });
+            return (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20, padding: 16 }}>
+              <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 520, maxHeight: "90vh", overflowY: "auto" }}>
+                <div style={{ fontWeight: 700, marginBottom: 4, color: C.brandDark }}>Log completion</div>
+                <div style={{ fontSize: 13, color: C.muted, marginBottom: 16 }}>
+                  {item.task}
+                  {item.lastPerformed ? ` · last done ${formatDateOnly(item.lastPerformed)}` : " · never performed"}
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Date performed</span>
+                    <input
+                      type="date"
+                      value={maintenanceCompleteModal.date}
+                      onChange={e => set({ date: e.target.value })}
+                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                    />
+                  </label>
+                  <PickerField
+                    label="Work type"
+                    value={maintenanceCompleteModal.changeType}
+                    onChange={v => set({ changeType: v })}
+                    options={["", ...changeTypes]}
+                    labelForOption={t => t || "Select…"}
+                    onManage={() => setShowChangeTypeManager(true)}
+                    manageLabel="Manage work types"
+                    title="Select work type"
+                  />
+                  <PickerField
+                    label="Vendor"
+                    value={maintenanceCompleteModal.vendor}
+                    onChange={v => set({ vendor: v })}
+                    options={["", ...(maintenanceCompleteModal.vendor && !vendors.includes(maintenanceCompleteModal.vendor) ? [maintenanceCompleteModal.vendor, ...vendors] : vendors)]}
+                    labelForOption={v => v || (vendors.length ? "Select…" : "No vendors yet")}
+                    onManage={() => setShowVendorManager(true)}
+                    manageLabel="Manage vendors"
+                    title="Select vendor"
+                  />
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Cost</span>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      value={maintenanceCompleteModal.cost}
+                      onChange={e => set({ cost: e.target.value })}
+                      placeholder="0.00"
+                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                    />
+                  </label>
+                </div>
+                <textarea
+                  value={maintenanceCompleteModal.note}
+                  onChange={e => set({ note: e.target.value })}
+                  placeholder="What was done, what was found…"
+                  rows={3}
+                  style={{ width: "100%", padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, resize: "vertical", color: C.ink }}
+                />
+                {maintenanceCompleteModal.error && (
+                  <div style={{ color: C.danger, fontSize: 13, marginTop: 8 }}>{maintenanceCompleteModal.error}</div>
+                )}
+                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
+                  <button onClick={() => setMaintenanceCompleteModal(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                  <button
+                    onClick={submitMaintenanceComplete}
+                    style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                  >
+                    {"Log completion"}
+                  </button>
+                </div>
+              </div>
+            </div>
+            );
+          })()}
 
           {/* Full-size viewer, rendered from renderWorkDialogs so BOTH views
               reach it -- the same reason the work dialogs live here. It was
@@ -10478,102 +10743,6 @@ function AssetTracker() {
                     const statusMeta = maintenanceStatusMeta(status);
                     const oneOff = isOneOffTask(item);
                     const done = status === "done";
-                    if (editingMaintenanceId === item.id) {
-                      return (
-                        <div key={item.id} style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)" }}>
-                          <TaskKindToggle
-                            value={maintenanceEditDraft.kind}
-                            onChange={k => setMaintenanceEditDraft({ ...maintenanceEditDraft, kind: k })}
-                          />
-                          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
-                            <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
-                              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Task</span>
-                              <input
-                                value={maintenanceEditDraft.task}
-                                onChange={e => setMaintenanceEditDraft({ ...maintenanceEditDraft, task: e.target.value })}
-                                style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                              />
-                            </label>
-                            <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
-                              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Notes</span>
-                              <textarea
-                                value={maintenanceEditDraft.notes}
-                                onChange={e => setMaintenanceEditDraft({ ...maintenanceEditDraft, notes: e.target.value })}
-                                rows={2}
-                                style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, fontFamily: "inherit", resize: "vertical" }}
-                              />
-                            </label>
-                            {maintenanceEditDraft.kind === TASK_KIND_ONEOFF ? (
-                              <>
-                                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Due date</span>
-                                  <input
-                                    type="date"
-                                    value={maintenanceEditDraft.dueDate}
-                                    onChange={e => setMaintenanceEditDraft({ ...maintenanceEditDraft, dueDate: e.target.value })}
-                                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                                  />
-                                </label>
-                                {/* Clearing this REOPENS a finished job. There
-                                    is no done flag to unset -- the date is the
-                                    whole of "is this done" -- so the field that
-                                    records the completion is also the control
-                                    that undoes it. */}
-                                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Completed</span>
-                                  <input
-                                    type="date"
-                                    value={maintenanceEditDraft.lastPerformed}
-                                    onChange={e => setMaintenanceEditDraft({ ...maintenanceEditDraft, lastPerformed: e.target.value })}
-                                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                                  />
-                                  <span style={{ fontSize: 11, color: C.placeholder }}>Clear to reopen</span>
-                                </label>
-                              </>
-                            ) : (
-                              <>
-                                <PickerField
-                                  label="Frequency"
-                                  value={maintenanceEditDraft.frequency}
-                                  onChange={v => setMaintenanceEditDraft({ ...maintenanceEditDraft, frequency: v })}
-                                  options={MAINTENANCE_FREQUENCIES.map(f => f.label)}
-                                  title="Select frequency"
-                                />
-                                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Last performed</span>
-                                  <input
-                                    type="date"
-                                    value={maintenanceEditDraft.lastPerformed}
-                                    onChange={e => setMaintenanceEditDraft({ ...maintenanceEditDraft, lastPerformed: e.target.value })}
-                                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                                  />
-                                </label>
-                              </>
-                            )}
-                            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Owner</span>
-                              <input
-                                value={maintenanceEditDraft.owner}
-                                onChange={e => setMaintenanceEditDraft({ ...maintenanceEditDraft, owner: e.target.value })}
-                                style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                              />
-                            </label>
-                          </div>
-                          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-                            <button
-                              onClick={saveMaintenanceEdit}
-                              disabled={!maintenanceEditDraft.task.trim()}
-                              style={{ padding: "8px 14px", background: (maintenanceEditDraft.task.trim()) ? C.success : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
-                            >
-                              {"Save"}
-                            </button>
-                            <button onClick={cancelEditMaintenance} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
-                              Cancel
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    }
                     return (
                       <div key={item.id} style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px" }}>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4, gap: 8 }}>
@@ -10584,7 +10753,7 @@ function AssetTracker() {
                             </span>
                             {canEdit && (
                             <>
-                            <button onClick={() => startEditMaintenance(item.id)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Edit maintenance item ${item.task}`}>
+                            <button onClick={() => openMaintenanceEdit(item.id)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Edit maintenance item ${item.task}`}>
                               <Pencil size={14} color={C.muted} />
                             </button>
                             <button onClick={() => setConfirmMaintenanceDelete(item.id)} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4 }} aria-label={`Delete maintenance item ${item.task}`}>
@@ -11041,107 +11210,6 @@ function AssetTracker() {
             </div>
           </div>
         )}
-
-        {confirmMaintenanceDelete !== null && (
-          <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20 }}>
-            <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 340 }}>
-              <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Delete this maintenance schedule?</div>
-              <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>This can't be undone.</div>
-              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-                <button onClick={() => setConfirmMaintenanceDelete(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
-                <button
-                  onClick={() => deleteMaintenanceItem(confirmMaintenanceDelete)}
-                  style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
-                >
-                  {"Delete"}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* v34: the maintenance completion form. Opens prefilled, so a routine
-            filter clean is still effectively one click -- but the fields that
-            used to have nowhere to go (what it cost, who did it, what they
-            found) are right here, and what gets written is linked back to the
-            schedule rather than floating loose in the work history. */}
-        {maintenanceCompleteModal && (() => {
-          const item = (selectedAsset.maintenanceItems || []).find(m => m && m.id === maintenanceCompleteModal.itemId);
-          if (!item) return null;
-          const set = patch => setMaintenanceCompleteModal({ ...maintenanceCompleteModal, ...patch, error: "" });
-          return (
-          <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20, padding: 16 }}>
-            <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 520, maxHeight: "90vh", overflowY: "auto" }}>
-              <div style={{ fontWeight: 700, marginBottom: 4, color: C.brandDark }}>Log completion</div>
-              <div style={{ fontSize: 13, color: C.muted, marginBottom: 16 }}>
-                {item.task}
-                {item.lastPerformed ? ` · last done ${formatDateOnly(item.lastPerformed)}` : " · never performed"}
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
-                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Date performed</span>
-                  <input
-                    type="date"
-                    value={maintenanceCompleteModal.date}
-                    onChange={e => set({ date: e.target.value })}
-                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                  />
-                </label>
-                <PickerField
-                  label="Work type"
-                  value={maintenanceCompleteModal.changeType}
-                  onChange={v => set({ changeType: v })}
-                  options={["", ...changeTypes]}
-                  labelForOption={t => t || "Select…"}
-                  onManage={() => setShowChangeTypeManager(true)}
-                  manageLabel="Manage work types"
-                  title="Select work type"
-                />
-                <PickerField
-                  label="Vendor"
-                  value={maintenanceCompleteModal.vendor}
-                  onChange={v => set({ vendor: v })}
-                  options={["", ...(maintenanceCompleteModal.vendor && !vendors.includes(maintenanceCompleteModal.vendor) ? [maintenanceCompleteModal.vendor, ...vendors] : vendors)]}
-                  labelForOption={v => v || (vendors.length ? "Select…" : "No vendors yet")}
-                  onManage={() => setShowVendorManager(true)}
-                  manageLabel="Manage vendors"
-                  title="Select vendor"
-                />
-                <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Cost</span>
-                  <input
-                    type="number"
-                    inputMode="decimal"
-                    value={maintenanceCompleteModal.cost}
-                    onChange={e => set({ cost: e.target.value })}
-                    placeholder="0.00"
-                    style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                  />
-                </label>
-              </div>
-              <textarea
-                value={maintenanceCompleteModal.note}
-                onChange={e => set({ note: e.target.value })}
-                placeholder="What was done, what was found…"
-                rows={3}
-                style={{ width: "100%", padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, resize: "vertical", color: C.ink }}
-              />
-              {maintenanceCompleteModal.error && (
-                <div style={{ color: C.danger, fontSize: 13, marginTop: 8 }}>{maintenanceCompleteModal.error}</div>
-              )}
-              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
-                <button onClick={() => setMaintenanceCompleteModal(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
-                <button
-                  onClick={submitMaintenanceComplete}
-                  style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
-                >
-                  {"Log completion"}
-                </button>
-              </div>
-            </div>
-          </div>
-          );
-        })()}
 
         {breakerModal && (() => {
           const allBreakers = selectedAsset.breakers || [];
@@ -12376,7 +12444,13 @@ function AssetTracker() {
                   <div
                     key={`${asset.id}-${item.id}`}
                     className="row-body"
-                    onClick={() => openDetail(asset, "maintenance")}
+                    // The row opens the TASK, not the asset it hangs off: the
+                    // task is what was tapped, and the asset is a link inside
+                    // the dialog for whoever actually wanted it. A viewer keeps
+                    // the old navigation, since the dialog is an edit form and
+                    // the asset's own card shows the same task read-only --
+                    // which is cheaper than a third rendering of these fields.
+                    onClick={() => (canEdit ? openMaintenanceEdit(item.id, asset.id) : openDetail(asset, "maintenance"))}
                     style={{ display: "grid", gridTemplateColumns: "220px 170px 100px 110px 130px 130px 130px 120px", alignItems: "center", cursor: "pointer", background: C.surface, borderTop: `1px solid ${C.border}` }}
                   >
                     <div style={{ padding: "12px 14px", fontSize: 13, color: C.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.task}</div>

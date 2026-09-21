@@ -2440,7 +2440,59 @@ visit, including the many where nothing was being added. They are now an **Add t
 - `openChangeEdit` seeds the date through **`changePerformedOn(ch)`**, not `ch.performedOn` —
   a pre-v34 entry has no such field and seeding blank would blank a real date on save.
 - **The maintenance ADD is a dialog; its inline edit was left alone.** Not an oversight —
-  only add was asked for, and the two are different flows. Worth revisiting together.
+  only add was asked for, and the two are different flows. **Revisited together on
+  2026-09-21**, which is what the entry below is about.
+**TAPPING A TASK OPENS THE TASK, NOT THE ASSET IT HANGS OFF (2026-09-21).** A row on the
+site-wide Tasks table used to call `openDetail(asset, "maintenance")` — so the one thing you
+could not do with a task you had just found was read it, change it or tick it off. Triage
+meant leaving the list you were triaging, finding the task again in a card list, and coming
+back. The row now opens the task itself; the asset is a **link inside the dialog** rather
+than the destination.
+
+- **`maintenanceModal` is ONE dialog over add and edit** — `{ mode: "add" }` or
+  `{ mode: "edit", itemId }`, both filling `maintenanceDraft`. That is `changeModal`'s shape,
+  taken for `changeModal`'s reason: a second form over the same fields is a second copy to
+  keep in step. It replaced the inline edit form that lived in the asset's card list, so
+  `maintenanceEditDraft` and `editingMaintenanceId` are gone and the card's pencil opens this.
+  **The two were always going to have to merge** — an edit form reachable only from inside one
+  asset's card list cannot serve a list of every asset's tasks.
+- **Every handler now takes an asset id, the way `openMaintenanceAdd` already did.**
+  `saveMaintenanceEdit`, `submitMaintenanceComplete` and `deleteMaintenanceItem` read
+  `workTarget`, never `selectedAsset` — which is **null on the main page**, where a save would
+  have silently done nothing and a completion would have written to whichever asset was open
+  last. `openMaintenanceEdit(itemId, assetId)` and `openMaintenanceComplete(itemId, assetId)`
+  follow the same rule: omitted means the open asset, and the dialog passes its own value
+  (`workDialogAssetId`, which is null on the detail page) straight back through, so an action
+  raised from inside it cannot retarget the write.
+- **The delete confirmation and the completion form moved into `renderWorkDialogs()`.** Both
+  are opened FROM this dialog, so leaving them in the detail view's return would set state and
+  paint nothing on the main page — the exact bug the photo lightbox had, met a second time.
+  **Anything reachable from both views belongs there.**
+- **Logging a completion CLOSES the task dialog behind it.** The draft still holds the
+  previous `lastPerformed`, so a Save afterwards would write it back over the completion just
+  logged — silently, on a form that looks untouched. Same for a delete, which would otherwise
+  leave the dialog open over a record that no longer exists.
+- **The draft's `id` is the ITEM's id in edit mode, never a fresh one.** The dialog's gallery
+  is keyed on it: minting one would show an empty gallery and file the next photo against a
+  task that does not exist. That is the orphan `attachPhotos` exists to avoid, and it would
+  have been minted deliberately.
+- **The "Completed / Clear to reopen" field is EDITING-ONLY.** It came from the inline edit
+  form and is the only way to reopen a finished one-off — there is no done flag to unset. It
+  is not offered while adding, where it would invite logging a job as done in the act of
+  creating it. Unifying the two forms is exactly how a field like this gets dropped; it was.
+- **A VIEWER still navigates.** The dialog is an edit form, and the asset's own card shows the
+  same task read-only — which is cheaper and more honest than a third rendering of these
+  fields. Worth revisiting if view-only triage is ever wanted.
+- **The History sub-tab's rows were deliberately left alone** and still open the asset. The
+  same argument applies to a work entry, which has its own dialog; only tasks were asked for.
+- **Frontend only — no backend change and no deploy.** Nothing about what is stored moved.
+- Covered by `test-frontend-tasks.js`, verified by mutation that eight silent failures fail it:
+  the row navigating again, any of the three handlers reading `selectedAsset`, a completion or
+  a delete leaving the dialog open, edit mode saving through the add path, either modal moving
+  back into the detail view, and the reopen field ceasing to be editing-only. The dialog was
+  driven in Chromium against Sandbox for the rest — the link, the write landing on the right
+  asset, and a finished one-off reopened by clearing its date.
+
 **The site-wide Maintenance tab mirrors an asset's (2026-09-10):** a `HierarchyNav` scope
 filter, then **Scheduled** / **History** sub-tabs, then Add task / Log work.
 - **It shares `scopeId` with the Assets tab, deliberately.** Narrowing to a building and

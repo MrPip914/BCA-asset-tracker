@@ -205,6 +205,81 @@ check('BOTH save paths clear frequencyDays too',
 check('an edit always writes an explicit kind rather than relying on the blank default',
       /kind: oneOff \? TASK_KIND_ONEOFF : TASK_KIND_SCHEDULED,/.test(src));
 
+// ---------- the task dialog, and what it writes to ----------
+// Tapping a task on the site-wide list used to open its ASSET, which is the
+// long way round to the thing that was tapped. It opens the task itself now,
+// with the asset as a link inside it. Every rule below fails silently: the
+// dialog still opens, and writes land somewhere other than where they look.
+
+// Brace-counting, because these live INSIDE the component and their closing
+// brace is indented -- slicing to the first line-start `}` runs to the end of
+// AssetTracker and makes every assertion below trivially true.
+function body(name) {
+  let i = src.indexOf(`function ${name}(`);
+  if (i === -1) throw new Error(`${name} not found in index.html`);
+  if (src.slice(i - 6, i) === 'async ') i -= 6;
+  let depth = 0;
+  for (let k = src.indexOf('{', i); k < src.length; k++) {
+    if (src[k] === '{') depth++;
+    else if (src[k] === '}' && --depth === 0) return src.slice(i, k + 1);
+  }
+  throw new Error(`${name} never closes`);
+}
+
+check('the site-wide task row opens the task, not the asset',
+      /onClick=\{\(\) => \(canEdit \? openMaintenanceEdit\(item\.id, asset\.id\) : openDetail\(asset, "maintenance"\)\)\}/.test(src),
+      'the row hands over its OWN asset; there is no open one to fall back to on the main page');
+
+// The whole reason the dialog can be opened from the main page at all. Every
+// one of these handlers read selectedAsset, which is null out there -- so a
+// save would silently do nothing, and a completion would write to whatever
+// asset happened to be open last.
+for (const fn of ['saveMaintenanceEdit', 'submitMaintenanceComplete', 'deleteMaintenanceItem']) {
+  // Comments stripped: several of these SAY "selectedAsset" while explaining
+  // why they no longer read it.
+  const b = body(fn).split('\n').filter(l => !l.trim().startsWith('//')).join('\n');
+  check(`${fn} writes to workTarget, not to whatever asset is open`,
+        b.includes('workTarget') && !/\bselectedAsset\b/.test(b) && !/\bselectedId\b/.test(b),
+        'selectedAsset is null on the main page, where this is now reachable');
+}
+
+// Logging a completion leaves a draft holding the PREVIOUS lastPerformed on
+// screen. Its Save would write that back over the completion just logged, with
+// the form looking untouched.
+check('logging a completion closes the task dialog behind it',
+      /setMaintenanceCompleteModal\(null\);[\s\S]{0,400}?setMaintenanceModal\(null\);/.test(body('submitMaintenanceComplete')));
+check('deleting a task closes the dialog it was deleted from',
+      body('deleteMaintenanceItem').includes('setMaintenanceModal(null)'));
+
+// Both of these are opened FROM the task dialog, so they have to render where
+// it does. Left in the detail view they set state and paint nothing on the main
+// page -- exactly the bug the photo lightbox had.
+const rwAt = src.indexOf('function renderWorkDialogs');
+const detailAt = src.indexOf('if (view === "detail" && selectedAsset)');
+for (const [what, marker] of [['the delete confirmation', '{confirmMaintenanceDelete !== null && ('],
+                              ['the completion form', '{maintenanceCompleteModal && (() => {']]) {
+  const at = src.indexOf(marker);
+  check(`${what} renders from renderWorkDialogs, not inside the detail view`,
+        at > rwAt && at < detailAt);
+}
+
+// ONE form over these fields, not two. The add dialog and an inline edit form
+// were separate copies until the dialog took both, which is the duplication
+// changeModal exists to avoid.
+check('there is no second task form left behind',
+      !/maintenanceEditDraft/.test(src),
+      'add and edit are one dialog over one draft');
+check('the dialog serves both modes off the same save buttons',
+      /onClick=\{editing \? saveMaintenanceEdit : addMaintenanceItem\}/.test(src));
+
+// Clearing the completion date is the ONLY way to reopen a finished one-off --
+// there is no done flag to unset. Offering it while ADDING one would invite
+// logging a job as done in the act of creating it.
+check('a one-off being edited can be reopened by clearing its date',
+      /\{editing && \([\s\S]{0,1200}?Clear to reopen/.test(src));
+check('the reopen field is editing-only',
+      src.split('Clear to reopen').length - 1 === 1);
+
 // The fixture. A uniform one exercises half the code — the personIds lesson.
 const mock = src.slice(src.indexOf('const MOCK_SNAPSHOT'), src.indexOf('const MOCK_SNAPSHOT') + 200000);
 check('MOCK_SNAPSHOT carries an open dated one-off',

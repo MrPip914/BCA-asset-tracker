@@ -237,7 +237,15 @@ eq('every gallery opens through openPhotoViewer, which reseeds the caption draft
 // adoption fills it in — see BUGS.md. An id-less row cannot be addressed by any
 // handler, and with two of them the wrong one is edited.
 eq('the Add task dialog mints the schedule id on open',
-   /id: crypto\.randomUUID\(\)/.test(src.slice(src.indexOf('setShowMaintenanceAdd(true)') - 400, src.indexOf('setShowMaintenanceAdd(true)'))), true);
+   /id: crypto\.randomUUID\(\)/.test(src.slice(src.indexOf("setMaintenanceModal({ mode: \"add\" })") - 400, src.indexOf("setMaintenanceModal({ mode: \"add\" })"))), true);
+// The other half of the same rule, once one dialog serves both modes: OPENING
+// an existing task must seed the draft with that task's OWN id. A fresh one
+// there shows an empty gallery and files the next photo against a task that
+// does not exist — the orphan this whole section is about, minted deliberately.
+eq('opening an existing task reuses ITS id rather than minting one',
+   /function openMaintenanceEdit[\s\S]{0,600}?id: item\.id,/.test(src), true);
+eq('openMaintenanceEdit mints no id of its own',
+   /function openMaintenanceEdit[\s\S]{0,900}?crypto\.randomUUID\(\)/.test(src), false);
 eq('addMaintenanceItem writes an id rather than leaving it to the next load',
    /id: maintenanceDraft\.id \|\| crypto\.randomUUID\(\)/.test(src), true);
 eq('a maintenance schedule can own photos',
