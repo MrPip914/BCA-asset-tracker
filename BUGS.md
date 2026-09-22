@@ -16,6 +16,20 @@ version that fixed them.
 
 ## Open
 
+### `sheet.mjs copy` does not carry a client's type categories
+**Found:** 2026-09-21, while dry-running `copy bca dev`.
+**Needs a deploy:** no — `sheet.mjs` only.
+**Confirmed:** the dry run lists `typeCategories` under "preserved", i.e. the destination
+keeps its own.
+
+`CONFIG_CONTENT_KEYS` was written before v33 added the `typeCategories` Config key and was
+never extended. So a copy brings over the client's types and their `typeSettings` (each of
+which names a `categoryId`) but leaves the destination's category LIST in place. A client
+category dev doesn't have is a dangling `categoryId`, which the app renders as
+Uncategorized — not an error, but the clone does not look like the client. Fix is adding
+`"typeCategories"` to `CONFIG_CONTENT_KEYS`; worth checking the list against every Config
+key `doPost` writes at the same time, since this is the same drift waiting to recur.
+
 ### The admin import hardcodes the BCA prefix, so a new tenant's counter starts at 1
 **Found:** 2026-09-15, while working out the asset prefix for a second client.
 **Needs a deploy:** YES — `AssetTrackerSync.gs` (`adminParseAssetCsv_`), so a version bump
