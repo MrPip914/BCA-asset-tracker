@@ -191,14 +191,21 @@ const TYPE_REGISTRY = {
   Condenser: { categoryIds: ["Facilities"], parentTypes: ["Building"] },
   // A Room is a space, not a device — no brand/model/serial/etc. It sits in the
   // Building it's in, or inside another Room (a closet within a classroom).
+  // floorPlan: true ships ON for Room and Building -- see typeHasFloorPlan --
+  // because those are the two places someone actually has a drawing for.
+  // It's a per-type SETTING, not fixed to these two: any type, including a
+  // custom one, can have it switched on from the type editor, the same way
+  // requiredFields already works (typeSettings[id].floorPlan overrides this).
   Room: {
     locked: true, icon: DoorOpen, categoryIds: ["Places"], parentTypes: ["Building", "Room"],
     excludedFields: ["tag", "brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
+    floorPlan: true,
   },
   // One level up from a Room, with even less in common with a device asset.
   Building: {
     locked: true, icon: Building2, categoryIds: ["Places"], parentTypes: ["Campus"],
     excludedFields: ["tag", "brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
+    floorPlan: true,
   },
   // A site — a group of Buildings, and the top of the tree. Added once the app
   // had to describe more than one location (the school itself plus a separate
@@ -673,6 +680,17 @@ function isPersonType(type) {
   return DERIVED_TYPE_SETS.personTypes.has(type);
 }
 
+// Whether this type can carry a floor plan -- a per-type SETTING, read
+// through typeEntryFor's merge exactly like isRequiredField reads
+// requiredFields, not a fixed list the way modules/parentTypes are. A plain
+// boolean needs none of categoryIds' "empty array must still beat the
+// shipped value" handling: {...base, ...over} already tells true from
+// undefined correctly on its own.
+function typeHasFloorPlan(type) {
+  const entry = typeEntryFor(type);
+  return !!(entry && entry.floorPlan);
+}
+
 // What each sub-item module IS — its tab label and how to count what's in it.
 // The registry's `modules` says which types OWN a module; this says what the
 // module means. Two halves of the same question kept apart on purpose: whether
@@ -733,6 +751,10 @@ function availableTabsFor(type) {
   return [
     "details",
     ...(isPlaceType(type) ? ["contents"] : []),
+    // Derived/toggleable per type, like contents -- not declared in a type's
+    // own `modules` list, since that's for a module every type-of-this-kind
+    // ships with. See typeHasFloorPlan.
+    ...(typeHasFloorPlan(type) ? ["floorPlan"] : []),
     ...modulesFor(type),
     // A common tab, deliberately NOT a module: a module is something only some
     // types own (a panel's breakers, a bulk item's allocations), and anything
@@ -1240,12 +1262,18 @@ const RETIRED_COLUMN_KEYS = new Set(["campus", "building", "room"]);
 // circuit's rooms) each have a bespoke component with its own managed list, and
 // a generic multiselect column would be a fourth thing that looks like them and
 // behaves differently.
+// `reference` is the one kind here that names something ELSE about the field
+// besides how to render it: which asset TYPE it may point at (`col.referenceType`,
+// set once at creation exactly like a select column's `options`). It holds ONE
+// asset id, never several (Eric's call) — a room wanting two would get a second
+// reference field, the same workaround a choice list with two answers would need.
 const COLUMN_DATA_TYPES = [
   { value: "text", label: "Text" },
   { value: "textarea", label: "Long text" },
   { value: "number", label: "Number" },
   { value: "date", label: "Date" },
   { value: "select", label: "Choice list" },
+  { value: "reference", label: "Reference" },
 ];
 const COLUMN_DATA_TYPE_VALUES = new Set(COLUMN_DATA_TYPES.map(t => t.value));
 // What a kind is CALLED. Falls back to the raw value, so a stored kind this
@@ -3287,7 +3315,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v40";
+const FRONTEND_SCRIPT_VERSION = "v41";
 // The version of THIS file — shown in About (the account menu), so "is my browser
 // actually running the build I just deployed, or a cached one?" is answerable in
 // two clicks instead of by reading view-source.
@@ -3305,7 +3333,7 @@ const FRONTEND_SCRIPT_VERSION = "v40";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-21.4";
+const APP_VERSION = "2026-09-22.2";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -3594,6 +3622,14 @@ const PHOTO_MAX_BYTES = 25 * 1024 * 1024;
 // photo. Cloudinary's own free-plan limit is 10MB, and being refused THERE costs
 // the whole upload and reports it in the host's words rather than ours.
 const DOC_MAX_BYTES = 10 * 1024 * 1024;
+// A floor plan is a whole different shape of file: a real Visio/CAD export's
+// path data can run several MB, and — like a document, unlike a photo —
+// nothing downstream re-encodes or shrinks it, so DOC_MAX_BYTES's 10MB (sized
+// for Cloudinary's free-plan PDF limit, an unrelated pipeline) isn't the right
+// number either. Cloudinary's RAW pipeline (see handleFloorPlanSign_) has no
+// equivalent size restriction the way PDF delivery does, so this cap exists
+// purely to catch someone picking the wrong file, not a host limit.
+const FLOORPLAN_MAX_BYTES = 25 * 1024 * 1024;
 
 // What may be attached at all, and which pipeline it takes. The backend signs
 // the same allowlist into every upload (PHOTO_ALLOWED_FORMATS in the .gs), so
@@ -3804,6 +3840,49 @@ function uploadPhotoToCloudinary(blob, sig, uploadName, onProgress) {
   });
 }
 
+// The floor plan's own upload, to Cloudinary's RAW pipeline rather than
+// /image/upload — same signed-parameter-driven shape as uploadPhotoToCloudinary
+// above (only send what sig.signedParams names, same XHR-for-progress reason,
+// same error wording), but the file's REAL bytes and REAL name: nothing
+// re-encodes an SVG the way a photo is downscaled to JPEG first, so there's no
+// "announce as upload.jpg" step here — the whole point of the raw pipeline is
+// that what's posted is exactly what comes back.
+function uploadFloorPlanToCloudinary(file, sig, onProgress) {
+  const form = new FormData();
+  form.append("file", file, file.name || "floorplan.svg");
+  form.append("api_key", sig.apiKey);
+  form.append("signature", sig.signature);
+  (sig.signedParams || ["folder", "public_id", "timestamp", "allowed_formats"]).forEach(k => {
+    const value = k === "public_id" ? sig.publicId : sig[k];
+    if (value !== undefined && value !== null && value !== "") form.append(k, value);
+  });
+  const resourceType = sig.resourceType || "raw";
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "https://api.cloudinary.com/v1_1/" + encodeURIComponent(sig.cloudName) + "/" + resourceType + "/upload");
+    if (onProgress && xhr.upload) {
+      xhr.upload.onprogress = e => {
+        if (e.lengthComputable && e.total > 0) onProgress(Math.min(1, e.loaded / e.total));
+      };
+    }
+    xhr.onerror = () => reject(new Error("the upload could not reach the file host."));
+    xhr.ontimeout = () => reject(new Error("the upload to the file host timed out."));
+    xhr.onload = () => {
+      let data = null;
+      try { data = JSON.parse(xhr.responseText); } catch (err) { data = null; }
+      const ok = xhr.status >= 200 && xhr.status < 300;
+      if (!ok || !data || !data.secure_url) {
+        const detail = data && data.error && data.error.message ? data.error.message : "HTTP " + xhr.status;
+        reject(new Error("The file host refused the upload: " + detail));
+        return;
+      }
+      if (onProgress) onProgress(1);
+      resolve(data);
+    };
+    xhr.send(form);
+  });
+}
+
 // Sandbox fixture. Deliberately MIXED, the same way the asset ids and the work
 // entry ids are: an asset photo, a breaker photo, a circuit photo, one hidden
 // from the public page, and one with NO thumbUrl so photoThumbUrl's derive
@@ -3977,7 +4056,29 @@ const MOCK_SNAPSHOT = {
     // everything and has no per-type prefix scheme.
     { label: "BCC0001", type: "Campus", name: "Brookside Christian Academy", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "The school site.", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
     { label: "BCC0002", type: "Campus", name: "Kramer Campus", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "Separate residential site — sample data behind the Electrical Map panel.", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
-    { label: "BCB0001", type: "Building", name: "Building 100", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    // Carries a fixture floor plan (a data: URI, so it loads with no network
+    // call, the same way an uploaded plan is stored while Sandbox is ON) so
+    // the Floor Plan tab has something to render by default rather than only
+    // after a manual upload. shape-101/102 are individually linked to real
+    // Rooms below (BCR0006/BCR0002); shape-103/104 are deliberately left
+    // UNLINKED but GROUPED, so Sandbox exercises both states the tab has to
+    // handle -- a shape mapped to a Room, and a shape that is not, which
+    // grouping does not require.
+    { label: "BCB0001", type: "Building", name: "Building 100", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active",
+      floorPlanUrl: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA4MDAgNTAwIj4KICA8ZyBpZD0ic2hhcGUtMTAxIj48dGl0bGU+U3BhY2UuMTAxPC90aXRsZT48ZGVzYz5Sb29tIDEwMjwvZGVzYz48cGF0aCBkPSJNMjAgMjAgTDIyMCAyMCBMMjIwIDE3MCBMMjAgMTcwIFoiLz48L2c+CiAgPGcgaWQ9InNoYXBlLTEwMiI+PHRpdGxlPlNwYWNlLjEwMjwvdGl0bGU+PGRlc2M+S2l0Y2hlbjwvZGVzYz48cmVjdCB4PSIyNDAiIHk9IjIwIiB3aWR0aD0iMTgwIiBoZWlnaHQ9IjE1MCIvPjwvZz4KICA8ZyBpZD0ic2hhcGUtMTAzIj48dGl0bGU+U3BhY2UuMTAzPC90aXRsZT48ZGVzYz5TdG9yYWdlIFJvb208L2Rlc2M+PHBhdGggZD0iTTIwIDIwMCBMMjIwIDIwMCBMMjIwIDM1MCBMMjAgMzUwIFoiLz48L2c+CiAgPGcgaWQ9InNoYXBlLTEwNCI+PHRpdGxlPlNwYWNlLjEwNDwvdGl0bGU+PGRlc2M+QmFjayBIYWxsd2F5PC9kZXNjPjxwYXRoIGQ9Ik0yNDAgMjAwIEw0MjAgMjAwIEw0MjAgMzUwIEwyNDAgMzUwIFoiLz48L2c+CiAgPGcgaWQ9ImxibC0xIj48dGl0bGU+U2hlZXQuMTwvdGl0bGU+PGRlc2M+QnVpbGRpbmcgMTAwIC0gRmlyc3QgRmxvb3I8L2Rlc2M+PHJlY3QgeD0iMjAiIHk9IjQwMCIgd2lkdGg9IjIwMCIgaGVpZ2h0PSI0MCIvPjwvZz4KPC9zdmc+Cg==",
+      floorPlanStorageKey: "bca/floorplans/mock-building-100",
+      floorPlanFileName: "building-100-first-floor.svg",
+      // shape-101's roomId is BCR0006's actual `id` (a uuid, not its label) --
+      // that room is one of the fixture's deliberately mixed rows whose id
+      // differs from its label, so this also exercises a floor plan link
+      // resolving through the id rather than assuming it equals the label.
+      floorPlanLinks: [
+        { shapeId: "shape-101", roomId: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", at: "2026-09-15T14:00:00.000Z", by: "Eric" },
+        { shapeId: "shape-102", roomId: "BCR0002", at: "2026-09-15T14:01:00.000Z", by: "Eric" },
+      ],
+      floorPlanGroups: [
+        { id: "fpg-storage-hall", name: "Storage & Hallway", hideLabel: false, memberShapeIds: ["shape-103", "shape-104"], at: "2026-09-15T14:05:00.000Z", by: "Eric" },
+      ] },
     // v40 fixture shape 2 of 4: an OPEN, DATED one-off, hanging off a PLACE --
     // the case that makes site-wide work expressible without an asset-less task.
     { label: "BCB0002", type: "Building", name: "Building 200", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active",
@@ -4622,6 +4723,11 @@ function AssetTracker() {
   // snapshot write at the very end -- and which no longer disables anything.
   const [photoBusy, setPhotoBusy] = useState(false);
   const [photoError, setPhotoError] = useState("");
+  // Its own flag/error, same reasoning as photoBusy/photoError above -- a
+  // floor plan upload is a real round trip to a file host, not the snapshot
+  // write isSaving covers.
+  const [floorPlanUploadBusy, setFloorPlanUploadBusy] = useState(false);
+  const [floorPlanUploadError, setFloorPlanUploadError] = useState("");
   // { done, total, pct } while an upload is running, else null. `pct` is what
   // the button shows: a percentage of the whole batch's bytes, each file an
   // equal share filled by its own upload progress events. `done` counts
@@ -7002,11 +7108,20 @@ function AssetTracker() {
         // "Computer" to "54da0bb7-…"". An audit row's text is written once and
         // kept forever, so it has to be resolved here rather than at render.
         const isTypeField = key === "type";
-        const fieldLabel = isParentField ? "Parent" : (columns.find(c => c.key === key)?.label || key);
+        const col = columns.find(c => c.key === key);
+        // A reference field stores an id exactly like parentId does, so an
+        // unresolved entry would read "Thermostat changed from BCA0099 to
+        // BCA0102" — the same problem the `type` field has, with the same fix.
+        // Deliberately not linked via `related` the way a parent move is: that
+        // reuses roles ("from"/"to") that mean "moved out of" / "moved into",
+        // which is the wrong sentence from the REFERENCED asset's own side.
+        const isReferenceField = col && columnDataType(col) === "reference";
+        const fieldLabel = isParentField ? "Parent" : (col?.label || key);
         // Named apart from the personIds branch's own nameFor above, which it
         // would otherwise shadow-and-not-shadow depending on the branch taken.
         const displayValueFor = v => isParentField ? (parentNameFor(v, assets) || UNASSIGNED_LABEL)
           : isTypeField ? typeNameOf(v, typesList)
+          : isReferenceField ? (parentNameFor(v, assets) || "—")
           : v;
         const from = displayValueFor(oldVal);
         const to = displayValueFor(newVal);
@@ -7513,6 +7628,150 @@ function AssetTracker() {
         + count + " photos. Add them a few at a time, or update the backend.");
     }
     return list;
+  }
+
+  // ---------- FLOOR PLAN ----------
+  // Same batch-signing shape as signPhotoUploads, simplified to the one file a
+  // floor plan always is -- op:"floorPlanSign" hands back a single signature
+  // for Cloudinary's RAW pipeline (see handleFloorPlanSign_), not the N-file
+  // array shape a photo batch needs.
+  async function signFloorPlanUpload() {
+    const res = await fetch(SHEET_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ op: "floorPlanSign", sessionId: sessionId }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!data || !data.ok) throw new Error((data && data.error) || "Could not get permission to upload.");
+    return data;
+  }
+
+  // Uploads a floor plan and attaches it to the OPEN asset (selectedAsset),
+  // replacing whatever it carried before -- a plan is 1:1 with its owner, not
+  // a growing gallery, so there is no "add another" the way attachPhotos has.
+  // Closes over selectedId/selectedAsset rather than taking an assetId param,
+  // same as updatePanelConfig/addBreaker do -- the Floor Plan tab, like
+  // Layout, only ever shows for whichever asset's detail page is open.
+  // Bytes-first-row-second ordering, same as a photo: a save rejected by the
+  // revision check strands an orphaned file at the host rather than leaving a
+  // reference that 404s.
+  //
+  // Sandbox uploads nothing anywhere -- consistent with "no network call
+  // happens at all while Sandbox is ON" -- and instead reads the file's own
+  // text into a data: URI, the same fixture shape MOCK_SNAPSHOT's photos
+  // already use. fetch() resolves a data: URL locally, so the rest of this
+  // tab (fetch + parse) runs completely unchanged whether the URL is a real
+  // Cloudinary one or this local stand-in.
+  async function uploadFloorPlanSvg(file) {
+    if (savingRef.current || floorPlanUploadBusy) return;
+    if (!file || !selectedAsset) return;
+    const looksLikeSvg = file.type === "image/svg+xml" || /\.svg$/i.test(file.name || "");
+    if (!looksLikeSvg) { setFloorPlanUploadError("That doesn't look like an SVG file."); return; }
+    if (file.size > FLOORPLAN_MAX_BYTES) {
+      setFloorPlanUploadError("That file is too large — a floor plan has to be under "
+        + Math.round(FLOORPLAN_MAX_BYTES / 1024 / 1024) + "MB.");
+      return;
+    }
+    setFloorPlanUploadError("");
+    setFloorPlanUploadBusy(true);
+    try {
+      let url, storageKey;
+      if (sandboxMode) {
+        const text = await file.text();
+        url = "data:image/svg+xml;utf8," + encodeURIComponent(text);
+        storageKey = "";
+      } else {
+        const sig = await signFloorPlanUpload();
+        const uploaded = await uploadFloorPlanToCloudinary(file, sig);
+        url = uploaded.secure_url;
+        storageKey = uploaded.public_id || sig.publicId;
+      }
+      const entry = {
+        assetLabel: selectedId, assetType: selectedAsset.type,
+        action: "floor_plan_replaced", to: file.name, at: new Date().toISOString(), by: currentUser || "",
+      };
+      await persist(
+        assets.map(a => (a.id === selectedId
+          ? { ...a, floorPlanUrl: url, floorPlanStorageKey: storageKey, floorPlanFileName: file.name }
+          : a)),
+        { auditLog: logAudit([entry]) },
+      );
+    } catch (err) {
+      setFloorPlanUploadError((err && err.message) || "That file could not be uploaded.");
+    } finally {
+      setFloorPlanUploadBusy(false);
+    }
+  }
+
+  // ---------- Space links (a shape on the plan -> a Room) and Space groups
+  // (several shapes collapsed to one tile) ----------
+  // Both are plain asset fields, same shape as breakers/circuits: computed
+  // next arrays, one persist() call, audited the way every other mutation
+  // here that isn't self-evidently a create/delete is (Breakers/Circuits
+  // carry no at/by of their own either).
+  //
+  // roomId falsy clears the link rather than writing a row naming no room --
+  // "no row for this shapeId" IS the unlinked state (see SPACE_LINK_FIELDS in
+  // AssetTrackerSync.gs), so an empty link is never stored at all.
+  function saveSpaceLink(shapeId, roomId) {
+    if (savingRef.current) return; // double-submit guard, see savingRef
+    if (!selectedAsset) return;
+    const existing = selectedAsset.floorPlanLinks || [];
+    const prior = existing.find(l => l.shapeId === shapeId);
+    const next = existing.filter(l => l.shapeId !== shapeId)
+      .concat(roomId ? [{ shapeId, roomId, at: new Date().toISOString(), by: currentUser || "" }] : []);
+    const entry = {
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId, assetType: selectedAsset.type,
+      action: roomId ? "space_linked" : "space_unlinked",
+      field: shapeId,
+      from: prior ? parentNameFor(prior.roomId, assets) : undefined,
+      to: roomId ? parentNameFor(roomId, assets) : undefined,
+    };
+    persist(
+      assets.map(a => (a.id === selectedId ? { ...a, floorPlanLinks: next } : a)),
+      { auditLog: logAudit([entry]) },
+    );
+  }
+
+  // draft.id present means EDIT (an existing group's membership/name/
+  // hideLabel changing); absent means CREATE. One function for both, same
+  // reasoning changeModal/breakerModal already take: a separate edit form
+  // would be a second copy of the same fields to keep in step.
+  function saveSpaceGroup(draft) {
+    if (savingRef.current) return; // double-submit guard, see savingRef
+    if (!selectedAsset) return;
+    const existing = selectedAsset.floorPlanGroups || [];
+    const isNew = !draft.id;
+    const saved = {
+      id: draft.id || (crypto.randomUUID ? crypto.randomUUID() : "grp_" + Math.random().toString(36).slice(2)),
+      name: (draft.name || "").trim() || `Group of ${(draft.memberShapeIds || []).length}`,
+      hideLabel: !!draft.hideLabel,
+      memberShapeIds: draft.memberShapeIds || [],
+      at: new Date().toISOString(), by: currentUser || "",
+    };
+    const next = isNew ? [...existing, saved] : existing.map(g => (g.id === saved.id ? saved : g));
+    const entry = {
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId, assetType: selectedAsset.type,
+      action: isNew ? "space_group_created" : "space_group_edited", to: saved.name,
+    };
+    persist(
+      assets.map(a => (a.id === selectedId ? { ...a, floorPlanGroups: next } : a)),
+      { auditLog: logAudit([entry]) },
+    );
+  }
+  function deleteSpaceGroup(groupId) {
+    if (savingRef.current) return; // double-submit guard, see savingRef
+    if (!selectedAsset) return;
+    const grp = (selectedAsset.floorPlanGroups || []).find(g => g.id === groupId);
+    const next = (selectedAsset.floorPlanGroups || []).filter(g => g.id !== groupId);
+    const entry = {
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId, assetType: selectedAsset.type,
+      action: "space_group_deleted", from: grp && grp.name,
+    };
+    persist(
+      assets.map(a => (a.id === selectedId ? { ...a, floorPlanGroups: next } : a)),
+      { auditLog: logAudit([entry]) },
+    );
   }
 
   // Removes the ROW. The image itself stays at the host -- see PHOTOS_EVAL.md
@@ -8717,7 +8976,8 @@ function AssetTracker() {
   //
   // Choices are dropped entirely unless the field is actually a choice list, so
   // switching a column to Text and back doesn't quietly resurrect a stale list.
-  function applyFieldKind(col, kind, choicesText) {
+  // referenceType follows the same rule for a reference field's target type.
+  function applyFieldKind(col, kind, choicesText, referenceType) {
     const shipped = DEFAULT_COLUMN_DATA_TYPES[col.key] || "text";
     const chosen = COLUMN_DATA_TYPE_VALUES.has(kind) ? kind : shipped;
     if (chosen === shipped) delete col.dataType;
@@ -8729,6 +8989,11 @@ function AssetTracker() {
       col.options = [...new Set(opts)];
     } else {
       delete col.options;
+    }
+    if (chosen === "reference") {
+      col.referenceType = referenceType || "";
+    } else {
+      delete col.referenceType;
     }
   }
 
@@ -8759,7 +9024,7 @@ function AssetTracker() {
       const created = { key, label, width: 160, visible: false, custom: true, restricted: true };
       // The kind was chosen on the pending row, keyed by tempId — the real key
       // doesn't exist until this loop invents it.
-      applyFieldKind(created, (draft.fieldTypes || {})[f.tempId], (draft.fieldChoices || {})[f.tempId]);
+      applyFieldKind(created, (draft.fieldTypes || {})[f.tempId], (draft.fieldChoices || {})[f.tempId], (draft.fieldReferenceTypes || {})[f.tempId]);
       nextColumns = [...nextColumns, created];
       createdKeys.push(key);
     });
@@ -8805,6 +9070,7 @@ function AssetTracker() {
         // rule back the moment someone re-ticked the field — a rule nobody set,
         // appearing from a decision made in a different session.
         requiredFields: (draft.requiredFields || []).filter(k => wanted.has(k)),
+        floorPlan: !!draft.floorPlan,
       },
     };
     persist(assets, { columns: nextColumns, typesList: nextTypesList, typeSettings: nextTypeSettings });
@@ -9143,6 +9409,10 @@ function AssetTracker() {
         if (!fieldAppliesTo(c.key, a.type)) { row[c.label] = ""; return; }
         row[c.label] = c.key === "person" ? personTextOf(a, assets)
           : c.key === "type" ? typeNameOf(a.type, typesList)
+          // A reference field's stored value is an id — resolved the same way
+          // Parent is, or the export would print a uuid where a school expects
+          // to read which Thermostat, which HVAC unit, which valve.
+          : columnDataType(c) === "reference" ? (parentNameFor(a[c.key], assets) || "")
           : (a[c.key] || "");
       });
       // A column config with no `parent` shouldn't cost the export its location
@@ -11127,6 +11397,10 @@ function AssetTracker() {
             const meta = {
               details: { label: "Details" },
               contents: { label: "Contents", count: contentsCount },
+              // Derived/toggleable like contents (see typeHasFloorPlan), so it
+              // lives here rather than in ASSET_MODULES, which is for a module
+              // a type declares owning, not a setting it can be switched into.
+              floorPlan: { label: "Floor Plan", count: (selectedAsset.floorPlanLinks || []).filter(l => l.roomId).length },
               maintenance: { label: "Tasks", count: openMaintenanceItems.length, urgent: overdueMaintenanceCount > 0 },
               photos: { label: "Files", count: assetPhotos.length },
               comments: { label: "Comments", count: comments.length },
@@ -11197,6 +11471,10 @@ function AssetTracker() {
                           // read as its name and for a user-created type is a raw
                           // uuid. Same resolution the list's Type cell does.
                           : c.key === "type" ? typeNameOf(selectedAsset.type, typesList)
+                          // A reference field stores the linked asset's id, same
+                          // as parentId — resolve it the same way rather than
+                          // printing the raw id.
+                          : columnDataType(c) === "reference" ? (parentNameFor(selectedAsset[c.key], assets) || "—")
                           : selectedAsset[c.key]
                         }
                         wide={c.key === "notes" || c.key === "parent"}
@@ -11317,6 +11595,10 @@ function AssetTracker() {
                       onChange={v => setDraft({ ...draft, [c.key]: v, ...clearedError(draft, c.key) })}
                       dataType={columnDataType(c)}
                       options={columnOptions(c)}
+                      referenceType={c.referenceType}
+                      assets={assets}
+                      typesList={typesList}
+                      excludeId={selectedAsset.id}
                       required={isRequiredField(c.key, draft.type)}
                       invalid={fieldIsInvalid(c.key, draft)}
                       error={fieldErrorFor(c.key, draft, editFormColumns)}
@@ -11535,6 +11817,21 @@ function AssetTracker() {
               saveCircuitEdit={saveCircuitEdit}
               deleteCircuit={deleteCircuit}
               openMoveCircuit={openMoveCircuit}
+            />
+          )}
+
+          {detailTab === "floorPlan" && typeHasFloorPlan(selectedAsset.type) && (
+            <FloorPlanTabContent
+              canEdit={canEdit}
+              selectedAsset={selectedAsset}
+              assets={assets}
+              typesList={typesList}
+              uploadBusy={floorPlanUploadBusy}
+              uploadError={floorPlanUploadError}
+              onUploadPlan={uploadFloorPlanSvg}
+              onSaveLink={saveSpaceLink}
+              onSaveGroup={saveSpaceGroup}
+              onDeleteGroup={deleteSpaceGroup}
             />
           )}
 
@@ -13094,6 +13391,10 @@ function AssetTracker() {
                     onChange={v => setDraft({ ...draft, [c.key]: v, ...clearedError(draft, c.key) })}
                     dataType={columnDataType(c)}
                     options={columnOptions(c)}
+                    referenceType={c.referenceType}
+                    assets={assets}
+                    typesList={typesList}
+                    excludeId={draft.id}
                     required={isRequiredField(c.key, draft.type)}
                     invalid={fieldIsInvalid(c.key, draft)}
                     error={fieldErrorFor(c.key, draft, addFormColumns)}
@@ -13665,14 +13966,20 @@ function AssetTracker() {
                   only in the type editor. A column created as Text and corrected
                   afterwards is a column whose first few values were typed into
                   the wrong kind of box. A choice list still has to go to the type
-                  editor for its choices — this is the one control that fits. */}
+                  editor for its choices — this is the one control that fits.
+                  Reference is left OUT of this list for the same reason: it has
+                  no options here either (no target type to pick), but unlike an
+                  empty choice list a reference field with nothing to point at
+                  reads as flatly broken rather than merely unfinished. It's only
+                  offered from the type editor's own Add Field dialog, which asks
+                  for the target type before the field exists at all. */}
               <div style={{ width: 120, flexShrink: 0 }}>
                 <PickerField
                   label="New column kind"
                   hideLabel
                   value={newColType}
                   onChange={setNewColType}
-                  options={COLUMN_DATA_TYPES.map(t => t.value)}
+                  options={COLUMN_DATA_TYPES.filter(t => t.value !== "reference").map(t => t.value)}
                   labelForOption={v => (COLUMN_DATA_TYPES.find(t => t.value === v) || {}).label || v}
                   title="Kind of value"
                 />
@@ -13728,7 +14035,7 @@ function FieldError({ message }) {
 // FORM-level one, repeated here (see fieldErrorFor) rather than a second copy —
 // a save is refused once, for one reason, and saying it twice in two wordings is
 // how the two drift.
-function Field({ label, value, onChange, placeholder, wide, dataType, options, error, invalid, required }) {
+function Field({ label, value, onChange, placeholder, wide, dataType, options, error, invalid, required, referenceType, assets, typesList, excludeId }) {
   const kind = dataType || "text";
   // A long-text field always takes the full row: a textarea in a 180px grid cell
   // is narrower than the text it holds. `wide` stays an explicit override for a
@@ -13760,6 +14067,44 @@ function Field({ label, value, onChange, placeholder, wide, dataType, options, e
           labelForOption={o => o || "—"}
           title={`Select ${label}`}
           emptyLabel="No choices configured for this field yet."
+        />
+        {foot}
+      </label>
+    );
+  }
+  if (kind === "reference") {
+    // The options are ASSETS, not a fixed list — every non-archived asset of
+    // the field's configured referenceType, minus the asset being edited
+    // itself (pointing at its own row is never useful). Flat, not a
+    // drill-down: the sub-panel feed picker already made this call for the
+    // same reason — nothing here is organized as a tree of its own, so
+    // there's nothing to browse into, just a list to search.
+    const candidates = (assets || []).filter(a => a.type === referenceType && (a.status || "Active") !== "Archived" && a.id !== excludeId);
+    const targetTypeName = referenceType ? typeNameOf(referenceType, typesList) : "";
+    return (
+      <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: fullWidth ? "1 / -1" : undefined }}>
+        {head}
+        <PickerField
+          label={label}
+          hideLabel
+          value={value || ""}
+          onChange={onChange}
+          options={["", ...candidates.map(a => a.id)]}
+          // A bare id is unidentifiable, so it's shown the way the sub-panel
+          // feed picker shows a panel — name plus where it sits, since two
+          // Thermostats can otherwise read identically.
+          labelForOption={id => {
+            if (!id) return "—";
+            const a = (assets || []).find(x => x.id === id);
+            if (!a) return "(deleted asset)";
+            const where = pathOf(a, assets);
+            return where ? `${nameOf(a, typesList)} — ${where}` : nameOf(a, typesList);
+          }}
+          title={`Select ${label}`}
+          emptyLabel={
+            !referenceType ? "No target type configured for this field yet."
+            : `No ${targetTypeName} assets exist yet.`
+          }
         />
         {foot}
       </label>
@@ -13947,6 +14292,47 @@ function RoomField({ value, onChange, assets, label = "Room", hideLabel, exclude
   );
 }
 
+// Picks a Room (or any place-type asset -- isPlaceType, not a fixed "Room"
+// test, so a Space can be linked to a Building or Campus too, same as any
+// other place-picking control in this app) for ONE shape on a floor plan.
+//
+// A room already linked to a DIFFERENT shape on the SAME plan is hidden by
+// default -- HierarchyBrowserModal's `excluded` set fully hides a row, not
+// merely disables it, which is exactly "foreground the rooms still free to
+// assign" on a floor plan that's mostly linked already. The room currently on
+// THIS shape is never excluded by its own link, so re-opening the picker to
+// change or clear it always shows the current choice.
+function SpaceRoomPickerField({ shapeId, value, onChange, assets, floorPlanLinks, onClose }) {
+  const all = assets || [];
+  const [revealAssigned, setRevealAssigned] = useState(false);
+  const assignedElsewhere = useMemo(() => new Set(
+    (floorPlanLinks || [])
+      .filter(l => l.shapeId !== shapeId && l.roomId && l.roomId !== value)
+      .map(l => l.roomId)
+  ), [floorPlanLinks, shapeId, value]);
+  const excluded = revealAssigned ? undefined : assignedElsewhere;
+  return (
+    <HierarchyBrowserModal
+      title="Select room"
+      hint="Choose the room this shape represents"
+      assets={all}
+      isSelectable={a => isPlaceType(a.type)}
+      excluded={excluded}
+      noneLabel="Not linked"
+      value={value || ""}
+      onChange={onChange}
+      onClose={onClose}
+      filterNote={assignedElsewhere.size > 0 && (
+        <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: C.muted, cursor: "pointer" }}>
+          <input type="checkbox" checked={revealAssigned} onChange={e => setRevealAssigned(e.target.checked)} style={{ margin: 0 }} />
+          Show rooms already assigned elsewhere
+          {!revealAssigned && <span style={{ color: C.empty }}>&nbsp;({assignedElsewhere.size} hidden)</span>}
+        </label>
+      )}
+    />
+  );
+}
+
 // Picks ANY asset, by drilling the hierarchy -- the same browser used to place
 // an asset, with the selectable predicate opened up instead of restricted to
 // Rooms. Used by the site-wide Maintenance tab, where a work dialog has no open
@@ -14102,6 +14488,14 @@ function HierarchyNav({ assets, scopeId, setScopeId }) {
 //                         the honest answer is that there's nothing to offer.
 function HierarchyBrowserModal({
   title, hint, assets, isSelectable, excluded, multi, value, onChange, onClose, noneLabel,
+  // Optional, purely additive: a node rendered between the hint and the
+  // breadcrumb, for a caller that needs one extra control alongside the
+  // browse/pick mechanics rather than a whole second modal. undefined for
+  // every existing caller, so nothing here changes for them. Introduced for
+  // the Floor Plan tab's room picker, which needs a "show rooms already
+  // assigned elsewhere" checkbox that a `render prop` fits far better than
+  // teaching this component a floor-plan-specific concept of its own.
+  filterNote,
 }) {
   const all = assets || [];
   const blocked = excluded || new Set();
@@ -14191,6 +14585,7 @@ function HierarchyBrowserModal({
             where (choosing a Room) nothing on screen is pickable yet and the
             list is all buildings. */}
         <div style={{ fontSize: 12, color: C.empty, marginBottom: 8 }}>{hint}</div>
+        {filterNote && <div style={{ marginBottom: 8 }}>{filterNote}</div>}
 
         {/* Multi-select only: what's picked so far, as removable chips. Without
             this you can't see your own selection — it's spread across levels and
@@ -14657,6 +15052,9 @@ function TypeManagerModal({
       parentTypes: entry.parentTypes || (TYPE_REGISTRY[t.id] ? [] : DEFAULT_PARENT_TYPES),
       fields: fieldOptions.filter(f => fieldAppliesTo(f.key, t.id)).map(f => f.key),
       requiredFields: requiredFieldsFor(t.id).slice(),
+      // Type-level, not per-field -- whether THIS type can carry a floor plan
+      // at all, seeded from the same merged entry every other override reads.
+      floorPlan: !!entry.floorPlan,
       categoryIds: typeLabelIdsOf(t.id).slice(),
       // Seeded from the EFFECTIVE data type — the column's override if it has
       // one, otherwise the shipped default — so the picker shows what is in
@@ -14673,6 +15071,10 @@ function TypeManagerModal({
       // a list under stored data would leave assets holding a value the field no
       // longer offers, which is the same shape of problem as changing the kind.
       fieldChoices: Object.fromEntries(fieldOptions.map(f => [f.key, columnOptions(f).join("\n")])),
+      // Same shape, for a reference field's target type — shown for every field,
+      // editable on none but a pending one, for the reason above: which type it
+      // points at is part of what the field IS.
+      fieldReferenceTypes: Object.fromEntries(fieldOptions.map(f => [f.key, f.referenceType || ""])),
       newFields: [],
     });
     setNewFieldDraft(null);
@@ -14745,6 +15147,7 @@ function TypeManagerModal({
       newFields: [...(draft.newFields || []), { tempId, label }],
       fieldTypes: { ...(draft.fieldTypes || {}), [tempId]: newFieldDraft.kind || "text" },
       fieldChoices: { ...(draft.fieldChoices || {}), [tempId]: newFieldDraft.choices || "" },
+      fieldReferenceTypes: { ...(draft.fieldReferenceTypes || {}), [tempId]: newFieldDraft.referenceType || "" },
     });
     setNewFieldDraft(null);
   };
@@ -14865,6 +15268,13 @@ function TypeManagerModal({
             {(draft.fieldChoices || {})[key]
               ? String(draft.fieldChoices[key]).split("\n").filter(Boolean).join(" · ")
               : "No choices configured."}
+          </div>
+        )}
+        {kind === "reference" && on && (
+          <div style={{ marginLeft: 24, fontSize: 12, color: C.empty }}>
+            {(draft.fieldReferenceTypes || {})[key]
+              ? `Points at a ${typeNameOf((draft.fieldReferenceTypes || {})[key], types)}`
+              : "No target type configured."}
           </div>
         )}
       </div>
@@ -15132,6 +15542,36 @@ function TypeManagerModal({
               </div>
             </div>
 
+            {/* Type-level, not per-field — whether this type gets a Floor Plan
+                tab at all. Room and Building ship with it on (TYPE_REGISTRY);
+                everything else starts off, same as Required starts off for
+                every field. A plain checkbox rather than a chip row, since
+                there's exactly one thing to answer, not one per type. */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Floor plan</span>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                <button
+                  type="button"
+                  role="checkbox"
+                  aria-checked={!!draft.floorPlan}
+                  aria-label="This type can carry a floor plan"
+                  onClick={() => setDraft({ ...draft, floorPlan: !draft.floorPlan })}
+                  style={{
+                    width: 16, height: 16, flexShrink: 0, borderRadius: 4, padding: 0,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    border: `1.5px solid ${draft.floorPlan ? C.brand : C.border}`,
+                    background: draft.floorPlan ? C.brand : "transparent",
+                  }}
+                >
+                  {draft.floorPlan && <Check size={11} color="#fff" />}
+                </button>
+                <span style={{ fontSize: 13, color: C.ink }}>Can carry a floor plan</span>
+              </label>
+              <div style={{ fontSize: 12, color: C.empty }}>
+                Room and Building have this on by default. Turn it on for another type to upload a drawing and link its shapes to rooms.
+              </div>
+            </div>
+
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Fields</span>
               {/* A ROW PER FIELD, not the chip row this used to be. The chip
@@ -15157,7 +15597,7 @@ function TypeManagerModal({
               <div style={{ display: "flex", marginTop: 2 }}>
                 <button
                   type="button"
-                  onClick={() => setNewFieldDraft({ label: "", kind: "text", choices: "", error: "" })}
+                  onClick={() => setNewFieldDraft({ label: "", kind: "text", choices: "", referenceType: "", error: "" })}
                   style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 10px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12, color: C.ink, fontWeight: 600 }}
                 >
                   <Plus size={13} /> Add field
@@ -15234,6 +15674,31 @@ function TypeManagerModal({
                         rows={4}
                         style={{ padding: "7px 9px", border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 13, fontFamily: "inherit", background: C.surface, color: C.ink, resize: "vertical" }}
                       />
+                    </label>
+                  )}
+
+                  {/* A reference field's TARGET TYPE is what a choice list's
+                      Choices are: the part of the field that can't be set from
+                      the plain Columns menu and can't change once the field
+                      exists (see applyFieldKind). Picking one asset of that
+                      type is the whole feature — "which Thermostat serves this
+                      Room" — so the target has to be a type, not a fixed list. */}
+                  {newFieldDraft.kind === "reference" && (
+                    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Points at</span>
+                      <PickerField
+                        label="Points at"
+                        hideLabel
+                        value={newFieldDraft.referenceType || ""}
+                        onChange={v => setNewFieldDraft({ ...newFieldDraft, referenceType: v })}
+                        options={types.map(t => t.id)}
+                        labelForOption={id => typeNameOf(id, types)}
+                        title="Points at"
+                        placeholder="Select a type…"
+                      />
+                      <span style={{ fontSize: 12, color: C.empty }}>
+                        The field will let you pick one asset of this type — e.g. which Thermostat serves this Room.
+                      </span>
                     </label>
                   )}
 
@@ -15906,6 +16371,788 @@ function ColumnFilterModal({ activeCol, filterConfigs, sortConfig, setSortConfig
             );
           })}
         </div>
+      </div>
+    </div>
+  );
+}
+
+/* ==================== Floor Plan tab ====================
+   An uploaded SVG floor plan, panned/zoomed, with its drawn "Space" shapes
+   tappable to link to a Room and groupable into one collapsed tile. Ported
+   from a validated Claude.ai Artifact prototype (never part of this repo) —
+   the interaction design below is settled; this is the first time any of it
+   runs against real data, real Rooms and the real save path.
+
+   No existing precedent in this file for runtime SVG parsing or viewBox
+   pan/zoom (PanelDiagram, the closest thing to a diagram tab, is a static
+   CSS grid computed from stored numbers, not a real drawing) — everything in
+   this section is new. Kept as plain, DOM-free functions wherever the math
+   allows, so it's unit-testable against fixture SVG strings the way
+   test-frontend-icons.js executes the real catalog rather than a copy of it.
+   ==================== */
+
+// ---------- Geometry: point-in-polygon, and a label's local clearance ----------
+function floorPlanPointInPoly(p, poly) {
+  let c = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if ((yi > p[1]) !== (yj > p[1]) && p[0] < ((xj - xi) * (p[1] - yi)) / (yj - yi) + xi) c = !c;
+  }
+  return c;
+}
+function floorPlanSegDist(p, a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1], l = dx * dx + dy * dy;
+  let t = l ? ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l : 0;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy);
+}
+// Returns not just a roomy interior point but how roomy it actually is — the
+// radius of the largest circle that fits there without crossing an edge. A
+// label sized off the shape's overall BOUNDING BOX reads fine for a
+// rectangle, where the box IS the room, and badly wrong for an elongated or
+// L-shaped one like a hallway, where the box spans the whole run of it while
+// the actual width at any point along it is much narrower. Sizing off the
+// LOCAL clearance at the point the label sits fixes that regardless of the
+// shape's outline. A 30x30 grid search, same resolution the prototype used
+// and proved sufficient against real Visio geometry.
+function floorPlanPole(poly) {
+  const xs = poly.map(p => p[0]), ys = poly.map(p => p[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  let best = [(x0 + x1) / 2, (y0 + y1) / 2], bd = -1;
+  for (let i = 1; i < 30; i++) {
+    for (let j = 1; j < 30; j++) {
+      const p = [x0 + ((x1 - x0) * i) / 30, y0 + ((y1 - y0) * j) / 30];
+      if (!floorPlanPointInPoly(p, poly)) continue;
+      let d = Infinity;
+      for (let k = 0, m = poly.length - 1; k < poly.length; m = k++) d = Math.min(d, floorPlanSegDist(p, poly[m], poly[k]));
+      if (d > bd) { bd = d; best = p; }
+    }
+  }
+  return { x: best[0], y: best[1], clear: bd < 0 ? 0 : bd };
+}
+function floorPlanBbox(pts) {
+  const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+  return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+}
+function floorPlanWrapWords(s, n) {
+  const out = []; let line = "";
+  for (const w of s.split(" ")) {
+    if ((line + " " + w).trim().length > n && line) { out.push(line); line = w; }
+    else line = (line + " " + w).trim();
+  }
+  if (line) out.push(line);
+  return out;
+}
+// Size AND wrap a shape's label off the same number — how much room there
+// actually IS at the point it sits (clear), not the shape's overall bounding
+// box. maxPx is the usual cap in CSS pixels for a roomy shape; clear rarely
+// lets a hallway get anywhere near it. 0.52 is a rough average glyph width
+// for this app's sans font at this weight — exact enough to decide when to
+// wrap, not exact enough to matter beyond that.
+function floorPlanLabelFit(k, clear, maxPx, label) {
+  const fs = Math.min(maxPx * k, Math.max(7 * k, clear * 1.15));
+  const maxChars = Math.max(4, Math.round((clear * 2.3) / (fs * 0.52)));
+  const words = (label || "").length > maxChars ? floorPlanWrapWords(label || "", maxChars) : [label || ""];
+  return { fs, words };
+}
+
+// ---------- viewBox pan/zoom math (pure — the component holds the mutable
+// viewBox in a ref, not state, so a drag/pinch doesn't chase a render per
+// frame; see FloorPlanTabContent) ----------
+// Frames a bbox with padding, growing to fill the stage's own aspect ratio
+// rather than letterboxing it — the same shape zoomTo took in the prototype.
+function floorPlanZoomViewBox(bbox, pad, stageAspect) {
+  const aspect = stageAspect || 0.66;
+  let w = bbox.w * (1 + pad * 2), h = bbox.h * (1 + pad * 2);
+  if (h / w > aspect) w = h / aspect;
+  w = Math.max(w, 80);
+  return { x: bbox.x + bbox.w / 2 - w / 2, y: bbox.y + bbox.h / 2 - (w * aspect) / 2, w, h: w * aspect };
+}
+// Zoom by a factor around a fixed point (cx,cy stay under the cursor/pinch
+// center) — used by Free Zoom's wheel/pinch handling, not by auto-framing.
+function floorPlanZoomAt(vb, factor, cx, cy, maxW) {
+  const nw = Math.min(Math.max(vb.w * factor, 80), maxW || Infinity);
+  const r = nw / vb.w;
+  return { x: cx - (cx - vb.x) * r, y: cy - (cy - vb.y) * r, w: nw, h: nw * (vb.h / vb.w) };
+}
+
+// ---------- SVG upload parsing ----------
+// A 2D affine transform, the subset Visio's own SVG export actually emits:
+// translate(tx,ty) and/or rotate(deg), composed in that order. Nothing here
+// needs skew or a full matrix() — those don't appear in a Visio export and
+// adding support for them speculatively is exactly the kind of code this
+// project avoids writing before something actually needs it.
+function floorPlanParseTransform(attrValue) {
+  const tr = /translate\(\s*([-\d.eE]+)[ ,]+([-\d.eE]+)\s*\)/.exec(attrValue || "");
+  const ro = /rotate\(\s*([-\d.eE]+)/.exec(attrValue || "");
+  return { tx: tr ? +tr[1] : 0, ty: tr ? +tr[2] : 0, rot: ro ? +ro[1] : 0 };
+}
+function floorPlanApplyTransform(t, x, y) {
+  const r = (t.rot * Math.PI) / 180;
+  return [t.tx + x * Math.cos(r) - y * Math.sin(r), t.ty + x * Math.sin(r) + y * Math.cos(r)];
+}
+// A real SVG path parser for the piece that matters here, not a "grab every
+// number" regex: a room with one rounded corner uses an arc (A) command, and
+// an arc's 7 parameters (rx,ry,x-axis-rotation,large-arc-flag,sweep-flag,x,y)
+// are NOT x,y pairs — naively pairing them desyncs every point after the arc.
+// Only the arc's ENDPOINT is kept, which is fine for a translucent room-fill
+// overlay: the corner doesn't need to render curved for a tap target to work.
+// Visio's own export only ever emits absolute M/L/A/Z, which is all this
+// handles.
+function floorPlanPathToPoints(d) {
+  const tokens = (d || "").match(/[MLAZ][^MLAZ]*/gi) || [];
+  const pts = [];
+  for (const tok of tokens) {
+    const cmd = tok[0];
+    const nums = (tok.slice(1).match(/-?\d*\.?\d+(?:[eE]-?\d+)?/g) || []).map(Number);
+    if (cmd === "M" || cmd === "L") {
+      for (let i = 0; i + 1 < nums.length; i += 2) pts.push([nums[i], nums[i + 1]]);
+    } else if (cmd === "A") {
+      for (let i = 0; i + 6 < nums.length; i += 7) pts.push([nums[i + 5], nums[i + 6]]);
+    }
+  }
+  return pts;
+}
+// Every ancestor transform between an element and the drawing's root SVG,
+// innermost first — the order a point has to pass through them in, since an
+// inner transform is what a shape is drawn in and outer ones then carry that
+// whole local space to its place on the page. Walking to the real <svg> root
+// (rather than stopping at, say, "the Space group") is what makes this work
+// at any nesting depth without knowing Visio's own group structure — a
+// generalization the prototype's hand-tracked depth stack didn't have, since
+// it was reading raw tags rather than a real parsed tree.
+function floorPlanTransformChain(el, root) {
+  const chain = [];
+  let cur = el.parentElement;
+  while (cur && cur !== root) {
+    const attr = cur.getAttribute && cur.getAttribute("transform");
+    if (attr) chain.push(floorPlanParseTransform(attr));
+    cur = cur.parentElement;
+  }
+  return chain;
+}
+function floorPlanApplyChain(chain, x, y) {
+  let px = x, py = y;
+  for (const t of chain) { const [nx, ny] = floorPlanApplyTransform(t, px, py); px = nx; py = ny; }
+  return [px, py];
+}
+const floorPlanRound2 = n => Math.round(n * 100) / 100;
+
+// Walks a parsed SVG document for the two shapes Visio's export names by
+// convention: a <g> titled "Space…" (an outlined room, with a <path> or
+// <rect> for its geometry) and a <g> titled "Sheet…" carrying a <desc> and a
+// <rect> (a plain text label with no outline of its own). Neither is
+// identified by tag alone — a drawing has plenty of other <g>/<path>/<rect>
+// elements (walls, doors, fixtures) that must not be mistaken for a room.
+//
+// gid prefers the element's own id (stable across a re-export, unlike the
+// numeric suffix Visio appends) and falls back to the title when an id is
+// missing, so a shape is always addressable by something.
+function parseFloorPlanSvg(svgText) {
+  const doc = new DOMParser().parseFromString(svgText || "", "image/svg+xml");
+  if (doc.querySelector("parsererror")) throw new Error("That file isn't a valid SVG.");
+  const root = doc.querySelector("svg");
+  if (!root) throw new Error("That file isn't a valid SVG.");
+  const spaces = [];
+  const labels = [];
+  const groups = doc.querySelectorAll("g");
+  for (const g of groups) {
+    const titleEl = g.querySelector("title");
+    // Only a title that is a DIRECT reflection of this shape, not one
+    // belonging to some element nested arbitrarily deep inside it (a Space
+    // can legitimately contain further groups, e.g. furniture, each with
+    // their own <title>).
+    if (titleEl && titleEl.parentElement !== g) continue;
+    const title = titleEl ? (titleEl.textContent || "").trim() : "";
+    if (/^Space/i.test(title)) {
+      const geomEl = g.querySelector("path, rect");
+      if (!geomEl) continue;
+      const localPts = geomEl.tagName.toLowerCase() === "rect"
+        ? (() => {
+            const x = parseFloat(geomEl.getAttribute("x") || "0"), y = parseFloat(geomEl.getAttribute("y") || "0");
+            const w = parseFloat(geomEl.getAttribute("width") || "0"), h = parseFloat(geomEl.getAttribute("height") || "0");
+            return [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
+          })()
+        : floorPlanPathToPoints(geomEl.getAttribute("d") || "");
+      if (localPts.length < 3) continue;
+      const chain = floorPlanTransformChain(geomEl, root);
+      const pts = localPts.map(([x, y]) => floorPlanApplyChain(chain, x, y)).map(([x, y]) => [floorPlanRound2(x), floorPlanRound2(y)]);
+      // pole/bbox computed HERE, once, rather than at render time — every tap
+      // target, label position and zoom-to-shape call reads them, and a
+      // 30x30 grid search (floorPlanPole) is not free to repeat per render.
+      spaces.push({ gid: g.getAttribute("id") || title, title, pts, pole: floorPlanPole(pts), bbox: floorPlanBbox(pts) });
+    } else if (/^Sheet/i.test(title)) {
+      const descEl = g.querySelector("desc");
+      const rectEl = g.querySelector("rect");
+      if (!descEl || !rectEl) continue;
+      const rx = parseFloat(rectEl.getAttribute("x") || "0"), ry = parseFloat(rectEl.getAttribute("y") || "0");
+      const rw = parseFloat(rectEl.getAttribute("width") || "0"), rh = parseFloat(rectEl.getAttribute("height") || "0");
+      const chain = floorPlanTransformChain(rectEl, root);
+      const [cx, cy] = floorPlanApplyChain(chain, rx + rw / 2, ry + rh / 2);
+      labels.push({ text: (descEl.textContent || "").replace(/\s+/g, " ").trim(), x: floorPlanRound2(cx), y: floorPlanRound2(cy) });
+    }
+  }
+  const vb = (root.getAttribute("viewBox") || "").trim().split(/\s+/).map(Number);
+  return {
+    spaces, labels,
+    viewBox: vb.length === 4 && vb.every(n => !Number.isNaN(n)) ? { x: vb[0], y: vb[1], w: vb[2], h: vb[3] } : null,
+  };
+}
+
+// Reads the plan's SVG text and parses it once its owner's floorPlanUrl is
+// (or changes to) something real. Deliberately its own hook rather than
+// inline in FloorPlanTabContent's body, so the fetch/parse lifecycle (and its
+// cancellation on a fast asset switch) is in one place, testable in isolation
+// from the render tree that consumes it.
+function useFloorPlanSvg(url) {
+  const [state, setState] = useState(() => (url ? { status: "loading" } : { status: "empty" }));
+  useEffect(() => {
+    let cancelled = false;
+    if (!url) { setState({ status: "empty" }); return undefined; }
+    setState({ status: "loading" });
+    fetchFloorPlanSvgText(url)
+      .then(text => {
+        if (cancelled) return;
+        const parsed = parseFloorPlanSvg(text);
+        setState({ status: "ready", spaces: parsed.spaces, labels: parsed.labels });
+      })
+      .catch(err => {
+        if (cancelled) return;
+        setState({ status: "error", error: (err && err.message) || "Could not load the floor plan." });
+      });
+    return () => { cancelled = true; };
+  }, [url]);
+  return state;
+}
+function fetchFloorPlanSvgText(url) {
+  return fetch(url).then(res => {
+    if (!res.ok) throw new Error("Could not load the floor plan file (HTTP " + res.status + ").");
+    return res.text();
+  });
+}
+
+// The Floor Plan tab: upload an SVG, pan/zoom it, tap a drawn Space to link
+// it to a Room, and group several Spaces into one collapsible tile. See the
+// big comment block above parseFloorPlanSvg for the overall shape; this is
+// the component that actually renders and drives it.
+//
+// Kept as one component rather than split the way Breakers/PanelDiagram are —
+// there's no separate "config form" / "diagram" / "legend" split here yet,
+// and splitting prematurely would be guessing at a seam before a second real
+// use (a Room's floor plan alongside a Building's) shows where it actually is.
+function FloorPlanTabContent({
+  canEdit, selectedAsset, assets, typesList,
+  uploadBusy, uploadError, onUploadPlan,
+  onSaveLink, onSaveGroup, onDeleteGroup,
+}) {
+  const plan = useFloorPlanSvg(selectedAsset.floorPlanUrl);
+  const links = selectedAsset.floorPlanLinks || [];
+  const groups = selectedAsset.floorPlanGroups || [];
+  const linkFor = shapeId => links.find(l => l.shapeId === shapeId) || null;
+  const groupOfShape = shapeId => groups.find(g => (g.memberShapeIds || []).includes(shapeId)) || null;
+
+  // ---- pan/zoom: the viewBox lives in a ref, not state, so a drag/pinch
+  // writes the SVG's viewBox attribute directly every frame instead of
+  // chasing a React render -- the same "ref over state for anything that
+  // shouldn't drive a render" preference this file already applies to
+  // savingRef/revisionsRef/writeQueueRef. vbTick is the one bit of state that
+  // DOES matter for a render: the legend/zoom buttons read vb.current
+  // through it after a committed (non-drag) change. ----
+  const svgElRef = useRef(null);
+  const stageElRef = useRef(null);
+  const vbRef = useRef({ x: 0, y: 0, w: 1000, h: 700 });
+  const [vbTick, setVbTick] = useState(0);
+  const [freeZoom, setFreeZoom] = useState(false);
+  const fittedForRef = useRef(null); // which plan's spaces this has already auto-fitted to
+
+  const applyVB = () => {
+    if (svgElRef.current) {
+      const b = vbRef.current;
+      svgElRef.current.setAttribute("viewBox", `${b.x} ${b.y} ${b.w} ${b.h}`);
+    }
+  };
+  const stageAspect = () => {
+    const r = stageElRef.current && stageElRef.current.getBoundingClientRect();
+    return r && r.width ? r.height / r.width : 0.66;
+  };
+  const zoomToBbox = (bbox, pad) => {
+    vbRef.current = floorPlanZoomViewBox(bbox, pad == null ? 0.08 : pad, stageAspect());
+    applyVB();
+    setVbTick(t => t + 1);
+  };
+  // Unit-per-pixel, for turning a drag's screen delta into a viewBox delta.
+  const unitsPerPx = () => {
+    const r = stageElRef.current && stageElRef.current.getBoundingClientRect();
+    return r && r.width ? vbRef.current.w / r.width : 1;
+  };
+
+  // Auto-fit the very first time this plan's spaces become available, and
+  // again if the asset changes to one with a DIFFERENT plan -- not on every
+  // render, or selecting a shape (which also touches state) would fight it.
+  useEffect(() => {
+    if (plan.status !== "ready") return;
+    const key = selectedAsset.id + ":" + plan.spaces.length;
+    if (fittedForRef.current === key) return;
+    fittedForRef.current = key;
+    const allPts = plan.spaces.flatMap(s => s.pts);
+    if (allPts.length) zoomToBbox(floorPlanBbox(allPts), 0.06);
+  }, [plan.status, plan.spaces, selectedAsset.id]);
+
+  // ---- Free Zoom gestures: wheel-to-zoom-at-cursor, drag-to-pan. Off by
+  // default -- most of the time tapping a shape (which auto-frames it) is
+  // the whole interaction, the same "the app frames the shot for you unless
+  // told otherwise" default every other view in this app already takes. ----
+  const dragRef = useRef(null);
+  const toStagePoint = e => {
+    const r = stageElRef.current.getBoundingClientRect();
+    return [e.clientX - r.left, e.clientY - r.top];
+  };
+  const onWheel = e => {
+    if (!freeZoom) return;
+    e.preventDefault();
+    const [px, py] = toStagePoint(e);
+    const k = unitsPerPx();
+    const cx = vbRef.current.x + px * k, cy = vbRef.current.y + py * k;
+    vbRef.current = floorPlanZoomAt(vbRef.current, Math.exp(e.deltaY * 0.0015), cx, cy, 20000);
+    applyVB();
+  };
+  const onPointerDown = e => {
+    if (!freeZoom) return;
+    stageElRef.current.setPointerCapture(e.pointerId);
+    dragRef.current = { x: e.clientX, y: e.clientY, vb0: { ...vbRef.current } };
+  };
+  const onPointerMove = e => {
+    if (!freeZoom || !dragRef.current) return;
+    const k = unitsPerPx();
+    const dx = (e.clientX - dragRef.current.x) * k, dy = (e.clientY - dragRef.current.y) * k;
+    vbRef.current = { ...dragRef.current.vb0, x: dragRef.current.vb0.x - dx, y: dragRef.current.vb0.y - dy };
+    applyVB();
+  };
+  const endDrag = () => {
+    if (!dragRef.current) return;
+    dragRef.current = null;
+    setVbTick(t => t + 1); // commit to state once, at gesture end
+  };
+
+  // ---- setup mode: Link and Group are two tabs of one mode, exactly the
+  // combined-bar shape the prototype settled on -- switching tabs keeps the
+  // same view and only resets each tab's own in-progress state. ----
+  const [setupTab, setSetupTab] = useState(null); // null | "link" | "group"
+  const [pickerShapeId, setPickerShapeId] = useState(null); // link tab: open picker for this shape
+  const [groupPick, setGroupPick] = useState(() => new Set());
+  const [groupEditingId, setGroupEditingId] = useState(null);
+  const [groupNaming, setGroupNaming] = useState(null); // array of shapeIds pending a name, or null
+  const [openGroupId, setOpenGroupId] = useState(null); // normal view: which group is expanded
+  const [selectedShapeId, setSelectedShapeId] = useState(null);
+
+  function exitSetup() {
+    setSetupTab(null); setPickerShapeId(null);
+    setGroupPick(new Set()); setGroupEditingId(null); setGroupNaming(null);
+  }
+  function switchSetupTab(tab) {
+    if (tab === setupTab) return;
+    setSetupTab(tab); setPickerShapeId(null);
+    setGroupPick(new Set()); setGroupEditingId(null); setGroupNaming(null);
+  }
+  function startGroupEdit(groupId) {
+    const g = groups.find(x => x.id === groupId);
+    if (!g) return;
+    setGroupEditingId(groupId);
+    setGroupPick(new Set(g.memberShapeIds || []));
+  }
+  function saveGroupEditNow() {
+    if (groupPick.size < 2) {
+      onDeleteGroup(groupEditingId);
+    } else {
+      const g = groups.find(x => x.id === groupEditingId);
+      onSaveGroup({ id: groupEditingId, name: g ? g.name : "", hideLabel: g ? g.hideLabel : false, memberShapeIds: [...groupPick] });
+    }
+    setGroupEditingId(null); setGroupPick(new Set());
+  }
+  function finishGroupPick() {
+    if (groupPick.size < 2) { setGroupPick(new Set()); return; }
+    setGroupNaming([...groupPick]);
+  }
+  function createGroupNow(name, hideLabel) {
+    onSaveGroup({ name, hideLabel, memberShapeIds: groupNaming });
+    setGroupNaming(null); setGroupPick(new Set());
+  }
+
+  function onShapeClick(shapeId) {
+    if (setupTab === "link") { setPickerShapeId(shapeId); return; }
+    if (setupTab === "group") {
+      const owner = groupOfShape(shapeId);
+      if (groupEditingId) {
+        if (owner && owner.id !== groupEditingId) return; // belongs to a different group -- inert
+        setGroupPick(p => { const n = new Set(p); n.has(shapeId) ? n.delete(shapeId) : n.add(shapeId); return n; });
+        return;
+      }
+      if (owner) { startGroupEdit(owner.id); return; }
+      setGroupPick(p => { const n = new Set(p); n.has(shapeId) ? n.delete(shapeId) : n.add(shapeId); return n; });
+      return;
+    }
+    // Normal view: a collapsed group opens (and frames itself); anything
+    // else just selects and frames.
+    const grp = groupOfShape(shapeId);
+    if (grp && openGroupId !== grp.id) {
+      setOpenGroupId(grp.id);
+      setSelectedShapeId(null);
+      const members = plan.status === "ready" ? plan.spaces.filter(s => (grp.memberShapeIds || []).includes(s.gid)) : [];
+      if (members.length) zoomToBbox(floorPlanBbox(members.flatMap(s => s.pts)), 0.15);
+      return;
+    }
+    setSelectedShapeId(shapeId);
+    const shape = plan.status === "ready" ? plan.spaces.find(s => s.gid === shapeId) : null;
+    if (shape) zoomToBbox(floorPlanBbox(shape.pts), 0.5);
+  }
+  function clearSelection() {
+    setSelectedShapeId(null); setOpenGroupId(null);
+  }
+
+  // Unlinked shapes that are tapped directly (not via the shape-linking mode)
+  // when nothing is set up yet at all get sent straight into linking that one
+  // shape, same reasoning linkThisSpace took in the prototype: the notice
+  // was the same number of taps away from fixing it, minus the framing a
+  // real linking mode gives.
+  function onUnlinkedShapeClick(shapeId) {
+    setSetupTab("link");
+    setPickerShapeId(shapeId);
+  }
+
+  const fileInputRef = useRef(null);
+
+  if (!selectedAsset.floorPlanUrl) {
+    return (
+      <div className="card" style={{ padding: 18 }}>
+        <p style={{ margin: "0 0 10px", fontSize: 14, color: C.ink }}>No floor plan uploaded yet.</p>
+        <p style={{ margin: "0 0 14px", fontSize: 13, color: C.empty }}>
+          Upload an SVG export (from Visio or similar) with its rooms drawn as named Space shapes,
+          and this tab will let you link each one to a Room and group them together.
+        </p>
+        {canEdit && (
+          <>
+            <button
+              type="button"
+              disabled={uploadBusy}
+              onClick={() => fileInputRef.current && fileInputRef.current.click()}
+              style={{ padding: "8px 14px", borderRadius: 10, border: "none", background: C.brand, color: "#fff", fontSize: 13, fontWeight: 600, opacity: uploadBusy ? 0.6 : 1 }}
+            >
+              {uploadBusy ? "Uploading…" : "Upload floor plan…"}
+            </button>
+            <input
+              ref={fileInputRef} type="file" accept=".svg,image/svg+xml" style={{ display: "none" }}
+              onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (f) onUploadPlan(f); }}
+            />
+          </>
+        )}
+        {uploadError && <p style={{ margin: "10px 0 0", fontSize: 13, color: C.danger }}>{uploadError}</p>}
+      </div>
+    );
+  }
+
+  // ANYTHING but "ready" falls through to the loading state here, not just
+  // "loading" by name. useFloorPlanSvg's status can still read its MOUNT-time
+  // value ("empty", if floorPlanUrl was blank when this component first
+  // rendered) for one render after floorPlanUrl turns truthy — its effect
+  // hasn't fired yet, since effects run after the render they're triggered
+  // by, not synchronously with the prop change. Enumerating "loading" alone
+  // left that one frame with a status this code didn't recognize, falling
+  // through to the main render below and reading .spaces off state that had
+  // none -- caught by driving an actual upload in the browser, not by
+  // reasoning about the effect timing in the abstract.
+  if (plan.status !== "ready" && plan.status !== "error") {
+    return <div className="card" style={{ padding: 18, fontSize: 13, color: C.empty }}>Loading the floor plan…</div>;
+  }
+  if (plan.status === "error") {
+    return (
+      <div className="card" style={{ padding: 18 }}>
+        <p style={{ margin: "0 0 10px", fontSize: 14, color: C.danger }}>{plan.error}</p>
+        {canEdit && (
+          <>
+            <button
+              type="button" disabled={uploadBusy}
+              onClick={() => fileInputRef.current && fileInputRef.current.click()}
+              style={{ padding: "7px 12px", borderRadius: 10, border: `1.5px solid ${C.border}`, background: "none", color: C.ink, fontSize: 13, fontWeight: 600 }}
+            >
+              {uploadBusy ? "Uploading…" : "Replace floor plan…"}
+            </button>
+            <input
+              ref={fileInputRef} type="file" accept=".svg,image/svg+xml" style={{ display: "none" }}
+              onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (f) onUploadPlan(f); }}
+            />
+          </>
+        )}
+      </div>
+    );
+  }
+
+  const css = `
+    .fp-stage { touch-action: ${freeZoom ? "none" : "pan-y"}; cursor: ${freeZoom ? "grab" : "default"}; }
+    .fp-room { cursor: pointer; }
+    .fp-room:hover > .fp-area { fill-opacity: .55; }
+    .fp-text { font-family: inherit; paint-order: stroke; stroke: #fff; stroke-linejoin: round; pointer-events: none; }
+  `;
+
+  const shapeStatus = shapeId => {
+    if (groupEditingId) {
+      const owner = groupOfShape(shapeId);
+      return { editable: !owner || owner.id === groupEditingId, picked: groupPick.has(shapeId) };
+    }
+    return { editable: true, picked: groupPick.has(shapeId) };
+  };
+
+  const renderedGroupIds = new Set();
+
+  return (
+    <div>
+      <style>{css}</style>
+
+      {/* ---------- setup bar: Link/Group tabs, shown only while in setup ---------- */}
+      {canEdit && setupTab && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10, background: C.brandDark, borderRadius: 10, padding: "9px 12px" }}>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button type="button" onClick={() => switchSetupTab("link")}
+              style={{ flex: 1, padding: "6px 0", borderRadius: 7, border: "none", fontSize: 12.5, fontWeight: 600, background: setupTab === "link" ? "#fff" : "rgba(255,255,255,.16)", color: setupTab === "link" ? C.brandDark : "#fff" }}>
+              Link
+            </button>
+            <button type="button" onClick={() => switchSetupTab("group")}
+              style={{ flex: 1, padding: "6px 0", borderRadius: 7, border: "none", fontSize: 12.5, fontWeight: 600, background: setupTab === "group" ? "#fff" : "rgba(255,255,255,.16)", color: setupTab === "group" ? C.brandDark : "#fff" }}>
+              Group
+            </button>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", color: "#fff", fontSize: 12.5 }}>
+            {setupTab === "link" && (
+              <span style={{ flex: 1 }}>Tap a shape to set its room · <b>{links.filter(l => l.roomId).length} of {plan.spaces.length} linked</b></span>
+            )}
+            {setupTab === "group" && groupEditingId && (
+              <span style={{ flex: 1 }}>Editing <b>{(groups.find(g => g.id === groupEditingId) || {}).name || ""}</b> · <b>{groupPick.size}</b> spaces</span>
+            )}
+            {setupTab === "group" && !groupEditingId && (
+              <span style={{ flex: 1 }}>Tap shapes to group together · <b>{groupPick.size} selected</b></span>
+            )}
+            {setupTab === "group" && groupEditingId && (
+              <>
+                <button type="button" onClick={saveGroupEditNow} style={{ padding: "4px 10px", borderRadius: 8, border: "1.5px solid rgba(255,255,255,.6)", background: "none", color: "#fff", fontSize: 12, fontWeight: 600 }}>Save</button>
+                <button type="button" onClick={() => { setGroupEditingId(null); setGroupPick(new Set()); }} style={{ padding: "4px 10px", borderRadius: 8, border: "1.5px solid rgba(255,255,255,.6)", background: "none", color: "#fff", fontSize: 12, fontWeight: 600 }}>Cancel</button>
+              </>
+            )}
+            {setupTab === "group" && !groupEditingId && (
+              <button type="button" onClick={finishGroupPick} style={{ padding: "4px 10px", borderRadius: 8, border: "1.5px solid rgba(255,255,255,.6)", background: "none", color: "#fff", fontSize: 12, fontWeight: 600 }}>Create group</button>
+            )}
+            <button type="button" onClick={exitSetup} style={{ padding: "4px 10px", borderRadius: 8, border: "1.5px solid rgba(255,255,255,.6)", background: "none", color: "#fff", fontSize: 12, fontWeight: 600 }}>Done</button>
+          </div>
+        </div>
+      )}
+
+      {/* ---------- toolbar: enter setup, replace file, free zoom ---------- */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+        {canEdit && !setupTab && (
+          <button type="button" onClick={() => setSetupTab("link")}
+            style={{ padding: "6px 11px", borderRadius: 9, border: `1.5px solid ${C.border}`, background: "none", color: C.ink, fontSize: 12.5, fontWeight: 600 }}>
+            Link &amp; group spaces…
+          </button>
+        )}
+        <button type="button" onClick={() => setFreeZoom(z => !z)}
+          style={{ padding: "6px 11px", borderRadius: 9, border: `1.5px solid ${C.border}`, background: freeZoom ? C.hover : "none", color: C.ink, fontSize: 12.5, fontWeight: 600 }}>
+          Free zoom {freeZoom ? "on" : "off"}
+        </button>
+        {selectedAsset.floorPlanFileName && (
+          <span style={{ fontSize: 12, color: C.empty, marginLeft: "auto" }}>{selectedAsset.floorPlanFileName}</span>
+        )}
+        {canEdit && (
+          <>
+            <button type="button" disabled={uploadBusy} onClick={() => fileInputRef.current && fileInputRef.current.click()}
+              style={{ padding: "6px 11px", borderRadius: 9, border: `1.5px solid ${C.border}`, background: "none", color: C.ink, fontSize: 12.5, fontWeight: 600 }}>
+              {uploadBusy ? "Uploading…" : "Replace…"}
+            </button>
+            <input ref={fileInputRef} type="file" accept=".svg,image/svg+xml" style={{ display: "none" }}
+              onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (f) onUploadPlan(f); }} />
+          </>
+        )}
+      </div>
+      {uploadError && <p style={{ margin: "0 0 8px", fontSize: 13, color: C.danger }}>{uploadError}</p>}
+
+      {/* ---------- the plan itself ---------- */}
+      <div
+        ref={stageElRef}
+        className="fp-stage"
+        style={{ position: "relative", width: "100%", height: "min(60vh, 620px)", minHeight: 320, border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden", background: C.bg }}
+        onWheel={onWheel}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+      >
+        <svg
+          ref={svgElRef}
+          width="100%" height="100%"
+          onClick={e => { if (e.target === svgElRef.current) clearSelection(); }}
+        >
+          {plan.spaces.map(s => {
+            const d = "M" + s.pts.map(p => p.join(" ")).join(" L") + " Z";
+            const link = linkFor(s.gid);
+            const grp = groupOfShape(s.gid);
+
+            // ---- setup-mode rendering ----
+            if (setupTab === "link") {
+              const linked = !!(link && link.roomId);
+              const sel = pickerShapeId === s.gid;
+              const roomName = linked ? (parentNameFor(link.roomId, assets) || "(deleted room)") : "Tap to link";
+              return (
+                <g key={s.gid} className="fp-room" onClick={() => onShapeClick(s.gid)}>
+                  <path className="fp-area" d={d}
+                    fill={linked ? "#3F8F5A" : "#C98A3B"} fillOpacity={linked ? 0.26 : 0.22}
+                    stroke={sel ? C.brandDark : (linked ? "#3F8F5A" : "#C98A3B")} strokeWidth={sel ? 3.4 : 1.6}
+                    strokeDasharray={linked ? undefined : "7 5"} />
+                  <text className="fp-text" x={s.pole.x} y={s.pole.y} textAnchor="middle" fontSize={11} fontWeight={600} fill={linked ? "#1F1F1F" : "#8A5A22"}>{roomName}</text>
+                </g>
+              );
+            }
+            if (setupTab === "group") {
+              const st = shapeStatus(s.gid);
+              if (!st.editable) {
+                return (
+                  <g key={s.gid} className="fp-room" style={{ cursor: "default" }}>
+                    <path className="fp-area" d={d} fill="#8FA6B8" fillOpacity={0.1} stroke="#8FA6B8" strokeWidth={1.3} strokeDasharray="4 3" />
+                  </g>
+                );
+              }
+              return (
+                <g key={s.gid} className="fp-room" onClick={() => onShapeClick(s.gid)}>
+                  <path className="fp-area" d={d}
+                    fill={st.picked ? C.brandDark : "transparent"} fillOpacity={st.picked ? 0.3 : 0}
+                    stroke={st.picked ? C.brandDark : "#8FA6B8"} strokeWidth={st.picked ? 3 : 1.4}
+                    strokeDasharray={st.picked ? undefined : "5 4"} />
+                  {st.picked && <circle cx={s.pole.x} cy={s.pole.y} r={9} fill={C.brandDark} stroke="#fff" strokeWidth={2} />}
+                  {st.picked && <text className="fp-text" x={s.pole.x} y={s.pole.y + 4} textAnchor="middle" fontSize={11} fontWeight={700} fill="#fff">✓</text>}
+                </g>
+              );
+            }
+
+            // ---- normal view ----
+            if (grp && openGroupId !== grp.id) {
+              if (renderedGroupIds.has(grp.id)) return null;
+              renderedGroupIds.add(grp.id);
+              const members = plan.spaces.filter(m => (grp.memberShapeIds || []).includes(m.gid));
+              const bbox = floorPlanBbox(members.flatMap(m => m.pts));
+              const items = members.map(m => linkFor(m.gid)).filter(l => l && l.roomId);
+              return (
+                <g key={grp.id} className="fp-room" onClick={() => onShapeClick(s.gid)}>
+                  {members.map(m => (
+                    <path key={m.gid} className="fp-area" d={"M" + m.pts.map(p => p.join(" ")).join(" L") + " Z"}
+                      fill={C.brand} fillOpacity={items.length ? 0.12 : 0.06} stroke="#416280" strokeWidth={1.3} />
+                  ))}
+                  {!grp.hideLabel && (
+                    <text className="fp-text" x={bbox.x + bbox.w / 2} y={bbox.y + bbox.h / 2} textAnchor="middle" fontSize={12} fontWeight={700} fill="#1F1F1F">{grp.name}</text>
+                  )}
+                  <FloorPlanGroupBadge cx={bbox.x + bbox.w / 2} cy={bbox.y + bbox.h / 2 + (grp.hideLabel ? 0 : 15)} count={members.length} />
+                </g>
+              );
+            }
+
+            const linked = !!(link && link.roomId);
+            const sel = selectedShapeId === s.gid;
+            const label = linked ? (parentNameFor(link.roomId, assets) || "(deleted room)") : "Not linked";
+            const clickHandler = grp ? () => onShapeClick(s.gid) : (linked ? () => onShapeClick(s.gid) : () => onUnlinkedShapeClick(s.gid));
+            return (
+              <g key={s.gid} className="fp-room" onClick={clickHandler}>
+                <path className="fp-area" d={d}
+                  fill={linked ? C.brand : "#C98A3B"} fillOpacity={linked ? 0.08 : 0.14}
+                  stroke={sel ? C.brandDark : "#416280"} strokeWidth={sel ? 3 : 1.3}
+                  strokeDasharray={linked ? undefined : "6 4"} />
+                <text className="fp-text" x={s.pole.x} y={s.pole.y} textAnchor="middle" fontSize={11} fontWeight={600} fill={linked ? "#1F1F1F" : "#8A6A3C"}>{label}</text>
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+
+      {/* ---------- room picker (Link tab) ---------- */}
+      {pickerShapeId && (
+        <SpaceRoomPickerField
+          shapeId={pickerShapeId}
+          value={(linkFor(pickerShapeId) || {}).roomId || ""}
+          onChange={roomId => { onSaveLink(pickerShapeId, roomId); setPickerShapeId(null); }}
+          assets={assets}
+          floorPlanLinks={links}
+          onClose={() => setPickerShapeId(null)}
+        />
+      )}
+
+      {/* ---------- name-this-group dialog ---------- */}
+      {groupNaming && (
+        <FloorPlanGroupNameDialog
+          count={groupNaming.length}
+          onCancel={() => setGroupNaming(null)}
+          onCreate={createGroupNow}
+        />
+      )}
+
+      {/* ---------- groups list, when not in setup ---------- */}
+      {!setupTab && groups.length > 0 && (
+        <div style={{ marginTop: 10, fontSize: 12.5, color: C.muted }}>
+          {groups.length} space group{groups.length > 1 ? "s" : ""} on this plan.
+        </div>
+      )}
+      {openGroupId && !setupTab && (
+        <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontSize: 13, fontWeight: 600, color: C.ink }}>
+            {(groups.find(g => g.id === openGroupId) || {}).name}
+          </span>
+          {canEdit && (
+            <button type="button" onClick={() => { onDeleteGroup(openGroupId); setOpenGroupId(null); }}
+              style={{ padding: "3px 9px", borderRadius: 8, border: `1.5px solid ${C.border}`, background: "none", color: C.danger, fontSize: 12, fontWeight: 600 }}>
+              Ungroup
+            </button>
+          )}
+          <button type="button" onClick={() => setOpenGroupId(null)} style={{ padding: "3px 9px", borderRadius: 8, border: "none", background: "none", color: C.brand, fontSize: 12, fontWeight: 600 }}>
+            Close
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+// The "N spaces" pill on a collapsed group tile in the normal (non-setup)
+// view -- always on, unlike an asset-count badge, since it says something
+// about the SHAPES (there's more than one), not about linked-room data.
+function FloorPlanGroupBadge({ cx, cy, count }) {
+  const label = `${count} spaces`;
+  const w = Math.max(label.length * 6.2, 44), h = 15;
+  return (
+    <g style={{ pointerEvents: "none" }}>
+      <rect x={cx - w / 2} y={cy - h / 2} width={w} height={h} rx={h / 2} fill="#30485E" fillOpacity={0.82} />
+      <text className="fp-text" x={cx} y={cy + 4} textAnchor="middle" fontSize={10} fontWeight={700} fill="#fff" stroke="none">{label}</text>
+    </g>
+  );
+}
+// Name + "hide this name on the floor" checkbox, shown once 2+ spaces are
+// picked in Group mode. A plain centered card, the same shape the app's
+// other small modals (floor picker, room picker) already take.
+function FloorPlanGroupNameDialog({ count, onCancel, onCreate }) {
+  const [name, setName] = useState("");
+  const [hideLabel, setHideLabel] = useState(false);
+  return (
+    <div onClick={onCancel} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 40, padding: 16 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, width: "100%", maxWidth: 340, display: "flex", flexDirection: "column", gap: 12 }}>
+        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>
+          Name this group
+        </div>
+        <div style={{ fontSize: 12, color: C.empty }}>{count} spaces selected</div>
+        <input
+          autoFocus value={name} onChange={e => setName(e.target.value)}
+          placeholder="e.g. Women's Locker-Room"
+          onKeyDown={e => { if (e.key === "Enter") onCreate(name, hideLabel); }}
+          style={{ padding: "8px 10px", borderRadius: 9, border: `1.5px solid ${C.border}`, fontSize: 14, color: C.ink }}
+        />
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: C.muted, cursor: "pointer" }}>
+          <input type="checkbox" checked={hideLabel} onChange={e => setHideLabel(e.target.checked)} style={{ margin: 0 }} />
+          Hide this name when viewing the floor
+        </label>
+        <button type="button" onClick={() => onCreate(name, hideLabel)}
+          style={{ padding: "9px 0", borderRadius: 10, border: "none", background: C.brand, color: "#fff", fontSize: 13, fontWeight: 700 }}>
+          Create group
+        </button>
       </div>
     </div>
   );

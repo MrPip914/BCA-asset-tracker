@@ -1,0 +1,219 @@
+// Tests for the Floor Plan tab's pure logic: the per-type "can carry a floor
+// plan" toggle, and the geometry/parsing math (clearance-based label sizing,
+// viewBox framing, and the SVG path/transform parsing a real Visio export
+// needs).
+//
+// parseFloorPlanSvg itself is NOT tested here — it calls the real browser
+// DOMParser, which plain Node has no equivalent of, and this project's own
+// convention (see CLAUDE.md, the snapshot-cache and nav sections) is that
+// genuine browser behavior gets verified by driving the real page in
+// Chromium, not faked with a DOM shim that tests this file's idea of a
+// parser instead of the real one. Its building blocks — floorPlanPathToPoints
+// (arc-aware path parsing) and floorPlanParseTransform/floorPlanApplyTransform
+// (the transform composition) — ARE pure and ARE tested here, since those are
+// exactly the pieces that fail silently and produce a garbled outline with no
+// error (the same arc-desync bug the prototype hit against a real 29-space
+// export, ported here as a regression check).
+//
+// Run: node test-frontend-floorplan.js   (exits non-zero on failure)
+const fs = require('fs');
+const path = require('path');
+const src = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+
+function grabFn(name) {
+  const i = src.indexOf(`function ${name}(`);
+  if (i === -1) throw new Error(`${name} not found`);
+  let depth = 0;
+  for (let k = src.indexOf('{', i); k < src.length; k++) {
+    if (src[k] === '{') depth++;
+    else if (src[k] === '}' && --depth === 0) return src.slice(i, k + 1);
+  }
+  throw new Error(`${name} not closed`);
+}
+function grabBlock(startsWith, endsWith) {
+  const i = src.indexOf(startsWith);
+  if (i === -1) throw new Error(`${startsWith} not found`);
+  const j = src.indexOf(endsWith, i);
+  if (j === -1) throw new Error(`${endsWith} not found after ${startsWith}`);
+  return src.slice(i, j + endsWith.length);
+}
+
+let pass = 0, fail = 0;
+const check = (name, ok, detail) => {
+  console.log((ok ? 'PASS  ' : 'FAIL  ') + name + (ok || !detail ? '' : `\n        ${detail}`));
+  ok ? pass++ : fail++;
+};
+const approx = (a, b, eps) => Math.abs(a - b) < (eps || 0.01);
+
+// --- 1. the per-type toggle ---------------------------------------------------
+const registrySrc = grabBlock('const TYPE_REGISTRY = {', '\n};');
+const iconStubs = [...new Set(
+  [...registrySrc.matchAll(/\bicon:\s*([A-Z]\w*)/g)].map(m => m[1])
+)].map(n => `const ${n} = null;`).join('\n');
+
+const toggleMod = { exports: {} };
+try {
+  new Function('module', [
+    iconStubs,
+    'let TYPE_SETTINGS = {};',
+    'let TYPE_FIELD_COLUMNS = [];',
+    registrySrc,
+    'let DERIVED_TYPE_SETS = { restrictedFields: new Set(), placeTypes: new Set() };',
+    grabFn('recomputeDerivedTypeSets'),
+    'recomputeDerivedTypeSets();',
+    grabFn('typeEntryFor'),
+    grabFn('typeHasFloorPlan'),
+    grabFn('isPlaceType'),
+    grabFn('modulesFor'),
+    grabFn('availableTabsFor'),
+    // setTypeSettings lets a test swap in an override without re-evaluating
+    // the whole module for each case.
+    'module.exports = { typeHasFloorPlan, availableTabsFor, setTypeSettings: s => { TYPE_SETTINGS = s; recomputeDerivedTypeSets(); } };',
+  ].join('\n'))(toggleMod);
+} catch (e) {
+  console.error('Could not evaluate the type-toggle helpers:\n  ' + e.message);
+  process.exit(1);
+}
+const { typeHasFloorPlan, availableTabsFor, setTypeSettings } = toggleMod.exports;
+
+check('Room carries a floor plan by default', typeHasFloorPlan('Room') === true);
+check('Building carries a floor plan by default', typeHasFloorPlan('Building') === true);
+check('Computer does not carry a floor plan by default', typeHasFloorPlan('Computer') === false);
+check('an unregistered (user-created) type does not carry one by default', typeHasFloorPlan('SomeCustomType') === false);
+
+setTypeSettings({ Computer: { floorPlan: true } });
+check('a per-type override can turn it ON for a type that ships off', typeHasFloorPlan('Computer') === true);
+check('Room is unaffected by an override naming a different type', typeHasFloorPlan('Room') === true);
+setTypeSettings({ Room: { floorPlan: false } });
+check('a per-type override can turn it OFF for a type that ships on', typeHasFloorPlan('Room') === false);
+setTypeSettings({});
+
+check('availableTabsFor includes floorPlan for Room', availableTabsFor('Room').includes('floorPlan'));
+check('availableTabsFor includes floorPlan for Building', availableTabsFor('Building').includes('floorPlan'));
+check('availableTabsFor omits floorPlan for Computer', !availableTabsFor('Computer').includes('floorPlan'));
+check('floorPlan sits before the common tabs (maintenance/photos/etc.), matching contents\' placement',
+  availableTabsFor('Room').indexOf('floorPlan') < availableTabsFor('Room').indexOf('maintenance'));
+
+// --- 2. geometry: clearance-based label sizing --------------------------------
+const geomMod = { exports: {} };
+new Function('module', [
+  grabFn('floorPlanPointInPoly'),
+  grabFn('floorPlanSegDist'),
+  grabFn('floorPlanPole'),
+  grabFn('floorPlanBbox'),
+  grabFn('floorPlanWrapWords'),
+  grabFn('floorPlanLabelFit'),
+  grabFn('floorPlanZoomViewBox'),
+  grabFn('floorPlanZoomAt'),
+  'module.exports = { floorPlanPole, floorPlanBbox, floorPlanLabelFit, floorPlanZoomViewBox, floorPlanZoomAt };',
+].join('\n'))(geomMod);
+const { floorPlanPole, floorPlanBbox, floorPlanLabelFit, floorPlanZoomViewBox, floorPlanZoomAt } = geomMod.exports;
+
+// A 100x100 square: the pole should land at the center with clearance ~50.
+const square = [[0, 0], [100, 0], [100, 100], [0, 100]];
+const squarePole = floorPlanPole(square);
+check('a square\'s pole lands near its center', approx(squarePole.x, 50, 3) && approx(squarePole.y, 50, 3),
+  `got (${squarePole.x}, ${squarePole.y})`);
+check('a square\'s clearance is about half its side', approx(squarePole.clear, 50, 3), `got ${squarePole.clear}`);
+
+// A long, narrow hallway (300 x 6): clearance should be tiny (~3), even
+// though its bounding-box WIDTH (300) is huge — this is the exact bug the
+// prototype fixed (Stage Left Hall's label rendering far too large because it
+// was sized off the bounding box instead of the local clearance). Narrow
+// enough that clear*1.15 lands clearly under the 11px cap both shapes would
+// otherwise hit — a hallway that's merely somewhat narrow proves nothing if
+// both ends up pinned to the same maximum.
+const hallway = [[0, 0], [300, 0], [300, 6], [0, 6]];
+const hallPole = floorPlanPole(hallway);
+check('a narrow hallway has small clearance despite a huge bounding box',
+  hallPole.clear < 5, `got ${hallPole.clear}`);
+const { fs: hallFs } = floorPlanLabelFit(1, hallPole.clear, 11, 'Stage Left Hall');
+const { fs: squareFs } = floorPlanLabelFit(1, squarePole.clear, 11, 'Main Room');
+check('the hallway\'s label is sized smaller than the square\'s, not larger',
+  hallFs < squareFs, `hallway fs=${hallFs}, square fs=${squareFs}`);
+
+// --- 3. label wrapping ---------------------------------------------------------
+const { words: shortWords } = floorPlanLabelFit(1, 50, 11, 'Kitchen');
+check('a short label that fits is not wrapped', shortWords.length === 1);
+const { words: longWords } = floorPlanLabelFit(1, 8, 11, "Women's Locker-Room Water Heater");
+check('a long label in a tight space wraps to more than one line', longWords.length > 1,
+  `got ${JSON.stringify(longWords)}`);
+check('wrapping does not drop any words', longWords.join(' ').split(/\s+/).length,
+  "Women's Locker-Room Water Heater".split(/\s+/).length);
+
+// --- 4. viewBox framing ---------------------------------------------------------
+const framed = floorPlanZoomViewBox({ x: 0, y: 0, w: 100, h: 100 }, 0, 1);
+check('framing a square bbox at 1:1 aspect with no padding reproduces it',
+  approx(framed.w, 100) && approx(framed.h, 100), JSON.stringify(framed));
+const paddedFrame = floorPlanZoomViewBox({ x: 0, y: 0, w: 100, h: 100 }, 0.1, 1);
+check('padding grows the frame rather than shrinking it',
+  paddedFrame.w > 100 && paddedFrame.h > 100, JSON.stringify(paddedFrame));
+// aspect is the STAGE's own height/width ratio (matching how the prototype's
+// zoomTo read stage.getBoundingClientRect()) — a WIDE stage has a SMALL
+// aspect (short relative to its width), e.g. 0.5 for a 2:1 stage.
+const wideStage = floorPlanZoomViewBox({ x: 0, y: 0, w: 100, h: 100 }, 0, 0.5);
+check('framing a square on a wide stage grows the WIDTH to fill it, keeping the shape centered',
+  wideStage.w > wideStage.h, JSON.stringify(wideStage));
+const tinyFrame = floorPlanZoomViewBox({ x: 0, y: 0, w: 1, h: 1 }, 0, 1);
+check('an absurdly small bbox is floored at a minimum width rather than zooming in forever',
+  tinyFrame.w >= 80, JSON.stringify(tinyFrame));
+
+// w starts well above the 80-unit floor (see floorPlanZoomViewBox's own
+// "tiny bbox" test above) so halving it lands somewhere that floor can't
+// mask a broken factor.
+const zoomedIn = floorPlanZoomAt({ x: 0, y: 0, w: 400, h: 400 }, 0.5, 200, 200);
+check('zooming in around the center keeps that center point fixed',
+  approx(zoomedIn.x + zoomedIn.w / 2, 200) && approx(zoomedIn.y + zoomedIn.h / 2, 200), JSON.stringify(zoomedIn));
+check('zooming in by 0.5 halves the width', approx(zoomedIn.w, 200), JSON.stringify(zoomedIn));
+
+// --- 5. path parsing: the arc-desync bug, pinned as a regression -------------
+const pathMod = { exports: {} };
+new Function('module', [
+  grabFn('floorPlanPathToPoints'),
+  'module.exports = { floorPlanPathToPoints };',
+].join('\n'))(pathMod);
+const { floorPlanPathToPoints } = pathMod.exports;
+
+check('a plain M/L rectangle parses to 4 points',
+  floorPlanPathToPoints('M0 0 L100 0 L100 100 L0 100 Z').length === 4);
+// A room with one rounded corner: three straight sides plus one arc. Pairing
+// every number naively (the bug this parser exists to avoid) would desync
+// every point after the arc's 7 non-paired parameters and either throw or
+// silently misplace the rest of the outline.
+const arcPath = 'M0 0 L80 0 L100 20 A20 20 0 0 1 100 40 L100 100 L0 100 Z';
+const arcPts = floorPlanPathToPoints(arcPath);
+check('a path with one rounded corner (arc) does not throw and returns real points',
+  arcPts.length >= 5 && arcPts.every(p => p.length === 2 && !p.some(Number.isNaN)),
+  JSON.stringify(arcPts));
+check('the arc contributes its ENDPOINT (100,40), not a desynced pairing of its 7 params',
+  arcPts.some(([x, y]) => approx(x, 100) && approx(y, 40)), JSON.stringify(arcPts));
+// The two points AFTER the arc must still be correct — this is exactly what
+// desyncs if the arc's params are paired as if they were plain x,y pairs.
+check('points after the arc are not corrupted by the arc\'s own parameters',
+  arcPts.some(([x, y]) => approx(x, 100) && approx(y, 100)) && arcPts.some(([x, y]) => approx(x, 0) && approx(y, 100)),
+  JSON.stringify(arcPts));
+
+// --- 6. transform composition ---------------------------------------------------
+const tMod = { exports: {} };
+new Function('module', [
+  grabFn('floorPlanParseTransform'),
+  grabFn('floorPlanApplyTransform'),
+  'module.exports = { floorPlanParseTransform, floorPlanApplyTransform };',
+].join('\n'))(tMod);
+const { floorPlanParseTransform, floorPlanApplyTransform } = tMod.exports;
+
+check('a translate-only transform reads its tx/ty and no rotation',
+  JSON.stringify(floorPlanParseTransform('translate(10,20)')) === JSON.stringify({ tx: 10, ty: 20, rot: 0 }));
+check('a rotate-only transform reads its angle and no translation',
+  JSON.stringify(floorPlanParseTransform('rotate(90)')) === JSON.stringify({ tx: 0, ty: 0, rot: 90 }));
+check('a missing/unrecognized transform is the identity, not a throw',
+  JSON.stringify(floorPlanParseTransform('')) === JSON.stringify({ tx: 0, ty: 0, rot: 0 }));
+
+const rotated = floorPlanApplyTransform({ tx: 0, ty: 0, rot: 90 }, 10, 0);
+check('a 90-degree rotation sends (10,0) to (~0,10)', approx(rotated[0], 0) && approx(rotated[1], 10),
+  JSON.stringify(rotated));
+const translated = floorPlanApplyTransform({ tx: 5, ty: 5, rot: 0 }, 10, 10);
+check('a plain translation just adds tx/ty', JSON.stringify(translated) === JSON.stringify([15, 15]));
+
+console.log(`\n${pass} passed, ${fail} failed`);
+process.exit(fail ? 1 : 0);
