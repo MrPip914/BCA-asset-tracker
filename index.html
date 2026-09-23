@@ -3333,7 +3333,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-22.3";
+const APP_VERSION = "2026-09-22.4";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -14331,6 +14331,7 @@ function SpaceRoomPickerField({ shapeId, value, onChange, assets, floorPlanLinks
       isSelectable={a => isPlaceType(a.type)}
       excluded={excluded}
       noneLabel="Not linked"
+      searchable
       value={value || ""}
       onChange={onChange}
       onClose={onClose}
@@ -14498,6 +14499,15 @@ function HierarchyNav({ assets, scopeId, setScopeId }) {
 //                         is right for a parent (a real, meaningful state) and
 //                         nonsense when you're assigning chairs to a room, where
 //                         the honest answer is that there's nothing to offer.
+//   searchable          — true to show a text box that flattens the scope into
+//                         a plain filtered list of pickable rows (each showing
+//                         its own path, since flattening loses the breadcrumb
+//                         that would otherwise say where it lives). Optional
+//                         and defaults to off, so every existing caller keeps
+//                         its plain drill-down. Introduced for the Floor Plan
+//                         room picker, whose scope is one building's own
+//                         rooms — few enough to drill through, but a search
+//                         box is still faster than a name you already know.
 function HierarchyBrowserModal({
   title, hint, assets, isSelectable, excluded, multi, value, onChange, onClose, noneLabel,
   // Optional, purely additive: a node rendered between the hint and the
@@ -14508,6 +14518,7 @@ function HierarchyBrowserModal({
   // assigned elsewhere" checkbox that a `render prop` fits far better than
   // teaching this component a floor-plan-specific concept of its own.
   filterNote,
+  searchable,
 }) {
   const all = assets || [];
   const blocked = excluded || new Set();
@@ -14518,6 +14529,7 @@ function HierarchyBrowserModal({
   const [picked, setPicked] = useState(() => (multi ? [...(value || [])] : []));
   const selectedIds = multi ? picked : (value ? [value] : []);
   const isPicked = label => selectedIds.includes(label);
+  const [searchQuery, setSearchQuery] = useState("");
 
   // An asset whose parent doesn't exist (deleted, or a bad hand edit) is treated
   // as a root, so it stays reachable here instead of being stranded — otherwise
@@ -14533,6 +14545,20 @@ function HierarchyBrowserModal({
     .sort((x, y) => nameOf(x).localeCompare(nameOf(y), undefined, { numeric: true, sensitivity: "base" }));
 
   const canPick = a => isSelectable(a) && !blocked.has(a.id);
+
+  // Search flattens the SCOPE (whatever `assets` this caller passed, already
+  // its own filter) rather than walking from the current level, so typing a
+  // name jumps straight to it regardless of where you're standing in the
+  // tree. Only pickable rows match -- the thing you're searching for is an
+  // answer, not a waypoint -- and each result carries its own path, the same
+  // "label — path" idiom the sub-panel feed picker uses, since flattening is
+  // exactly what throws the breadcrumb away.
+  const searchQueryNorm = searchable ? searchQuery.trim().toLowerCase() : "";
+  const searchResults = searchQueryNorm
+    ? all.filter(a => canPick(a) && nameOf(a).toLowerCase().includes(searchQueryNorm))
+        .sort((x, y) => nameOf(x).localeCompare(nameOf(y), undefined, { numeric: true, sensitivity: "base" }))
+    : null;
+
   // Does anything inside this lead somewhere pickable? Drives whether the row is
   // shown at all, and whether it gets an "open" chevron. The visited set guards
   // the same loop case every other walk in this file does.
@@ -14624,16 +14650,35 @@ function HierarchyBrowserModal({
           </div>
         )}
 
-        <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 1, marginBottom: 8, paddingBottom: 8, borderBottom: `1px solid ${C.border}` }}>
-          {crumb("All", null, trail.length === 0)}
-          {trail.map((a, i) => crumb(nameOf(a), a.id, i === trail.length - 1))}
-        </div>
+        {searchable && (
+          <div style={{ position: "relative", marginBottom: 8 }}>
+            <Search size={14} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: C.placeholder, pointerEvents: "none" }} />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              placeholder="Search…"
+              style={{ width: "100%", boxSizing: "border-box", padding: "8px 10px 8px 30px", borderRadius: 10, border: `1.5px solid ${C.border}`, fontSize: 14, color: C.ink, background: C.bg }}
+            />
+          </div>
+        )}
+
+        {/* The breadcrumb belongs to browse mode — while searching, the flat
+            result list below replaces it (and the level it names is beside
+            the point: a result can live at any depth). */}
+        {!searchResults && (
+          <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 1, marginBottom: 8, paddingBottom: 8, borderBottom: `1px solid ${C.border}` }}>
+            {crumb("All", null, trail.length === 0)}
+            {trail.map((a, i) => crumb(nameOf(a), a.id, i === trail.length - 1))}
+          </div>
+        )}
 
         <div style={{ display: "flex", flexDirection: "column", gap: 2, overflowY: "auto" }}>
-          {/* The "none" row belongs to the top level only — it's the absence of a
-              choice, not something that lives inside Building 100. Single-select
-              only: in multi-select, picking nothing is just an empty chip row. */}
-          {!multi && !effectiveLevelId && noneLabel && (
+          {/* The "none" row belongs to the top level of BROWSE mode only —
+              it's the absence of a choice, not something a search for a name
+              could ever match. Single-select only: in multi-select, picking
+              nothing is just an empty chip row. */}
+          {!multi && !searchResults && !effectiveLevelId && noneLabel && (
             <button
               onClick={() => { onChange(""); onClose(); }}
               style={{
@@ -14647,13 +14692,41 @@ function HierarchyBrowserModal({
             </button>
           )}
 
-          {rows.length === 0 && (
+          {searchResults && searchResults.length === 0 && (
+            <div style={{ fontSize: 13, color: C.empty, padding: "8px 2px" }}>Nothing matches "{searchQuery.trim()}".</div>
+          )}
+
+          {searchResults && searchResults.map(a => {
+            const isCurrent = isPicked(a.id);
+            const Icon = iconFor(a.type);
+            const path = pathOf(a, all);
+            return (
+              <button
+                key={a.id}
+                onClick={() => toggle(a)}
+                style={{
+                  display: "flex", alignItems: "center", gap: 8, padding: "9px 10px", width: "100%", boxSizing: "border-box",
+                  background: isCurrent ? C.hover : "transparent", border: "none", borderRadius: 10,
+                  fontSize: 14, textAlign: "left", color: C.ink, fontWeight: isCurrent ? 600 : 400,
+                }}
+              >
+                <Icon size={15} style={{ flexShrink: 0, color: C.brand }} />
+                <span style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
+                  <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{nameOf(a)}</span>
+                  {path && <span style={{ display: "block", fontSize: 11.5, color: C.empty, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{path}</span>}
+                </span>
+                {isCurrent && <Check size={15} color={C.brand} style={{ flexShrink: 0 }} />}
+              </button>
+            );
+          })}
+
+          {!searchResults && rows.length === 0 && (
             <div style={{ fontSize: 13, color: C.empty, padding: "8px 2px" }}>
               {effectiveLevelId ? "Nothing inside this you can choose." : "Nothing to choose from yet."}
             </div>
           )}
 
-          {rows.map(a => {
+          {!searchResults && rows.map(a => {
             const selectable = canPick(a);
             const openable = hasSelectableInside(a);
             const isCurrent = isPicked(a.id);
@@ -16910,6 +16983,17 @@ function FloorPlanTabContent({
       const owner = groupOfShape(shapeId);
       return { editable: !owner || owner.id === groupEditingId, picked: groupPick.has(shapeId) };
     }
+    // Building a FRESH group: once the first (so far ungrouped) shape has
+    // been picked, a shape that already belongs to a DIFFERENT group can no
+    // longer join it -- a shape lives in at most one group. Without this,
+    // tapping one silently discarded the in-progress picks and jumped into
+    // editing THAT group instead (onShapeClick's owner-jump below), which is
+    // exactly the surprise this greys out. Before the first pick, tapping a
+    // grouped shape is still that jump-into-edit shortcut -- the only way to
+    // reach group-membership editing at all -- so nothing is disabled yet.
+    if (groupPick.size > 0 && groupOfShape(shapeId)) {
+      return { editable: false, picked: false };
+    }
     return { editable: true, picked: groupPick.has(shapeId) };
   };
 
@@ -17023,9 +17107,14 @@ function FloorPlanTabContent({
             if (setupTab === "group") {
               const st = shapeStatus(s.gid);
               if (!st.editable) {
+                // A solid, filled grey block -- deliberately NOT the dashed
+                // outline "not yet chosen but available" uses elsewhere on
+                // this map, which read as available at a glance and was the
+                // whole complaint: a shape already in another group needs to
+                // look disabled, not just be inert under the hood.
                 return (
-                  <g key={s.gid} className="fp-room" style={{ cursor: "default" }}>
-                    <path className="fp-area" d={d} fill="#8FA6B8" fillOpacity={0.1} stroke="#8FA6B8" strokeWidth={1.3} strokeDasharray="4 3" />
+                  <g key={s.gid} className="fp-room" style={{ cursor: "default", opacity: 0.6 }}>
+                    <path className="fp-area" d={d} fill="#8FA6B8" fillOpacity={0.55} stroke="#5C6F7D" strokeWidth={1.3} />
                   </g>
                 );
               }
