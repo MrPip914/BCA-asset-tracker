@@ -3448,7 +3448,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-23.5";
+const APP_VERSION = "2026-09-23.6";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -16828,6 +16828,69 @@ function floorPlanGroupOutline(memberPolygons) {
   // disconnected group is the common one a real floor plan produces.
   return loops.length === 1 ? loops[0] : null;
 }
+// The minimum distance between two polygons, vertex-to-EDGE in both
+// directions (not just vertex-to-vertex) -- reusing floorPlanSegDist, the
+// same point-to-segment distance floorPlanPole already relies on. Correct
+// for the convex, roughly-rectangular rooms a floor plan actually draws;
+// it is not a general polygon-distance algorithm (that would need edge-to-
+// edge segment distance too), which this file has no more use for here
+// than it does for a full polygon union.
+function floorPlanShapeGap(ptsA, ptsB) {
+  let best = Infinity;
+  const scan = (from, to) => {
+    for (const p of from) {
+      for (let i = 0, n = to.length; i < n; i++) {
+        const d = floorPlanSegDist(p, to[i], to[(i + 1) % n]);
+        if (d < best) best = d;
+      }
+    }
+  };
+  scan(ptsA, ptsB);
+  scan(ptsB, ptsA);
+  return best;
+}
+// Groups member shapes into clusters by PROXIMITY, not by sharing a wall --
+// most real floor plans don't draw grouped spaces touching (a hallway
+// between two rooms in one "Restrooms" group, a gap where a wall isn't
+// modeled), so requiring an exact shared edge before two rooms count as
+// "together" would leave every real group looking like several unrelated
+// rooms. "Close" is relative to the ROOMS being compared, not a fixed
+// distance -- a plan drawn at one scale and one at a hundred times that
+// scale both produce sensible clusters as long as the rooms on each are
+// internally consistent, which is the normal case. CLOSE_FACTOR is a
+// judgment call with no way to derive it from the geometry alone: the
+// point it trades off is a gap that reads as "obviously the same area"
+// against one that reads as "a different part of the building" -- 0.75
+// of the smaller room's own shorter side is a hallway-width gap for a
+// room around that size, not a jump to a different wing.
+const FLOOR_PLAN_CLUSTER_CLOSE_FACTOR = 0.75;
+function floorPlanRoomScale(pts) {
+  const bbox = floorPlanBbox(pts);
+  return Math.min(bbox.w, bbox.h);
+}
+function floorPlanClusterShapes(members, closeFactor) {
+  const factor = closeFactor == null ? FLOOR_PLAN_CLUSTER_CLOSE_FACTOR : closeFactor;
+  const n = members.length;
+  const parent = members.map((_, i) => i);
+  const find = i => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const gap = floorPlanShapeGap(members[i].pts, members[j].pts);
+      const threshold = Math.min(floorPlanRoomScale(members[i].pts), floorPlanRoomScale(members[j].pts)) * factor;
+      if (gap <= threshold) {
+        const ri = find(i), rj = find(j);
+        if (ri !== rj) parent[ri] = rj;
+      }
+    }
+  }
+  const clusters = new Map();
+  for (let i = 0; i < n; i++) {
+    const r = find(i);
+    if (!clusters.has(r)) clusters.set(r, []);
+    clusters.get(r).push(members[i]);
+  }
+  return [...clusters.values()];
+}
 function floorPlanWrapWords(s, n) {
   const out = []; let line = "";
   for (const w of s.split(" ")) {
@@ -17732,53 +17795,61 @@ function FloorPlanTabContent({
               </g>
             );
           })}
-          {/* The open group's own frame -- everything outside it is already
-              dimmed above (groupDim/outsideOpenGroup), but a group of rooms
-              that are merely undimmed still reads as "several separate
-              rooms that happen to not be greyed out", not as one selected
-              thing. A border drawn around the whole footprint, plus a title
+          {/* The open group's own frame(s) -- everything outside it is
+              already dimmed above (groupDim/outsideOpenGroup), but a group
+              of rooms that are merely undimmed still reads as "several
+              separate rooms that happen to not be greyed out", not as one
+              selected thing. A border around each cluster, plus a title
               ABOVE it (bigger than a room's own label, and outside the
               border rather than inside it like a room name would be) is
               what actually answers "which group did I select". Drawn once,
               after every shape, so it paints on top and pointer-events:none
               so it never steals a click from a member underneath it.
 
-              The border TRACES the members' actual combined silhouette
-              (floorPlanGroupOutline) rather than boxing an irregular shape
-              in a rectangle -- an L-shaped or staggered group used to get a
-              border that cut across a room that isn't even in the group.
-              No outward padding: offsetting a traced, possibly-concave
-              outline needs real polygon math this file doesn't have, so the
-              breathing room comes from the stroke's own width instead. A
-              group whose members don't share exact wall coordinates (an odd
-              export, or rooms that only touch at a corner) falls back to
-              the plain padded bounding box exactly as before -- still a
-              border, just not a traced one, rather than nothing. */}
+              PLURAL, deliberately -- most real floor plans don't draw
+              grouped rooms touching (a hallway between two rooms in one
+              "Restrooms" group is still a gap on the SVG), so a single
+              border around the whole group's bbox would routinely box in
+              whatever sits in that gap along with rooms that aren't in the
+              group at all. floorPlanClusterShapes splits the members by
+              PROXIMITY first -- close rooms (a hallway-width gap, relative
+              to their own size) share one border, far-apart rooms get
+              separate ones -- and each cluster's border TRACES its actual
+              combined silhouette (floorPlanGroupOutline) when its members
+              really do share a wall, falling back to a padded box around
+              just that cluster otherwise. The group's name repeats above
+              every cluster rather than floating once over an arbitrary
+              one of them, so a scattered group never leaves a border with
+              no visible label of its own. */}
           {!setupTab && openGroupId && (() => {
             const grp = groups.find(g => g.id === openGroupId);
             const members = grp && plan.status === "ready"
               ? plan.spaces.filter(m => (grp.memberShapeIds || []).includes(m.gid)) : [];
             if (!members.length) return null;
-            const bbox = floorPlanBbox(members.flatMap(m => m.pts));
-            const outline = members.length > 1 ? floorPlanGroupOutline(members.map(m => m.pts)) : null;
-            const frame = outline
-              ? <path d={"M" + outline.map(p => p.join(" ")).join(" L") + " Z"}
-                  fill="none" stroke={C.brandDark} strokeWidth={3 * k} strokeLinejoin="round" />
-              : (() => {
-                  const pad = 14 * k;
-                  const bx = bbox.x - pad, by = bbox.y - pad, bw = bbox.w + pad * 2, bh = bbox.h + pad * 2;
-                  return <rect x={bx} y={by} width={bw} height={bh} rx={8 * k}
-                    fill="none" stroke={C.brandDark} strokeWidth={2.5 * k} />;
-                })();
-            return (
-              <g style={{ pointerEvents: "none" }}>
-                {frame}
-                <text className="fp-text" x={bbox.x + bbox.w / 2} y={bbox.y - 14 * k} textAnchor="middle"
-                  fontSize={16 * k} fontWeight={700} fill={C.brandDark}>
-                  {grp.name}
-                </text>
-              </g>
-            );
+            const clusters = floorPlanClusterShapes(members.map(m => ({ gid: m.gid, pts: m.pts })));
+            return clusters.map((cluster, ci) => {
+              const clusterPts = cluster.map(m => m.pts);
+              const bbox = floorPlanBbox(clusterPts.flat());
+              const outline = cluster.length > 1 ? floorPlanGroupOutline(clusterPts) : null;
+              const frame = outline
+                ? <path d={"M" + outline.map(p => p.join(" ")).join(" L") + " Z"}
+                    fill="none" stroke={C.brandDark} strokeWidth={3 * k} strokeLinejoin="round" />
+                : (() => {
+                    const pad = 14 * k;
+                    const bx = bbox.x - pad, by = bbox.y - pad, bw = bbox.w + pad * 2, bh = bbox.h + pad * 2;
+                    return <rect x={bx} y={by} width={bw} height={bh} rx={8 * k}
+                      fill="none" stroke={C.brandDark} strokeWidth={2.5 * k} />;
+                  })();
+              return (
+                <g key={ci} style={{ pointerEvents: "none" }}>
+                  {frame}
+                  <text className="fp-text" x={bbox.x + bbox.w / 2} y={bbox.y - 14 * k} textAnchor="middle"
+                    fontSize={16 * k} fontWeight={700} fill={C.brandDark}>
+                    {grp.name}
+                  </text>
+                </g>
+              );
+            });
           })()}
         </svg>
       </div>
