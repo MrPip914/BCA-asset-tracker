@@ -2787,7 +2787,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-23.8";
+const APP_VERSION = "2026-09-23.9";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -13700,9 +13700,22 @@ function HierarchyNav({ assets, scopeId, setScopeId, showChildren = true }) {
     if (!pid) return null;
     return all.some(x => x.id === pid) ? pid : null;
   };
+  // "Has children" reuses contentsOf's own definition of what's inside a
+  // place -- everything below it at ANY depth, plus bulk-item allocations
+  // named directly at it -- rather than a narrower "has a direct parentId
+  // child" check of its own. Those two are equivalent for a place with
+  // nothing at all (no descendant can exist without a direct child first),
+  // but only contentsOf also counts a place holding nothing but allocated
+  // bulk items (chairs, tables), which have no parentId at all. Using a
+  // second, narrower definition here would disagree with what clicking
+  // into the SAME place's own Contents tab shows.
   const childPlaces = all
     .filter(a => isPlaceType(a.type) && parentKeyOf(a) === (effectiveScope || null))
-    .sort((x, y) => nameOf(x).localeCompare(nameOf(y), undefined, { numeric: true, sensitivity: "base" }));
+    .map(p => ({ p, hasContents: contentsOf(p, all).contentsCount > 0 }))
+    .sort((x, y) => (
+      (x.hasContents === y.hasContents ? 0 : x.hasContents ? -1 : 1)
+      || nameOf(x.p).localeCompare(nameOf(y.p), undefined, { numeric: true, sensitivity: "base" })
+    ));
 
   const trail = scope ? [...ancestorsOf(scope, all).reverse(), scope] : [];
 
@@ -13731,16 +13744,21 @@ function HierarchyNav({ assets, scopeId, setScopeId, showChildren = true }) {
       </div>
       {showChildren && childPlaces.length > 0 && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 9 }}>
-          {childPlaces.map(p => {
+          {childPlaces.map(({ p, hasContents }) => {
             const Icon = iconFor(p.type);
             return (
               <button
                 key={p.id}
                 type="button"
                 onClick={() => setScopeId(p.id)}
-                style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 11px", borderRadius: 14, fontSize: 13, fontWeight: 500, border: `1.5px solid ${C.border}`, background: "transparent", color: C.ink }}
+                style={{
+                  display: "flex", alignItems: "center", gap: 5, padding: "5px 11px", borderRadius: 14, fontSize: 13, fontWeight: 500,
+                  border: `1.5px solid ${hasContents ? C.brand : C.border}`,
+                  background: hasContents ? C.hover : "transparent",
+                  color: C.ink,
+                }}
               >
-                <Icon size={13} style={{ color: C.brand, flexShrink: 0 }} />
+                <Icon size={13} style={{ color: hasContents ? C.brandDark : C.brand, flexShrink: 0 }} />
                 {nameOf(p)}
               </button>
             );
