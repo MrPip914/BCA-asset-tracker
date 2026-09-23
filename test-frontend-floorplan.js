@@ -215,5 +215,93 @@ check('a 90-degree rotation sends (10,0) to (~0,10)', approx(rotated[0], 0) && a
 const translated = floorPlanApplyTransform({ tx: 5, ty: 5, rot: 0 }, 10, 10);
 check('a plain translation just adds tx/ty', JSON.stringify(translated) === JSON.stringify([15, 15]));
 
+// --- 7. remapping links/groups across a plan REPLACE ----------------------------
+// The bug this covers: replacing a floor plan's SVG can hand every shape a
+// brand-new id (Visio's own numeric suffix is NOT stable across a re-export,
+// only the title is — see floorPlanRemapShapeIds's own comment), so a room
+// link stored against the OLD id silently stopped matching anything on the
+// new plan. It stayed in storage, inflated the "linked" count, and blocked
+// its room from being picked again as "already assigned elsewhere" — on a
+// plan that, as far as anyone could see, had never been linked at all.
+const remapMod = { exports: {} };
+new Function('module', [
+  grabFn('floorPlanRemapShapeIds'),
+  grabFn('floorPlanRemapLinksAndGroups'),
+  'module.exports = { floorPlanRemapShapeIds, floorPlanRemapLinksAndGroups };',
+].join('\n'))(remapMod);
+const { floorPlanRemapShapeIds, floorPlanRemapLinksAndGroups } = remapMod.exports;
+
+{
+  const oldSpaces = [
+    { gid: 'old-1', title: 'Space.101' },
+    { gid: 'old-2', title: 'Space.102' },
+  ];
+  // A re-export: same titles, entirely different ids -- the exact case that
+  // broke, and the one this exists to carry forward.
+  const newSpacesRenamed = [
+    { gid: 'new-9', title: 'Space.101' },
+    { gid: 'new-8', title: 'Space.102' },
+  ];
+  const remap = floorPlanRemapShapeIds(oldSpaces, newSpacesRenamed);
+  check('a shape whose id changed is found by its (stable) title',
+    remap('old-1') === 'new-9', `got ${JSON.stringify(remap('old-1'))}`);
+  check('a shape with no match in the new plan is undefined, not guessed',
+    floorPlanRemapShapeIds(oldSpaces, [{ gid: 'new-1', title: 'Space.999' }])('old-1') === undefined);
+
+  // A tool whose ids DO survive a re-export (or a literal re-upload of the
+  // same file) is trusted outright — id match wins before title is even
+  // consulted, so this is not solely a title-matching mechanism.
+  const newSpacesSameIds = [{ gid: 'old-1', title: 'Space.WHATEVER' }];
+  check('a direct id match is trusted even if the title changed underneath it',
+    floorPlanRemapShapeIds(oldSpaces, newSpacesSameIds)('old-1') === 'old-1');
+}
+
+{
+  const oldSpaces = [
+    { gid: 'old-1', title: 'Space.101' },
+    { gid: 'old-2', title: 'Space.102' },
+    { gid: 'old-3', title: 'Space.103' },
+  ];
+  const newSpaces = [
+    { gid: 'new-1', title: 'Space.101' }, // survives, renamed
+    { gid: 'new-2', title: 'Space.102' }, // survives, renamed
+    // Space.103 is gone entirely -- the room genuinely isn't on this plan.
+  ];
+  const links = [
+    { shapeId: 'old-1', roomId: 'BCR0001' },
+    { shapeId: 'old-3', roomId: 'BCR0003' },
+  ];
+  const groups = [
+    // Both members survive -- the group itself should survive, remapped.
+    { id: 'g1', name: 'Pair', memberShapeIds: ['old-1', 'old-2'] },
+    // Only one member survives -- a "group" of one is not a group; the
+    // same rule saveGroupEditNow already applies when a member is removed
+    // by hand.
+    { id: 'g2', name: 'Orphaned', memberShapeIds: ['old-1', 'old-3'] },
+  ];
+  const { links: nextLinks, groups: nextGroups } = floorPlanRemapLinksAndGroups(links, groups, oldSpaces, newSpaces);
+
+  check('a link onto a surviving (renamed) shape is remapped, not dropped',
+    nextLinks.some(l => l.shapeId === 'new-1' && l.roomId === 'BCR0001'),
+    `got ${JSON.stringify(nextLinks)}`);
+  check('a link onto a shape that is genuinely gone is dropped, not left dangling',
+    !nextLinks.some(l => l.roomId === 'BCR0003'),
+    `got ${JSON.stringify(nextLinks)}`);
+  check('exactly the surviving links remain', nextLinks.length === 1,
+    `got ${JSON.stringify(nextLinks)}`);
+
+  check('a group whose members all survive keeps them, remapped',
+    JSON.stringify((nextGroups.find(g => g.id === 'g1') || {}).memberShapeIds) === JSON.stringify(['new-1', 'new-2']),
+    `got ${JSON.stringify(nextGroups)}`);
+  check('a group that drops below two surviving members is dropped whole',
+    !nextGroups.some(g => g.id === 'g2'),
+    `got ${JSON.stringify(nextGroups)}`);
+}
+
+check('a first upload (no old plan yet) drops every link rather than throwing',
+  JSON.stringify(floorPlanRemapLinksAndGroups(
+    [{ shapeId: 'old-1', roomId: 'BCR0001' }], [], [], [{ gid: 'new-1', title: 'Space.101' }]
+  ).links) === '[]');
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

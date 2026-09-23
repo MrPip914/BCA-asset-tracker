@@ -3333,7 +3333,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-22.4";
+const APP_VERSION = "2026-09-22.5";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -7662,7 +7662,11 @@ function AssetTracker() {
   // already use. fetch() resolves a data: URL locally, so the rest of this
   // tab (fetch + parse) runs completely unchanged whether the URL is a real
   // Cloudinary one or this local stand-in.
-  async function uploadFloorPlanSvg(file) {
+  // `oldSpaces` is whatever the tab had already parsed for the plan being
+  // REPLACED (empty on a first upload) -- FloorPlanTabContent passes its own
+  // `plan.spaces` straight through rather than this function re-fetching the
+  // plan it's about to overwrite just to get the same list a second time.
+  async function uploadFloorPlanSvg(file, oldSpaces) {
     if (savingRef.current || floorPlanUploadBusy) return;
     if (!file || !selectedAsset) return;
     const looksLikeSvg = file.type === "image/svg+xml" || /\.svg$/i.test(file.name || "");
@@ -7675,9 +7679,9 @@ function AssetTracker() {
     setFloorPlanUploadError("");
     setFloorPlanUploadBusy(true);
     try {
+      const text = await file.text();
       let url, storageKey;
       if (sandboxMode) {
-        const text = await file.text();
         url = "data:image/svg+xml;utf8," + encodeURIComponent(text);
         storageKey = "";
       } else {
@@ -7686,13 +7690,29 @@ function AssetTracker() {
         url = uploaded.secure_url;
         storageKey = uploaded.public_id || sig.publicId;
       }
+      // Best-effort: read locally what the NEW file's shapes are, so an
+      // existing link/group can be carried onto them (see
+      // floorPlanRemapShapeIds). A file that fails to parse here already
+      // uploaded fine above -- this is read-only inspection, not validation
+      // -- so it just means nothing to remap onto; the plan itself still
+      // loads (or reports its own parse error) the same as before this
+      // existed.
+      let nextLinks = selectedAsset.floorPlanLinks || [];
+      let nextGroups = selectedAsset.floorPlanGroups || [];
+      try {
+        const newSpaces = parseFloorPlanSvg(text).spaces;
+        const remapped = floorPlanRemapLinksAndGroups(nextLinks, nextGroups, oldSpaces, newSpaces);
+        nextLinks = remapped.links;
+        nextGroups = remapped.groups;
+      } catch { /* see above -- upload proceeds regardless */ }
       const entry = {
         assetLabel: selectedId, assetType: selectedAsset.type,
         action: "floor_plan_replaced", to: file.name, at: new Date().toISOString(), by: currentUser || "",
       };
       await persist(
         assets.map(a => (a.id === selectedId
-          ? { ...a, floorPlanUrl: url, floorPlanStorageKey: storageKey, floorPlanFileName: file.name }
+          ? { ...a, floorPlanUrl: url, floorPlanStorageKey: storageKey, floorPlanFileName: file.name,
+              floorPlanLinks: nextLinks, floorPlanGroups: nextGroups }
           : a)),
         { auditLog: logAudit([entry]) },
       );
@@ -11400,6 +11420,14 @@ function AssetTracker() {
               // Derived/toggleable like contents (see typeHasFloorPlan), so it
               // lives here rather than in ASSET_MODULES, which is for a module
               // a type declares owning, not a setting it can be switched into.
+              //
+              // Counts STORED links, not shapes the current plan actually
+              // has -- this outer scope has no parsed SVG to check against
+              // (that only exists inside FloorPlanTabContent's own hook), so
+              // a link orphaned by an earlier replace (before
+              // uploadFloorPlanSvg started pruning them) still counts here
+              // until the next replace writes it away. The tab's own "N
+              // linked" status line is the one that's actually live.
               floorPlan: { label: "Floor Plan", count: (selectedAsset.floorPlanLinks || []).filter(l => l.roomId).length },
               maintenance: { label: "Tasks", count: openMaintenanceItems.length, urgent: overdueMaintenanceCount > 0 },
               photos: { label: "Files", count: assetPhotos.length },
@@ -16684,6 +16712,51 @@ function parseFloorPlanSvg(svgText) {
   };
 }
 
+// Maps OLD shapeIds to NEW shapeIds across a plan replace, so a room link
+// (or a group) survives a re-export instead of quietly becoming unreachable
+// dead weight -- stored forever, counted in the tab badge, and blocking that
+// room from being picked again ("already assigned elsewhere") even though no
+// shape on the CURRENT plan actually names it.
+//
+// gid's own comment already says the numeric id Visio appends is NOT stable
+// across a re-export -- only the title is. This tries id first anyway (it
+// covers a re-upload of the literal same file, and a different export tool
+// might have the opposite stability guarantee), then falls back to matching
+// by title. A shape matching neither is genuinely gone from this plan; the
+// caller drops it rather than pointing a link at nothing.
+//
+// Returns a lookup function, not a plain map, since building the two title
+// indexes once per replace (not once per shapeId looked up) is the entire
+// reason this exists as a closure.
+function floorPlanRemapShapeIds(oldSpaces, newSpaces) {
+  const newGids = new Set((newSpaces || []).map(s => s.gid));
+  const newTitleToGid = new Map();
+  (newSpaces || []).forEach(s => { if (!newTitleToGid.has(s.title)) newTitleToGid.set(s.title, s.gid); });
+  const oldGidToTitle = new Map((oldSpaces || []).map(s => [s.gid, s.title]));
+  return oldGid => {
+    if (newGids.has(oldGid)) return oldGid;
+    const title = oldGidToTitle.get(oldGid);
+    return title && newTitleToGid.has(title) ? newTitleToGid.get(title) : undefined;
+  };
+}
+
+// Applies floorPlanRemapShapeIds to an asset's own links and groups, for the
+// moment it gets a new plan. A link whose shape doesn't survive is dropped,
+// never left pointing at a shapeId this plan no longer has. A group that
+// drops below two surviving members is dropped whole -- the same "fewer than
+// two is not a group" rule saveGroupEditNow already applies when a member is
+// removed by hand.
+function floorPlanRemapLinksAndGroups(links, groups, oldSpaces, newSpaces) {
+  const remap = floorPlanRemapShapeIds(oldSpaces, newSpaces);
+  const nextLinks = (links || [])
+    .map(l => ({ ...l, shapeId: remap(l.shapeId) }))
+    .filter(l => l.shapeId);
+  const nextGroups = (groups || [])
+    .map(g => ({ ...g, memberShapeIds: (g.memberShapeIds || []).map(remap).filter(Boolean) }))
+    .filter(g => g.memberShapeIds.length >= 2);
+  return { links: nextLinks, groups: nextGroups };
+}
+
 // Reads the plan's SVG text and parses it once its owner's floorPlanUrl is
 // (or changes to) something real. Deliberately its own hook rather than
 // inline in FloorPlanTabContent's body, so the fetch/parse lifecycle (and its
@@ -16731,8 +16804,21 @@ function FloorPlanTabContent({
   onSaveLink, onSaveGroup, onDeleteGroup,
 }) {
   const plan = useFloorPlanSvg(selectedAsset.floorPlanUrl);
-  const links = selectedAsset.floorPlanLinks || [];
-  const groups = selectedAsset.floorPlanGroups || [];
+  // Filtered to shapes the CURRENTLY LOADED plan actually has. uploadFloorPlanSvg
+  // prunes a link/group that doesn't survive a REPLACE, but that only runs at
+  // the moment of the next upload -- this is what keeps data already left
+  // stale by an earlier replace (before that existed) from inflating "N
+  // linked" or blocking its room as "assigned elsewhere" on a plan that no
+  // shape here actually names, without waiting for one more upload to fix it.
+  const validShapeIds = plan.status === "ready" ? new Set(plan.spaces.map(s => s.gid)) : null;
+  const links = validShapeIds
+    ? (selectedAsset.floorPlanLinks || []).filter(l => validShapeIds.has(l.shapeId))
+    : (selectedAsset.floorPlanLinks || []);
+  const groups = validShapeIds
+    ? (selectedAsset.floorPlanGroups || [])
+        .map(g => ({ ...g, memberShapeIds: (g.memberShapeIds || []).filter(id => validShapeIds.has(id)) }))
+        .filter(g => g.memberShapeIds.length >= 2)
+    : (selectedAsset.floorPlanGroups || []);
   const linkFor = shapeId => links.find(l => l.shapeId === shapeId) || null;
   const groupOfShape = shapeId => groups.find(g => (g.memberShapeIds || []).includes(shapeId)) || null;
 
@@ -16926,7 +17012,7 @@ function FloorPlanTabContent({
             </button>
             <input
               ref={fileInputRef} type="file" accept=".svg,image/svg+xml" style={{ display: "none" }}
-              onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (f) onUploadPlan(f); }}
+              onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (f) onUploadPlan(f, plan.status === "ready" ? plan.spaces : []); }}
             />
           </>
         )}
@@ -16963,7 +17049,7 @@ function FloorPlanTabContent({
             </button>
             <input
               ref={fileInputRef} type="file" accept=".svg,image/svg+xml" style={{ display: "none" }}
-              onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (f) onUploadPlan(f); }}
+              onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (f) onUploadPlan(f, plan.status === "ready" ? plan.spaces : []); }}
             />
           </>
         )}
@@ -17062,7 +17148,7 @@ function FloorPlanTabContent({
               {uploadBusy ? "Uploading…" : "Replace…"}
             </button>
             <input ref={fileInputRef} type="file" accept=".svg,image/svg+xml" style={{ display: "none" }}
-              onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (f) onUploadPlan(f); }} />
+              onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (f) onUploadPlan(f, plan.status === "ready" ? plan.spaces : []); }} />
           </>
         )}
       </div>
