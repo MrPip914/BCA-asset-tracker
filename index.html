@@ -2262,6 +2262,31 @@ function pathOf(asset, assets) {
   return ancestorsOf(asset, assets).map(a => nameOf(a)).reverse().join(PATH_SEPARATOR);
 }
 
+// Walks up from a room (or the room an asset sits in) to find where it's
+// actually shown on a floor plan: the nearest ancestor whose own PARENT has
+// a plan naming it as a linked shape. A room nested inside one that isn't
+// itself drawn falls back to whichever ancestor room IS -- generalized from
+// the mockup's own drawnFor, which only ever had one hardcoded floor to
+// check; this app can carry a plan at any level, not just one.
+//
+// Takes a ROOM id, never an asset's own id -- an ordinary asset (a Computer)
+// is never itself drawn as a shape, only the room holding it is, so a
+// caller with a non-place asset passes its parentId instead of its own id.
+function drawnOnMapFor(roomId, assets) {
+  let cur = roomId ? (assets || []).find(a => a.id === roomId) : null;
+  const seen = new Set();
+  while (cur && !seen.has(cur.id)) {
+    seen.add(cur.id);
+    const owner = cur.parentId ? (assets || []).find(a => a.id === cur.parentId) : null;
+    if (owner && owner.floorPlanUrl) {
+      const link = (owner.floorPlanLinks || []).find(l => l.roomId === cur.id);
+      if (link) return { ownerId: owner.id, shapeId: link.shapeId, roomId: cur.id };
+    }
+    cur = owner;
+  }
+  return null;
+}
+
 // Same as buildingNameOf but returns the Building asset's id — used for
 // filtering/sorting by building, where matching on a stable id (not a name that
 // could theoretically collide or change) is what's actually wanted.
@@ -2668,7 +2693,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-22.8";
+const APP_VERSION = "2026-09-22.9";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -4182,7 +4207,7 @@ function AssetTracker() {
     setRevisions(next);
   }
 
-  const [mainTab, setMainTab] = useState("assets"); // "assets" | "maintenance" | "audit" — top-level page tab
+  const [mainTab, setMainTab] = useState("assets"); // "assets" | "maintenance" | "map" | "audit" — top-level page tab
   const [view, setView] = useState("list"); // "list" | "detail"
   const [selectedId, setSelectedId] = useState(null);
   const [detailEditing, setDetailEditing] = useState(false);
@@ -4332,6 +4357,13 @@ function AssetTracker() {
   // those are *filters* (match one exact value). Both can be on at once and
   // simply intersect.
   const [scopeId, setScopeId] = useState("");
+  // Set by "Show on map" (see showOnMap below) and cleared by the Map tab
+  // once it's acted on it -- a one-shot instruction ("zoom to and pulse this
+  // shape next time its plan loads"), not standing state the tab reads every
+  // render. Living here rather than inside FloorPlanTabContent is what lets
+  // it survive the scope change: setScopeId often remounts the component
+  // that would otherwise have to carry it.
+  const [mapFocusShapeId, setMapFocusShapeId] = useState(null);
   const [typeFilter, setTypeFilter] = useState("All types");
   const [userFilter, setUserFilter] = useState("All users");
   const [statusFilter, setStatusFilter] = useState("Active");
@@ -6146,6 +6178,20 @@ function AssetTracker() {
     // wrong conclusion — click a row already on screen when measuring scroll.
     if (home !== null && home < depth) window.history.go(home - depth);
     else closeDetail();
+  }
+
+  // Leaves the detail page for the Map tab, scoped to whichever asset owns
+  // the plan `drawn` (from drawnOnMapFor) points at, and arms a one-shot
+  // "zoom to and pulse this shape" instruction the Map tab picks up once
+  // that plan loads. Goes through closeDetail() rather than a raw setView,
+  // for the same reason every other exit from a detail page does: it heals
+  // the history entry instead of leaving a stale ?asset= behind it.
+  function showOnMap(drawn) {
+    if (!drawn) return;
+    closeDetail();
+    setMainTab("map");
+    setScopeId(drawn.ownerId);
+    setMapFocusShapeId(drawn.shapeId);
   }
 
   // Switching tabs REPLACES rather than pushes. Pushing would bury the previous
@@ -10879,6 +10925,35 @@ function AssetTracker() {
             );
           })()}
 
+          {detailTab === "details" && (() => {
+            // A place asset checks itself; an ordinary asset checks the room
+            // it sits in, since only places are ever drawn as shapes on a
+            // plan -- the same split drawnOnMapFor's own comment makes. A
+            // Bulk Item (allocations, no single parentId) has nothing to
+            // check and correctly finds nothing.
+            const roomId = isPlaceType(selectedAsset.type) ? selectedAsset.id : selectedAsset.parentId;
+            const drawn = drawnOnMapFor(roomId, assets);
+            if (!drawn) return null;
+            return (
+              <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 18, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)", marginBottom: 20 }}>
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginBottom: 10, paddingBottom: 6, borderBottom: `1px solid ${C.border}` }}>
+                  On the map
+                </div>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 13, color: C.ink }}>
+                    {isPlaceType(selectedAsset.type) ? "Shown on the floor plan." : `Shown in ${parentNameFor(drawn.roomId, assets)} on the floor plan.`}
+                  </span>
+                  <button
+                    onClick={() => showOnMap(drawn)}
+                    style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", background: "transparent", color: C.brandDark, border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 13, borderRadius: 10, flexShrink: 0 }}
+                  >
+                    <MapPin size={14} /> Show on map
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
+
           {detailTab === "contents" && (
             <>
               {contentsCount === 0 ? (
@@ -12850,6 +12925,8 @@ function AssetTracker() {
           onSaveLink={(shapeId, roomId) => saveSpaceLink(scopeId, shapeId, roomId)}
           onSaveGroup={draft => saveSpaceGroup(scopeId, draft)}
           onDeleteGroup={groupId => deleteSpaceGroup(scopeId, groupId)}
+          focusShapeId={mapFocusShapeId}
+          onFocusHandled={() => setMapFocusShapeId(null)}
         />
         </>
         )}
@@ -15857,6 +15934,7 @@ function fetchFloorPlanSvgText(url) {
 function MapTabContent({
   canEdit, assets, typesList, scopeAsset,
   uploadBusy, uploadError, onUploadPlan, onSaveLink, onSaveGroup, onDeleteGroup,
+  focusShapeId, onFocusHandled,
 }) {
   if (!scopeAsset) {
     return (
@@ -15886,6 +15964,8 @@ function MapTabContent({
       onSaveLink={onSaveLink}
       onSaveGroup={onSaveGroup}
       onDeleteGroup={onDeleteGroup}
+      focusShapeId={focusShapeId}
+      onFocusHandled={onFocusHandled}
     />
   );
 }
@@ -15909,6 +15989,7 @@ function FloorPlanTabContent({
   canEdit, selectedAsset, assets, typesList,
   uploadBusy, uploadError, onUploadPlan,
   onSaveLink, onSaveGroup, onDeleteGroup,
+  focusShapeId, onFocusHandled,
 }) {
   const plan = useFloorPlanSvg(selectedAsset.floorPlanUrl);
   // Filtered to shapes the CURRENTLY LOADED plan actually has. uploadFloorPlanSvg
@@ -15975,6 +16056,30 @@ function FloorPlanTabContent({
     const allPts = plan.spaces.flatMap(s => s.pts);
     if (allPts.length) zoomToBbox(floorPlanBbox(allPts), 0.06);
   }, [plan.status, plan.spaces, selectedAsset.id]);
+
+  // One-shot "zoom to and pulse this shape" instruction from showOnMap (see
+  // AssetTracker) -- armed the moment this plan's spaces are available,
+  // consumed once, and always cleared via onFocusHandled so the parent's
+  // pending state can't replay the same pulse on a later, unrelated visit.
+  // Runs in its own effect rather than folded into the auto-fit one above:
+  // both can fire on the same render (a fresh scope AND a pending focus),
+  // and since React runs effects in declaration order within one commit,
+  // this one's zoomToBbox call is simply the last write before paint --
+  // no flicker, the focus destination just wins over the whole-plan fit.
+  // A shapeId that matches nothing (a stale focus from a different plan)
+  // clears itself rather than pulsing nothing.
+  const [pulsingShapeId, setPulsingShapeId] = useState(null);
+  const pulseTimerRef = useRef(null);
+  useEffect(() => {
+    if (plan.status !== "ready" || !focusShapeId) return;
+    const shape = plan.spaces.find(s => s.gid === focusShapeId);
+    if (!shape) { onFocusHandled(); return; }
+    zoomToBbox(floorPlanBbox(shape.pts), 0.5);
+    setPulsingShapeId(focusShapeId);
+    clearTimeout(pulseTimerRef.current);
+    pulseTimerRef.current = setTimeout(() => setPulsingShapeId(null), 3600);
+    onFocusHandled();
+  }, [plan.status, plan.spaces, selectedAsset.id, focusShapeId]);
 
   // ---- Free Zoom gestures: wheel-to-zoom-at-cursor, drag-to-pan. Off by
   // default -- most of the time tapping a shape (which auto-frames it) is
@@ -16169,6 +16274,9 @@ function FloorPlanTabContent({
     .fp-room { cursor: pointer; }
     .fp-room:hover > .fp-area { fill-opacity: .55; }
     .fp-text { font-family: inherit; paint-order: stroke; stroke: #fff; stroke-linejoin: round; pointer-events: none; }
+    .fp-pulse { animation: fpPulse 1.1s ease-out 3; pointer-events: none; }
+    @keyframes fpPulse { 0% { opacity: 1; } 100% { opacity: 0; } }
+    @media (prefers-reduced-motion: reduce) { .fp-pulse { animation: none; opacity: .7; } }
   `;
 
   const shapeStatus = shapeId => {
@@ -16339,11 +16447,19 @@ function FloorPlanTabContent({
               const members = plan.spaces.filter(m => (grp.memberShapeIds || []).includes(m.gid));
               const bbox = floorPlanBbox(members.flatMap(m => m.pts));
               const items = members.map(m => linkFor(m.gid)).filter(l => l && l.roomId);
+              // A pulsing shape inside a COLLAPSED group has no standalone
+              // tile of its own to pulse -- every member flashes instead,
+              // since that is the whole visible extent of the tile.
+              const groupPulsing = members.some(m => m.gid === pulsingShapeId);
               return (
                 <g key={grp.id} className="fp-room" onClick={() => onShapeClick(s.gid)}>
                   {members.map(m => (
                     <path key={m.gid} className="fp-area" d={"M" + m.pts.map(p => p.join(" ")).join(" L") + " Z"}
                       fill={C.brand} fillOpacity={items.length ? 0.12 : 0.06} stroke="#416280" strokeWidth={1.3} />
+                  ))}
+                  {groupPulsing && members.map(m => (
+                    <path key={"pulse-" + m.gid} className="fp-pulse" d={"M" + m.pts.map(p => p.join(" ")).join(" L") + " Z"}
+                      fill={C.accent} fillOpacity={0.45} />
                   ))}
                   {!grp.hideLabel && (
                     // No single polygon to pole-search for a merged tile, so
@@ -16369,6 +16485,9 @@ function FloorPlanTabContent({
                   fill={linked ? C.brand : "#C98A3B"} fillOpacity={linked ? 0.08 : 0.14}
                   stroke={sel ? C.brandDark : "#416280"} strokeWidth={sel ? 3 : 1.3}
                   strokeDasharray={linked ? undefined : "6 4"} />
+                {s.gid === pulsingShapeId && (
+                  <path className="fp-pulse" d={d} fill={C.accent} fillOpacity={0.45} />
+                )}
                 <FloorPlanLabel x={s.pole.x} y={s.pole.y} k={k} clear={s.pole.clear} maxPx={11}
                   text={label} fontWeight={600} fill={linked ? "#1F1F1F" : "#8A6A3C"} />
               </g>

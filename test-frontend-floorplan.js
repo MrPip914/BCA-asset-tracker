@@ -305,5 +305,66 @@ check('a first upload (no old plan yet) drops every link rather than throwing',
     [{ shapeId: 'old-1', roomId: 'BCR0001' }], [], [], [{ gid: 'new-1', title: 'Space.101' }]
   ).links) === '[]');
 
+// --- 8. drawnOnMapFor: finding where a room/asset is shown on SOME plan --------
+// The "Show on map" cross-navigation this exists for: an ordinary asset is
+// never itself drawn, only the room holding it is, and the room holding it
+// can be nested arbitrarily deep with a plan living at any level -- not just
+// the one hardcoded floor the mockup's own drawnFor walked.
+const drawnMod = { exports: {} };
+new Function('module', [
+  grabFn('drawnOnMapFor'),
+  'module.exports = { drawnOnMapFor };',
+].join('\n'))(drawnMod);
+const { drawnOnMapFor } = drawnMod.exports;
+
+{
+  const assets = [
+    { id: 'building', parentId: null, floorPlanUrl: 'x.svg', floorPlanLinks: [{ shapeId: 'shape-1', roomId: 'room' }] },
+    { id: 'room', parentId: 'building' },
+    { id: 'device', parentId: 'room' },
+  ];
+  check('a room drawn directly on its parent\'s plan is found',
+    JSON.stringify(drawnOnMapFor('room', assets)) === JSON.stringify({ ownerId: 'building', shapeId: 'shape-1', roomId: 'room' }));
+  // The real call site passes an ordinary (non-place) asset's parentId here,
+  // never the asset's own id -- but the function itself has no notion of
+  // "place" at all, it just walks parents. Calling it with the DEVICE's own
+  // id still finds the room's link by climbing straight past it, which is
+  // the same "fall back to an ancestor that IS drawn" behavior as the nested
+  // case below, just entered one level lower. Worth pinning: it means an
+  // isPlaceType mistake at the call site would degrade to "finds it anyway"
+  // rather than a silent miss.
+  check("starting from a non-place asset's own id still finds its room via the same walk-up",
+    JSON.stringify(drawnOnMapFor('device', assets)) === JSON.stringify({ ownerId: 'building', shapeId: 'shape-1', roomId: 'room' }));
+
+  // A device's own room isn't drawn, but ITS parent (a nested "wing" room) is
+  // -- the same "falls back to whichever ancestor room IS drawn" case the
+  // mockup's drawnFor handled, generalized past one hardcoded floor.
+  const nested = [
+    { id: 'building', parentId: null, floorPlanUrl: 'x.svg', floorPlanLinks: [{ shapeId: 'shape-9', roomId: 'wing' }] },
+    { id: 'wing', parentId: 'building' },
+    { id: 'closet', parentId: 'wing' }, // not itself linked to any shape
+  ];
+  check('an undrawn room falls back to the nearest ancestor room that IS drawn',
+    JSON.stringify(drawnOnMapFor('closet', nested)) === JSON.stringify({ ownerId: 'building', shapeId: 'shape-9', roomId: 'wing' }));
+}
+
+check('a room whose parent has no floor plan at all is not drawn anywhere',
+  drawnOnMapFor('room', [{ id: 'building', parentId: null }, { id: 'room', parentId: 'building' }]) === null);
+
+check('a room whose parent has a plan but no link naming it is not drawn',
+  drawnOnMapFor('room', [
+    { id: 'building', parentId: null, floorPlanUrl: 'x.svg', floorPlanLinks: [{ shapeId: 'shape-1', roomId: 'some-other-room' }] },
+    { id: 'room', parentId: 'building' },
+  ]) === null);
+
+check('a null/blank roomId (e.g. a Bulk Item with no single parentId) is not drawn anywhere, not a throw',
+  drawnOnMapFor(null, [{ id: 'building', floorPlanUrl: 'x.svg', floorPlanLinks: [] }]) === null);
+
+check('a parentage loop does not hang -- terminates rather than looping forever',
+  drawnOnMapFor('a', [
+    { id: 'a', parentId: 'b' },
+    { id: 'b', parentId: 'a' },
+  ]) === null);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
