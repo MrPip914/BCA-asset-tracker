@@ -108,8 +108,7 @@ new Function('module', [
   grabFn('floorPlanSegDist'),
   grabFn('floorPlanPole'),
   grabFn('floorPlanBbox'),
-  grabFn('floorPlanGroupOutlineKey'),
-  grabFn('floorPlanGroupOutline'),
+  grabFn('floorPlanRasterOutline'),
   grabFn('floorPlanShapeGap'),
   closeFactorLine[0],
   grabFn('floorPlanRoomScale'),
@@ -118,9 +117,9 @@ new Function('module', [
   grabFn('floorPlanLabelFit'),
   grabFn('floorPlanZoomViewBox'),
   grabFn('floorPlanZoomAt'),
-  'module.exports = { floorPlanPole, floorPlanBbox, floorPlanGroupOutline, floorPlanShapeGap, floorPlanClusterShapes, floorPlanLabelFit, floorPlanZoomViewBox, floorPlanZoomAt };',
+  'module.exports = { floorPlanPole, floorPlanBbox, floorPlanRasterOutline, floorPlanShapeGap, floorPlanClusterShapes, floorPlanLabelFit, floorPlanZoomViewBox, floorPlanZoomAt };',
 ].join('\n'))(geomMod);
-const { floorPlanPole, floorPlanBbox, floorPlanGroupOutline, floorPlanShapeGap, floorPlanClusterShapes, floorPlanLabelFit, floorPlanZoomViewBox, floorPlanZoomAt } = geomMod.exports;
+const { floorPlanPole, floorPlanBbox, floorPlanRasterOutline, floorPlanShapeGap, floorPlanClusterShapes, floorPlanLabelFit, floorPlanZoomViewBox, floorPlanZoomAt } = geomMod.exports;
 
 // A 100x100 square: the pole should land at the center with clearance ~50.
 const square = [[0, 0], [100, 0], [100, 100], [0, 100]];
@@ -145,60 +144,80 @@ const { fs: squareFs } = floorPlanLabelFit(1, squarePole.clear, 11, 'Main Room')
 check('the hallway\'s label is sized smaller than the square\'s, not larger',
   hallFs < squareFs, `hallway fs=${hallFs}, square fs=${squareFs}`);
 
-// --- 2b. group outline: edge-cancellation union of adjacent rooms -------------
-// Two unit squares sharing the edge x=1 -- the union is a 2x1 rectangle, and
-// the shared wall must cancel out of the traced boundary entirely rather
-// than showing up as a stray interior line.
+// --- 2b. group outline: RASTER tracing, not exact-edge matching ---------------
+// floorPlanGroupOutline (edge cancellation on exact shared coordinates) was
+// the first attempt here and looked right against the hand-built fixture,
+// then traced a plain rectangle against a real Visio export -- not one wall
+// in it was byte-identical between two "adjacent" rooms (a T-junction, wall
+// thickness, export rounding all defeat an exact match). floorPlanRasterOutline
+// replaced it: it only asks "is this point within `pad` of ANY member",
+// which needs no coordinate to match anything, so it works identically
+// whether two rooms truly touch or merely sit close together -- and that
+// same `pad` is what bridges the gap between grouped-but-not-touching rooms
+// into one traced blob, or leaves them as two when the gap is too wide.
+// Areas here are checked with a generous tolerance, since a raster trace is
+// an approximation of the true polygon by construction, not the exact
+// shoelace answer floorPlanGroupOutline's vector edges gave.
 const shoelaceArea = loop => Math.abs(loop.reduce((s, p, i) => {
   const q = loop[(i + 1) % loop.length];
   return s + (p[0] * q[1] - q[0] * p[1]);
 }, 0)) / 2;
+const totalArea = loops => loops.reduce((s, l) => s + shoelaceArea(l), 0);
+
+// Two 100x100 squares sharing the edge x=100 -- the union is a 2x1
+// rectangle. pad=0 traces the true polygon edges with no bridging and no
+// outward margin, so this is the closest thing to an exact check the
+// raster method allows.
 {
-  const left = [[0, 0], [1, 0], [1, 1], [0, 1]];
-  const right = [[1, 0], [2, 0], [2, 1], [1, 1]];
-  const outline = floorPlanGroupOutline([left, right]);
-  check('two adjacent squares trace to their combined 2x1 area, not each square alone',
-    outline && approx(shoelaceArea(outline), 2), `got ${outline && shoelaceArea(outline)}`);
-  const hasCorner = (loop, x, y) => loop.some(([px, py]) => approx(px, x) && approx(py, y));
-  check('the traced outline reaches the far outer corner (2,1), not just each square\'s own',
-    outline && hasCorner(outline, 2, 1), JSON.stringify(outline));
-  check('the shared wall (x=1) does not survive as a visible interior edge',
-    outline && outline.filter(([x]) => approx(x, 1)).length <= 2, JSON.stringify(outline));
+  const left = [[0, 0], [100, 0], [100, 100], [0, 100]];
+  const right = [[100, 0], [200, 0], [200, 100], [100, 100]];
+  const loops = floorPlanRasterOutline([left, right], 0);
+  check('two touching squares trace to ONE loop covering their combined area, not two',
+    loops && loops.length === 1, JSON.stringify(loops && loops.length));
+  check('...and that area is their combined 20000, not each 10000 alone',
+    loops && approx(totalArea(loops), 20000, 1500), `got ${loops && totalArea(loops)}`);
 }
 
-// Three unit squares forming an L (bottom-left, bottom-right, top-right) --
-// the traced outline has to be SMALLER than the 2x2 bounding box a rect
-// would have used, or it isn't actually following the concave shape.
+// Three 100x100 squares forming an L (bottom-left, bottom-right, top-right)
+// -- the traced outline has to be smaller than the 200x200=40000 bounding
+// box a rectangle would have used, or it isn't following the concave notch.
 {
-  const a = [[0, 0], [1, 0], [1, 1], [0, 1]];
-  const b = [[1, 0], [2, 0], [2, 1], [1, 1]];
-  const c = [[1, 1], [2, 1], [2, 2], [1, 2]];
-  const outline = floorPlanGroupOutline([a, b, c]);
-  check('an L of three squares traces to area 3, not the 2x2=4 bounding box',
-    outline && approx(shoelaceArea(outline), 3), `got ${outline && shoelaceArea(outline)}`);
+  const a = [[0, 0], [100, 0], [100, 100], [0, 100]];
+  const b = [[100, 0], [200, 0], [200, 100], [100, 100]];
+  const c = [[100, 100], [200, 100], [200, 200], [100, 200]];
+  const loops = floorPlanRasterOutline([a, b, c], 0);
+  check('an L of three squares traces to ~30000 (three squares), not the 40000 bbox',
+    loops && approx(totalArea(loops), 30000, 2000), `got ${loops && totalArea(loops)}`);
 }
 
-// Two squares that share no edge at all -- the exact shape of the fixture's
-// own "Storage & Hallway" group, whose two rooms are grouped on the floor
-// plan without sharing a wall on the SVG (a gap between them). Edge
-// cancellation cancels nothing, so this closes into TWO separate loops, not
-// one -- and returning either loop alone would trace one room while
-// silently leaving the other one outside its own group's border, which is
-// worse than the bounding box this must fall back to instead.
+// Two 100x100 squares with a real gap between them (not touching) -- the
+// fixture's own "Storage & Hallway" shape. pad big enough to bridge the
+// gap traces them as ONE blob; pad too small to reach across leaves TWO.
 {
-  const disjoint = floorPlanGroupOutline([[[0, 0], [1, 0], [1, 1], [0, 1]], [[5, 5], [6, 5], [6, 6], [5, 6]]]);
-  check('two shapes with no shared wall return null rather than tracing just one of them',
-    disjoint === null, JSON.stringify(disjoint));
+  const left = [[0, 0], [100, 0], [100, 100], [0, 100]];
+  const right = [[110, 0], [210, 0], [210, 100], [110, 100]]; // 10-unit gap
+  const bridged = floorPlanRasterOutline([left, right], 6);
+  check('a gap smaller than 2x pad bridges into ONE traced blob',
+    bridged && bridged.length === 1, JSON.stringify(bridged && bridged.length));
+  const unbridged = floorPlanRasterOutline([left, right], 2);
+  check('the same gap with too little pad stays TWO separate blobs, not one box spanning it',
+    unbridged && unbridged.length === 2, JSON.stringify(unbridged && unbridged.length));
 }
 
-// A single polygon (the caller never does this -- a "group" of one member
-// is refused elsewhere -- but the helper itself should still behave) traces
-// back to its own boundary rather than returning null or throwing.
+// A single polygon traces back to roughly its own boundary rather than
+// returning null or throwing -- the caller never groups one member alone,
+// but the helper itself should still behave reasonably if asked to.
 {
-  const solo = floorPlanGroupOutline([[[0, 0], [3, 0], [3, 2], [0, 2]]]);
-  check('a single polygon traces back to its own area', solo && approx(shoelaceArea(solo), 6),
-    `got ${solo && shoelaceArea(solo)}`);
+  const solo = floorPlanRasterOutline([[[0, 0], [90, 0], [90, 60], [0, 60]]], 0);
+  check('a single polygon traces back to its own ~5400 area',
+    solo && approx(totalArea(solo), 5400, 500), `got ${solo && totalArea(solo)}`);
 }
+
+// Degenerate input (fewer than 3 total points across every member) must
+// not throw -- the caller's own guards should prevent this in practice,
+// but a helper that throws on bad input is worse than one that says null.
+check('degenerate input (too few points) returns null rather than throwing',
+  floorPlanRasterOutline([[[0, 0], [1, 1]]], 0) === null);
 
 // --- 2c. clustering by PROXIMITY, not by shared walls --------------------------
 // Real floor plans mostly don't draw grouped rooms touching -- a hallway
@@ -239,9 +258,9 @@ const shoelaceArea = loop => Math.abs(loop.reduce((s, p, i) => {
     JSON.stringify(sizes));
 }
 {
-  // Genuinely touching rooms (gap 0) must still cluster together -- this is
-  // the case floorPlanGroupOutline's edge cancellation already handles;
-  // clustering must not accidentally split it apart.
+  // Genuinely touching rooms (gap 0) must still cluster together -- the
+  // raster trace handles this case fine on its own, but clustering must
+  // not accidentally split it apart before tracing ever sees it.
   const touchingA = { gid: 'a', pts: [[0, 0], [10, 0], [10, 10], [0, 10]] };
   const touchingB = { gid: 'b', pts: [[10, 0], [20, 0], [20, 10], [10, 10]] };
   check('touching rooms (gap 0) still cluster into one',
