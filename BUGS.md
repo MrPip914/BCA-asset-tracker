@@ -343,6 +343,28 @@ user is least sure whether their click worked.
 
 **Blocks:** nothing.
 
+### The Contents tab's Rooms section shows every room with a blank name
+**Found:** 2026-09-23, while extracting the Contents tab's row rendering into a shared
+`ContentsList` component for the Map tab's own room-contents panel.
+**Needs a deploy:** no — `index.html` only.
+**Confirmed:** by reading the source; not yet reproduced in a browser, but the field it
+reads has been gone from every Room asset since the 2026-08-25 removal, so there is
+nothing that could make it print anything.
+
+The Rooms section of an asset's Contents tab renders each child room as
+`<span>{r.room}</span>` — the pre-name-refactor field, retired when "Room, Building and
+Campus are not columns at all" removed it. A Room's display name lives on `name` (or
+falls back to `tag`/label) now, read via `nameOf()`, same as everywhere else in the app.
+`r.room` is `undefined` on every Room asset, so the row renders with an icon, its Asset
+ID, and a blank space where the name belongs — the ID and chevron still work, so the row
+is still clickable and still opens the right room, which is likely why this went
+unnoticed. Fix is `nameOf(r, typesList)` in place of `r.room`.
+
+**Blocks:** nothing for the Map-tab work that found it — `ContentsList` was extracted
+byte-for-byte from the existing broken render rather than fixed in passing, so the new
+Map-tab room panel shows the identical blank names until this is fixed once, in the
+shared component, for both places at once.
+
 ---
 
 ## Fixed

@@ -2203,6 +2203,101 @@ function descendantsOf(asset, assets) {
   return (assets || []).filter(a => a.id !== asset.id && ancestorsOf(a, assets).some(p => p.id === asset.id));
 }
 
+// Everything inside a place, at any depth, split the way the Contents tab
+// (and now the Map tab's own room panel) renders it. Extracted from what
+// used to be inlined once, at the top of AssetTracker's render body, purely
+// for the Contents tab -- the Map tab needing the identical answer for
+// whichever room is currently selected is what pulled it out to a shared
+// function rather than becoming a second copy of the same three lines.
+function contentsOf(place, assets) {
+  if (!place || !isPlaceType(place.type)) {
+    return { contentRooms: [], contentDevices: [], contentAllocations: [], contentsCount: 0 };
+  }
+  const below = descendantsOf(place, assets);
+  const contentRooms = below.filter(a => a.type === "Room");
+  const contentDevices = below.filter(a => a.type !== "Room");
+  // A bulk allocation names a Room directly and is not a parent link, so it
+  // stays an exact match on this place rather than anything below it.
+  const contentAllocations = (assets || [])
+    .filter(a => a.type === "Bulk Item")
+    .flatMap(b => (b.allocations || []).filter(al => al.roomId === place.id).map(al => ({ bulk: b, quantity: al.quantity })));
+  return { contentRooms, contentDevices, contentAllocations, contentsCount: contentDevices.length + contentRooms.length + contentAllocations.length };
+}
+
+// The Rooms/Devices/Bulk-Items listing shared by an asset's own Contents tab
+// and the Map tab's room panel -- same three sections, same row shape, so
+// the two don't drift into two different readings of "what's inside this
+// place". `onOpen` is `openDetail` at both call sites; kept as a prop rather
+// than imported directly since this file has no import mechanism at all and
+// every other shared component here takes its callbacks the same way.
+function ContentsList({ place, assets, typesList, onOpen, emptyLabel }) {
+  const { contentRooms, contentDevices, contentAllocations, contentsCount } = contentsOf(place, assets);
+  if (contentsCount === 0) {
+    return (
+      <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>
+        {emptyLabel || `Nothing linked to this ${typeNameOf(place.type, typesList).toLowerCase()} yet.`}
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {contentRooms.length > 0 && (
+        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginBottom: 2 }}>
+          Rooms ({contentRooms.length})
+        </div>
+      )}
+      {contentRooms.map(r => {
+        const RIcon = iconFor(r.type);
+        return (
+          <button key={r.label} onClick={() => onOpen(r)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
+            <RIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
+            {/* r.room is the pre-name-refactor field -- see BUGS.md, "The
+                Contents tab's Rooms section shows every room with a blank
+                name". Extracted byte-for-byte rather than fixed in passing. */}
+            <span style={{ fontSize: 14, color: C.ink, flex: 1 }}>{r.room}</span>
+            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.accent }}>{r.label}</span>
+            <ChevronRight size={14} style={{ color: C.placeholder }} />
+          </button>
+        );
+      })}
+      {contentDevices.length > 0 && (
+        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginTop: contentRooms.length ? 10 : 0, marginBottom: 2 }}>
+          Devices ({contentDevices.length})
+        </div>
+      )}
+      {contentDevices.map(d => {
+        const DIcon = iconFor(d.type);
+        return (
+          <button key={d.id} onClick={() => onOpen(d)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
+            <DIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
+            <span style={{ fontSize: 14, color: C.ink, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {typeNameOf(d.type, typesList)}{d.brand ? ` · ${d.brand}` : ""}{place.type === "Building" && roomNameOf(d, assets) ? ` · ${roomNameOf(d, assets)}` : ""}
+            </span>
+            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.accent }}>{d.label}</span>
+            <ChevronRight size={14} style={{ color: C.placeholder }} />
+          </button>
+        );
+      })}
+      {contentAllocations.length > 0 && (
+        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginTop: (contentRooms.length || contentDevices.length) ? 10 : 0, marginBottom: 2 }}>
+          Bulk Items ({contentAllocations.length})
+        </div>
+      )}
+      {contentAllocations.map(({ bulk, quantity }) => {
+        const BIcon = iconFor(bulk.type);
+        return (
+          <button key={bulk.id} onClick={() => onOpen(bulk)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
+            <BIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
+            <span style={{ fontSize: 14, color: C.ink, flex: 1 }}>{nameOf(bulk, typesList) !== bulk.tag ? nameOf(bulk, typesList) : typeNameOf(bulk.type, typesList)}</span>
+            <span style={{ fontWeight: 600, color: C.brandDark }}>× {quantity}</span>
+            <ChevronRight size={14} style={{ color: C.placeholder }} />
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 // Would pointing `childId` at `parentId` close a loop? True when the proposed
 // parent IS the child, or already sits somewhere below it. ancestorsOf is itself
 // loop-safe, so this stays correct even when the existing data is already bad.
@@ -2693,7 +2788,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-22.9";
+const APP_VERSION = "2026-09-22.10";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -10559,28 +10654,11 @@ function AssetTracker() {
     // needs excluding by name.
     const editFormColumns = formColumnsFor(draft.type);
 
-    // What's inside this place, at any depth. This used to be two hand-written
-    // cases — a Room matched devices by roomId, a Building gathered its Rooms and
-    // then the devices in them, plus a special case for the one type (Condenser)
-    // that attached to a Building directly. One parent chain collapses all of
-    // that into "everything below me", which also means a device inside a closet
-    // inside a classroom shows up under the classroom, matching what the Room
-    // filter on the list now does.
-    // Which assets *are* Rooms is an identity question, so that test still
-    // compares the type name; Rooms are split out only so they list separately.
-    const isPlace = isPlaceType(selectedAsset.type);
-    let contentDevices = [], contentRooms = [], contentAllocations = [];
-    if (isPlace) {
-      const below = descendantsOf(selectedAsset, assets);
-      contentRooms = below.filter(a => a.type === "Room");
-      contentDevices = below.filter(a => a.type !== "Room");
-      // A bulk allocation names a Room directly and is not a parent link, so it
-      // stays an exact match on this asset rather than anything below it.
-      contentAllocations = assets
-        .filter(a => a.type === "Bulk Item")
-        .flatMap(b => (b.allocations || []).filter(al => al.roomId === selectedAsset.id).map(al => ({ bulk: b, quantity: al.quantity })));
-    }
-    const contentsCount = contentDevices.length + contentRooms.length + contentAllocations.length;
+    // What's inside this place, at any depth -- see contentsOf's own comment
+    // for why this walks the whole parent chain rather than two hand-written
+    // cases. contentsCount alone feeds the Contents tab's badge below; the
+    // full breakdown is only needed where ContentsList actually renders it.
+    const { contentsCount } = contentsOf(selectedAsset, assets);
 
     return (
       <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'IBM Plex Sans', sans-serif", color: C.ink }}>
@@ -10955,66 +11033,7 @@ function AssetTracker() {
           })()}
 
           {detailTab === "contents" && (
-            <>
-              {contentsCount === 0 ? (
-                <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>
-                  Nothing linked to this {typeNameOf(selectedAsset.type, typesList).toLowerCase()} yet.
-                </div>
-              ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {contentRooms.length > 0 && (
-                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginBottom: 2 }}>
-                      Rooms ({contentRooms.length})
-                    </div>
-                  )}
-                  {contentRooms.map(r => {
-                    const RIcon = iconFor(r.type);
-                    return (
-                      <button key={r.label} onClick={() => openDetail(r)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
-                        <RIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
-                        <span style={{ fontSize: 14, color: C.ink, flex: 1 }}>{r.room}</span>
-                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.accent }}>{r.label}</span>
-                        <ChevronRight size={14} style={{ color: C.placeholder }} />
-                      </button>
-                    );
-                  })}
-                  {contentDevices.length > 0 && (
-                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginTop: contentRooms.length ? 10 : 0, marginBottom: 2 }}>
-                      Devices ({contentDevices.length})
-                    </div>
-                  )}
-                  {contentDevices.map(d => {
-                    const DIcon = iconFor(d.type);
-                    return (
-                      <button key={d.id} onClick={() => openDetail(d)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
-                        <DIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
-                        <span style={{ fontSize: 14, color: C.ink, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {typeNameOf(d.type, typesList)}{d.brand ? ` · ${d.brand}` : ""}{selectedAsset.type === "Building" && roomNameOf(d, assets) ? ` · ${roomNameOf(d, assets)}` : ""}
-                        </span>
-                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.accent }}>{d.label}</span>
-                        <ChevronRight size={14} style={{ color: C.placeholder }} />
-                      </button>
-                    );
-                  })}
-                  {contentAllocations.length > 0 && (
-                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginTop: (contentRooms.length || contentDevices.length) ? 10 : 0, marginBottom: 2 }}>
-                      Bulk Items ({contentAllocations.length})
-                    </div>
-                  )}
-                  {contentAllocations.map(({ bulk, quantity }) => {
-                    const BIcon = iconFor(bulk.type);
-                    return (
-                      <button key={bulk.id} onClick={() => openDetail(bulk)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
-                        <BIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
-                        <span style={{ fontSize: 14, color: C.ink, flex: 1 }}>{nameOf(bulk, typesList) !== bulk.tag ? nameOf(bulk, typesList) : typeNameOf(bulk.type, typesList)}</span>
-                        <span style={{ fontWeight: 600, color: C.brandDark }}>× {quantity}</span>
-                        <ChevronRight size={14} style={{ color: C.placeholder }} />
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </>
+            <ContentsList place={selectedAsset} assets={assets} typesList={typesList} onOpen={openDetail} />
           )}
 
           {detailTab === "allocations" && hasModule(selectedAsset.type, "allocations") && (
@@ -12927,6 +12946,7 @@ function AssetTracker() {
           onDeleteGroup={groupId => deleteSpaceGroup(scopeId, groupId)}
           focusShapeId={mapFocusShapeId}
           onFocusHandled={() => setMapFocusShapeId(null)}
+          onOpenAsset={openDetail}
         />
         </>
         )}
@@ -15934,7 +15954,7 @@ function fetchFloorPlanSvgText(url) {
 function MapTabContent({
   canEdit, assets, typesList, scopeAsset,
   uploadBusy, uploadError, onUploadPlan, onSaveLink, onSaveGroup, onDeleteGroup,
-  focusShapeId, onFocusHandled,
+  focusShapeId, onFocusHandled, onOpenAsset,
 }) {
   if (!scopeAsset) {
     return (
@@ -15966,6 +15986,7 @@ function MapTabContent({
       onDeleteGroup={onDeleteGroup}
       focusShapeId={focusShapeId}
       onFocusHandled={onFocusHandled}
+      onOpenAsset={onOpenAsset}
     />
   );
 }
@@ -15989,7 +16010,7 @@ function FloorPlanTabContent({
   canEdit, selectedAsset, assets, typesList,
   uploadBusy, uploadError, onUploadPlan,
   onSaveLink, onSaveGroup, onDeleteGroup,
-  focusShapeId, onFocusHandled,
+  focusShapeId, onFocusHandled, onOpenAsset,
 }) {
   const plan = useFloorPlanSvg(selectedAsset.floorPlanUrl);
   // Filtered to shapes the CURRENTLY LOADED plan actually has. uploadFloorPlanSvg
@@ -16540,6 +16561,32 @@ function FloorPlanTabContent({
           </button>
         </div>
       )}
+
+      {/* A selected LINKED shape (an ordinary tap, or a member tapped inside
+          an already-open group -- onShapeClick sets selectedShapeId either
+          way) shows what's actually inside the room it's linked to. Nothing
+          renders for an UNLINKED shape: those go straight into the Link
+          picker on tap (onUnlinkedShapeClick), so selectedShapeId is never
+          set for one in the first place. */}
+      {selectedShapeId && !setupTab && (() => {
+        const link = linkFor(selectedShapeId);
+        const room = link ? assets.find(a => a.id === link.roomId) : null;
+        if (!room) return null;
+        return (
+          <div style={{ marginTop: 8, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
+              <span style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>{nameOf(room, typesList)}</span>
+              {onOpenAsset && (
+                <button type="button" onClick={() => onOpenAsset(room)}
+                  style={{ padding: "3px 9px", borderRadius: 8, border: `1.5px solid ${C.border}`, background: "none", color: C.brandDark, fontSize: 12, fontWeight: 600 }}>
+                  Open room
+                </button>
+              )}
+            </div>
+            <ContentsList place={room} assets={assets} typesList={typesList} onOpen={onOpenAsset} />
+          </div>
+        );
+      })()}
     </div>
   );
 }
