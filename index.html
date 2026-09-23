@@ -191,9 +191,10 @@ const TYPE_REGISTRY = {
   Condenser: { categoryIds: ["Facilities"], parentTypes: ["Building"] },
   // A Room is a space, not a device — no brand/model/serial/etc. It sits in the
   // Building it's in, or inside another Room (a closet within a classroom).
-  // floorPlan: true ships ON for Room and Building -- see typeHasFloorPlan --
-  // because those are the two places someone actually has a drawing for.
-  // It's a per-type SETTING, not fixed to these two: any type, including a
+  // floorPlan: true ships ON for Room, Building and Campus -- see
+  // typeHasFloorPlan -- because those are the levels someone actually has a
+  // drawing for: a room diagram, a building floor plan, a campus site plan.
+  // It's a per-type SETTING, not fixed to these three: any type, including a
   // custom one, can have it switched on from the type editor, the same way
   // requiredFields already works (typeSettings[id].floorPlan overrides this).
   Room: {
@@ -216,6 +217,7 @@ const TYPE_REGISTRY = {
   Campus: {
     locked: true, icon: MapPin, categoryIds: ["Places"], parentTypes: [],
     excludedFields: ["tag", "brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
+    floorPlan: true,
   },
   // Tables, chairs... not individually tagged or tied to one room — a pooled
   // quantity, distributed across rooms via the Allocations tab instead. That
@@ -2788,7 +2790,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-22.13";
+const APP_VERSION = "2026-09-23.1";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -3509,7 +3511,22 @@ const MOCK_SNAPSHOT = {
     // readable-prefix habit (BCB buildings, BCR rooms) — note that's a property of
     // this hand-written fixture only; the app itself issues BCA numbers for
     // everything and has no per-type prefix scheme.
-    { label: "BCC0001", type: "Campus", name: "Brookside Christian Academy", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "The school site.", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
+    // Carries its own fixture plan -- a campus SITE plan, one level above
+    // Building 100's own -- so Sandbox can exercise navigating from one plan
+    // into another (see onNavigateToPlan in FloorPlanTabContent). site-b100 is
+    // linked to BCB0001, which has its own uploaded plan below, so tapping it
+    // drills straight in; site-b200 is linked to BCB0002, which has none, so
+    // tapping it falls through to the ordinary select-and-frame behavior --
+    // both branches of that gate need a case, the same personIds-style reason
+    // every other mixed fixture entry here gives.
+    { label: "BCC0001", type: "Campus", name: "Brookside Christian Academy", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "The school site.", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active",
+      floorPlanUrl: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA4MDAgNTAwIj4KICA8ZyBpZD0ic2l0ZS1iMTAwIj48dGl0bGU+U3BhY2UuMjAxPC90aXRsZT48ZGVzYz5CdWlsZGluZyAxMDA8L2Rlc2M+PHJlY3QgeD0iMjAiIHk9IjIwIiB3aWR0aD0iMjIwIiBoZWlnaHQ9IjE2MCIvPjwvZz4KICA8ZyBpZD0ic2l0ZS1iMjAwIj48dGl0bGU+U3BhY2UuMjAyPC90aXRsZT48ZGVzYz5CdWlsZGluZyAyMDA8L2Rlc2M+PHJlY3QgeD0iMjgwIiB5PSIyMCIgd2lkdGg9IjIyMCIgaGVpZ2h0PSIxNjAiLz48L2c+CiAgPGcgaWQ9ImxibC1zaXRlIj48dGl0bGU+U2hlZXQuMjwvdGl0bGU+PGRlc2M+Q2FtcHVzIFNpdGUgUGxhbjwvZGVzYz48cmVjdCB4PSIyMCIgeT0iNDAwIiB3aWR0aD0iMjAwIiBoZWlnaHQ9IjQwIi8+PC9nPgo8L3N2Zz4K",
+      floorPlanStorageKey: "bca/floorplans/mock-campus-site",
+      floorPlanFileName: "campus-site-plan.svg",
+      floorPlanLinks: [
+        { shapeId: "site-b100", roomId: "BCB0001", at: "2026-09-23T09:00:00.000Z", by: "Eric" },
+        { shapeId: "site-b200", roomId: "BCB0002", at: "2026-09-23T09:01:00.000Z", by: "Eric" },
+      ] },
     { label: "BCC0002", type: "Campus", name: "Kramer Campus", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "Separate residential site — sample data behind the Electrical Map panel.", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
     // Carries a fixture floor plan (a data: URI, so it loads with no network
     // call, the same way an uploaded plan is stored while Sandbox is ON) so
@@ -6291,6 +6308,20 @@ function AssetTracker() {
     setMainTab("map");
     setScopeId(drawn.ownerId);
     setMapFocusShapeId(drawn.shapeId);
+  }
+
+  // Tapping a shape on the Map tab that's linked to something with its OWN
+  // floor plan (a Building drawn on a Campus's site plan, say) drills into
+  // that plan instead of showing the shape as a linked room -- see
+  // onShapeClick in FloorPlanTabContent. Sets the SAME scopeId Assets/
+  // Maintenance share, exactly like the HierarchyNav breadcrumb would.
+  // mapQuery/mapFocusShapeId are cleared because they name things on the
+  // plan being left -- carrying a match count or a pulse target over to an
+  // unrelated plan would be confusing rather than convenient.
+  function navigateFloorPlanTo(assetId) {
+    setScopeId(assetId);
+    setMapQuery("");
+    setMapFocusShapeId(null);
   }
 
   // Switching tabs REPLACES rather than pushes. Pushing would bury the previous
@@ -12994,6 +13025,7 @@ function AssetTracker() {
           focusShapeId={mapFocusShapeId}
           onFocusHandled={() => setMapFocusShapeId(null)}
           onOpenAsset={openDetail}
+          onNavigateToPlan={navigateFloorPlanTo}
           query={mapQuery}
         />
         </>
@@ -16034,7 +16066,7 @@ function fetchFloorPlanSvgText(url) {
 function MapTabContent({
   canEdit, assets, typesList, scopeAsset,
   uploadBusy, uploadError, onUploadPlan, onSaveLink, onSaveGroup, onDeleteGroup,
-  focusShapeId, onFocusHandled, onOpenAsset, query,
+  focusShapeId, onFocusHandled, onOpenAsset, onNavigateToPlan, query,
 }) {
   if (!scopeAsset) {
     return (
@@ -16069,6 +16101,7 @@ function MapTabContent({
       focusShapeId={focusShapeId}
       onFocusHandled={onFocusHandled}
       onOpenAsset={onOpenAsset}
+      onNavigateToPlan={onNavigateToPlan}
       query={query}
     />
   );
@@ -16093,7 +16126,7 @@ function FloorPlanTabContent({
   canEdit, selectedAsset, assets, typesList,
   uploadBusy, uploadError, onUploadPlan,
   onSaveLink, onSaveGroup, onDeleteGroup,
-  focusShapeId, onFocusHandled, onOpenAsset, query,
+  focusShapeId, onFocusHandled, onOpenAsset, onNavigateToPlan, query,
 }) {
   const plan = useFloorPlanSvg(selectedAsset.floorPlanUrl);
   // Filtered to shapes the CURRENTLY LOADED plan actually has. uploadFloorPlanSvg
@@ -16278,14 +16311,35 @@ function FloorPlanTabContent({
       setGroupPick(p => { const n = new Set(p); n.has(shapeId) ? n.delete(shapeId) : n.add(shapeId); return n; });
       return;
     }
-    // Normal view: a collapsed group opens (and frames itself); anything
-    // else just selects and frames.
+    // Normal view: a collapsed group opens (and frames itself); a shape
+    // linked to something that carries its OWN floor plan navigates
+    // straight into that plan instead (onNavigateToPlan) -- tapping a
+    // Building on a Campus's site plan should land on the Building's own
+    // plan, the same way tapping a Building on the real campus takes you
+    // into the building rather than showing you a list of what's in it.
+    // Anything else just selects and frames, as before.
     const grp = groupOfShape(shapeId);
     if (grp && openGroupId !== grp.id) {
       setOpenGroupId(grp.id);
       setSelectedShapeId(null);
       const members = plan.status === "ready" ? plan.spaces.filter(s => (grp.memberShapeIds || []).includes(s.gid)) : [];
       if (members.length) zoomToBbox(floorPlanBbox(members.flatMap(s => s.pts)), 0.15);
+      return;
+    }
+    // Gated on the linked asset actually HAVING a plan uploaded, not merely
+    // being an eligible type -- Room ships floorPlan-eligible by default, the
+    // same as Building, so an eligibility-only check would hijack every
+    // ordinary linked room (which has no plan of its own) away from the
+    // room-contents panel below and into an empty "no plan yet" screen.
+    // Requiring floorPlanUrl means only a shape that genuinely has its own
+    // plan to show -- a Building drawn on a Campus's site plan, say -- drills
+    // in; a Room with nothing uploaded still shows what's inside it here.
+    const navLink = linkFor(shapeId);
+    const navAsset = navLink ? assets.find(a => a.id === navLink.roomId) : null;
+    if (navAsset && navAsset.floorPlanUrl && onNavigateToPlan) {
+      setSelectedShapeId(null);
+      setOpenGroupId(null);
+      onNavigateToPlan(navAsset.id);
       return;
     }
     setSelectedShapeId(shapeId);
