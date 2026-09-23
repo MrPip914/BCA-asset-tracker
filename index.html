@@ -2790,7 +2790,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-23.1";
+const APP_VERSION = "2026-09-23.2";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -3513,12 +3513,16 @@ const MOCK_SNAPSHOT = {
     // everything and has no per-type prefix scheme.
     // Carries its own fixture plan -- a campus SITE plan, one level above
     // Building 100's own -- so Sandbox can exercise navigating from one plan
-    // into another (see onNavigateToPlan in FloorPlanTabContent). site-b100 is
-    // linked to BCB0001, which has its own uploaded plan below, so tapping it
-    // drills straight in; site-b200 is linked to BCB0002, which has none, so
-    // tapping it falls through to the ordinary select-and-frame behavior --
-    // both branches of that gate need a case, the same personIds-style reason
-    // every other mixed fixture entry here gives.
+    // into another (see onNavigateToPlan in FloorPlanTabContent, and its
+    // double-tap gate in onShapeClick: tap a linked shape once to select
+    // it, tap the same shape again to go to its own plan). site-b100
+    // (BCB0001) and site-b200 (BCB0002) land differently on that second
+    // tap: BCB0001 has its own uploaded plan below and drills straight
+    // into it, while BCB0002 has none and lands on the empty "no plan
+    // uploaded yet" screen with the child-place chips that case needs (its
+    // Room, BCR0008, is one step further down) -- both are floor-plan-
+    // eligible Buildings, so both need a case, the same personIds-style
+    // reason every other mixed fixture entry here gives.
     { label: "BCC0001", type: "Campus", name: "Brookside Christian Academy", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "The school site.", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active",
       floorPlanUrl: "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA4MDAgNTAwIj4KICA8ZyBpZD0ic2l0ZS1iMTAwIj48dGl0bGU+U3BhY2UuMjAxPC90aXRsZT48ZGVzYz5CdWlsZGluZyAxMDA8L2Rlc2M+PHJlY3QgeD0iMjAiIHk9IjIwIiB3aWR0aD0iMjIwIiBoZWlnaHQ9IjE2MCIvPjwvZz4KICA8ZyBpZD0ic2l0ZS1iMjAwIj48dGl0bGU+U3BhY2UuMjAyPC90aXRsZT48ZGVzYz5CdWlsZGluZyAyMDA8L2Rlc2M+PHJlY3QgeD0iMjgwIiB5PSIyMCIgd2lkdGg9IjIyMCIgaGVpZ2h0PSIxNjAiLz48L2c+CiAgPGcgaWQ9ImxibC1zaXRlIj48dGl0bGU+U2hlZXQuMjwvdGl0bGU+PGRlc2M+Q2FtcHVzIFNpdGUgUGxhbjwvZGVzYz48cmVjdCB4PSIyMCIgeT0iNDAwIiB3aWR0aD0iMjAwIiBoZWlnaHQ9IjQwIi8+PC9nPgo8L3N2Zz4K",
       floorPlanStorageKey: "bca/floorplans/mock-campus-site",
@@ -13001,21 +13005,30 @@ function AssetTracker() {
         </>
         )}
 
-        {mainTab === "map" && (
+        {mainTab === "map" && (() => {
+          const mapScopeAsset = scopeId ? assets.find(a => a.id === scopeId) : null;
+          return (
         <>
         {/* Shares scopeId with Assets/Maintenance, deliberately -- same
             reasoning Maintenance's own HierarchyNav already takes: narrowing
             to a building on one tab and switching to this one keeps you
             where you were, rather than silently widening back to everything.
-            showChildren=false: the breadcrumb still says where you are, but
-            the child-place chips are dropped so the map itself sits close to
-            the top of the tab -- see HierarchyNav's own comment on the prop. */}
-        <HierarchyNav assets={assets} scopeId={scopeId} setScopeId={setScopeId} showChildren={false} />
+            showChildren is false exactly when a plan is on screen (breadcrumb
+            only, so the map sits close to the top of the tab -- see
+            HierarchyNav's own comment on the prop) and true otherwise -- the
+            top-level view, same as always, AND a scoped asset with no plan of
+            its own. That second case is what a double-tap (see
+            onShapeClick's own comment) can land you on, for a linked
+            Building whose real plans live one level down on Floor assets
+            it contains, and without the chips it would be a dead end:
+            nothing else on this tab lets you go further when there's no
+            plan to click through. */}
+        <HierarchyNav assets={assets} scopeId={scopeId} setScopeId={setScopeId} showChildren={!mapScopeAsset || !mapScopeAsset.floorPlanUrl} />
         <MapTabContent
           canEdit={canEdit}
           assets={assets}
           typesList={typesList}
-          scopeAsset={scopeId ? assets.find(a => a.id === scopeId) : null}
+          scopeAsset={mapScopeAsset}
           uploadBusy={floorPlanUploadBusy}
           uploadError={floorPlanUploadError}
           onUploadPlan={(file, oldSpaces) => uploadFloorPlanSvg(scopeId, file, oldSpaces)}
@@ -13029,7 +13042,8 @@ function AssetTracker() {
           query={mapQuery}
         />
         </>
-        )}
+          );
+        })()}
 
         {mainTab === "audit" && (() => {
           // Sliced at render, not in the memo: the memo holds the full answer to
@@ -13667,10 +13681,14 @@ function AssetPickerField({ label, assets, value, onChange, hint }) {
 //
 // showChildren (default true, so every existing caller is unaffected) hides
 // the child-place chip row while keeping the breadcrumb. The Map tab passes
-// false: once a plan is on screen, the plan itself is the way to drill
-// deeper (tap a shape, or a room's own contents panel), so a second set of
-// drill-down chips above it is redundant weight between the top of the tab
-// and the thing it exists to show.
+// false whenever a plan is actually on screen: the plan itself is the way to
+// drill deeper there (tap a shape, or a room's own contents panel), so a
+// second set of drill-down chips above it is redundant weight between the
+// top of the tab and the thing it exists to show. It passes true (or omits
+// the prop) when there's no plan to click through instead -- the top-level
+// view, and a scoped asset with no plan of its own, which is where a
+// double-tap on a linked shape (see onShapeClick) can land you. Without the
+// chips there, that screen would be a dead end.
 function HierarchyNav({ assets, scopeId, setScopeId, showChildren = true }) {
   const all = assets || [];
   const scope = scopeId ? all.find(a => a.id === scopeId) : null;
@@ -16218,6 +16236,19 @@ function FloorPlanTabContent({
     onFocusHandled();
   }, [plan.status, plan.spaces, selectedAsset.id, focusShapeId]);
 
+  // Selection and group-open state must not carry across a SCOPE change --
+  // two different plans can reuse the same shape id (each SVG's own gid
+  // numbering is local to its own file), so a shape selected on the plan
+  // just left could otherwise read as "already selected" on the very
+  // first tap of a DIFFERENT plan, turning what should be a first tap
+  // into an accidental navigate (see onShapeClick's double-tap gate).
+  // FloorPlanTabContent isn't remounted on a scope change -- same tree
+  // position, just a new selectedAsset prop -- so nothing else clears this.
+  useEffect(() => {
+    setSelectedShapeId(null);
+    setOpenGroupId(null);
+  }, [selectedAsset.id]);
+
   // ---- Free Zoom gestures: wheel-to-zoom-at-cursor, drag-to-pan. Off by
   // default -- most of the time tapping a shape (which auto-frames it) is
   // the whole interaction, the same "the app frames the shot for you unless
@@ -16311,13 +16342,21 @@ function FloorPlanTabContent({
       setGroupPick(p => { const n = new Set(p); n.has(shapeId) ? n.delete(shapeId) : n.add(shapeId); return n; });
       return;
     }
-    // Normal view: a collapsed group opens (and frames itself); a shape
-    // linked to something that carries its OWN floor plan navigates
-    // straight into that plan instead (onNavigateToPlan) -- tapping a
-    // Building on a Campus's site plan should land on the Building's own
-    // plan, the same way tapping a Building on the real campus takes you
-    // into the building rather than showing you a list of what's in it.
-    // Anything else just selects and frames, as before.
+    // Normal view: a collapsed group opens (and frames itself). Anything
+    // else is a shape tap, and a FIRST tap always just selects and frames --
+    // no gate, no setting, works identically whether or not the linked
+    // asset carries a plan of its own. A SECOND tap on the shape that is
+    // ALREADY selected navigates into that asset's own Map screen instead
+    // (onNavigateToPlan), if it's a type that can carry one -- tapping a
+    // Building on a Campus's site plan once shows what's inside it, tapping
+    // it again takes you into the Building's own plan, the same two-step
+    // most map apps already use for "show info" vs. "go there". This is
+    // deliberately gesture-driven rather than a per-asset setting: the
+    // ambiguity a setting would have to resolve (does THIS Room want its
+    // taps to navigate or show contents?) doesn't exist here, because the
+    // SAME tap always starts by showing contents and only a second,
+    // deliberate tap goes further -- so every linked shape behaves the
+    // same way with nothing to configure.
     const grp = groupOfShape(shapeId);
     if (grp && openGroupId !== grp.id) {
       setOpenGroupId(grp.id);
@@ -16326,21 +16365,15 @@ function FloorPlanTabContent({
       if (members.length) zoomToBbox(floorPlanBbox(members.flatMap(s => s.pts)), 0.15);
       return;
     }
-    // Gated on the linked asset actually HAVING a plan uploaded, not merely
-    // being an eligible type -- Room ships floorPlan-eligible by default, the
-    // same as Building, so an eligibility-only check would hijack every
-    // ordinary linked room (which has no plan of its own) away from the
-    // room-contents panel below and into an empty "no plan yet" screen.
-    // Requiring floorPlanUrl means only a shape that genuinely has its own
-    // plan to show -- a Building drawn on a Campus's site plan, say -- drills
-    // in; a Room with nothing uploaded still shows what's inside it here.
-    const navLink = linkFor(shapeId);
-    const navAsset = navLink ? assets.find(a => a.id === navLink.roomId) : null;
-    if (navAsset && navAsset.floorPlanUrl && onNavigateToPlan) {
-      setSelectedShapeId(null);
-      setOpenGroupId(null);
-      onNavigateToPlan(navAsset.id);
-      return;
+    if (selectedShapeId === shapeId) {
+      const navLink = linkFor(shapeId);
+      const navAsset = navLink ? assets.find(a => a.id === navLink.roomId) : null;
+      if (navAsset && typeHasFloorPlan(navAsset.type) && onNavigateToPlan) {
+        setSelectedShapeId(null);
+        setOpenGroupId(null);
+        onNavigateToPlan(navAsset.id);
+        return;
+      }
     }
     setSelectedShapeId(shapeId);
     const shape = plan.status === "ready" ? plan.spaces.find(s => s.gid === shapeId) : null;
