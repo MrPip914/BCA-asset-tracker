@@ -78,6 +78,9 @@ const { typeHasFloorPlan, availableTabsFor, setTypeSettings } = toggleMod.export
 
 check('Room carries a floor plan by default', typeHasFloorPlan('Room') === true);
 check('Building carries a floor plan by default', typeHasFloorPlan('Building') === true);
+// Campus joined Room/Building once plan-to-plan navigation needed a site
+// plan to navigate FROM -- see onNavigateToPlan in FloorPlanTabContent.
+check('Campus carries a floor plan by default', typeHasFloorPlan('Campus') === true);
 check('Computer does not carry a floor plan by default', typeHasFloorPlan('Computer') === false);
 check('an unregistered (user-created) type does not carry one by default', typeHasFloorPlan('SomeCustomType') === false);
 
