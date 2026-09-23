@@ -751,10 +751,6 @@ function availableTabsFor(type) {
   return [
     "details",
     ...(isPlaceType(type) ? ["contents"] : []),
-    // Derived/toggleable per type, like contents -- not declared in a type's
-    // own `modules` list, since that's for a module every type-of-this-kind
-    // ships with. See typeHasFloorPlan.
-    ...(typeHasFloorPlan(type) ? ["floorPlan"] : []),
     ...modulesFor(type),
     // A common tab, deliberately NOT a module: a module is something only some
     // types own (a panel's breakers, a bulk item's allocations), and anything
@@ -2672,7 +2668,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-22.7";
+const APP_VERSION = "2026-09-22.8";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -6991,9 +6987,15 @@ function AssetTracker() {
   // REPLACED (empty on a first upload) -- FloorPlanTabContent passes its own
   // `plan.spaces` straight through rather than this function re-fetching the
   // plan it's about to overwrite just to get the same list a second time.
-  async function uploadFloorPlanSvg(file, oldSpaces) {
+  //
+  // Takes an explicit `assetId` rather than closing over the open asset --
+  // the Map tab is the only caller now (there is no "open asset" the way an
+  // asset detail page has one), and it can be looking at any place in the
+  // hierarchy, not necessarily whichever asset a detail page last opened.
+  async function uploadFloorPlanSvg(assetId, file, oldSpaces) {
+    const targetAsset = assets.find(a => a.id === assetId);
     if (savingRef.current || floorPlanUploadBusy) return;
-    if (!file || !selectedAsset) return;
+    if (!file || !targetAsset) return;
     const looksLikeSvg = file.type === "image/svg+xml" || /\.svg$/i.test(file.name || "");
     if (!looksLikeSvg) { setFloorPlanUploadError("That doesn't look like an SVG file."); return; }
     if (file.size > FLOORPLAN_MAX_BYTES) {
@@ -7022,8 +7024,8 @@ function AssetTracker() {
       // -- so it just means nothing to remap onto; the plan itself still
       // loads (or reports its own parse error) the same as before this
       // existed.
-      let nextLinks = selectedAsset.floorPlanLinks || [];
-      let nextGroups = selectedAsset.floorPlanGroups || [];
+      let nextLinks = targetAsset.floorPlanLinks || [];
+      let nextGroups = targetAsset.floorPlanGroups || [];
       try {
         const newSpaces = parseFloorPlanSvg(text).spaces;
         const remapped = floorPlanRemapLinksAndGroups(nextLinks, nextGroups, oldSpaces, newSpaces);
@@ -7031,11 +7033,11 @@ function AssetTracker() {
         nextGroups = remapped.groups;
       } catch { /* see above -- upload proceeds regardless */ }
       const entry = {
-        assetLabel: selectedId, assetType: selectedAsset.type,
+        assetLabel: assetId, assetType: targetAsset.type,
         action: "floor_plan_replaced", to: file.name, at: new Date().toISOString(), by: currentUser || "",
       };
       await persist(
-        assets.map(a => (a.id === selectedId
+        assets.map(a => (a.id === assetId
           ? { ...a, floorPlanUrl: url, floorPlanStorageKey: storageKey, floorPlanFileName: file.name,
               floorPlanLinks: nextLinks, floorPlanGroups: nextGroups }
           : a)),
@@ -7058,22 +7060,27 @@ function AssetTracker() {
   // roomId falsy clears the link rather than writing a row naming no room --
   // "no row for this shapeId" IS the unlinked state (see SPACE_LINK_FIELDS in
   // AssetTrackerSync.gs), so an empty link is never stored at all.
-  function saveSpaceLink(shapeId, roomId) {
+  //
+  // All three of these take an explicit `assetId`, for the same reason
+  // uploadFloorPlanSvg does: the Map tab is the only caller, and it names
+  // whichever place is currently scoped, not "the open asset".
+  function saveSpaceLink(assetId, shapeId, roomId) {
     if (savingRef.current) return; // double-submit guard, see savingRef
-    if (!selectedAsset) return;
-    const existing = selectedAsset.floorPlanLinks || [];
+    const targetAsset = assets.find(a => a.id === assetId);
+    if (!targetAsset) return;
+    const existing = targetAsset.floorPlanLinks || [];
     const prior = existing.find(l => l.shapeId === shapeId);
     const next = existing.filter(l => l.shapeId !== shapeId)
       .concat(roomId ? [{ shapeId, roomId, at: new Date().toISOString(), by: currentUser || "" }] : []);
     const entry = {
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId, assetType: selectedAsset.type,
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: assetId, assetType: targetAsset.type,
       action: roomId ? "space_linked" : "space_unlinked",
       field: shapeId,
       from: prior ? parentNameFor(prior.roomId, assets) : undefined,
       to: roomId ? parentNameFor(roomId, assets) : undefined,
     };
     persist(
-      assets.map(a => (a.id === selectedId ? { ...a, floorPlanLinks: next } : a)),
+      assets.map(a => (a.id === assetId ? { ...a, floorPlanLinks: next } : a)),
       { auditLog: logAudit([entry]) },
     );
   }
@@ -7082,10 +7089,11 @@ function AssetTracker() {
   // hideLabel changing); absent means CREATE. One function for both, same
   // reasoning changeModal/breakerModal already take: a separate edit form
   // would be a second copy of the same fields to keep in step.
-  function saveSpaceGroup(draft) {
+  function saveSpaceGroup(assetId, draft) {
     if (savingRef.current) return; // double-submit guard, see savingRef
-    if (!selectedAsset) return;
-    const existing = selectedAsset.floorPlanGroups || [];
+    const targetAsset = assets.find(a => a.id === assetId);
+    if (!targetAsset) return;
+    const existing = targetAsset.floorPlanGroups || [];
     const isNew = !draft.id;
     const saved = {
       id: draft.id || (crypto.randomUUID ? crypto.randomUUID() : "grp_" + Math.random().toString(36).slice(2)),
@@ -7096,25 +7104,26 @@ function AssetTracker() {
     };
     const next = isNew ? [...existing, saved] : existing.map(g => (g.id === saved.id ? saved : g));
     const entry = {
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId, assetType: selectedAsset.type,
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: assetId, assetType: targetAsset.type,
       action: isNew ? "space_group_created" : "space_group_edited", to: saved.name,
     };
     persist(
-      assets.map(a => (a.id === selectedId ? { ...a, floorPlanGroups: next } : a)),
+      assets.map(a => (a.id === assetId ? { ...a, floorPlanGroups: next } : a)),
       { auditLog: logAudit([entry]) },
     );
   }
-  function deleteSpaceGroup(groupId) {
+  function deleteSpaceGroup(assetId, groupId) {
     if (savingRef.current) return; // double-submit guard, see savingRef
-    if (!selectedAsset) return;
-    const grp = (selectedAsset.floorPlanGroups || []).find(g => g.id === groupId);
-    const next = (selectedAsset.floorPlanGroups || []).filter(g => g.id !== groupId);
+    const targetAsset = assets.find(a => a.id === assetId);
+    if (!targetAsset) return;
+    const grp = (targetAsset.floorPlanGroups || []).find(g => g.id === groupId);
+    const next = (targetAsset.floorPlanGroups || []).filter(g => g.id !== groupId);
     const entry = {
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId, assetType: selectedAsset.type,
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: assetId, assetType: targetAsset.type,
       action: "space_group_deleted", from: grp && grp.name,
     };
     persist(
-      assets.map(a => (a.id === selectedId ? { ...a, floorPlanGroups: next } : a)),
+      assets.map(a => (a.id === assetId ? { ...a, floorPlanGroups: next } : a)),
       { auditLog: logAudit([entry]) },
     );
   }
@@ -10599,18 +10608,6 @@ function AssetTracker() {
             const meta = {
               details: { label: "Details" },
               contents: { label: "Contents", count: contentsCount },
-              // Derived/toggleable like contents (see typeHasFloorPlan), so it
-              // lives here rather than in ASSET_MODULES, which is for a module
-              // a type declares owning, not a setting it can be switched into.
-              //
-              // Counts STORED links, not shapes the current plan actually
-              // has -- this outer scope has no parsed SVG to check against
-              // (that only exists inside FloorPlanTabContent's own hook), so
-              // a link orphaned by an earlier replace (before
-              // uploadFloorPlanSvg started pruning them) still counts here
-              // until the next replace writes it away. The tab's own "N
-              // linked" status line is the one that's actually live.
-              floorPlan: { label: "Floor Plan", count: (selectedAsset.floorPlanLinks || []).filter(l => l.roomId).length },
               maintenance: { label: "Tasks", count: openMaintenanceItems.length, urgent: overdueMaintenanceCount > 0 },
               photos: { label: "Files", count: assetPhotos.length },
               comments: { label: "Comments", count: comments.length },
@@ -11027,21 +11024,6 @@ function AssetTracker() {
               saveCircuitEdit={saveCircuitEdit}
               deleteCircuit={deleteCircuit}
               openMoveCircuit={openMoveCircuit}
-            />
-          )}
-
-          {detailTab === "floorPlan" && typeHasFloorPlan(selectedAsset.type) && (
-            <FloorPlanTabContent
-              canEdit={canEdit}
-              selectedAsset={selectedAsset}
-              assets={assets}
-              typesList={typesList}
-              uploadBusy={floorPlanUploadBusy}
-              uploadError={floorPlanUploadError}
-              onUploadPlan={uploadFloorPlanSvg}
-              onSaveLink={saveSpaceLink}
-              onSaveGroup={saveSpaceGroup}
-              onDeleteGroup={deleteSpaceGroup}
             />
           )}
 
@@ -12141,6 +12123,10 @@ function AssetTracker() {
           {[
             { key: "assets", label: "Assets" },
             { key: "maintenance", label: "Tasks", count: allOpenMaintenanceRows.length, urgent: maintenanceOverdueTotal > 0 },
+            // No count, deliberately, same reasoning Audit already has below:
+            // it answers "is there a plan here", not "how many", and there's
+            // no natural number to put in parentheses at this scope anyway.
+            { key: "map", label: "Map" },
             // No count, deliberately. Maintenance's says how much there is to
             // DO; the audit log only ever grows, so "Audit (11482)" is a number
             // that answers nothing and gets longer forever.
@@ -12843,6 +12829,28 @@ function AssetTracker() {
           </StickyTable>
           </>
           )}
+        </>
+        )}
+
+        {mainTab === "map" && (
+        <>
+        {/* Shares scopeId with Assets/Maintenance, deliberately -- same
+            reasoning Maintenance's own HierarchyNav already takes: narrowing
+            to a building on one tab and switching to this one keeps you
+            where you were, rather than silently widening back to everything. */}
+        <HierarchyNav assets={assets} scopeId={scopeId} setScopeId={setScopeId} />
+        <MapTabContent
+          canEdit={canEdit}
+          assets={assets}
+          typesList={typesList}
+          scopeAsset={scopeId ? assets.find(a => a.id === scopeId) : null}
+          uploadBusy={floorPlanUploadBusy}
+          uploadError={floorPlanUploadError}
+          onUploadPlan={(file, oldSpaces) => uploadFloorPlanSvg(scopeId, file, oldSpaces)}
+          onSaveLink={(shapeId, roomId) => saveSpaceLink(scopeId, shapeId, roomId)}
+          onSaveGroup={draft => saveSpaceGroup(scopeId, draft)}
+          onDeleteGroup={groupId => deleteSpaceGroup(scopeId, groupId)}
+        />
         </>
         )}
 
@@ -15839,6 +15847,49 @@ function fetchFloorPlanSvgText(url) {
   });
 }
 
+// The site-wide Map tab's own body: whatever HierarchyNav is currently
+// scoped to decides which asset's plan (if any) is shown. Three states --
+// nothing scoped yet, scoped to something that was never eligible to carry a
+// plan, and scoped to something that is -- the last of which just hands off
+// to FloorPlanTabContent unchanged, since that component was always written
+// to take "whichever asset" rather than assuming a detail page opened it
+// (see its own comment: "a Room's floor plan alongside a Building's").
+function MapTabContent({
+  canEdit, assets, typesList, scopeAsset,
+  uploadBusy, uploadError, onUploadPlan, onSaveLink, onSaveGroup, onDeleteGroup,
+}) {
+  if (!scopeAsset) {
+    return (
+      <div className="card" style={{ padding: 18 }}>
+        <p style={{ margin: 0, fontSize: 14, color: C.empty }}>Pick a campus or building above to see its floor plan.</p>
+      </div>
+    );
+  }
+  if (!typeHasFloorPlan(scopeAsset.type)) {
+    return (
+      <div className="card" style={{ padding: 18 }}>
+        <p style={{ margin: 0, fontSize: 14, color: C.empty }}>
+          {typeNameOf(scopeAsset.type, typesList)} assets don't carry a floor plan. Pick a place below that does, if there is one.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <FloorPlanTabContent
+      canEdit={canEdit}
+      selectedAsset={scopeAsset}
+      assets={assets}
+      typesList={typesList}
+      uploadBusy={uploadBusy}
+      uploadError={uploadError}
+      onUploadPlan={onUploadPlan}
+      onSaveLink={onSaveLink}
+      onSaveGroup={onSaveGroup}
+      onDeleteGroup={onDeleteGroup}
+    />
+  );
+}
+
 // The Floor Plan tab: upload an SVG, pan/zoom it, tap a drawn Space to link
 // it to a Room, and group several Spaces into one collapsible tile. See the
 // big comment block above parseFloorPlanSvg for the overall shape; this is
@@ -15848,6 +15899,12 @@ function fetchFloorPlanSvgText(url) {
 // there's no separate "config form" / "diagram" / "legend" split here yet,
 // and splitting prematurely would be guessing at a seam before a second real
 // use (a Room's floor plan alongside a Building's) shows where it actually is.
+//
+// Called from the site-wide Map tab (MapTabContent) now, not from an asset's
+// own detail page -- the per-asset "Floor Plan" tab was removed in favor of
+// this, so there is exactly one caller. Its props are unchanged regardless:
+// it was always written to take "whichever asset", never assuming a detail
+// page opened it.
 function FloorPlanTabContent({
   canEdit, selectedAsset, assets, typesList,
   uploadBusy, uploadError, onUploadPlan,

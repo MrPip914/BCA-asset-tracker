@@ -88,11 +88,13 @@ setTypeSettings({ Room: { floorPlan: false } });
 check('a per-type override can turn it OFF for a type that ships on', typeHasFloorPlan('Room') === false);
 setTypeSettings({});
 
-check('availableTabsFor includes floorPlan for Room', availableTabsFor('Room').includes('floorPlan'));
-check('availableTabsFor includes floorPlan for Building', availableTabsFor('Building').includes('floorPlan'));
-check('availableTabsFor omits floorPlan for Computer', !availableTabsFor('Computer').includes('floorPlan'));
-check('floorPlan sits before the common tabs (maintenance/photos/etc.), matching contents\' placement',
-  availableTabsFor('Room').indexOf('floorPlan') < availableTabsFor('Room').indexOf('maintenance'));
+// The per-asset "Floor Plan" detail tab was removed once the site-wide Map
+// tab took over managing a plan -- typeHasFloorPlan now decides only what
+// the Map tab shows at a given scope, never a per-asset tab. availableTabsFor
+// must never resurrect it, for ANY type, regardless of the setting above.
+check('availableTabsFor no longer offers a floorPlan tab for Room', !availableTabsFor('Room').includes('floorPlan'));
+check('availableTabsFor no longer offers a floorPlan tab for Building', !availableTabsFor('Building').includes('floorPlan'));
+check('availableTabsFor no longer offers a floorPlan tab for Computer', !availableTabsFor('Computer').includes('floorPlan'));
 
 // --- 2. geometry: clearance-based label sizing --------------------------------
 const geomMod = { exports: {} };
