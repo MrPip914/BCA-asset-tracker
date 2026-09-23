@@ -31,7 +31,8 @@
  * fallback philosophy as a missing `_dirty`.
  *
  * Tabs created automatically on first run: Assets, Comments, Changes,
- * Allocations, Maintenance, Breakers, Circuits, BreakerTypes, AuditLog, Config.
+ * Allocations, Maintenance, Breakers, Circuits, BreakerTypes, SpaceLinks,
+ * SpaceGroups, AuditLog, Config.
  */
 
 // Bump this number any time this file changes, so a stuck deployment is obvious
@@ -49,7 +50,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v40";
+const SCRIPT_VERSION = "v41";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -60,6 +61,8 @@ const SHEET_NAMES = {
   breakers: "Breakers",
   circuits: "Circuits",
   breakerTypes: "BreakerTypes",
+  spaceLinks: "SpaceLinks",
+  spaceGroups: "SpaceGroups",
   audit: "AuditLog",
   photos: "Photos",
   config: "Config",
@@ -144,6 +147,15 @@ const ASSET_FIELDS = [
   "brand", "model", "serial", "person", "personIds", "peripherals", "notes",
   "totalQuantity", "purchaseDate", "warrantyUntil", "status",
   "panelSlotCount", "panelLayout",
+  // A floor plan is 1:1 with the asset that carries it (which type can carry
+  // one at all is a frontend-only setting -- see typeHasFloorPlan in
+  // index.html -- this schema doesn't care). Flat fields, not a child tab,
+  // for the same reason panelSlotCount/panelLayout are: there's only ever
+  // one per owner. "floorPlanStorageKey" is the write handle (a Cloudinary
+  // public_id), kept alongside the URL for the same reason a photo's is --
+  // it isn't recoverable from a delivery URL, and it's what a future
+  // replace or delete needs.
+  "floorPlanUrl", "floorPlanStorageKey", "floorPlanFileName",
 ];
 
 // The Assets tab's real column set: the fixed schema above PLUS whatever custom
@@ -226,6 +238,19 @@ const BREAKER_FIELDS = ["id", "panelLabel", "cells", "ampRating", "status", "ser
 // existed: every one of them has a breakerId, so they still attach to their breaker
 // on read, and each gets its panelLabel filled in the next time the panel is saved.
 const CIRCUIT_FIELDS = ["id", "breakerId", "panelLabel", "label", "roomsServed", "feedsPanelLabel", "notes"];
+
+// A Space-Link ties one shape drawn on a floor plan to a Room (or any other
+// place-type asset) -- scoped to the PLAN-OWNING asset (assetLabel), keyed by
+// shapeId, the stable id the SVG's own <title> carries on that drawn Space.
+// No row at all is the unlinked state; a shapeId has at most one row, and
+// re-linking it just replaces the row rather than appending a second one.
+const SPACE_LINK_FIELDS = ["assetLabel", "shapeId", "roomId", "at", "by"];
+// A Space-Group collapses several shapes on one plan into a single named,
+// collapsible tile. "id" is a crypto.randomUUID() -- groups are a sub-entity
+// like a Breaker's groupId, not an Asset, so they have no label of their own
+// (see "Reference conventions" -- CLAUDE.md). "memberShapeIds" is
+// comma-joined, the same convention a breaker's "cells" already uses.
+const SPACE_GROUP_FIELDS = ["id", "assetLabel", "name", "hideLabel", "memberShapeIds", "at", "by"];
 // A user-defined catalog of reusable breaker configurations — see
 // BREAKER_TYPES_ARCHITECTURE.md. "members" is a JSON-encoded array of
 // { cells, ampRating }, where cells use RELATIVE slot indices (a type's own
@@ -1290,6 +1315,8 @@ function handleAuthenticatedRead_(body, e) {
     const breakerRows = readTable_(SHEET_NAMES.breakers, BREAKER_FIELDS);
     const circuitRows = readTable_(SHEET_NAMES.circuits, CIRCUIT_FIELDS);
     const breakerTypeRows = readTable_(SHEET_NAMES.breakerTypes, BREAKER_TYPE_FIELDS);
+    const spaceLinkRows = readTable_(SHEET_NAMES.spaceLinks, SPACE_LINK_FIELDS);
+    const spaceGroupRows = readTable_(SHEET_NAMES.spaceGroups, SPACE_GROUP_FIELDS);
     const allAuditRows = readTable_(SHEET_NAMES.audit, AUDIT_FIELDS);
     // The most RECENT rows, which is the end of an append-only tab. Its append
     // order is its chronological order -- the same fact the frontend's
@@ -1378,6 +1405,19 @@ function handleAuthenticatedRead_(body, e) {
             roomsServedIds: c.roomsServed ? String(c.roomsServed).split(",").map(s => s.trim()) : [],
             feedsPanelLabel: c.feedsPanelLabel, notes: c.notes,
           })),
+        // Only meaningful for an asset whose TYPE currently allows a floor plan
+        // (typeHasFloorPlan, frontend-only) -- attached unconditionally here like
+        // every other child array, since that setting can change without a
+        // deploy and this script has no reason to know it.
+        floorPlanLinks: spaceLinkRows.filter(l => l.assetLabel === label).map(l => ({
+          shapeId: l.shapeId, roomId: l.roomId, at: l.at, by: l.by,
+        })),
+        floorPlanGroups: spaceGroupRows.filter(g => g.assetLabel === label).map(g => ({
+          id: g.id, name: g.name,
+          hideLabel: String(g.hideLabel) === "true",
+          memberShapeIds: g.memberShapeIds ? String(g.memberShapeIds).split(",").map(s => s.trim()) : [],
+          at: g.at, by: g.by,
+        })),
       };
     });
 
@@ -1671,6 +1711,85 @@ function handlePhotoSign_(body) {
   return jsonOut_(Object.assign({ ok: true, signatures: signatures }, signatures[0]));
 }
 
+// --- Floor plan uploads (v41) -------------------------------------------------
+// A floor plan is one SVG file, replacing itself on the asset that carries it --
+// not an item joining a growing gallery, which is why this is its own op rather
+// than a branch inside handlePhotoSign_: that function signs a BATCH shape
+// (N independent signatures for N photos in one save) and hard-codes the IMAGE
+// pipeline (allowed_formats "jpg,png,pdf", always .../image/upload). An image
+// upload is also re-encoded to JPEG client-side before it ever reaches
+// Cloudinary (downscalePhoto in index.html) -- fine for a photo, fatal for an
+// SVG, since re-encoding would destroy the vector markup the frontend needs to
+// parse back out. So this signs for Cloudinary's RAW pipeline instead, which
+// stores and serves the exact bytes with no transformation of any kind.
+//
+// Same security posture as handlePhotoSign_ throughout: folder/object name
+// chosen HERE and never taken from the request, a short-lived signature,
+// editor-only, and the same three CLOUDINARY_* Script Properties -- no new
+// credential, no new scope.
+//
+// NOT a signed parameter: Cloudinary's resource_type ("raw" here, "image" for
+// photos) is chosen by which UPLOAD URL is posted to (.../raw/upload vs.
+// .../image/upload), not by a field in the signed body -- signing one would
+// only produce a signature Cloudinary's own server does not expect and every
+// upload would fail with "invalid signature" and no clearer reason why.
+const FLOORPLAN_ALLOWED_FORMATS = "svg";
+
+function handleFloorPlanSign_(body) {
+  const configMap = readConfigMap_();
+  const auth = authorizeSession_(body.sessionId, configMap);
+  if (!auth.ok) {
+    return jsonOut_({
+      ok: false, authFailed: true, reason: auth.reason,
+      email: auth.email || "", error: auth.error,
+    });
+  }
+  // Uploading a floor plan is an edit, same rule as a photo.
+  if (auth.role !== ROLE_EDITOR) {
+    return jsonOut_({
+      ok: false, authFailed: true, reason: "readonly",
+      error: "Your access is view-only, so a floor plan can't be uploaded.",
+    });
+  }
+
+  const props = PropertiesService.getScriptProperties();
+  const cloudName = props.getProperty("CLOUDINARY_CLOUD_NAME");
+  const apiKey = props.getProperty("CLOUDINARY_API_KEY");
+  const apiSecret = props.getProperty("CLOUDINARY_API_SECRET");
+  if (!cloudName || !apiKey || !apiSecret) {
+    return jsonOut_({
+      ok: false,
+      error: "File uploads aren't set up for this tenant. Add CLOUDINARY_CLOUD_NAME, "
+        + "CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET under Project Settings > Script "
+        + "Properties in this Sheet's Apps Script project.",
+    });
+  }
+
+  const folder = props.getProperty("CLOUDINARY_FOLDER") || "assets";
+  const timestamp = Math.floor(Date.now() / 1000);
+  const publicId = Utilities.getUuid();
+  const params = {
+    folder: folder,
+    public_id: publicId,
+    timestamp: timestamp,
+    allowed_formats: FLOORPLAN_ALLOWED_FORMATS,
+  };
+  return jsonOut_({
+    ok: true,
+    cloudName: cloudName,
+    apiKey: apiKey,
+    folder: folder,
+    publicId: publicId,
+    timestamp: timestamp,
+    allowed_formats: FLOORPLAN_ALLOWED_FORMATS,
+    // Informational only -- see the comment above on why this is never signed.
+    // The frontend reads it to know which upload URL to POST to.
+    resourceType: "raw",
+    signature: cloudinarySignature_(params, apiSecret),
+    signedParams: Object.keys(params).sort(),
+  });
+}
+
 // Authenticated, read-only, and deliberately outside the write lock's critical
 // section for the reason handleAuthenticatedRead_ takes its own: the script lock
 // is not reentrant. It takes one anyway, because writeTable_ clear()s a tab
@@ -1729,6 +1848,12 @@ function doPost(e) {
   // this script.
   if (body.op === "photoSign") {
     return handlePhotoSign_(body);
+  }
+
+  // A floor plan upload signature -- one file, the RAW pipeline, not the batch/
+  // image shape photoSign hands out. See handleFloorPlanSign_.
+  if (body.op === "floorPlanSign") {
+    return handleFloorPlanSign_(body);
   }
 
   // The WHOLE audit log, for the views that genuinely need all of it -- an
@@ -1891,6 +2016,8 @@ function doPost(e) {
       const maintenanceRows = [];
       const breakerRows = [];
       const circuitRows = [];
+      const spaceLinkRows = [];
+      const spaceGroupRows = [];
       assets.forEach(a => {
         // v31: key child rows on the asset's id, falling back to its label for a
         // row that has none yet. Must match doGet's join exactly -- they are the
@@ -1939,6 +2066,18 @@ function doPost(e) {
           roomsServed: (c.roomsServedIds || []).join(","), feedsPanelLabel: c.feedsPanelLabel || "",
           notes: c.notes || "",
         }));
+        // Same "derive the owner from the asset being iterated, never trust the
+        // payload" rule as panelLabel above.
+        (a.floorPlanLinks || []).forEach(l => spaceLinkRows.push({
+          assetLabel: key, shapeId: l.shapeId, roomId: l.roomId || "",
+          at: l.at || "", by: l.by || "",
+        }));
+        (a.floorPlanGroups || []).forEach(g => spaceGroupRows.push({
+          id: g.id, assetLabel: key, name: g.name || "",
+          hideLabel: g.hideLabel ? "true" : "",
+          memberShapeIds: (g.memberShapeIds || []).join(","),
+          at: g.at || "", by: g.by || "",
+        }));
       });
       writeTableIfChanged_(SHEET_NAMES.comments, ["assetLabel", "text", "at", "by"], commentRows, configMap, nextTabHashes);
       writeTableIfChanged_(SHEET_NAMES.changes, CHANGE_FIELDS, changeRows, configMap, nextTabHashes);
@@ -1946,6 +2085,8 @@ function doPost(e) {
       writeTableIfChanged_(SHEET_NAMES.maintenance, MAINTENANCE_FIELDS, maintenanceRows, configMap, nextTabHashes);
       writeTableIfChanged_(SHEET_NAMES.breakers, BREAKER_FIELDS, breakerRows, configMap, nextTabHashes);
       writeTableIfChanged_(SHEET_NAMES.circuits, CIRCUIT_FIELDS, circuitRows, configMap, nextTabHashes);
+      writeTableIfChanged_(SHEET_NAMES.spaceLinks, SPACE_LINK_FIELDS, spaceLinkRows, configMap, nextTabHashes);
+      writeTableIfChanged_(SHEET_NAMES.spaceGroups, SPACE_GROUP_FIELDS, spaceGroupRows, configMap, nextTabHashes);
     }
 
     // Audit entries are only ever appended to client-side (never edited or
@@ -2260,6 +2401,11 @@ function adminDataTabs_() {
     { name: SHEET_NAMES.breakers, headers: BREAKER_FIELDS },
     { name: SHEET_NAMES.circuits, headers: CIRCUIT_FIELDS },
     { name: SHEET_NAMES.breakerTypes, headers: BREAKER_TYPE_FIELDS },
+    // Wipe clears these too, same reasoning as Photos below: a link or group
+    // row's only content is a reference to an asset (and, for a link, a room)
+    // that would no longer exist after an import replaces the inventory.
+    { name: SHEET_NAMES.spaceLinks, headers: SPACE_LINK_FIELDS },
+    { name: SHEET_NAMES.spaceGroups, headers: SPACE_GROUP_FIELDS },
     { name: SHEET_NAMES.audit, headers: AUDIT_FIELDS },
     // Wipe clears this too: a photo row's only content is a reference to an
     // asset that would no longer exist, and leaving them would point the next

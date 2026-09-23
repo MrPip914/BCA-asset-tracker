@@ -61,14 +61,14 @@ const writeBlock = between('assets.forEach(a => {', TAB_WRITE_CALL + '(SHEET_NAM
 
 const readSide = new Function(
   'assetRows', 'commentRows', 'changeRows', 'allocationRows', 'maintenanceRows',
-  'breakerRows', 'circuitRows',
+  'breakerRows', 'circuitRows', 'spaceLinkRows', 'spaceGroupRows',
   readBlock + '\n return assets;'
 );
 const writeSide = new Function('assets', `
   const commentRows = [], changeRows = [], allocationRows = [], maintenanceRows = [],
-        breakerRows = [], circuitRows = [];
+        breakerRows = [], circuitRows = [], spaceLinkRows = [], spaceGroupRows = [];
   ${writeBlock}
-  return { commentRows, changeRows, allocationRows, maintenanceRows, breakerRows, circuitRows };
+  return { commentRows, changeRows, allocationRows, maintenanceRows, breakerRows, circuitRows, spaceLinkRows, spaceGroupRows };
 `);
 
 // The two header constants, evaluated from their real source.
@@ -135,7 +135,8 @@ check('MAINTENANCE_FIELDS carries id', mod.MAINTENANCE_FIELDS.indexOf('id') !== 
 const written = writeSide([ASSET]);
 const back = readSide(
   [ASSET], written.commentRows, written.changeRows, written.allocationRows,
-  written.maintenanceRows, written.breakerRows, written.circuitRows
+  written.maintenanceRows, written.breakerRows, written.circuitRows,
+  written.spaceLinkRows, written.spaceGroupRows
 )[0];
 
 check('a maintenance item\'s id survives the round trip',
@@ -180,7 +181,8 @@ check('the written maintenance row carries id',
   const w = writeSide([ASSET, other]);
   const rows = readSide(
     [ASSET, other], w.commentRows, w.changeRows, w.allocationRows,
-    w.maintenanceRows, w.breakerRows, w.circuitRows
+    w.maintenanceRows, w.breakerRows, w.circuitRows,
+    w.spaceLinkRows, w.spaceGroupRows
   );
   check('two assets on one tab keep their own maintenance items and changes',
         rows.every(a => a.maintenanceItems.length === 2 && a.changes.length === 3),
