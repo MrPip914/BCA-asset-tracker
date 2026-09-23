@@ -2787,7 +2787,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-23.7";
+const APP_VERSION = "2026-09-23.8";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -15836,6 +15836,48 @@ function floorPlanBbox(pts) {
 // floorPlanClusterShapes' own threshold, but padded raster still leaves a
 // gap between two of them), every disconnected piece is still traced and
 // rendered, rather than the whole thing silently collapsing to nothing.
+// Simplifies a closed loop (Ramer-Douglas-Peucker) so a diagonal or curved
+// wall -- which the raster grid can only approximate as a staircase of
+// axis-aligned steps -- reads as the smooth line it actually is, instead
+// of the sawtooth the grid drew. RDP is defined over an OPEN path (it
+// needs two fixed endpoints to measure every other point's deviation
+// from), so a closed loop is split at two points into two open chains,
+// each simplified independently, then stitched back together -- one
+// split point alone would leave that single seam artificially protected
+// from simplification, which is exactly where a sawtooth would survive.
+// Splitting at INDEX 0 and the halfway index keeps both chains a
+// reasonable fraction of the loop rather than one chain being almost the
+// whole boundary and the other a single edge.
+function floorPlanSimplifyPath(pts, eps) {
+  if (pts.length < 3) return pts;
+  const start = pts[0], end = pts[pts.length - 1];
+  let maxDist = 0, index = 0;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const d = floorPlanSegDist(pts[i], start, end);
+    if (d > maxDist) { maxDist = d; index = i; }
+  }
+  if (maxDist <= eps) return [start, end];
+  const left = floorPlanSimplifyPath(pts.slice(0, index + 1), eps);
+  const right = floorPlanSimplifyPath(pts.slice(index), eps);
+  return left.slice(0, -1).concat(right);
+}
+function floorPlanSimplifyLoop(loop, eps) {
+  const n = loop.length;
+  if (n < 5 || !(eps > 0)) return loop;
+  const chainPts = (from, to) => {
+    const out = [];
+    for (let i = from; ; i = (i + 1) % n) {
+      out.push(loop[i]);
+      if (i === to) break;
+    }
+    return out;
+  };
+  const mid = Math.floor(n / 2);
+  const a = floorPlanSimplifyPath(chainPts(0, mid), eps);
+  const b = floorPlanSimplifyPath(chainPts(mid, 0), eps);
+  const simplified = a.slice(0, -1).concat(b.slice(0, -1));
+  return simplified.length >= 3 ? simplified : loop;
+}
 function floorPlanRasterOutline(memberPolygons, pad, resolution) {
   const allPts = memberPolygons.flat();
   if (allPts.length < 3) return null;
@@ -15925,7 +15967,15 @@ function floorPlanRasterOutline(memberPolygons, pad, resolution) {
     }
     if (loop.length >= 3) loops.push(loop);
   }
-  return loops.length ? loops : null;
+  if (!loops.length) return null;
+  // Simplified AFTER stitching, not before: RDP needs one connected path
+  // to measure deviation along, not a pile of unordered unit edges. The
+  // tolerance is tied to `cell`, the same unit the sawtooth's own step
+  // size is measured in -- a diagonal wall's staircase never deviates from
+  // the true line by more than about one cell, so any smaller tolerance
+  // would leave the sawtooth standing and any much larger one starts
+  // eating real corners the grid resolved correctly.
+  return loops.map(loop => floorPlanSimplifyLoop(loop, cell * 1.5));
 }
 // The minimum distance between two polygons, vertex-to-EDGE in both
 // directions (not just vertex-to-vertex) -- reusing floorPlanSegDist, the
