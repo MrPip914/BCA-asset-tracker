@@ -2788,7 +2788,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-22.11";
+const APP_VERSION = "2026-09-22.12";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -12975,8 +12975,11 @@ function AssetTracker() {
         {/* Shares scopeId with Assets/Maintenance, deliberately -- same
             reasoning Maintenance's own HierarchyNav already takes: narrowing
             to a building on one tab and switching to this one keeps you
-            where you were, rather than silently widening back to everything. */}
-        <HierarchyNav assets={assets} scopeId={scopeId} setScopeId={setScopeId} />
+            where you were, rather than silently widening back to everything.
+            showChildren=false: the breadcrumb still says where you are, but
+            the child-place chips are dropped so the map itself sits close to
+            the top of the tab -- see HierarchyNav's own comment on the prop. */}
+        <HierarchyNav assets={assets} scopeId={scopeId} setScopeId={setScopeId} showChildren={false} />
         <MapTabContent
           canEdit={canEdit}
           assets={assets}
@@ -13629,7 +13632,14 @@ function AssetPickerField({ label, assets, value, onChange, hint }) {
 // at all. Forcing one component to be both would have meant a predicate that
 // says "everything" plus disabling the modal's own hiding rules, which is more
 // configuration than the fifteen lines of shared tree-walking are worth.
-function HierarchyNav({ assets, scopeId, setScopeId }) {
+//
+// showChildren (default true, so every existing caller is unaffected) hides
+// the child-place chip row while keeping the breadcrumb. The Map tab passes
+// false: once a plan is on screen, the plan itself is the way to drill
+// deeper (tap a shape, or a room's own contents panel), so a second set of
+// drill-down chips above it is redundant weight between the top of the tab
+// and the thing it exists to show.
+function HierarchyNav({ assets, scopeId, setScopeId, showChildren = true }) {
   const all = assets || [];
   const scope = scopeId ? all.find(a => a.id === scopeId) : null;
   // A scope whose asset has vanished (deleted in another tab) falls back to the
@@ -13672,7 +13682,7 @@ function HierarchyNav({ assets, scopeId, setScopeId }) {
         {crumb("All assets", null, trail.length === 0)}
         {trail.map((a, i) => crumb(nameOf(a), a.id, i === trail.length - 1))}
       </div>
-      {childPlaces.length > 0 && (
+      {showChildren && childPlaces.length > 0 && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 9 }}>
           {childPlaces.map(p => {
             const Icon = iconFor(p.type);
@@ -16029,7 +16039,9 @@ function MapTabContent({
   if (!scopeAsset) {
     return (
       <div className="card" style={{ padding: 18 }}>
-        <p style={{ margin: 0, fontSize: 14, color: C.empty }}>Pick a campus or building above to see its floor plan.</p>
+        <p style={{ margin: 0, fontSize: 14, color: C.empty }}>
+          Open a Building or Room from the Assets tab, then use its "Show on map" button to land here on its own plan.
+        </p>
       </div>
     );
   }
@@ -16037,7 +16049,7 @@ function MapTabContent({
     return (
       <div className="card" style={{ padding: 18 }}>
         <p style={{ margin: 0, fontSize: 14, color: C.empty }}>
-          {typeNameOf(scopeAsset.type, typesList)} assets don't carry a floor plan. Pick a place below that does, if there is one.
+          {typeNameOf(scopeAsset.type, typesList)} assets don't carry a floor plan. Open a place that does from the Assets tab, then use its "Show on map" button.
         </p>
       </div>
     );
@@ -16446,34 +16458,6 @@ function FloorPlanTabContent({
         </div>
       )}
 
-      {/* ---------- toolbar: enter setup, replace file, free zoom ---------- */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-        {canEdit && !setupTab && (
-          <button type="button" onClick={() => setSetupTab("link")}
-            style={{ padding: "6px 11px", borderRadius: 9, border: `1.5px solid ${C.border}`, background: "none", color: C.ink, fontSize: 12.5, fontWeight: 600 }}>
-            Link &amp; group spaces…
-          </button>
-        )}
-        <button type="button" onClick={() => setFreeZoom(z => !z)}
-          style={{ padding: "6px 11px", borderRadius: 9, border: `1.5px solid ${C.border}`, background: freeZoom ? C.hover : "none", color: C.ink, fontSize: 12.5, fontWeight: 600 }}>
-          Free zoom {freeZoom ? "on" : "off"}
-        </button>
-        {selectedAsset.floorPlanFileName && (
-          <span style={{ fontSize: 12, color: C.empty, marginLeft: "auto" }}>{selectedAsset.floorPlanFileName}</span>
-        )}
-        {canEdit && (
-          <>
-            <button type="button" disabled={uploadBusy} onClick={() => fileInputRef.current && fileInputRef.current.click()}
-              style={{ padding: "6px 11px", borderRadius: 9, border: `1.5px solid ${C.border}`, background: "none", color: C.ink, fontSize: 12.5, fontWeight: 600 }}>
-              {uploadBusy ? "Uploading…" : "Replace…"}
-            </button>
-            <input ref={fileInputRef} type="file" accept=".svg,image/svg+xml" style={{ display: "none" }}
-              onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (f) onUploadPlan(f, plan.status === "ready" ? plan.spaces : []); }} />
-          </>
-        )}
-      </div>
-      {uploadError && <p style={{ margin: "0 0 8px", fontSize: 13, color: C.danger }}>{uploadError}</p>}
-
       {/* ---------- the plan itself ---------- */}
       <div
         ref={stageElRef}
@@ -16606,6 +16590,38 @@ function FloorPlanTabContent({
           })}
         </svg>
       </div>
+
+      {/* ---------- toolbar: enter setup, replace file, free zoom -- BELOW
+          the map, not above it, so the map itself sits as close to the top
+          of the tab as the setup bar (which still renders above it, while
+          active, since its status text is exactly what you're looking at
+          mid-tap) allows. ---------- */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+        {canEdit && !setupTab && (
+          <button type="button" onClick={() => setSetupTab("link")}
+            style={{ padding: "6px 11px", borderRadius: 9, border: `1.5px solid ${C.border}`, background: "none", color: C.ink, fontSize: 12.5, fontWeight: 600 }}>
+            Link &amp; group spaces…
+          </button>
+        )}
+        <button type="button" onClick={() => setFreeZoom(z => !z)}
+          style={{ padding: "6px 11px", borderRadius: 9, border: `1.5px solid ${C.border}`, background: freeZoom ? C.hover : "none", color: C.ink, fontSize: 12.5, fontWeight: 600 }}>
+          Free zoom {freeZoom ? "on" : "off"}
+        </button>
+        {selectedAsset.floorPlanFileName && (
+          <span style={{ fontSize: 12, color: C.empty, marginLeft: "auto" }}>{selectedAsset.floorPlanFileName}</span>
+        )}
+        {canEdit && (
+          <>
+            <button type="button" disabled={uploadBusy} onClick={() => fileInputRef.current && fileInputRef.current.click()}
+              style={{ padding: "6px 11px", borderRadius: 9, border: `1.5px solid ${C.border}`, background: "none", color: C.ink, fontSize: 12.5, fontWeight: 600 }}>
+              {uploadBusy ? "Uploading…" : "Replace…"}
+            </button>
+            <input ref={fileInputRef} type="file" accept=".svg,image/svg+xml" style={{ display: "none" }}
+              onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (f) onUploadPlan(f, plan.status === "ready" ? plan.spaces : []); }} />
+          </>
+        )}
+      </div>
+      {uploadError && <p style={{ margin: "8px 0 0", fontSize: 13, color: C.danger }}>{uploadError}</p>}
 
       {/* ---------- room picker (Link tab) ---------- */}
       {pickerShapeId && (
