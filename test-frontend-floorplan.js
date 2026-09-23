@@ -366,5 +366,73 @@ check('a parentage loop does not hang -- terminates rather than looping forever'
     { id: 'b', parentId: 'a' },
   ]) === null);
 
+// --- 9. in-map search: floorPlanShapeMatches / floorPlanTextMatches -----------
+// This needs the real type registry (contentsOf calls isPlaceType, nameOf
+// needs the person-name machinery even for non-person fixtures) -- the same
+// stubbing shape test-frontend-tag.js already uses to run these functions
+// for real rather than reimplementing what "matches" means a second time.
+// Reuses registrySrc/iconStubs from section 1 above rather than re-slicing
+// the same source text.
+const searchDepthLine = src.match(/const MAX_PARENT_DEPTH = \d+;/);
+if (!searchDepthLine) throw new Error('MAX_PARENT_DEPTH not found');
+
+const matchMod = { exports: {} };
+try {
+  new Function('module', [
+    iconStubs,
+    'const TYPE_SETTINGS = {};',
+    'let TYPE_FIELD_COLUMNS = [];',
+    registrySrc,
+    'let DERIVED_TYPE_SETS = { restrictedFields: new Set(), placeTypes: new Set() };',
+    grabFn('recomputeDerivedTypeSets'),
+    'recomputeDerivedTypeSets();',
+    grabFn('typeEntryFor'),
+    grabFn('typeNameOf'),
+    grabFn('isPlaceType'),
+    searchDepthLine[0],
+    grabFn('parentOf'),
+    grabFn('ancestorsOf'),
+    grabFn('descendantsOf'),
+    grabFn('contentsOf'),
+    grabBlock('const PERSON_NAME_ORDERS = {', 'lastFirst" };'),
+    'let PERSON_NAME_ORDER = PERSON_NAME_ORDERS.firstLast;',
+    grabFn('isPersonType'),
+    grabFn('splitPersonName'),
+    grabFn('personNamePartsOf'),
+    grabFn('composePersonName'),
+    grabFn('nameOf'),
+    grabFn('floorPlanTextMatches'),
+    grabFn('floorPlanShapeMatches'),
+    'module.exports = { floorPlanTextMatches, floorPlanShapeMatches, contentsOf };',
+  ].join('\n'))(matchMod);
+} catch (e) {
+  console.error('Could not evaluate the search-match helpers:\n  ' + e.message);
+  process.exit(1);
+}
+const { floorPlanShapeMatches } = matchMod.exports;
+
+{
+  const assets = [
+    { id: 'room1', type: 'Room', name: 'Kitchen', parentId: null },
+    { id: 'dev1', type: 'Computer', name: '', tag: 'BCA0001', parentId: 'room1', brand: 'Dell' },
+    { id: 'bulk1', type: 'Bulk Item', name: '', tag: 'BCA0002', parentId: null, allocations: [{ roomId: 'room1', quantity: 5 }] },
+  ];
+  const room = assets[0];
+  check('a room matches by its own name',
+    floorPlanShapeMatches(room, assets, [], 'kitchen'));
+  check('matching is case-insensitive',
+    floorPlanShapeMatches(room, assets, [], 'KITCHEN'));
+  check('a room matches when a DEVICE inside it matches (here, by brand)',
+    floorPlanShapeMatches(room, assets, [], 'dell'));
+  check('a room matches when a BULK ITEM allocated to it matches (here, by tag)',
+    floorPlanShapeMatches(room, assets, [], 'BCA0002'));
+  check('a room does not match text that names nothing in it',
+    !floorPlanShapeMatches(room, assets, [], 'nonexistent'));
+  check('an empty query never matches -- search is INACTIVE, not "matches everything"',
+    !floorPlanShapeMatches(room, assets, [], ''));
+  check('a null room (e.g. an unresolved link) never matches, and does not throw',
+    !floorPlanShapeMatches(null, assets, [], 'kitchen'));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

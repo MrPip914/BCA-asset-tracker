@@ -3449,7 +3449,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-22.10";
+const APP_VERSION = "2026-09-22.11";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -5146,6 +5146,10 @@ function AssetTracker() {
     try { localStorage.setItem(NAME_ORDER_STORAGE_KEY, order); } catch (e) { /* non-fatal — just won't remember across reloads */ }
   }
   const [maintenanceQuery, setMaintenanceQuery] = useState("");
+  // Local to whatever plan is currently shown, not global across the whole
+  // inventory -- see floorPlanShapeMatches's own comment on why this is a
+  // deliberately separate, smaller match than the Assets tab's search.
+  const [mapQuery, setMapQuery] = useState("");
   const [maintenanceStatusFilter, setMaintenanceStatusFilter] = useState(MAINTENANCE_STATUS_OPEN);
   const [maintenanceKindFilter, setMaintenanceKindFilter] = useState("All kinds");
   const [maintenanceFrequencyFilter, setMaintenanceFrequencyFilter] = useState("All frequencies");
@@ -13345,6 +13349,46 @@ function AssetTracker() {
           </div>
         )}
 
+        {/* No hamburger menu here -- Link & group spaces / Replace / Free
+            zoom already live inside FloorPlanTabContent's own toolbar, and
+            there's nothing else (yet) worth a second menu for. */}
+        {mainTab === "map" && (
+          <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
+            {searchOpen || mapQuery ? (
+              <div style={{ position: "relative", width: 220 }}>
+                <Search size={14} style={{ position: "absolute", left: 10, top: 9, color: C.accent }} />
+                <input
+                  autoFocus
+                  value={mapQuery}
+                  onChange={e => setMapQuery(e.target.value)}
+                  onBlur={() => { if (!mapQuery) setSearchOpen(false); }}
+                  placeholder="Find on this plan…"
+                  style={{ width: "100%", padding: "8px 28px 8px 30px", border: `1.5px solid ${C.border}`, background: C.surface, fontSize: 13, borderRadius: 10, color: C.ink }}
+                />
+                {mapQuery && (
+                  <button
+                    onClick={() => { setMapQuery(""); setSearchOpen(false); }}
+                    aria-label="Clear search"
+                    className="icon-btn"
+                    style={{ position: "absolute", right: 4, top: 4, background: "none", border: "none", padding: 4, borderRadius: 6, color: C.muted, display: "flex" }}
+                  >
+                    <X size={13} />
+                  </button>
+                )}
+              </div>
+            ) : (
+              <button
+                onClick={() => setSearchOpen(true)}
+                aria-label="Search"
+                className="icon-btn"
+                style={{ background: "none", border: "none", padding: 8, borderRadius: 8, color: C.brandDark, display: "flex" }}
+              >
+                <Search size={18} />
+              </button>
+            )}
+          </div>
+        )}
+
         {mainTab === "audit" && (
           <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
             {searchOpen || auditQuery ? (
@@ -13897,6 +13941,7 @@ function AssetTracker() {
           focusShapeId={mapFocusShapeId}
           onFocusHandled={() => setMapFocusShapeId(null)}
           onOpenAsset={openDetail}
+          query={mapQuery}
         />
         </>
         )}
@@ -16862,6 +16907,31 @@ function floorPlanRemapLinksAndGroups(links, groups, oldSpaces, newSpaces) {
   return { links: nextLinks, groups: nextGroups };
 }
 
+// Does a room -- or anything IN it -- match an in-map search query? Reuses
+// contentsOf rather than a second "what's inside this room" query, the same
+// reasoning that pulled ContentsList out for the room panel: this is the
+// identical question, asked to decide highlighting instead of to render a
+// list. Deliberately its OWN small text-match rather than sharing the
+// Assets tab's search (chainNames/type/person/generic-scan, all folded into
+// one big useMemo) -- pulling that apart to share three lines here would be
+// a bigger, riskier refactor of already-shipped, already-tested code than
+// this warrants; the fields matched here (name, tag, label, type, brand,
+// model, serial) cover what someone would actually type for a piece of
+// equipment, just not literally the same code path.
+function floorPlanTextMatches(asset, typesList, q) {
+  const hay = [nameOf(asset, typesList), asset.tag, asset.label, typeNameOf(asset.type, typesList), asset.brand, asset.model, asset.serial]
+    .filter(Boolean).join(" ").toLowerCase();
+  return hay.includes(q);
+}
+function floorPlanShapeMatches(room, assets, typesList, query) {
+  const q = (query || "").trim().toLowerCase();
+  if (!q || !room) return false;
+  if (floorPlanTextMatches(room, typesList, q)) return true;
+  const { contentDevices, contentAllocations } = contentsOf(room, assets);
+  return contentDevices.some(a => floorPlanTextMatches(a, typesList, q))
+    || contentAllocations.some(({ bulk }) => floorPlanTextMatches(bulk, typesList, q));
+}
+
 // Reads the plan's SVG text and parses it once its owner's floorPlanUrl is
 // (or changes to) something real. Deliberately its own hook rather than
 // inline in FloorPlanTabContent's body, so the fetch/parse lifecycle (and its
@@ -16904,7 +16974,7 @@ function fetchFloorPlanSvgText(url) {
 function MapTabContent({
   canEdit, assets, typesList, scopeAsset,
   uploadBusy, uploadError, onUploadPlan, onSaveLink, onSaveGroup, onDeleteGroup,
-  focusShapeId, onFocusHandled, onOpenAsset,
+  focusShapeId, onFocusHandled, onOpenAsset, query,
 }) {
   if (!scopeAsset) {
     return (
@@ -16937,6 +17007,7 @@ function MapTabContent({
       focusShapeId={focusShapeId}
       onFocusHandled={onFocusHandled}
       onOpenAsset={onOpenAsset}
+      query={query}
     />
   );
 }
@@ -16960,7 +17031,7 @@ function FloorPlanTabContent({
   canEdit, selectedAsset, assets, typesList,
   uploadBusy, uploadError, onUploadPlan,
   onSaveLink, onSaveGroup, onDeleteGroup,
-  focusShapeId, onFocusHandled, onOpenAsset,
+  focusShapeId, onFocusHandled, onOpenAsset, query,
 }) {
   const plan = useFloorPlanSvg(selectedAsset.floorPlanUrl);
   // Filtered to shapes the CURRENTLY LOADED plan actually has. uploadFloorPlanSvg
@@ -17278,6 +17349,11 @@ function FloorPlanTabContent({
   // stage's own pixel width. k is exactly what turns "11 SVG units" into
   // "11 pixels on screen" regardless of how zoomed out the view is.
   const k = unitsPerPx();
+  // Search only ever applies to the normal (non-setup) view -- matching a
+  // shape you're about to link or group is not a question the search box
+  // answers, and dimming everything else while you're deciding what a shape
+  // IS would fight the setup UI rather than help it.
+  const qTrim = !setupTab ? (query || "").trim().toLowerCase() : "";
 
   return (
     <div>
@@ -17422,11 +17498,21 @@ function FloorPlanTabContent({
               // tile of its own to pulse -- every member flashes instead,
               // since that is the whole visible extent of the tile.
               const groupPulsing = members.some(m => m.gid === pulsingShapeId);
+              // A tile matches search if ANY of its members' rooms (or what's
+              // in them) does -- the whole tile is one visible unit, so there
+              // is no finer-grained thing to highlight than all of it.
+              const memberRooms = items.map(l => assets.find(a => a.id === l.roomId)).filter(Boolean);
+              const groupHit = qTrim && memberRooms.some(room => floorPlanShapeMatches(room, assets, typesList, query));
+              const groupDim = qTrim && !groupHit;
               return (
-                <g key={grp.id} className="fp-room" onClick={() => onShapeClick(s.gid)}>
+                <g key={grp.id} className="fp-room" onClick={() => onShapeClick(s.gid)} style={groupDim ? { opacity: 0.3 } : undefined}>
                   {members.map(m => (
                     <path key={m.gid} className="fp-area" d={"M" + m.pts.map(p => p.join(" ")).join(" L") + " Z"}
                       fill={C.brand} fillOpacity={items.length ? 0.12 : 0.06} stroke="#416280" strokeWidth={1.3} />
+                  ))}
+                  {groupHit && members.map(m => (
+                    <path key={"hit-" + m.gid} d={"M" + m.pts.map(p => p.join(" ")).join(" L") + " Z"}
+                      fill="none" stroke={C.accent} strokeWidth={3 * k} />
                   ))}
                   {groupPulsing && members.map(m => (
                     <path key={"pulse-" + m.gid} className="fp-pulse" d={"M" + m.pts.map(p => p.join(" ")).join(" L") + " Z"}
@@ -17450,12 +17536,16 @@ function FloorPlanTabContent({
             const sel = selectedShapeId === s.gid;
             const label = linked ? (parentNameFor(link.roomId, assets) || "(deleted room)") : "Not linked";
             const clickHandler = grp ? () => onShapeClick(s.gid) : (linked ? () => onShapeClick(s.gid) : () => onUnlinkedShapeClick(s.gid));
+            const room = linked ? assets.find(a => a.id === link.roomId) : null;
+            const isHit = qTrim && floorPlanShapeMatches(room, assets, typesList, query);
+            const isDim = qTrim && !isHit;
             return (
-              <g key={s.gid} className="fp-room" onClick={clickHandler}>
+              <g key={s.gid} className="fp-room" onClick={clickHandler} style={isDim ? { opacity: 0.3 } : undefined}>
                 <path className="fp-area" d={d}
                   fill={linked ? C.brand : "#C98A3B"} fillOpacity={linked ? 0.08 : 0.14}
                   stroke={sel ? C.brandDark : "#416280"} strokeWidth={sel ? 3 : 1.3}
                   strokeDasharray={linked ? undefined : "6 4"} />
+                {isHit && <path d={d} fill="none" stroke={C.accent} strokeWidth={3 * k} />}
                 {s.gid === pulsingShapeId && (
                   <path className="fp-pulse" d={d} fill={C.accent} fillOpacity={0.45} />
                 )}
@@ -17488,6 +17578,20 @@ function FloorPlanTabContent({
           onCreate={createGroupNow}
         />
       )}
+
+      {/* ---------- search status ---------- */}
+      {qTrim && (() => {
+        const matchingRoomIds = new Set(
+          links.filter(l => l.roomId && floorPlanShapeMatches(assets.find(a => a.id === l.roomId), assets, typesList, query)).map(l => l.roomId)
+        );
+        return (
+          <div style={{ marginTop: 10, fontSize: 12.5, color: C.muted }}>
+            {matchingRoomIds.size === 0
+              ? `Nothing matches "${query.trim()}".`
+              : `${matchingRoomIds.size} room${matchingRoomIds.size === 1 ? "" : "s"} match${matchingRoomIds.size === 1 ? "es" : ""} "${query.trim()}".`}
+          </div>
+        );
+      })()}
 
       {/* ---------- groups list, when not in setup ---------- */}
       {!setupTab && groups.length > 0 && (
