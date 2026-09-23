@@ -108,6 +108,8 @@ new Function('module', [
   grabFn('floorPlanSegDist'),
   grabFn('floorPlanPole'),
   grabFn('floorPlanBbox'),
+  grabFn('floorPlanSimplifyPath'),
+  grabFn('floorPlanSimplifyLoop'),
   grabFn('floorPlanRasterOutline'),
   grabFn('floorPlanShapeGap'),
   closeFactorLine[0],
@@ -117,9 +119,9 @@ new Function('module', [
   grabFn('floorPlanLabelFit'),
   grabFn('floorPlanZoomViewBox'),
   grabFn('floorPlanZoomAt'),
-  'module.exports = { floorPlanPole, floorPlanBbox, floorPlanRasterOutline, floorPlanShapeGap, floorPlanClusterShapes, floorPlanLabelFit, floorPlanZoomViewBox, floorPlanZoomAt };',
+  'module.exports = { floorPlanPole, floorPlanBbox, floorPlanSimplifyLoop, floorPlanRasterOutline, floorPlanShapeGap, floorPlanClusterShapes, floorPlanLabelFit, floorPlanZoomViewBox, floorPlanZoomAt };',
 ].join('\n'))(geomMod);
-const { floorPlanPole, floorPlanBbox, floorPlanRasterOutline, floorPlanShapeGap, floorPlanClusterShapes, floorPlanLabelFit, floorPlanZoomViewBox, floorPlanZoomAt } = geomMod.exports;
+const { floorPlanPole, floorPlanBbox, floorPlanSimplifyLoop, floorPlanRasterOutline, floorPlanShapeGap, floorPlanClusterShapes, floorPlanLabelFit, floorPlanZoomViewBox, floorPlanZoomAt } = geomMod.exports;
 
 // A 100x100 square: the pole should land at the center with clearance ~50.
 const square = [[0, 0], [100, 0], [100, 100], [0, 100]];
@@ -218,6 +220,52 @@ const totalArea = loops => loops.reduce((s, l) => s + shoelaceArea(l), 0);
 // but a helper that throws on bad input is worse than one that says null.
 check('degenerate input (too few points) returns null rather than throwing',
   floorPlanRasterOutline([[[0, 0], [1, 1]]], 0) === null);
+
+// --- 2b-ii. smoothing a rasterized diagonal's staircase -----------------------
+// The grid can only draw a diagonal or curved wall as a staircase of
+// axis-aligned steps (screenshotted on a real tenant's floor plan as a
+// visible sawtooth). floorPlanSimplifyLoop's job is to collapse that
+// staircase back into the smooth line it approximates, without eating a
+// GENUINE right-angle corner in the process.
+{
+  // A 10-step staircase climbing from (0,0) to (10,10) -- exactly the
+  // shape a raster trace of a diagonal wall at cell size 1 produces --
+  // closed into a polygon along the bottom and left edges. No step
+  // deviates from the true diagonal by more than one cell, so an eps of
+  // 1.5 should collapse the whole climb to essentially one straight edge.
+  const staircase = [];
+  for (let i = 0; i < 10; i++) { staircase.push([i, i]); staircase.push([i + 1, i]); }
+  staircase.push([10, 0]);
+  staircase.push([0, 0]);
+  const before = staircase.length;
+  const simplified = floorPlanSimplifyLoop(staircase, 1.5);
+  check('a staircase approximating a diagonal simplifies to far fewer points',
+    simplified.length < before / 2, `before=${before} after=${simplified.length}`);
+  check('...and the enclosed area barely moves (within a couple cells\' worth)',
+    Math.abs(totalArea([simplified]) - totalArea([staircase])) < 10,
+    `before=${totalArea([staircase])} after=${totalArea([simplified])}`);
+}
+
+// A plain rectangle has no sawtooth to remove -- simplification must leave
+// its real corners alone rather than treating every corner as noise.
+{
+  const rect = [[0, 0], [50, 0], [50, 30], [0, 30]];
+  const simplified = floorPlanSimplifyLoop(rect, 1.5);
+  check('a rectangle with no staircase keeps its own area (corners aren\'t eaten)',
+    approx(totalArea([simplified]), 1500, 5), `got ${totalArea([simplified])}`);
+}
+
+// The full pipeline: two shapes meeting along a DIAGONAL edge (not an
+// axis-aligned one) still traces to roughly their combined area once
+// simplified, confirming the smoothing runs inside floorPlanRasterOutline
+// itself and not just when called directly.
+{
+  const lower = [[0, 0], [100, 0], [100, 100], [0, 0]]; // triangle, hypotenuse (0,0)-(100,100)
+  const upper = [[0, 0], [100, 100], [0, 100]]; // the other half of the same square
+  const loops = floorPlanRasterOutline([lower, upper], 0);
+  check('two triangles sharing a diagonal still trace to ~the combined 10000 square',
+    loops && approx(totalArea(loops), 10000, 800), `got ${loops && totalArea(loops)}`);
+}
 
 // --- 2c. clustering by PROXIMITY, not by shared walls --------------------------
 // Real floor plans mostly don't draw grouped rooms touching -- a hallway
