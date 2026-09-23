@@ -3448,7 +3448,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-23.6";
+const APP_VERSION = "2026-09-23.7";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -16754,79 +16754,128 @@ function floorPlanBbox(pts) {
   const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
   return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
 }
-// The outer boundary of several adjacent Space polygons, traced by EDGE
-// CANCELLATION rather than a general polygon-union algorithm: a wall shared
-// by two rooms is drawn once by each of them, in opposite winding order, so
-// it appears twice across the whole group and cancels out, leaving only the
-// edges that belong to exactly one member -- which is exactly the outside
-// of the group. This is the right amount of geometry for what a floor plan
-// actually is (adjacent rooms sharing exact wall coordinates), and it is
-// far simpler than a real polygon-boolean-union library, which this file
-// deliberately has none of. It degrades safely rather than crashing when
-// that assumption doesn't hold (rooms that don't share an exact edge, an
-// odd export): the caller falls back to a plain bounding box whenever this
-// returns null.
+// The outer boundary of several Space polygons, traced by RASTERIZING the
+// area within `pad` of any member and walking the grid's own edges --
+// deliberately not a vector polygon-union or an edge-matching scheme. Real
+// exports (Visio, a CAD tool) essentially never draw two "adjacent" rooms
+// sharing an exact edge: there's a T-junction where one room's straight
+// wall meets a corner of its neighbor, coordinates differ by the wall's
+// own thickness, or export rounding leaves them a hair apart -- any of
+// which defeats an exact-match scheme outright (this file's own first
+// attempt at this, edge cancellation, looked right against the hand-built
+// fixture and then produced a plain rectangle against a real WC 1st Floor
+// export, because not one wall in it was byte-identical between neighbors).
+// A grid does not care: it only asks "is this point within pad of ANY
+// member", which is true whether that's because the point is inside a
+// room, inside a hallway-width gap between two grouped rooms, or near a
+// wall drawn a few units off from its neighbor's. That same `pad` is also
+// what gives the traced line its outward breathing room -- offsetting a
+// concave polygon outward is itself real geometry this file has no
+// library for, and rasterizing at a padded radius produces that offset as
+// a side effect rather than a second problem to solve.
 //
-// Points are matched by a rounded key, not exact equality -- the arc
-// handling in floorPlanPathToPoints can leave two "the same" corners a
-// hair apart in floating point, and an edge that fails to cancel because
-// of that would leave a stray interior line looking like a real wall.
-function floorPlanGroupOutlineKey(p) {
-  return Math.round(p[0] * 20) / 20 + "," + Math.round(p[1] * 20) / 20;
-}
-function floorPlanGroupOutline(memberPolygons) {
-  const count = new Map();
-  const dir = new Map();
-  memberPolygons.forEach(pts => {
-    for (let i = 0; i < pts.length; i++) {
-      const a = pts[i], b = pts[(i + 1) % pts.length];
-      const ak = floorPlanGroupOutlineKey(a), bk = floorPlanGroupOutlineKey(b);
-      if (ak === bk) continue; // a degenerate zero-length edge
-      const canon = ak < bk ? ak + "|" + bk : bk + "|" + ak;
-      count.set(canon, (count.get(canon) || 0) + 1);
-      dir.set(canon, [a, b]);
+// resolution is cells along the LONGER side of the padded bbox; the
+// shorter side gets proportionally fewer, so cells are square. 64 is fine
+// enough to keep a real angled wall or a small closet legible without
+// the cost (or the render-thrash risk, since this runs in the render body)
+// of a much finer grid -- this is the same "enough, not exact" precision
+// floorPlanPole's 30x30 search already uses for a harder problem.
+//
+// Returns an ARRAY of loops, not one -- if pad isn't enough to bridge
+// every member into a single blob (a cluster whose members are close by
+// floorPlanClusterShapes' own threshold, but padded raster still leaves a
+// gap between two of them), every disconnected piece is still traced and
+// rendered, rather than the whole thing silently collapsing to nothing.
+function floorPlanRasterOutline(memberPolygons, pad, resolution) {
+  const allPts = memberPolygons.flat();
+  if (allPts.length < 3) return null;
+  const rawBbox = floorPlanBbox(allPts);
+  const bbox = { x: rawBbox.x - pad, y: rawBbox.y - pad, w: rawBbox.w + pad * 2, h: rawBbox.h + pad * 2 };
+  if (bbox.w <= 0 || bbox.h <= 0) return null;
+  const res = resolution || 64;
+  // The grid has to be fine enough to resolve `pad` itself, not just the
+  // shapes' own extent -- with a plain bbox/res cell size, a small pad on
+  // a wide cluster (bridging one narrow gap across an otherwise-large
+  // group) could land smaller than a single cell, so whether two members'
+  // padded regions actually touch would flicker cell to cell instead of
+  // meeting cleanly, fragmenting the trace into many tiny stray loops. At
+  // least 3 cells across the pad is enough for that meeting to land
+  // consistently; capped so a vanishingly small pad on a huge plan can't
+  // demand an unbounded grid.
+  const cell = Math.max(1e-9, Math.min(Math.max(bbox.w, bbox.h) / res, pad > 0 ? Math.max(pad / 3, 1e-9) : Infinity));
+  const nx = Math.min(400, Math.max(1, Math.round(bbox.w / cell)));
+  const ny = Math.min(400, Math.max(1, Math.round(bbox.h / cell)));
+  // Grid-line coordinates are computed ONCE per line and looked up by
+  // index, never re-derived per cell -- two neighboring cells computing
+  // their shared corner independently (bbox.x + ix*cw vs bbox.x + (ix-1)*cw
+  // + cw) can round to two DIFFERENT floats for what is mathematically the
+  // same point, which silently breaks the exact-match stitching below. A
+  // shared xs/ys array is what makes two cells' idea of "the same corner"
+  // actually the same value.
+  const cw = bbox.w / nx, ch = bbox.h / ny;
+  const xs = new Array(nx + 1); for (let i = 0; i <= nx; i++) xs[i] = bbox.x + i * cw;
+  const ys = new Array(ny + 1); for (let i = 0; i <= ny; i++) ys[i] = bbox.y + i * ch;
+  // Distance from a point to a polygon: 0 when inside, else the nearest
+  // edge -- reusing floorPlanPointInPoly and floorPlanSegDist exactly as
+  // floorPlanShapeGap does for the same "how far is this from that shape"
+  // question, asked here of a grid point instead of another polygon.
+  const distToPoly = (p, poly) => {
+    if (floorPlanPointInPoly(p, poly)) return 0;
+    let d = Infinity;
+    for (let i = 0, n = poly.length; i < n; i++) d = Math.min(d, floorPlanSegDist(p, poly[i], poly[(i + 1) % n]));
+    return d;
+  };
+  const inside = new Uint8Array(nx * ny);
+  for (let iy = 0; iy < ny; iy++) {
+    const py = (ys[iy] + ys[iy + 1]) / 2;
+    for (let ix = 0; ix < nx; ix++) {
+      const px = (xs[ix] + xs[ix + 1]) / 2;
+      for (const poly of memberPolygons) {
+        if (distToPoly([px, py], poly) <= pad) { inside[iy * nx + ix] = 1; break; }
+      }
     }
-  });
-  const boundary = [];
-  count.forEach((n, key) => { if (n === 1) boundary.push(dir.get(key)); });
-  if (boundary.length < 3) return null;
-  // Stitch the surviving edges into one or more closed loops by matching
-  // endpoints -- a greedy walk, which is enough for the simple (non-self-
-  // intersecting) boundaries a real floor plan produces.
-  const used = new Array(boundary.length).fill(false);
+  }
+  const isInside = (ix, iy) => ix >= 0 && ix < nx && iy >= 0 && iy < ny && inside[iy * nx + ix];
+  // Every inside cell contributes the edges it shares with an outside (or
+  // off-grid) neighbor -- adjacent inside cells share an edge that never
+  // gets added by either side, which is what leaves only the true outline.
+  const edges = [];
+  for (let iy = 0; iy < ny; iy++) {
+    for (let ix = 0; ix < nx; ix++) {
+      if (!isInside(ix, iy)) continue;
+      const x0 = xs[ix], x1 = xs[ix + 1], y0 = ys[iy], y1 = ys[iy + 1];
+      if (!isInside(ix, iy - 1)) edges.push([[x0, y0], [x1, y0]]);
+      if (!isInside(ix + 1, iy)) edges.push([[x1, y0], [x1, y1]]);
+      if (!isInside(ix, iy + 1)) edges.push([[x1, y1], [x0, y1]]);
+      if (!isInside(ix - 1, iy)) edges.push([[x0, y1], [x0, y0]]);
+    }
+  }
+  if (!edges.length) return null;
+  // Stitching needs no epsilon here: every edge came off the SAME xs/ys
+  // arrays, so two edges meant to meet share the identical float, not a
+  // close one -- that guarantee is exactly what xs/ys above buys.
+  const key = p => p[0] + "," + p[1];
+  const used = new Array(edges.length).fill(false);
   const loops = [];
-  for (let start = 0; start < boundary.length; start++) {
+  for (let start = 0; start < edges.length; start++) {
     if (used[start]) continue;
     used[start] = true;
-    const loop = [boundary[start][0], boundary[start][1]];
-    let guard = boundary.length + 1;
+    const loop = [edges[start][0], edges[start][1]];
+    let guard = edges.length + 1;
     while (guard-- > 0) {
-      const tailKey = floorPlanGroupOutlineKey(loop[loop.length - 1]);
+      const tailKey = key(loop[loop.length - 1]);
       let next = -1;
-      for (let i = 0; i < boundary.length; i++) {
-        if (!used[i] && floorPlanGroupOutlineKey(boundary[i][0]) === tailKey) { next = i; break; }
+      for (let i = 0; i < edges.length; i++) {
+        if (!used[i] && key(edges[i][0]) === tailKey) { next = i; break; }
       }
       if (next === -1) break;
       used[next] = true;
-      loop.push(boundary[next][1]);
-      if (floorPlanGroupOutlineKey(loop[loop.length - 1]) === floorPlanGroupOutlineKey(loop[0])) break;
+      loop.push(edges[next][1]);
+      if (key(loop[loop.length - 1]) === key(loop[0])) break;
     }
     if (loop.length >= 3) loops.push(loop);
   }
-  if (!loops.length) return null;
-  // MORE THAN ONE LOOP MEANS "NOT ONE CONNECTED SHAPE", NOT A HOLE, and
-  // that distinction is the one this function actually has to get right.
-  // The fixture's own "Storage & Hallway" group is exactly this case: two
-  // rooms grouped together on the FLOOR PLAN that don't share a wall on
-  // the SVG (there's a hallway-width gap between them), so edge
-  // cancellation cancels nothing and each room closes its own separate
-  // 4-edge loop. Picking "the biggest loop" there would trace ONE room and
-  // silently leave the other one outside its own group's border -- worse
-  // than the plain bounding box this falls back to instead. A real hole
-  // (a donut-shaped room) would also hit this path and also fall back;
-  // that trade is deliberate, since a hole is the rare case and a
-  // disconnected group is the common one a real floor plan produces.
-  return loops.length === 1 ? loops[0] : null;
+  return loops.length ? loops : null;
 }
 // The minimum distance between two polygons, vertex-to-EDGE in both
 // directions (not just vertex-to-vertex) -- reusing floorPlanSegDist, the
@@ -17814,13 +17863,16 @@ function FloorPlanTabContent({
               group at all. floorPlanClusterShapes splits the members by
               PROXIMITY first -- close rooms (a hallway-width gap, relative
               to their own size) share one border, far-apart rooms get
-              separate ones -- and each cluster's border TRACES its actual
-              combined silhouette (floorPlanGroupOutline) when its members
-              really do share a wall, falling back to a padded box around
-              just that cluster otherwise. The group's name repeats above
-              every cluster rather than floating once over an arbitrary
-              one of them, so a scattered group never leaves a border with
-              no visible label of its own. */}
+              separate ones -- and each cluster's border is traced by
+              floorPlanRasterOutline, which pads and rasterizes rather than
+              matching exact wall coordinates: a real export's neighboring
+              rooms almost never share a byte-identical edge (a T-junction,
+              wall thickness, export rounding), so an exact-match tracer
+              looked right against the hand-built fixture and produced a
+              plain rectangle against a real floor plan. The group's name
+              repeats above every cluster rather than floating once over an
+              arbitrary one of them, so a scattered group never leaves a
+              border with no visible label of its own. */}
           {!setupTab && openGroupId && (() => {
             const grp = groups.find(g => g.id === openGroupId);
             const members = grp && plan.status === "ready"
@@ -17830,20 +17882,31 @@ function FloorPlanTabContent({
             return clusters.map((cluster, ci) => {
               const clusterPts = cluster.map(m => m.pts);
               const bbox = floorPlanBbox(clusterPts.flat());
-              const outline = cluster.length > 1 ? floorPlanGroupOutline(clusterPts) : null;
-              const frame = outline
-                ? <path d={"M" + outline.map(p => p.join(" ")).join(" L") + " Z"}
+              // pad has two jobs at once: it's what bridges a real gap
+              // between this cluster's own members (so they trace as ONE
+              // blob, not several), and it's what gives the traced line its
+              // outward breathing room past the walls it follows -- see
+              // floorPlanRasterOutline's own comment on why one number does
+              // both. Half the closeness threshold that justified grouping
+              // these rooms is enough to bridge a gap that size; a fixed
+              // 10 screen-px floor keeps a tight or single-member cluster
+              // from tracing flush against its own walls with no margin.
+              const roomScale = Math.min(...clusterPts.map(pts => floorPlanRoomScale(pts)));
+              const pad = Math.max(FLOOR_PLAN_CLUSTER_CLOSE_FACTOR * roomScale / 2, 10 * k);
+              const loops = floorPlanRasterOutline(clusterPts, pad);
+              const frame = loops
+                ? <path d={loops.map(loop => "M" + loop.map(p => p.join(" ")).join(" L") + " Z").join(" ")}
                     fill="none" stroke={C.brandDark} strokeWidth={3 * k} strokeLinejoin="round" />
                 : (() => {
-                    const pad = 14 * k;
-                    const bx = bbox.x - pad, by = bbox.y - pad, bw = bbox.w + pad * 2, bh = bbox.h + pad * 2;
+                    const bpad = 14 * k;
+                    const bx = bbox.x - bpad, by = bbox.y - bpad, bw = bbox.w + bpad * 2, bh = bbox.h + bpad * 2;
                     return <rect x={bx} y={by} width={bw} height={bh} rx={8 * k}
                       fill="none" stroke={C.brandDark} strokeWidth={2.5 * k} />;
                   })();
               return (
                 <g key={ci} style={{ pointerEvents: "none" }}>
                   {frame}
-                  <text className="fp-text" x={bbox.x + bbox.w / 2} y={bbox.y - 14 * k} textAnchor="middle"
+                  <text className="fp-text" x={bbox.x + bbox.w / 2} y={bbox.y - pad - 8 * k} textAnchor="middle"
                     fontSize={16 * k} fontWeight={700} fill={C.brandDark}>
                     {grp.name}
                   </text>
