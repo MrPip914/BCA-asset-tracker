@@ -2787,7 +2787,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-23.3";
+const APP_VERSION = "2026-09-23.4";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -16647,7 +16647,12 @@ function FloorPlanTabContent({
               // is no finer-grained thing to highlight than all of it.
               const memberRooms = items.map(l => assets.find(a => a.id === l.roomId)).filter(Boolean);
               const groupHit = qTrim && memberRooms.some(room => floorPlanShapeMatches(room, assets, typesList, query));
-              const groupDim = qTrim && !groupHit;
+              // This branch only runs for a group OTHER than the open one
+              // (its own entry condition is grp && openGroupId !== grp.id),
+              // so openGroupId being set at all is enough to know this tile
+              // is outside the selected group and should dim along with
+              // every ungrouped shape -- see the matching check below.
+              const groupDim = (qTrim && !groupHit) || !!openGroupId;
               return (
                 <g key={grp.id} className="fp-room" onClick={() => onShapeClick(s.gid)} style={groupDim ? { opacity: 0.3 } : undefined}>
                   {members.map(m => (
@@ -16682,7 +16687,12 @@ function FloorPlanTabContent({
             const clickHandler = grp ? () => onShapeClick(s.gid) : (linked ? () => onShapeClick(s.gid) : () => onUnlinkedShapeClick(s.gid));
             const room = linked ? assets.find(a => a.id === link.roomId) : null;
             const isHit = qTrim && floorPlanShapeMatches(room, assets, typesList, query);
-            const isDim = qTrim && !isHit;
+            // A shape reaching this branch with a group at all can only be a
+            // member of the OPEN group -- anything else grouped was already
+            // caught by the collapsed-tile branch above. So the only shapes
+            // here that sit OUTSIDE an open group are the ungrouped ones.
+            const outsideOpenGroup = !!openGroupId && !grp;
+            const isDim = (qTrim && !isHit) || outsideOpenGroup;
             return (
               <g key={s.gid} className="fp-room" onClick={clickHandler} style={isDim ? { opacity: 0.3 } : undefined}>
                 <path className="fp-area" d={d}
@@ -16698,6 +16708,35 @@ function FloorPlanTabContent({
               </g>
             );
           })}
+          {/* The open group's own frame -- everything outside it is already
+              dimmed above (groupDim/outsideOpenGroup), but a group of rooms
+              that are merely undimmed still reads as "several separate
+              rooms that happen to not be greyed out", not as one selected
+              thing. A border drawn around the whole footprint, plus a title
+              ABOVE it (bigger than a room's own label, and outside the
+              border rather than inside it like a room name would be) is
+              what actually answers "which group did I select". Drawn once,
+              after every shape, so it paints on top and pointer-events:none
+              so it never steals a click from a member underneath it. */}
+          {!setupTab && openGroupId && (() => {
+            const grp = groups.find(g => g.id === openGroupId);
+            const members = grp && plan.status === "ready"
+              ? plan.spaces.filter(m => (grp.memberShapeIds || []).includes(m.gid)) : [];
+            if (!members.length) return null;
+            const bbox = floorPlanBbox(members.flatMap(m => m.pts));
+            const pad = 14 * k;
+            const bx = bbox.x - pad, by = bbox.y - pad, bw = bbox.w + pad * 2, bh = bbox.h + pad * 2;
+            return (
+              <g style={{ pointerEvents: "none" }}>
+                <rect x={bx} y={by} width={bw} height={bh} rx={8 * k}
+                  fill="none" stroke={C.brandDark} strokeWidth={2.5 * k} />
+                <text className="fp-text" x={bx + bw / 2} y={by - 8 * k} textAnchor="middle"
+                  fontSize={16 * k} fontWeight={700} fill={C.brandDark}>
+                  {grp.name}
+                </text>
+              </g>
+            );
+          })()}
         </svg>
       </div>
 
@@ -16814,6 +16853,46 @@ function FloorPlanTabContent({
               )}
             </div>
             <ContentsList place={room} assets={assets} typesList={typesList} onOpen={onOpenAsset} />
+          </div>
+        );
+      })()}
+
+      {/* An open group with nothing individually selected inside it used to
+          show NOTHING here -- the group-name/Ungroup/Close row above says
+          which group is open, but not what's actually IN it, so answering
+          that meant tapping every member one at a time. Lists every member's
+          LINKED room (an unlinked member has no room to list, same as
+          ContentsList's own Rooms section never lists a non-room). Yields to
+          the single-room panel above the moment a specific member is picked
+          -- a more specific selection should win over the group-wide one. */}
+      {openGroupId && !selectedShapeId && !setupTab && (() => {
+        const grp = groups.find(g => g.id === openGroupId);
+        if (!grp) return null;
+        const groupRooms = (grp.memberShapeIds || [])
+          .map(shapeId => linkFor(shapeId))
+          .filter(l => l && l.roomId)
+          .map(l => assets.find(a => a.id === l.roomId))
+          .filter(Boolean);
+        if (!groupRooms.length) return null;
+        return (
+          <div style={{ marginTop: 8, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14 }}>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginBottom: 8 }}>
+              Rooms in this group ({groupRooms.length})
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {groupRooms.map(room => {
+                const RIcon = iconFor(room.type);
+                return (
+                  <button key={room.id} onClick={() => onOpenAsset && onOpenAsset(room)} className="row-body"
+                    style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.bg, padding: "10px 14px", textAlign: "left", width: "100%" }}>
+                    <RIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
+                    <span style={{ fontSize: 14, color: C.ink, flex: 1 }}>{nameOf(room, typesList)}</span>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.accent }}>{room.label}</span>
+                    <ChevronRight size={14} style={{ color: C.placeholder }} />
+                  </button>
+                );
+              })}
+            </div>
           </div>
         );
       })()}
