@@ -100,6 +100,8 @@ check('availableTabsFor no longer offers a floorPlan tab for Building', !availab
 check('availableTabsFor no longer offers a floorPlan tab for Computer', !availableTabsFor('Computer').includes('floorPlan'));
 
 // --- 2. geometry: clearance-based label sizing --------------------------------
+const closeFactorLine = src.match(/const FLOOR_PLAN_CLUSTER_CLOSE_FACTOR = [\d.]+;/);
+if (!closeFactorLine) throw new Error('FLOOR_PLAN_CLUSTER_CLOSE_FACTOR not found');
 const geomMod = { exports: {} };
 new Function('module', [
   grabFn('floorPlanPointInPoly'),
@@ -108,13 +110,17 @@ new Function('module', [
   grabFn('floorPlanBbox'),
   grabFn('floorPlanGroupOutlineKey'),
   grabFn('floorPlanGroupOutline'),
+  grabFn('floorPlanShapeGap'),
+  closeFactorLine[0],
+  grabFn('floorPlanRoomScale'),
+  grabFn('floorPlanClusterShapes'),
   grabFn('floorPlanWrapWords'),
   grabFn('floorPlanLabelFit'),
   grabFn('floorPlanZoomViewBox'),
   grabFn('floorPlanZoomAt'),
-  'module.exports = { floorPlanPole, floorPlanBbox, floorPlanGroupOutline, floorPlanLabelFit, floorPlanZoomViewBox, floorPlanZoomAt };',
+  'module.exports = { floorPlanPole, floorPlanBbox, floorPlanGroupOutline, floorPlanShapeGap, floorPlanClusterShapes, floorPlanLabelFit, floorPlanZoomViewBox, floorPlanZoomAt };',
 ].join('\n'))(geomMod);
-const { floorPlanPole, floorPlanBbox, floorPlanGroupOutline, floorPlanLabelFit, floorPlanZoomViewBox, floorPlanZoomAt } = geomMod.exports;
+const { floorPlanPole, floorPlanBbox, floorPlanGroupOutline, floorPlanShapeGap, floorPlanClusterShapes, floorPlanLabelFit, floorPlanZoomViewBox, floorPlanZoomAt } = geomMod.exports;
 
 // A 100x100 square: the pole should land at the center with clearance ~50.
 const square = [[0, 0], [100, 0], [100, 100], [0, 100]];
@@ -192,6 +198,54 @@ const shoelaceArea = loop => Math.abs(loop.reduce((s, p, i) => {
   const solo = floorPlanGroupOutline([[[0, 0], [3, 0], [3, 2], [0, 2]]]);
   check('a single polygon traces back to its own area', solo && approx(shoelaceArea(solo), 6),
     `got ${solo && shoelaceArea(solo)}`);
+}
+
+// --- 2c. clustering by PROXIMITY, not by shared walls --------------------------
+// Real floor plans mostly don't draw grouped rooms touching -- a hallway
+// between two restrooms in one "Restrooms" group is still a gap on the SVG
+// -- so the group border has to decide "close enough to share one border"
+// from a GAP relative to room size, never from an exact shared edge.
+{
+  // Two 10x10 rooms with a 5-unit gap between them: a hallway-width gap for
+  // rooms this size, well under the 0.75x-shorter-side default threshold.
+  const roomA = { gid: 'a', pts: [[0, 0], [10, 0], [10, 10], [0, 10]] };
+  const roomB = { gid: 'b', pts: [[15, 0], [25, 0], [25, 10], [15, 10]] };
+  check('two close rooms (small gap relative to their size) land in ONE cluster',
+    floorPlanShapeGap(roomA.pts, roomB.pts) === 5);
+  const closeClusters = floorPlanClusterShapes([roomA, roomB]);
+  check('...confirmed: one cluster holding both', closeClusters.length === 1 && closeClusters[0].length === 2,
+    JSON.stringify(closeClusters.map(c => c.map(m => m.gid))));
+}
+{
+  // Same two 10x10 rooms, but a 30-unit gap -- comparable to jumping to a
+  // different wing of the building, not a hallway.
+  const roomA = { gid: 'a', pts: [[0, 0], [10, 0], [10, 10], [0, 10]] };
+  const roomC = { gid: 'c', pts: [[40, 0], [50, 0], [50, 10], [40, 10]] };
+  const farClusters = floorPlanClusterShapes([roomA, roomC]);
+  check('two far-apart rooms land in SEPARATE clusters, not one box spanning the gap',
+    farClusters.length === 2, JSON.stringify(farClusters.map(c => c.map(m => m.gid))));
+}
+{
+  // Three rooms: A and B close together, C far from both -- must produce
+  // TWO clusters (A+B, and C alone), not three singles and not one big one.
+  const roomA = { gid: 'a', pts: [[0, 0], [10, 0], [10, 10], [0, 10]] };
+  const roomB = { gid: 'b', pts: [[15, 0], [25, 0], [25, 10], [15, 10]] };
+  const roomC = { gid: 'c', pts: [[60, 0], [70, 0], [70, 10], [60, 10]] };
+  const clusters = floorPlanClusterShapes([roomA, roomB, roomC]);
+  check('a close pair plus one far room clusters as {A,B} and {C}, not three singles',
+    clusters.length === 2, JSON.stringify(clusters.map(c => c.map(m => m.gid))));
+  const sizes = clusters.map(c => c.length).sort();
+  check('...and the sizes are 1 and 2, not 1/1/1 or 3', JSON.stringify(sizes) === '[1,2]',
+    JSON.stringify(sizes));
+}
+{
+  // Genuinely touching rooms (gap 0) must still cluster together -- this is
+  // the case floorPlanGroupOutline's edge cancellation already handles;
+  // clustering must not accidentally split it apart.
+  const touchingA = { gid: 'a', pts: [[0, 0], [10, 0], [10, 10], [0, 10]] };
+  const touchingB = { gid: 'b', pts: [[10, 0], [20, 0], [20, 10], [10, 10]] };
+  check('touching rooms (gap 0) still cluster into one',
+    floorPlanClusterShapes([touchingA, touchingB]).length === 1);
 }
 
 // --- 3. label wrapping ---------------------------------------------------------
