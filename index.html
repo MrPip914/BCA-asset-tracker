@@ -2672,7 +2672,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-22.5";
+const APP_VERSION = "2026-09-22.6";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -16134,6 +16134,14 @@ function FloorPlanTabContent({
   };
 
   const renderedGroupIds = new Set();
+  // SVG units per on-screen pixel of the CURRENT viewBox -- the missing half
+  // of floorPlanLabelFit. A fixed SVG-unit fontSize (what every label here
+  // used until now) renders at a wildly different PIXEL size depending on
+  // zoom: fine once zoomed into one room, illegibly small at the default
+  // whole-floor overview, where the viewBox can span several times the
+  // stage's own pixel width. k is exactly what turns "11 SVG units" into
+  // "11 pixels on screen" regardless of how zoomed out the view is.
+  const k = unitsPerPx();
 
   return (
     <div>
@@ -16236,7 +16244,8 @@ function FloorPlanTabContent({
                     fill={linked ? "#3F8F5A" : "#C98A3B"} fillOpacity={linked ? 0.26 : 0.22}
                     stroke={sel ? C.brandDark : (linked ? "#3F8F5A" : "#C98A3B")} strokeWidth={sel ? 3.4 : 1.6}
                     strokeDasharray={linked ? undefined : "7 5"} />
-                  <text className="fp-text" x={s.pole.x} y={s.pole.y} textAnchor="middle" fontSize={11} fontWeight={600} fill={linked ? "#1F1F1F" : "#8A5A22"}>{roomName}</text>
+                  <FloorPlanLabel x={s.pole.x} y={s.pole.y} k={k} clear={s.pole.clear} maxPx={11}
+                    text={roomName} fontWeight={600} fill={linked ? "#1F1F1F" : "#8A5A22"} />
                 </g>
               );
             }
@@ -16280,7 +16289,13 @@ function FloorPlanTabContent({
                       fill={C.brand} fillOpacity={items.length ? 0.12 : 0.06} stroke="#416280" strokeWidth={1.3} />
                   ))}
                   {!grp.hideLabel && (
-                    <text className="fp-text" x={bbox.x + bbox.w / 2} y={bbox.y + bbox.h / 2} textAnchor="middle" fontSize={12} fontWeight={700} fill="#1F1F1F">{grp.name}</text>
+                    // No single polygon to pole-search for a merged tile, so
+                    // clearance is approximated from the combined bbox's
+                    // shorter side -- the same "how much room does this
+                    // label actually have" question floorPlanPole answers
+                    // for one shape, asked of the group's silhouette instead.
+                    <FloorPlanLabel x={bbox.x + bbox.w / 2} y={bbox.y + bbox.h / 2} k={k}
+                      clear={Math.min(bbox.w, bbox.h) / 2} maxPx={12} text={grp.name} fontWeight={700} fill="#1F1F1F" />
                   )}
                   <FloorPlanGroupBadge cx={bbox.x + bbox.w / 2} cy={bbox.y + bbox.h / 2 + (grp.hideLabel ? 0 : 15)} count={members.length} />
                 </g>
@@ -16297,7 +16312,8 @@ function FloorPlanTabContent({
                   fill={linked ? C.brand : "#C98A3B"} fillOpacity={linked ? 0.08 : 0.14}
                   stroke={sel ? C.brandDark : "#416280"} strokeWidth={sel ? 3 : 1.3}
                   strokeDasharray={linked ? undefined : "6 4"} />
-                <text className="fp-text" x={s.pole.x} y={s.pole.y} textAnchor="middle" fontSize={11} fontWeight={600} fill={linked ? "#1F1F1F" : "#8A6A3C"}>{label}</text>
+                <FloorPlanLabel x={s.pole.x} y={s.pole.y} k={k} clear={s.pole.clear} maxPx={11}
+                  text={label} fontWeight={600} fill={linked ? "#1F1F1F" : "#8A6A3C"} />
               </g>
             );
           })}
@@ -16349,6 +16365,30 @@ function FloorPlanTabContent({
         </div>
       )}
     </div>
+  );
+}
+// Every room/group name label drawn ON the plan goes through this, rather
+// than a plain <text>: it's what actually calls floorPlanLabelFit (the
+// clearance-and-zoom-aware sizing the prototype used), turns its `words`
+// into stacked <tspan> lines when a label doesn't fit on one, and centers
+// that whole block vertically on (x, y) rather than hanging below it the
+// way a single unwrapped line implicitly does.
+function FloorPlanLabel({ x, y, k, clear, maxPx, text, fill, fontWeight }) {
+  const { fs, words } = floorPlanLabelFit(k, clear, maxPx, text);
+  const lineHeight = fs * 1.15;
+  const startDy = -((words.length - 1) / 2) * lineHeight;
+  return (
+    <text className="fp-text" textAnchor="middle" fontSize={fs} fontWeight={fontWeight} fill={fill}>
+      {words.map((w, i) => (
+        // The first line is placed with an ABSOLUTE y (the block's start);
+        // every line after it is a RELATIVE dy step down from the one
+        // before -- an absolute y on every tspan would stack them all on
+        // top of each other instead of down the page.
+        i === 0
+          ? <tspan key={i} x={x} y={y + startDy}>{w}</tspan>
+          : <tspan key={i} x={x} dy={lineHeight}>{w}</tspan>
+      ))}
+    </text>
   );
 }
 // The "N spaces" pill on a collapsed group tile in the normal (non-setup)
