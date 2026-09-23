@@ -106,13 +106,15 @@ new Function('module', [
   grabFn('floorPlanSegDist'),
   grabFn('floorPlanPole'),
   grabFn('floorPlanBbox'),
+  grabFn('floorPlanGroupOutlineKey'),
+  grabFn('floorPlanGroupOutline'),
   grabFn('floorPlanWrapWords'),
   grabFn('floorPlanLabelFit'),
   grabFn('floorPlanZoomViewBox'),
   grabFn('floorPlanZoomAt'),
-  'module.exports = { floorPlanPole, floorPlanBbox, floorPlanLabelFit, floorPlanZoomViewBox, floorPlanZoomAt };',
+  'module.exports = { floorPlanPole, floorPlanBbox, floorPlanGroupOutline, floorPlanLabelFit, floorPlanZoomViewBox, floorPlanZoomAt };',
 ].join('\n'))(geomMod);
-const { floorPlanPole, floorPlanBbox, floorPlanLabelFit, floorPlanZoomViewBox, floorPlanZoomAt } = geomMod.exports;
+const { floorPlanPole, floorPlanBbox, floorPlanGroupOutline, floorPlanLabelFit, floorPlanZoomViewBox, floorPlanZoomAt } = geomMod.exports;
 
 // A 100x100 square: the pole should land at the center with clearance ~50.
 const square = [[0, 0], [100, 0], [100, 100], [0, 100]];
@@ -136,6 +138,61 @@ const { fs: hallFs } = floorPlanLabelFit(1, hallPole.clear, 11, 'Stage Left Hall
 const { fs: squareFs } = floorPlanLabelFit(1, squarePole.clear, 11, 'Main Room');
 check('the hallway\'s label is sized smaller than the square\'s, not larger',
   hallFs < squareFs, `hallway fs=${hallFs}, square fs=${squareFs}`);
+
+// --- 2b. group outline: edge-cancellation union of adjacent rooms -------------
+// Two unit squares sharing the edge x=1 -- the union is a 2x1 rectangle, and
+// the shared wall must cancel out of the traced boundary entirely rather
+// than showing up as a stray interior line.
+const shoelaceArea = loop => Math.abs(loop.reduce((s, p, i) => {
+  const q = loop[(i + 1) % loop.length];
+  return s + (p[0] * q[1] - q[0] * p[1]);
+}, 0)) / 2;
+{
+  const left = [[0, 0], [1, 0], [1, 1], [0, 1]];
+  const right = [[1, 0], [2, 0], [2, 1], [1, 1]];
+  const outline = floorPlanGroupOutline([left, right]);
+  check('two adjacent squares trace to their combined 2x1 area, not each square alone',
+    outline && approx(shoelaceArea(outline), 2), `got ${outline && shoelaceArea(outline)}`);
+  const hasCorner = (loop, x, y) => loop.some(([px, py]) => approx(px, x) && approx(py, y));
+  check('the traced outline reaches the far outer corner (2,1), not just each square\'s own',
+    outline && hasCorner(outline, 2, 1), JSON.stringify(outline));
+  check('the shared wall (x=1) does not survive as a visible interior edge',
+    outline && outline.filter(([x]) => approx(x, 1)).length <= 2, JSON.stringify(outline));
+}
+
+// Three unit squares forming an L (bottom-left, bottom-right, top-right) --
+// the traced outline has to be SMALLER than the 2x2 bounding box a rect
+// would have used, or it isn't actually following the concave shape.
+{
+  const a = [[0, 0], [1, 0], [1, 1], [0, 1]];
+  const b = [[1, 0], [2, 0], [2, 1], [1, 1]];
+  const c = [[1, 1], [2, 1], [2, 2], [1, 2]];
+  const outline = floorPlanGroupOutline([a, b, c]);
+  check('an L of three squares traces to area 3, not the 2x2=4 bounding box',
+    outline && approx(shoelaceArea(outline), 3), `got ${outline && shoelaceArea(outline)}`);
+}
+
+// Two squares that share no edge at all -- the exact shape of the fixture's
+// own "Storage & Hallway" group, whose two rooms are grouped on the floor
+// plan without sharing a wall on the SVG (a gap between them). Edge
+// cancellation cancels nothing, so this closes into TWO separate loops, not
+// one -- and returning either loop alone would trace one room while
+// silently leaving the other one outside its own group's border, which is
+// worse than the bounding box this must fall back to instead.
+{
+  const disjoint = floorPlanGroupOutline([[[0, 0], [1, 0], [1, 1], [0, 1]], [[5, 5], [6, 5], [6, 6], [5, 6]]]);
+  check('two shapes with no shared wall return null rather than tracing just one of them',
+    disjoint === null, JSON.stringify(disjoint));
+}
+
+// A single polygon (the caller never does this -- a "group" of one member
+// is refused elsewhere -- but the helper itself should still behave) traces
+// back to its own boundary rather than returning null or throwing.
+{
+  const solo = floorPlanGroupOutline([[[0, 0], [3, 0], [3, 2], [0, 2]]]);
+  check('a single polygon traces back to its own area', solo && approx(shoelaceArea(solo), 6),
+    `got ${solo && shoelaceArea(solo)}`);
+}
 
 // --- 3. label wrapping ---------------------------------------------------------
 const { words: shortWords } = floorPlanLabelFit(1, 50, 11, 'Kitchen');

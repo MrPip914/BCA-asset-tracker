@@ -3448,7 +3448,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-23.4";
+const APP_VERSION = "2026-09-23.5";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -16754,6 +16754,80 @@ function floorPlanBbox(pts) {
   const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
   return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
 }
+// The outer boundary of several adjacent Space polygons, traced by EDGE
+// CANCELLATION rather than a general polygon-union algorithm: a wall shared
+// by two rooms is drawn once by each of them, in opposite winding order, so
+// it appears twice across the whole group and cancels out, leaving only the
+// edges that belong to exactly one member -- which is exactly the outside
+// of the group. This is the right amount of geometry for what a floor plan
+// actually is (adjacent rooms sharing exact wall coordinates), and it is
+// far simpler than a real polygon-boolean-union library, which this file
+// deliberately has none of. It degrades safely rather than crashing when
+// that assumption doesn't hold (rooms that don't share an exact edge, an
+// odd export): the caller falls back to a plain bounding box whenever this
+// returns null.
+//
+// Points are matched by a rounded key, not exact equality -- the arc
+// handling in floorPlanPathToPoints can leave two "the same" corners a
+// hair apart in floating point, and an edge that fails to cancel because
+// of that would leave a stray interior line looking like a real wall.
+function floorPlanGroupOutlineKey(p) {
+  return Math.round(p[0] * 20) / 20 + "," + Math.round(p[1] * 20) / 20;
+}
+function floorPlanGroupOutline(memberPolygons) {
+  const count = new Map();
+  const dir = new Map();
+  memberPolygons.forEach(pts => {
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i], b = pts[(i + 1) % pts.length];
+      const ak = floorPlanGroupOutlineKey(a), bk = floorPlanGroupOutlineKey(b);
+      if (ak === bk) continue; // a degenerate zero-length edge
+      const canon = ak < bk ? ak + "|" + bk : bk + "|" + ak;
+      count.set(canon, (count.get(canon) || 0) + 1);
+      dir.set(canon, [a, b]);
+    }
+  });
+  const boundary = [];
+  count.forEach((n, key) => { if (n === 1) boundary.push(dir.get(key)); });
+  if (boundary.length < 3) return null;
+  // Stitch the surviving edges into one or more closed loops by matching
+  // endpoints -- a greedy walk, which is enough for the simple (non-self-
+  // intersecting) boundaries a real floor plan produces.
+  const used = new Array(boundary.length).fill(false);
+  const loops = [];
+  for (let start = 0; start < boundary.length; start++) {
+    if (used[start]) continue;
+    used[start] = true;
+    const loop = [boundary[start][0], boundary[start][1]];
+    let guard = boundary.length + 1;
+    while (guard-- > 0) {
+      const tailKey = floorPlanGroupOutlineKey(loop[loop.length - 1]);
+      let next = -1;
+      for (let i = 0; i < boundary.length; i++) {
+        if (!used[i] && floorPlanGroupOutlineKey(boundary[i][0]) === tailKey) { next = i; break; }
+      }
+      if (next === -1) break;
+      used[next] = true;
+      loop.push(boundary[next][1]);
+      if (floorPlanGroupOutlineKey(loop[loop.length - 1]) === floorPlanGroupOutlineKey(loop[0])) break;
+    }
+    if (loop.length >= 3) loops.push(loop);
+  }
+  if (!loops.length) return null;
+  // MORE THAN ONE LOOP MEANS "NOT ONE CONNECTED SHAPE", NOT A HOLE, and
+  // that distinction is the one this function actually has to get right.
+  // The fixture's own "Storage & Hallway" group is exactly this case: two
+  // rooms grouped together on the FLOOR PLAN that don't share a wall on
+  // the SVG (there's a hallway-width gap between them), so edge
+  // cancellation cancels nothing and each room closes its own separate
+  // 4-edge loop. Picking "the biggest loop" there would trace ONE room and
+  // silently leave the other one outside its own group's border -- worse
+  // than the plain bounding box this falls back to instead. A real hole
+  // (a donut-shaped room) would also hit this path and also fall back;
+  // that trade is deliberate, since a hole is the rare case and a
+  // disconnected group is the common one a real floor plan produces.
+  return loops.length === 1 ? loops[0] : null;
+}
 function floorPlanWrapWords(s, n) {
   const out = []; let line = "";
   for (const w of s.split(" ")) {
@@ -17667,20 +17741,39 @@ function FloorPlanTabContent({
               border rather than inside it like a room name would be) is
               what actually answers "which group did I select". Drawn once,
               after every shape, so it paints on top and pointer-events:none
-              so it never steals a click from a member underneath it. */}
+              so it never steals a click from a member underneath it.
+
+              The border TRACES the members' actual combined silhouette
+              (floorPlanGroupOutline) rather than boxing an irregular shape
+              in a rectangle -- an L-shaped or staggered group used to get a
+              border that cut across a room that isn't even in the group.
+              No outward padding: offsetting a traced, possibly-concave
+              outline needs real polygon math this file doesn't have, so the
+              breathing room comes from the stroke's own width instead. A
+              group whose members don't share exact wall coordinates (an odd
+              export, or rooms that only touch at a corner) falls back to
+              the plain padded bounding box exactly as before -- still a
+              border, just not a traced one, rather than nothing. */}
           {!setupTab && openGroupId && (() => {
             const grp = groups.find(g => g.id === openGroupId);
             const members = grp && plan.status === "ready"
               ? plan.spaces.filter(m => (grp.memberShapeIds || []).includes(m.gid)) : [];
             if (!members.length) return null;
             const bbox = floorPlanBbox(members.flatMap(m => m.pts));
-            const pad = 14 * k;
-            const bx = bbox.x - pad, by = bbox.y - pad, bw = bbox.w + pad * 2, bh = bbox.h + pad * 2;
+            const outline = members.length > 1 ? floorPlanGroupOutline(members.map(m => m.pts)) : null;
+            const frame = outline
+              ? <path d={"M" + outline.map(p => p.join(" ")).join(" L") + " Z"}
+                  fill="none" stroke={C.brandDark} strokeWidth={3 * k} strokeLinejoin="round" />
+              : (() => {
+                  const pad = 14 * k;
+                  const bx = bbox.x - pad, by = bbox.y - pad, bw = bbox.w + pad * 2, bh = bbox.h + pad * 2;
+                  return <rect x={bx} y={by} width={bw} height={bh} rx={8 * k}
+                    fill="none" stroke={C.brandDark} strokeWidth={2.5 * k} />;
+                })();
             return (
               <g style={{ pointerEvents: "none" }}>
-                <rect x={bx} y={by} width={bw} height={bh} rx={8 * k}
-                  fill="none" stroke={C.brandDark} strokeWidth={2.5 * k} />
-                <text className="fp-text" x={bx + bw / 2} y={by - 8 * k} textAnchor="middle"
+                {frame}
+                <text className="fp-text" x={bbox.x + bbox.w / 2} y={bbox.y - 14 * k} textAnchor="middle"
                   fontSize={16 * k} fontWeight={700} fill={C.brandDark}>
                   {grp.name}
                 </text>
