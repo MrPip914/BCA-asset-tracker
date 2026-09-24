@@ -616,6 +616,24 @@ function typeNameOf(typeId, typesList) {
 // type listed, so a tenant that removed Computer -- nothing locks it -- still
 // opens the add form on a type that actually exists. A flagged type that has
 // since been removed is simply not in the list, so it falls through the same way.
+// The Parent the add form should hold for `type`, given where HierarchyNav is
+// drilled to: the scoped place when it may legally contain that type, else blank.
+function scopedParentFor(type, scopeId, assets) {
+  const scopeAsset = scopeId ? (assets || []).find(a => a.id === scopeId) : null;
+  return scopeAsset && canBeParentOf(scopeAsset.type, type) ? scopeId : "";
+}
+
+// The add form's Parent after its Type changes. The form OPENS on the default
+// type, so scoped to a Building it opens with a blank Parent (a Computer cannot
+// sit in a Building) -- and switching to Room left it blank, which read as the
+// prefill not working at all. So a type change re-derives the Parent from the
+// scope, but ONLY while the Parent is still blank or still the scope itself: a
+// parent someone picked by hand is theirs, and is never overwritten.
+function reScopedParentId(currentParentId, newType, scopeId, assets) {
+  if (currentParentId && currentParentId !== scopeId) return currentParentId;
+  return scopedParentFor(newType, scopeId, assets);
+}
+
 function defaultNewAssetType(typesList) {
   const list = typesList || [];
   const chosen = list.find(t => t && t.isDefault);
@@ -2924,7 +2942,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-24.4";
+const APP_VERSION = "2026-09-24.5";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -6637,10 +6655,8 @@ function AssetTracker() {
     // legal parent for the starting type -- a Computer only takes a Room, so
     // scoping to a Building leaves this blank rather than pointing a new
     // Computer at a parent its own type rejects. Changing the type in the form
-    // does not re-derive this any more than it re-derives the tag; it's a
-    // starting point, not a rule that keeps enforcing itself.
-    const scopeAsset = scopeId ? (assets || []).find(a => a.id === scopeId) : null;
-    const startParentId = scopeAsset && canBeParentOf(scopeAsset.type, startType) ? scopeId : "";
+    // re-derives it (reScopedParentId) until a parent is picked by hand.
+    const startParentId = scopedParentFor(startType, scopeId, assets);
     setDraft({
       ...emptyDraftFrom(columns),
       id: crypto.randomUUID(),
@@ -12875,7 +12891,7 @@ function AssetTracker() {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12 }}>
               {addFormColumns.map(c => (
                 c.key === "type" ? (
-                  <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v, ...clearedError(draft, "type") })} types={typesList} labels={typeLabels} onManage={() => setShowTypesManager(true)} />
+                  <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v, parentId: reScopedParentId(draft.parentId, v, scopeId, assets), ...clearedError(draft, "type") })} types={typesList} labels={typeLabels} onManage={() => setShowTypesManager(true)} />
                 ) : c.key === "parent" ? (
                   <ParentField
                     key={c.key}
