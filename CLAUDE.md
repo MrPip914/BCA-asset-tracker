@@ -1575,6 +1575,14 @@ one that removed Computer, since nothing locks it.
   into a state nothing could name. A `DEFAULT` badge on the type list shows which it is.
 - The scope prefill still applies on top: the Parent is prefilled only when the scoped
   place is a legal parent for whatever the default type is.
+- **Changing the default while the add form is OPEN moves that form onto it**
+  (2026-09-24). The type editor is reached from the form's own Type gear, so the form was
+  seeded on the old default and kept it, and the new default only showed on the next
+  open. `saveTypeSettings` now moves an open form whose Type is still the untouched old
+  default, re-deriving its Parent from the scope. A type someone chose is left alone.
+  - **Found on 3C, and half of that report was the parent rules, not a bug**: 3C's `Other`
+    may sit only inside a Room, so drilled to a Floor or a Building there is no legal
+    parent to prefill. That is the type's "Can sit inside" setting doing its job.
 - Covered by `test-frontend-default-type.js`, which runs the real resolver and list update.
   Verified by mutation that dropping the clear-others step or re-hardcoding Computer in
   `startAdd` each fail it.
