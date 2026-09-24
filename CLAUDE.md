@@ -1551,6 +1551,29 @@ no backend change at all, and the exception is the one worth remembering.
 - **Editing is allowed on locked types.** `locked` means the app depends on the type *existing*
   — its tabs, its field rules — which is about the id, not what it's called or what it holds.
 
+**Which type Add asset opens on is a setting in the type editor** ("Default type for new
+assets", 2026-09-23). `startAdd()` used to hardcode `"Computer"`, which is wrong for a
+tenant like a church whose inventory is mostly rooms and fixtures — and simply broken for
+one that removed Computer, since nothing locks it.
+- **Stored as `isDefault: true` on the chosen `typesList` entry, NOT in `typeSettings`.**
+  Both are free (properties on existing Config blobs — no backend release), but "Reset to
+  default" deletes a type's `typeSettings` override wholesale, and resetting a type's
+  FIELDS must not quietly stop it being the default too. Which type is the default is also
+  genuinely a fact about the list, not about one type's rules.
+- **`defaultNewAssetType(typesList)` is the one resolver**: the flagged type, else Computer
+  if it is still listed, else the first type listed. So an untouched sheet behaves exactly
+  as before, a removed default falls through rather than naming a type that no longer
+  exists, and nothing needs migrating.
+- **There is always exactly one.** `renameTypeInList` clears the flag from every other
+  entry in the same pass that sets it, and the editor LOCKS the box on the type that is
+  already the default — it moves by ticking a different type, never by unticking this one
+  into a state nothing could name. A `DEFAULT` badge on the type list shows which it is.
+- The scope prefill still applies on top: the Parent is prefilled only when the scoped
+  place is a legal parent for whatever the default type is.
+- Covered by `test-frontend-default-type.js`, which runs the real resolver and list update.
+  Verified by mutation that dropping the clear-others step or re-hardcoding Computer in
+  `startAdd` each fail it.
+
 **The icon catalog is 166 icons in 17 groups, behind a shortcut row (2026-09-20).** The picker
 was a flat wrap of 15, which is why two Facilities types shipped as question marks and "People"
 had no person in it. `ICON_GROUPS` is the catalog, `TYPE_ICON_CHOICES` is it flattened for
