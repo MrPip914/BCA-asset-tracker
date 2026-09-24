@@ -629,21 +629,33 @@ runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg')] }).then(calls => {
      pcts[pcts.length - 1], 100);
 
   // ---- the input and the wiring, which the execution above cannot see -------
-  // TWO inputs, because a phone builds its picker menu from `accept`: an
-  // images-only input is what gets iOS's Photo Library option, and adding PDFs
-  // to that same input removes it. Both take several at once.
+  // THREE inputs, because a phone honors only one of `capture`/`multiple` on a
+  // given input, not both at once, and which one it picks when both are set is
+  // not documented or stable across OS versions. `capture` alone launches the
+  // camera directly; plain `multiple` opens the library's own multi-select
+  // picker. Our own two-item menu is the chooser between them, standing in for
+  // the OS action sheet a `multiple` images input no longer reliably offers.
   // Sliced to the next top-level function: grab() would stop at the destructured
   // props' closing brace, since that is the first {...} after the name.
   const galleryAt = src.indexOf('function PhotoGallery(');
   const gallery = src.slice(galleryAt, galleryAt + src.slice(galleryAt).search(/\r?\nfunction /));
-  eq('the PHOTOS input accepts images only, so the phone offers its photo library',
-     /ref=\{inputRef\} type="file" accept="image\/\*" multiple onChange=\{pick\}/.test(gallery), true);
+  eq('the CAMERA input launches the camera directly -- capture, but no multiple',
+     /ref=\{cameraInputRef\} type="file" accept="image\/\*" capture="environment" onChange=\{pick\}/.test(gallery), true);
+  eq('...and it is not ALSO a multi-select input (the two intents do not mix)',
+     /ref=\{cameraInputRef\}[^>]*multiple/.test(gallery), false);
+  eq('the LIBRARY input multi-selects -- multiple, but no capture',
+     /ref=\{libraryInputRef\} type="file" accept="image\/\*" multiple onChange=\{pick\}/.test(gallery), true);
+  eq('...and it does not ALSO try to launch the camera',
+     /ref=\{libraryInputRef\}[^>]*capture/.test(gallery), false);
   eq('the FILES input takes PDFs, several at once, into the same pick()',
      /ref=\{docInputRef\} type="file" accept="application\/pdf,image\/\*" multiple onChange=\{pick\}/.test(gallery), true);
-  eq('no single input mixes PDFs into the photos picker again',
-     /ref=\{inputRef\}[^>]*application\/pdf/.test(gallery), false);
-  eq('each button opens its own picker',
-     /inputRef\.current\.click\(\)/.test(gallery) && /docInputRef\.current\.click\(\)/.test(gallery), true);
+  eq('Add photos opens a CHOOSER rather than clicking an input directly',
+     /onClick=\{\(\) => setPhotoMenuOpen\(v => !v\)\}/.test(gallery), true);
+  eq('...whose two rows are what click each input',
+     /cameraInputRef\.current && cameraInputRef\.current\.click\(\)/.test(gallery)
+     && /libraryInputRef\.current && libraryInputRef\.current\.click\(\)/.test(gallery), true);
+  eq('the files button still opens its own picker directly, no chooser needed',
+     /docInputRef\.current && docInputRef\.current\.click\(\)/.test(gallery), true);
   eq('pick hands over the whole FileList rather than just the first',
      /Array\.from\(e\.target\.files\)/.test(src), true);
   // The split exists so a future call site cannot reintroduce a per-file write.

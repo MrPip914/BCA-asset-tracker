@@ -3583,14 +3583,27 @@ three decisions.
     A signature covers exactly the parameters it was computed over, so an allowlist signed
     onto the first signature and omitted from the rest would refuse every upload in a batch
     but the first — which reads as a flaky host rather than as a missing parameter.
-- **Photos and files are TWO buttons with two pickers** (2026-09-24): **Add photos**
-  (`accept="image/*"`) and **Add files** (`accept="application/pdf,image/*"`), both
-  `multiple`, both into the same `pick()`. A phone builds its picker menu from `accept`:
-  an images-only input gets iOS's Photo Library / Take Photo / Choose File sheet, where the
-  library multi-selects. v39 added PDFs to the ONE input, which dropped Photo Library from
-  that sheet and left the camera and the Files app — where a tap returns one file — so
-  picking several photos, the everyday case, got harder for everyone. **Never put a
-  non-image type back on the photos input.**
+- **Photos and files are TWO buttons; Add photos is now OUR OWN chooser, not the
+  OS's** (2026-09-24, second pass). The first pass split PDFs onto their own **Add files**
+  button (`accept="application/pdf,image/*" multiple`) so an images-only **Add photos**
+  input would get iOS's Photo Library / Take Photo / Choose File action sheet — that part
+  held. What didn't: a phone reported `accept="image/*" multiple` going straight to the
+  library with no camera option at all. Recent iOS Safari drops "Take Photo" from the sheet
+  the moment `multiple` is set — you cannot multi-select while taking a single photo — and
+  there is no single `<input>` that reliably offers both at once; which of `capture`/
+  `multiple` wins when both are set is undocumented and not stable across OS versions.
+  - **Add photos is now a menu we render**, not one input's native sheet: tapping it opens
+    two rows, "Take photo" and "Choose from library", each clicking its OWN hidden input —
+    `cameraInputRef` (`capture="environment"`, no `multiple`, launches the camera directly)
+    and `libraryInputRef` (`multiple`, no `capture`, opens the library's own multi-select
+    picker). Same fixed-inset-click-catcher-plus-card shape as the toolbar hamburger and the
+    floor-plan menu. **Never put both `capture` and `multiple` on the same input again** —
+    that ambiguity is exactly what broke the first pass.
+  - **Add files is UNCHANGED** — one button, one input
+    (`accept="application/pdf,image/*" multiple`), the OS's own sheet. It wasn't reported
+    broken, and the reasoning above doesn't apply to it the same way: a PDF can't come from
+    a camera capture, so there's no capture-vs-multiple conflict to route around.
+  - **Never put a non-image type on the camera or library inputs.**
 - **The multipart part's FILENAME is what tells Cloudinary the format**, and it is not the
   user's file name. A photo is re-encoded to JPEG here, so it is announced as `upload.jpg`
   — sending the original `IMG_4821.HEIC` would declare a format those bytes no longer are.

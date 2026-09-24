@@ -3603,7 +3603,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-24.7";
+const APP_VERSION = "2026-09-24.8";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -20047,8 +20047,20 @@ function AttachmentImage({ photo, src, alt, style, iconSize, hideName }) {
 // See the Files section near the top of this file.
 function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onAddLink, onDelete, onToggleHidden, onOpen, emptyText }) {
   const [confirmDelete, setConfirmDelete] = React.useState(null);
-  const inputRef = React.useRef(null);
+  const cameraInputRef = React.useRef(null);
+  const libraryInputRef = React.useRef(null);
   const docInputRef = React.useRef(null);
+  // Add photos is a CHOOSER, not a single input (2026-09-24, second pass). One
+  // input covering both camera and library used to work -- accept="image/*"
+  // with `multiple` -- until a phone reported it going straight to the library
+  // with no camera option at all: recent iOS Safari drops "Take Photo" from
+  // the sheet the moment `multiple` is set, since you cannot multi-select
+  // WHILE taking one photo. There is no single input that offers both, so this
+  // is two inputs behind our own two-item menu instead of the OS's: `capture`
+  // alone (no `multiple`) launches the camera directly, plain `multiple` (no
+  // `capture`) opens the library's own multi-select picker -- both confirmed
+  // against the real behavior each one already had on its own.
+  const [photoMenuOpen, setPhotoMenuOpen] = React.useState(false);
   // The Add link form, as ONE object -- url, name and its error open and close
   // together, so closing it is `setLinkDraft(null)` and leaves nothing behind.
   // Same shape as newFieldDraft in the type editor.
@@ -20082,41 +20094,68 @@ function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onAddLink
     <div>
       {canEdit && (
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
-          {/* TWO PICKERS, BECAUSE A PHONE DECIDES ITS MENU FROM `accept`
-              (2026-09-24). An images-only input gets iOS's "Photo Library /
-              Take Photo / Choose File" sheet, where the library multi-selects.
-              Adding application/pdf to the same input drops Photo Library from
-              that sheet -- leaving the camera and the Files app, where one tap
-              picks one file -- which is what one picker for both did to
-              everyone's photo workflow. So photos get their own input, and PDFs
-              theirs.
-              Each filter is a courtesy and not the rule -- fileKindOf refuses
-              anything else, and the backend signs the same allowlist into every
-              upload. Both run the same pick() into the same onAdd. */}
-          <input ref={inputRef} type="file" accept="image/*" multiple onChange={pick} style={{ display: "none" }} />
+          {/* THE CAMERA INPUT AND THE LIBRARY INPUT ARE SEPARATE ELEMENTS,
+              never one input with both `capture` and `multiple` -- a phone
+              honors only one of the two intents on a single input, and which
+              one it picks is not documented or stable across OS versions.
+              `capture` alone launches the camera directly, one photo per tap;
+              plain `multiple` opens the library's own multi-select picker.
+              Neither is user-visible -- our own two-item menu below is the
+              chooser, standing in for the OS action sheet that a `multiple`
+              images input no longer reliably offers. */}
+          <input ref={cameraInputRef} type="file" accept="image/*" capture="environment" onChange={pick} style={{ display: "none" }} />
+          <input ref={libraryInputRef} type="file" accept="image/*" multiple onChange={pick} style={{ display: "none" }} />
           <input ref={docInputRef} type="file" accept="application/pdf,image/*" multiple onChange={pick} style={{ display: "none" }} />
-          <button
-            onClick={() => inputRef.current && inputRef.current.click()}
-            disabled={busy}
-            style={{
-              display: "flex", alignItems: "center", gap: 6, padding: "8px 14px",
-              background: busy ? C.border : C.brand, color: busy ? C.muted : "#fff",
-              border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13,
-              cursor: busy ? "default" : "pointer",
-            }}
-          >
-            {busy ? <Loader2 size={14} className="spin" /> : <Camera size={14} />}
-            {/* Moves rather than saying "Uploading..." for a minute with
-                nothing changing. It reports a PERCENTAGE of the batch's bytes,
-                never "file 1 of 3": uploads run in a pool, so several are always
-                in flight and a file number would be claiming otherwise -- which
-                is exactly what made this look stuck. */}
-            {busy
-              ? (progress && typeof progress.pct === "number"
-                  ? (progress.total > 1 ? "Uploading " + progress.total + " files… " : "Uploading… ") + progress.pct + "%"
-                  : "Uploading…")
-              : "Add photos"}
-          </button>
+          <div style={{ position: "relative" }}>
+            <button
+              onClick={() => setPhotoMenuOpen(v => !v)}
+              disabled={busy}
+              style={{
+                display: "flex", alignItems: "center", gap: 6, padding: "8px 14px",
+                background: busy ? C.border : C.brand, color: busy ? C.muted : "#fff",
+                border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13,
+                cursor: busy ? "default" : "pointer",
+              }}
+            >
+              {busy ? <Loader2 size={14} className="spin" /> : <Camera size={14} />}
+              {/* Moves rather than saying "Uploading..." for a minute with
+                  nothing changing. It reports a PERCENTAGE of the batch's bytes,
+                  never "file 1 of 3": uploads run in a pool, so several are always
+                  in flight and a file number would be claiming otherwise -- which
+                  is exactly what made this look stuck. */}
+              {busy
+                ? (progress && typeof progress.pct === "number"
+                    ? (progress.total > 1 ? "Uploading " + progress.total + " files… " : "Uploading… ") + progress.pct + "%"
+                    : "Uploading…")
+                : "Add photos"}
+            </button>
+            {/* Same shape as the toolbar hamburger and the floor-plan menu:
+                fixed-inset click-catcher to close, an absolutely positioned
+                card of icon-btn rows. */}
+            {photoMenuOpen && (
+              <>
+                <div onClick={() => setPhotoMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
+                <div style={{ position: "absolute", left: 0, top: "100%", marginTop: 6, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, minWidth: 200, overflow: "hidden", padding: 4 }}>
+                  <button
+                    type="button"
+                    onClick={() => { setPhotoMenuOpen(false); cameraInputRef.current && cameraInputRef.current.click(); }}
+                    className="icon-btn"
+                    style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
+                  >
+                    <Camera size={15} /> Take photo
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setPhotoMenuOpen(false); libraryInputRef.current && libraryInputRef.current.click(); }}
+                    className="icon-btn"
+                    style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
+                  >
+                    <ImagePlus size={15} /> Choose from library
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
           <button
             onClick={() => docInputRef.current && docInputRef.current.click()}
             disabled={busy}
