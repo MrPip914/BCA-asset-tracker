@@ -3508,7 +3508,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-23.14";
+const APP_VERSION = "2026-09-24.1";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -16935,178 +16935,364 @@ function floorPlanBbox(pts) {
   const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
   return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
 }
-// The outer boundary of several Space polygons, traced by RASTERIZING the
-// area within `pad` of any member and walking the grid's own edges --
-// deliberately not a vector polygon-union or an edge-matching scheme. Real
-// exports (Visio, a CAD tool) essentially never draw two "adjacent" rooms
-// sharing an exact edge: there's a T-junction where one room's straight
-// wall meets a corner of its neighbor, coordinates differ by the wall's
-// own thickness, or export rounding leaves them a hair apart -- any of
-// which defeats an exact-match scheme outright (this file's own first
-// attempt at this, edge cancellation, looked right against the hand-built
-// fixture and then produced a plain rectangle against a real WC 1st Floor
-// export, because not one wall in it was byte-identical between neighbors).
-// A grid does not care: it only asks "is this point within pad of ANY
-// member", which is true whether that's because the point is inside a
-// room, inside a hallway-width gap between two grouped rooms, or near a
-// wall drawn a few units off from its neighbor's. That same `pad` is also
-// what gives the traced line its outward breathing room -- offsetting a
-// concave polygon outward is itself real geometry this file has no
-// library for, and rasterizing at a padded radius produces that offset as
-// a side effect rather than a second problem to solve.
+// THE BORDER AROUND AN OPEN SPACE GROUP. Four steps, and the order is the
+// point -- each one exists because a simpler version failed on a real plan:
 //
-// resolution is cells along the LONGER side of the padded bbox; the
-// shorter side gets proportionally fewer, so cells are square. 64 is fine
-// enough to keep a real angled wall or a small closet legible without
-// the cost (or the render-thrash risk, since this runs in the render body)
-// of a much finer grid -- this is the same "enough, not exact" precision
-// floorPlanPole's 30x30 search already uses for a harder problem.
+//   1. RASTERIZE the members on a grid rotated to the building's own main wall
+//      direction. Real exports (Visio, a CAD tool) essentially never draw two
+//      "adjacent" rooms sharing an exact edge -- T-junctions, wall thickness,
+//      export rounding -- which is what sank this file's first attempt, an
+//      edge-matching tracer that drew a plain rectangle around a real WC 1st
+//      Floor export. A grid does not care whether two walls match. ROTATING it
+//      is what lets the walls of an angled building land on grid lines instead
+//      of on staircases.
+//   2. BRIDGE the gaps between members with a morphological CLOSING (grow by
+//      `bridge`, then shrink by the same amount) using a SQUARE, not a disc.
+//      This is the fix for the border being far from the rooms: the version
+//      before this grew the shape by one number and traced THAT, so the
+//      distance needed to bridge a hallway was also the distance the line sat
+//      off every wall -- about a third of a room's width. Closing bridges the
+//      same gaps and then gives the distance back. The square is the fix for
+//      the other complaint: a disc rounds every inside corner into an arc,
+//      and an arc can only be drawn as short sides at angles no wall has. A
+//      square aligned with the walls keeps both kinds of corner square.
+//   3. REGULARIZE the traced line: runs close to one of the plan's own wall
+//      directions (floorPlanWallAngles) are snapped to exactly that direction
+//      and then onto the real wall itself when one lies within a cell and a
+//      half, so a straight side of the border is parallel to -- and a fixed
+//      distance from -- the wall it follows rather than a least-squares guess
+//      at it. A run that matches no wall direction keeps its own angle.
+//   4. OFFSET each regularized side outward by `margin` and re-intersect
+//      neighbours. Offsetting straight LINES is what keeps corners sharp; the
+//      old version got its margin from the round grow in step 2, which is
+//      where the rounded corners came from in the first place.
 //
-// Returns an ARRAY of loops, not one -- if pad isn't enough to bridge
-// every member into a single blob (a cluster whose members are close by
-// floorPlanClusterShapes' own threshold, but padded raster still leaves a
-// gap between two of them), every disconnected piece is still traced and
-// rendered, rather than the whole thing silently collapsing to nothing.
-// Simplifies a closed loop (Ramer-Douglas-Peucker) so a diagonal or curved
-// wall -- which the raster grid can only approximate as a staircase of
-// axis-aligned steps -- reads as the smooth line it actually is, instead
-// of the sawtooth the grid drew. RDP is defined over an OPEN path (it
-// needs two fixed endpoints to measure every other point's deviation
-// from), so a closed loop is split at two points into two open chains,
-// each simplified independently, then stitched back together -- one
-// split point alone would leave that single seam artificially protected
-// from simplification, which is exactly where a sawtooth would survive.
-// Splitting at INDEX 0 and the halfway index keeps both chains a
-// reasonable fraction of the loop rather than one chain being almost the
-// whole boundary and the other a single edge.
-function floorPlanSimplifyPath(pts, eps) {
-  if (pts.length < 3) return pts;
-  const start = pts[0], end = pts[pts.length - 1];
-  let maxDist = 0, index = 0;
-  for (let i = 1; i < pts.length - 1; i++) {
-    const d = floorPlanSegDist(pts[i], start, end);
-    if (d > maxDist) { maxDist = d; index = i; }
-  }
-  if (maxDist <= eps) return [start, end];
-  const left = floorPlanSimplifyPath(pts.slice(0, index + 1), eps);
-  const right = floorPlanSimplifyPath(pts.slice(index), eps);
-  return left.slice(0, -1).concat(right);
+// Returns an ARRAY of loops: members too far apart to bridge still each get
+// traced rather than the whole group collapsing to nothing, and an enclosed
+// courtyard wider than the bridge is a hole with its own loop.
+const FLOOR_PLAN_OUTLINE_CELLS = 240;
+const FLOOR_PLAN_SNAP_TOLERANCE = 15 * Math.PI / 180;
+// Smallest angle between two DIRECTED angles, in [0, PI].
+function floorPlanAngleGap(a, b) {
+  const d = Math.abs(a - b) % (2 * Math.PI);
+  return d > Math.PI ? 2 * Math.PI - d : d;
 }
-function floorPlanSimplifyLoop(loop, eps) {
-  const n = loop.length;
-  if (n < 5 || !(eps > 0)) return loop;
-  const chainPts = (from, to) => {
-    const out = [];
-    for (let i = from; ; i = (i + 1) % n) {
-      out.push(loop[i]);
-      if (i === to) break;
+// The directions a plan's walls actually run in, as undirected angles in
+// [0, PI), the direction carrying the most total wall length first. Peaks of
+// a length-weighted 1-degree histogram, each refined against the real edges
+// near it and then blocked +-8 degrees so one direction can't be picked twice;
+// a direction under 5% of the total wall length is noise, not a wall.
+function floorPlanWallAngles(polys) {
+  const edges = [];
+  let total = 0;
+  for (const poly of polys) {
+    for (let i = 0, n = poly.length; i < n; i++) {
+      const a = poly[i], b = poly[(i + 1) % n];
+      const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      if (!(len > 0)) continue;
+      const ang = ((Math.atan2(b[1] - a[1], b[0] - a[0]) % Math.PI) + Math.PI) % Math.PI;
+      edges.push({ ang, len });
+      total += len;
+    }
+  }
+  if (!(total > 0)) return [0];
+  const bins = new Float64Array(180);
+  for (const e of edges) bins[Math.round(e.ang * 180 / Math.PI) % 180] += e.len;
+  const smooth = new Float64Array(180);
+  for (let i = 0; i < 180; i++) for (let d = -2; d <= 2; d++) smooth[i] += bins[(i + d + 180) % 180];
+  const undirected = (a, b) => { const d = Math.abs(a - b) % Math.PI; return Math.min(d, Math.PI - d); };
+  const picked = [];
+  const blocked = new Uint8Array(180);
+  while (picked.length < 4) {
+    let best = -1;
+    for (let i = 0; i < 180; i++) if (!blocked[i] && (best === -1 || smooth[i] > smooth[best])) best = i;
+    if (best === -1 || smooth[best] < total * 0.05) break;
+    const centre = best * Math.PI / 180;
+    let sx = 0, sw = 0;
+    for (const e of edges) {
+      if (undirected(e.ang, centre) > 3 * Math.PI / 180) continue;
+      let a = e.ang;
+      if (a - centre > Math.PI / 2) a -= Math.PI; else if (centre - a > Math.PI / 2) a += Math.PI;
+      sx += a * e.len; sw += e.len;
+    }
+    picked.push(((((sw ? sx / sw : centre) % Math.PI) + Math.PI) % Math.PI));
+    for (let d = -8; d <= 8; d++) blocked[(best + d + 180) % 180] = 1;
+  }
+  return picked.length ? picked : [0];
+}
+// Step 3 and 4 for ONE traced loop. `raw` is the loop at wall level, one
+// point per grid step, with the inside of the shape on the (-dy, dx) side of
+// every step -- the tracer guarantees that for outer loops and holes alike,
+// which is what lets "outward" be read off each side's own direction.
+function floorPlanRegularizeLoop(raw, cell, margin, snapAngles, walls) {
+  const n = raw.length;
+  if (n < 4) return null;
+  const pt = i => raw[((i % n) + n) % n];
+  // Ramer-Douglas-Peucker with a cell-and-a-half tolerance, over a closed loop
+  // split at two anchors so neither seam escapes simplification. A clean
+  // raster staircase deviates under one cell from the line it approximates,
+  // but a line passing exactly through cell centres rounds into occasional
+  // DOUBLE steps (~1.41 cells off) -- one cell left those standing as a
+  // sawtooth. A real step of two cells or more still survives.
+  const keep = new Uint8Array(n);
+  const rdp = (i0, i1) => {
+    if (i1 - i0 < 2) return;
+    const a = pt(i0), b = pt(i1);
+    let best = -1, bestD = 1.5 * cell;
+    for (let i = i0 + 1; i < i1; i++) {
+      const d = floorPlanSegDist(pt(i), a, b);
+      if (d > bestD) { bestD = d; best = i; }
+    }
+    if (best === -1) return;
+    keep[best % n] = 1;
+    rdp(i0, best);
+    rdp(best, i1);
+  };
+  const mid = Math.floor(n / 2);
+  keep[0] = 1; keep[mid] = 1;
+  rdp(0, mid);
+  rdp(mid, n);
+  const idx = [];
+  for (let i = 0; i < n; i++) if (keep[i]) idx.push(i);
+  if (idx.length < 3) return null;
+
+  let segs = idx.map((i0, j) => {
+    const i1 = j + 1 < idx.length ? idx[j + 1] : idx[0] + n;
+    const a = pt(i0), b = pt(i1);
+    const chord = Math.atan2(b[1] - a[1], b[0] - a[0]);
+    // Snapped with its SENSE kept (s or s + PI, whichever is nearer), since
+    // which way a side runs is what says which side of it is outside.
+    let nearest = chord, gap = Infinity;
+    for (const s of snapAngles) {
+      for (const cand of [s, s + Math.PI]) {
+        const d = floorPlanAngleGap(cand, chord);
+        if (d < gap) { gap = d; nearest = cand; }
+      }
+    }
+    const pts = [];
+    for (let i = i0; i <= i1; i++) pts.push(pt(i));
+    return { ang: gap <= FLOOR_PLAN_SNAP_TOLERANCE ? nearest : chord, pts };
+  });
+  // A run under four cells long (under 2% of the group across) between two
+  // sides that can meet is a corner nub the grid left behind -- the flat tip a
+  // corner leaves when it lands diagonally on the grid -- not a wall -- dropping it lets its neighbours meet at the corner itself.
+  for (let j = 0; j < segs.length && segs.length > 3; ) {
+    const s = segs[j], p0 = s.pts[0], p1 = s.pts[s.pts.length - 1];
+    const prev = segs[(j - 1 + segs.length) % segs.length], next = segs[(j + 1) % segs.length];
+    const meet = Math.abs(Math.sin(next.ang - prev.ang)) > Math.sin(20 * Math.PI / 180);
+    if (Math.hypot(p1[0] - p0[0], p1[1] - p0[1]) < 4 * cell && meet) segs.splice(j, 1);
+    else j++;
+  }
+  // Neighbouring runs snapped to the SAME direction are one side of the
+  // border with a sub-cell jog between them (two rooms' walls a hair out of
+  // line) -- one side, fitted once, rather than a stair step nobody drew.
+  let changed = true;
+  while (changed && segs.length > 2) {
+    changed = false;
+    for (let j = 0; j < segs.length; j++) {
+      const k = (j + 1) % segs.length;
+      if (floorPlanAngleGap(segs[j].ang, segs[k].ang) < 1e-9) {
+        const merged = { ang: segs[j].ang, pts: segs[j].pts.concat(segs[k].pts.slice(1)) };
+        if (k === 0) { segs[0] = merged; segs.pop(); } else segs.splice(j, 2, merged);
+        changed = true;
+        break;
+      }
+    }
+  }
+  if (segs.length < 3) return null;
+
+  const lines = segs.map(s => {
+    const ux = Math.cos(s.ang), uy = Math.sin(s.ang);
+    const ox = uy, oy = -ux; // outward normal: the tracer keeps the inside on (-dy, dx)
+    let c = 0;
+    for (const p of s.pts) c += ox * p[0] + oy * p[1];
+    c /= s.pts.length;
+    // Onto the real wall. Parallel within 2 degrees, within a cell and a half
+    // of the fitted line, and actually alongside this stretch of it; several
+    // qualifying walls (two rooms' faces a hair apart) are averaged by how
+    // much of the stretch each one covers.
+    let lo = Infinity, hi = -Infinity;
+    for (const p of s.pts) { const t = ux * p[0] + uy * p[1]; if (t < lo) lo = t; if (t > hi) hi = t; }
+    let sw = 0, sc = 0;
+    for (const w of walls) {
+      if (Math.abs(ux * w.dy - uy * w.dx) > Math.sin(2 * Math.PI / 180) * w.len) continue;
+      const cw = ox * w.mx + oy * w.my;
+      if (Math.abs(cw - c) > 1.5 * cell) continue;
+      const ta = ux * w.a[0] + uy * w.a[1], tb = ux * w.b[0] + uy * w.b[1];
+      const overlap = Math.min(hi, Math.max(ta, tb)) - Math.max(lo, Math.min(ta, tb));
+      if (overlap <= 0) continue;
+      sw += overlap; sc += overlap * cw;
+    }
+    if (sw > 0) c = sc / sw;
+    return { ox, oy, c: c + margin, end: s.pts[s.pts.length - 1] };
+  });
+
+  // Corners: neighbouring sides intersected. Where they're too close to
+  // parallel for that to be meaningful (under 20 degrees apart), or the
+  // intersection lands implausibly far from the corner the grid actually
+  // traced, the corner becomes a short connector through the traced point
+  // instead of a spike.
+  const out = [];
+  const onto = (p, l) => { const d = l.ox * p[0] + l.oy * p[1] - l.c; return [p[0] - d * l.ox, p[1] - d * l.oy]; };
+  for (let j = 0; j < lines.length; j++) {
+    const A = lines[j], B = lines[(j + 1) % lines.length];
+    const det = A.ox * B.oy - A.oy * B.ox;
+    let placed = false;
+    if (Math.abs(det) > Math.sin(20 * Math.PI / 180)) {
+      const x = (A.c * B.oy - A.oy * B.c) / det, y = (A.ox * B.c - A.c * B.ox) / det;
+      if (Math.hypot(x - A.end[0], y - A.end[1]) <= 4 * cell + 2 * margin) { out.push([x, y]); placed = true; }
+    }
+    if (!placed) { out.push(onto(A.end, A)); out.push(onto(A.end, B)); }
+  }
+  return out.length >= 3 ? out : null;
+}
+// `bridge`: gaps between members narrower than twice this are filled.
+// `margin`: how far outside the walls the border sits.
+function floorPlanRasterOutline(memberPolygons, bridge, margin) {
+  const polysIn = (memberPolygons || []).filter(p => Array.isArray(p) && p.length >= 3);
+  if (!polysIn.length) return null;
+  const angles = floorPlanWallAngles(polysIn);
+  const t0 = angles[0], cs = Math.cos(t0), sn = Math.sin(t0);
+  const rot = p => [p[0] * cs + p[1] * sn, -p[0] * sn + p[1] * cs];
+  const unrot = p => [p[0] * cs - p[1] * sn, p[0] * sn + p[1] * cs];
+  const polys = polysIn.map(poly => poly.map(rot));
+  const R = Math.max(0, Number(bridge) || 0), m = Math.max(0, Number(margin) || 0);
+  const box = floorPlanBbox(polys.flat());
+  if (!(box.w > 0) || !(box.h > 0)) return null;
+
+  // A fixed number of cells along the longer side, coarsened only if the
+  // bridge's own border would push the grid past a quarter-million cells.
+  // This runs in the render body, and a fine grid is cheap because every step
+  // below is linear in the cell count.
+  let cell = Math.max(box.w, box.h) / FLOOR_PLAN_OUTLINE_CELLS;
+  let r, border, nx, ny;
+  for (;;) {
+    r = Math.ceil(R / cell - 1e-9);
+    border = r + 2;
+    nx = Math.ceil(box.w / cell) + 2 * border;
+    ny = Math.ceil(box.h / cell) + 2 * border;
+    if (nx * ny <= 250000) break;
+    cell *= 1.25;
+  }
+  const gx = box.x - border * cell, gy = box.y - border * cell;
+
+  // Step 1: a cell is inside when its CENTRE is inside a member (scanline,
+  // even-odd per polygon).
+  const mask = new Uint8Array(nx * ny);
+  for (const poly of polys) {
+    const n = poly.length;
+    for (let iy = 0; iy < ny; iy++) {
+      const y = gy + (iy + 0.5) * cell;
+      const hits = [];
+      for (let i = 0; i < n; i++) {
+        const a = poly[i], b = poly[(i + 1) % n];
+        if ((a[1] > y) !== (b[1] > y)) hits.push(a[0] + (y - a[1]) * (b[0] - a[0]) / (b[1] - a[1]));
+      }
+      if (hits.length < 2) continue;
+      hits.sort((p, q) => p - q);
+      for (let k = 0; k + 1 < hits.length; k += 2) {
+        const from = Math.max(0, Math.ceil((hits[k] - gx) / cell - 0.5));
+        const to = Math.min(nx - 1, Math.floor((hits[k + 1] - gx) / cell - 0.5));
+        for (let ix = from; ix <= to; ix++) mask[iy * nx + ix] = 1;
+      }
+    }
+  }
+
+  // Step 2: square closing -- grow by r cells, then shrink by r (shrinking is
+  // growing the outside). Each grow is a row pass then a column pass of a
+  // sliding window, so it costs the same whatever the radius.
+  const grow = (src, rad) => {
+    const tmp = new Uint8Array(nx * ny), out = new Uint8Array(nx * ny);
+    const pre = new Int32Array(Math.max(nx, ny) + 1);
+    for (let iy = 0; iy < ny; iy++) {
+      for (let ix = 0; ix < nx; ix++) pre[ix + 1] = pre[ix] + src[iy * nx + ix];
+      for (let ix = 0; ix < nx; ix++) {
+        if (pre[Math.min(nx, ix + rad + 1)] - pre[Math.max(0, ix - rad)] > 0) tmp[iy * nx + ix] = 1;
+      }
+    }
+    for (let ix = 0; ix < nx; ix++) {
+      for (let iy = 0; iy < ny; iy++) pre[iy + 1] = pre[iy] + tmp[iy * nx + ix];
+      for (let iy = 0; iy < ny; iy++) {
+        if (pre[Math.min(ny, iy + rad + 1)] - pre[Math.max(0, iy - rad)] > 0) out[iy * nx + ix] = 1;
+      }
     }
     return out;
   };
-  const mid = Math.floor(n / 2);
-  const a = floorPlanSimplifyPath(chainPts(0, mid), eps);
-  const b = floorPlanSimplifyPath(chainPts(mid, 0), eps);
-  const simplified = a.slice(0, -1).concat(b.slice(0, -1));
-  return simplified.length >= 3 ? simplified : loop;
-}
-function floorPlanRasterOutline(memberPolygons, pad, resolution) {
-  const allPts = memberPolygons.flat();
-  if (allPts.length < 3) return null;
-  const rawBbox = floorPlanBbox(allPts);
-  const bbox = { x: rawBbox.x - pad, y: rawBbox.y - pad, w: rawBbox.w + pad * 2, h: rawBbox.h + pad * 2 };
-  if (bbox.w <= 0 || bbox.h <= 0) return null;
-  const res = resolution || 64;
-  // The grid has to be fine enough to resolve `pad` itself, not just the
-  // shapes' own extent -- with a plain bbox/res cell size, a small pad on
-  // a wide cluster (bridging one narrow gap across an otherwise-large
-  // group) could land smaller than a single cell, so whether two members'
-  // padded regions actually touch would flicker cell to cell instead of
-  // meeting cleanly, fragmenting the trace into many tiny stray loops. At
-  // least 3 cells across the pad is enough for that meeting to land
-  // consistently; capped so a vanishingly small pad on a huge plan can't
-  // demand an unbounded grid.
-  const cell = Math.max(1e-9, Math.min(Math.max(bbox.w, bbox.h) / res, pad > 0 ? Math.max(pad / 3, 1e-9) : Infinity));
-  const nx = Math.min(400, Math.max(1, Math.round(bbox.w / cell)));
-  const ny = Math.min(400, Math.max(1, Math.round(bbox.h / cell)));
-  // Grid-line coordinates are computed ONCE per line and looked up by
-  // index, never re-derived per cell -- two neighboring cells computing
-  // their shared corner independently (bbox.x + ix*cw vs bbox.x + (ix-1)*cw
-  // + cw) can round to two DIFFERENT floats for what is mathematically the
-  // same point, which silently breaks the exact-match stitching below. A
-  // shared xs/ys array is what makes two cells' idea of "the same corner"
-  // actually the same value.
-  const cw = bbox.w / nx, ch = bbox.h / ny;
-  const xs = new Array(nx + 1); for (let i = 0; i <= nx; i++) xs[i] = bbox.x + i * cw;
-  const ys = new Array(ny + 1); for (let i = 0; i <= ny; i++) ys[i] = bbox.y + i * ch;
-  // Distance from a point to a polygon: 0 when inside, else the nearest
-  // edge -- reusing floorPlanPointInPoly and floorPlanSegDist exactly as
-  // floorPlanShapeGap does for the same "how far is this from that shape"
-  // question, asked here of a grid point instead of another polygon.
-  const distToPoly = (p, poly) => {
-    if (floorPlanPointInPoly(p, poly)) return 0;
-    let d = Infinity;
-    for (let i = 0, n = poly.length; i < n; i++) d = Math.min(d, floorPlanSegDist(p, poly[i], poly[(i + 1) % n]));
-    return d;
+  let solid = mask;
+  if (r > 0) {
+    const grown = grow(mask, r);
+    const outside = new Uint8Array(nx * ny);
+    for (let i = 0; i < outside.length; i++) outside[i] = grown[i] ? 0 : 1;
+    const outsideGrown = grow(outside, r);
+    solid = new Uint8Array(nx * ny);
+    for (let i = 0; i < solid.length; i++) solid[i] = outsideGrown[i] ? 0 : 1;
+  }
+
+  // Trace the solid region's boundary on the grid LATTICE (integer corner
+  // ids, so two steps meet on an identical key rather than on floats that
+  // happen to agree). Each inside cell contributes the sides it shares with
+  // outside, oriented so the inside is on the (-dy, dx) side of every step.
+  const at = (ix, iy) => ix >= 0 && ix < nx && iy >= 0 && iy < ny && solid[iy * nx + ix] === 1;
+  const W = nx + 1;
+  const from = [], to = [];
+  const byStart = new Map();
+  const step = (x0, y0, x1, y1) => {
+    const k = y0 * W + x0;
+    const list = byStart.get(k);
+    if (list) list.push(from.length); else byStart.set(k, [from.length]);
+    from.push(k); to.push(y1 * W + x1);
   };
-  const inside = new Uint8Array(nx * ny);
-  for (let iy = 0; iy < ny; iy++) {
-    const py = (ys[iy] + ys[iy + 1]) / 2;
-    for (let ix = 0; ix < nx; ix++) {
-      const px = (xs[ix] + xs[ix + 1]) / 2;
-      for (const poly of memberPolygons) {
-        if (distToPoly([px, py], poly) <= pad) { inside[iy * nx + ix] = 1; break; }
-      }
-    }
-  }
-  const isInside = (ix, iy) => ix >= 0 && ix < nx && iy >= 0 && iy < ny && inside[iy * nx + ix];
-  // Every inside cell contributes the edges it shares with an outside (or
-  // off-grid) neighbor -- adjacent inside cells share an edge that never
-  // gets added by either side, which is what leaves only the true outline.
-  const edges = [];
   for (let iy = 0; iy < ny; iy++) {
     for (let ix = 0; ix < nx; ix++) {
-      if (!isInside(ix, iy)) continue;
-      const x0 = xs[ix], x1 = xs[ix + 1], y0 = ys[iy], y1 = ys[iy + 1];
-      if (!isInside(ix, iy - 1)) edges.push([[x0, y0], [x1, y0]]);
-      if (!isInside(ix + 1, iy)) edges.push([[x1, y0], [x1, y1]]);
-      if (!isInside(ix, iy + 1)) edges.push([[x1, y1], [x0, y1]]);
-      if (!isInside(ix - 1, iy)) edges.push([[x0, y1], [x0, y0]]);
+      if (!at(ix, iy)) continue;
+      if (!at(ix, iy - 1)) step(ix, iy, ix + 1, iy);
+      if (!at(ix + 1, iy)) step(ix + 1, iy, ix + 1, iy + 1);
+      if (!at(ix, iy + 1)) step(ix + 1, iy + 1, ix, iy + 1);
+      if (!at(ix - 1, iy)) step(ix, iy + 1, ix, iy);
     }
   }
-  if (!edges.length) return null;
-  // Stitching needs no epsilon here: every edge came off the SAME xs/ys
-  // arrays, so two edges meant to meet share the identical float, not a
-  // close one -- that guarantee is exactly what xs/ys above buys.
-  const key = p => p[0] + "," + p[1];
-  const used = new Array(edges.length).fill(false);
-  const loops = [];
-  for (let start = 0; start < edges.length; start++) {
-    if (used[start]) continue;
-    used[start] = true;
-    const loop = [edges[start][0], edges[start][1]];
-    let guard = edges.length + 1;
-    while (guard-- > 0) {
-      const tailKey = key(loop[loop.length - 1]);
-      let next = -1;
-      for (let i = 0; i < edges.length; i++) {
-        if (!used[i] && key(edges[i][0]) === tailKey) { next = i; break; }
+  if (!from.length) return null;
+  const dirOf = e => [(to[e] % W) - (from[e] % W), Math.floor(to[e] / W) - Math.floor(from[e] / W)];
+  const used = new Uint8Array(from.length);
+  const rawLoops = [];
+  for (let s = 0; s < from.length; s++) {
+    if (used[s]) continue;
+    used[s] = 1;
+    const ids = [from[s]];
+    let cur = s;
+    for (let guard = from.length; guard > 0 && to[cur] !== from[s]; guard--) {
+      const cands = (byStart.get(to[cur]) || []).filter(e => !used[e]);
+      if (!cands.length) break;
+      let next = cands[0];
+      // Two inside cells touching only at a corner: keep turning toward the
+      // inside, so each stays its own loop instead of one figure-eight.
+      if (cands.length > 1) {
+        const [dx, dy] = dirOf(cur);
+        const turn = cands.find(e => { const [ex, ey] = dirOf(e); return ex === -dy && ey === dx; });
+        if (turn !== undefined) next = turn;
       }
-      if (next === -1) break;
-      used[next] = true;
-      loop.push(edges[next][1]);
-      if (key(loop[loop.length - 1]) === key(loop[0])) break;
+      used[next] = 1;
+      ids.push(from[next]);
+      cur = next;
     }
-    if (loop.length >= 3) loops.push(loop);
+    if (ids.length >= 4) rawLoops.push(ids.map(k => [gx + (k % W) * cell, gy + Math.floor(k / W) * cell]));
   }
-  if (!loops.length) return null;
-  // Simplified AFTER stitching, not before: RDP needs one connected path
-  // to measure deviation along, not a pile of unordered unit edges. The
-  // tolerance is tied to `cell`, the same unit the sawtooth's own step
-  // size is measured in -- a diagonal wall's staircase never deviates from
-  // the true line by more than about one cell, so any smaller tolerance
-  // would leave the sawtooth standing and any much larger one starts
-  // eating real corners the grid resolved correctly.
-  return loops.map(loop => floorPlanSimplifyLoop(loop, cell * 1.5));
+
+  // Steps 3 and 4, in the rotated frame, then back.
+  const snapAngles = angles.map(a => a - t0).concat([Math.PI / 2]);
+  const walls = [];
+  for (const poly of polys) {
+    for (let i = 0, n = poly.length; i < n; i++) {
+      const a = poly[i], b = poly[(i + 1) % n];
+      const dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy);
+      if (len > 0) walls.push({ a, b, dx, dy, len, mx: (a[0] + b[0]) / 2, my: (a[1] + b[1]) / 2 });
+    }
+  }
+  const loops = rawLoops
+    .map(raw => floorPlanRegularizeLoop(raw, cell, m, snapAngles, walls))
+    .filter(Boolean)
+    .map(loop => loop.map(unrot));
+  return loops.length ? loops : null;
 }
 // The minimum distance between two polygons, vertex-to-EDGE in both
 // directions (not just vertex-to-vertex) -- reusing floorPlanSegDist, the
@@ -18106,7 +18292,7 @@ function FloorPlanTabContent({
               PROXIMITY first -- close rooms (a hallway-width gap, relative
               to their own size) share one border, far-apart rooms get
               separate ones -- and each cluster's border is traced by
-              floorPlanRasterOutline, which pads and rasterizes rather than
+              floorPlanRasterOutline, which rasterizes rather than
               matching exact wall coordinates: a real export's neighboring
               rooms almost never share a byte-identical edge (a T-junction,
               wall thickness, export rounding), so an exact-match tracer
@@ -18124,31 +18310,28 @@ function FloorPlanTabContent({
             return clusters.map((cluster, ci) => {
               const clusterPts = cluster.map(m => m.pts);
               const bbox = floorPlanBbox(clusterPts.flat());
-              // pad has two jobs at once: it's what bridges a real gap
-              // between this cluster's own members (so they trace as ONE
-              // blob, not several), and it's what gives the traced line its
-              // outward breathing room past the walls it follows -- see
-              // floorPlanRasterOutline's own comment on why one number does
-              // both. Half the closeness threshold that justified grouping
-              // these rooms is enough to bridge a gap that size; a fixed
-              // 10 screen-px floor keeps a tight or single-member cluster
-              // from tracing flush against its own walls with no margin.
+              // Two numbers, two jobs -- see floorPlanRasterOutline. `bridge`
+              // closes the gaps that justified grouping these rooms (half the
+              // closeness threshold fills a gap that size); `margin` is how
+              // far the line sits off the walls, in SCREEN pixels so it reads
+              // the same at every zoom. They used to be one number, which is
+              // why the border sat a third of a room away from everything.
               const roomScale = Math.min(...clusterPts.map(pts => floorPlanRoomScale(pts)));
-              const pad = Math.max(FLOOR_PLAN_CLUSTER_CLOSE_FACTOR * roomScale / 2, 10 * k);
-              const loops = floorPlanRasterOutline(clusterPts, pad);
+              const bridge = FLOOR_PLAN_CLUSTER_CLOSE_FACTOR * roomScale / 2;
+              const margin = 6 * k;
+              const loops = floorPlanRasterOutline(clusterPts, bridge, margin);
               const frame = loops
                 ? <path d={loops.map(loop => "M" + loop.map(p => p.join(" ")).join(" L") + " Z").join(" ")}
-                    fill="none" stroke={C.brandDark} strokeWidth={3 * k} strokeLinejoin="round" />
-                : (() => {
-                    const bpad = 14 * k;
-                    const bx = bbox.x - bpad, by = bbox.y - bpad, bw = bbox.w + bpad * 2, bh = bbox.h + bpad * 2;
-                    return <rect x={bx} y={by} width={bw} height={bh} rx={8 * k}
-                      fill="none" stroke={C.brandDark} strokeWidth={2.5 * k} />;
-                  })();
+                    fill="none" stroke={C.brandDark} strokeWidth={3 * k} strokeLinejoin="miter" strokeMiterlimit={4} />
+                : <rect x={bbox.x - margin} y={bbox.y - margin} width={bbox.w + margin * 2} height={bbox.h + margin * 2}
+                    fill="none" stroke={C.brandDark} strokeWidth={2.5 * k} />;
+              // Above the border's own highest point, not the rooms' -- on a
+              // rotated building those are different places.
+              const top = loops ? Math.min(...loops.flat().map(p => p[1])) : bbox.y - margin;
               return (
                 <g key={ci} style={{ pointerEvents: "none" }}>
                   {frame}
-                  <text className="fp-text" x={bbox.x + bbox.w / 2} y={bbox.y - pad - 8 * k} textAnchor="middle"
+                  <text className="fp-text" x={bbox.x + bbox.w / 2} y={top - 8 * k} textAnchor="middle"
                     fontSize={16 * k} fontWeight={700} fill={C.brandDark}>
                     {grp.name}
                   </text>

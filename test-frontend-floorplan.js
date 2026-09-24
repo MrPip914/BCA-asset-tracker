@@ -102,14 +102,18 @@ check('availableTabsFor no longer offers a floorPlan tab for Computer', !availab
 // --- 2. geometry: clearance-based label sizing --------------------------------
 const closeFactorLine = src.match(/const FLOOR_PLAN_CLUSTER_CLOSE_FACTOR = [\d.]+;/);
 if (!closeFactorLine) throw new Error('FLOOR_PLAN_CLUSTER_CLOSE_FACTOR not found');
+const outlineConsts = src.match(/const FLOOR_PLAN_OUTLINE_CELLS = [^;]+;\r?\nconst FLOOR_PLAN_SNAP_TOLERANCE = [^;]+;/);
+if (!outlineConsts) throw new Error('FLOOR_PLAN_OUTLINE_CELLS / FLOOR_PLAN_SNAP_TOLERANCE not found');
 const geomMod = { exports: {} };
 new Function('module', [
   grabFn('floorPlanPointInPoly'),
   grabFn('floorPlanSegDist'),
   grabFn('floorPlanPole'),
   grabFn('floorPlanBbox'),
-  grabFn('floorPlanSimplifyPath'),
-  grabFn('floorPlanSimplifyLoop'),
+  outlineConsts[0],
+  grabFn('floorPlanAngleGap'),
+  grabFn('floorPlanWallAngles'),
+  grabFn('floorPlanRegularizeLoop'),
   grabFn('floorPlanRasterOutline'),
   grabFn('floorPlanShapeGap'),
   closeFactorLine[0],
@@ -119,9 +123,9 @@ new Function('module', [
   grabFn('floorPlanLabelFit'),
   grabFn('floorPlanZoomViewBox'),
   grabFn('floorPlanZoomAt'),
-  'module.exports = { floorPlanPole, floorPlanBbox, floorPlanSimplifyLoop, floorPlanRasterOutline, floorPlanShapeGap, floorPlanClusterShapes, floorPlanLabelFit, floorPlanZoomViewBox, floorPlanZoomAt };',
+  'module.exports = { floorPlanPole, floorPlanBbox, floorPlanWallAngles, floorPlanRasterOutline, floorPlanShapeGap, floorPlanClusterShapes, floorPlanLabelFit, floorPlanZoomViewBox, floorPlanZoomAt };',
 ].join('\n'))(geomMod);
-const { floorPlanPole, floorPlanBbox, floorPlanSimplifyLoop, floorPlanRasterOutline, floorPlanShapeGap, floorPlanClusterShapes, floorPlanLabelFit, floorPlanZoomViewBox, floorPlanZoomAt } = geomMod.exports;
+const { floorPlanPole, floorPlanBbox, floorPlanWallAngles, floorPlanRasterOutline, floorPlanShapeGap, floorPlanClusterShapes, floorPlanLabelFit, floorPlanZoomViewBox, floorPlanZoomAt } = geomMod.exports;
 
 // A 100x100 square: the pole should land at the center with clearance ~50.
 const square = [[0, 0], [100, 0], [100, 100], [0, 100]];
@@ -221,50 +225,119 @@ const totalArea = loops => loops.reduce((s, l) => s + shoelaceArea(l), 0);
 check('degenerate input (too few points) returns null rather than throwing',
   floorPlanRasterOutline([[[0, 0], [1, 1]]], 0) === null);
 
-// --- 2b-ii. smoothing a rasterized diagonal's staircase -----------------------
-// The grid can only draw a diagonal or curved wall as a staircase of
-// axis-aligned steps (screenshotted on a real tenant's floor plan as a
-// visible sawtooth). floorPlanSimplifyLoop's job is to collapse that
-// staircase back into the smooth line it approximates, without eating a
-// GENUINE right-angle corner in the process.
+// --- 2b-ii. the border is PARALLEL to the walls and CLOSE to them -------------
+// Eric, 2026-09-24: the border had "many sides that aren't parallel with the
+// shape of the rooms" and sat too far out. Both came from one padding number
+// doing two jobs -- the distance needed to bridge a hallway was also the
+// distance the line sat off every wall, and growing the shape by a DISC turned
+// every corner into an arc that could only be drawn as off-angle sides. These
+// check the fix at its three observable properties.
+const sideAngles = loop => loop.map((p, i) => {
+  const q = loop[(i + 1) % loop.length];
+  return ((Math.atan2(q[1] - p[1], q[0] - p[0]) * 180 / Math.PI) % 180 + 180) % 180;
+});
+const allNear = (angles, targets, tol) => angles.every(a => targets.some(t => {
+  const d = Math.abs(a - t) % 180;
+  return Math.min(d, 180 - d) <= tol;
+}));
+const sq = (x, y, w, h) => [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
+const turned = (poly, deg) => {
+  const a = deg * Math.PI / 180, c = Math.cos(a), s = Math.sin(a);
+  return poly.map(([x, y]) => [x * c - y * s, x * s + y * c]);
+};
+
+// A single room with a 5-unit margin: every side exactly 5 off its wall.
 {
-  // A 10-step staircase climbing from (0,0) to (10,10) -- exactly the
-  // shape a raster trace of a diagonal wall at cell size 1 produces --
-  // closed into a polygon along the bottom and left edges. No step
-  // deviates from the true diagonal by more than one cell, so an eps of
-  // 1.5 should collapse the whole climb to essentially one straight edge.
-  const staircase = [];
-  for (let i = 0; i < 10; i++) { staircase.push([i, i]); staircase.push([i + 1, i]); }
-  staircase.push([10, 0]);
-  staircase.push([0, 0]);
-  const before = staircase.length;
-  const simplified = floorPlanSimplifyLoop(staircase, 1.5);
-  check('a staircase approximating a diagonal simplifies to far fewer points',
-    simplified.length < before / 2, `before=${before} after=${simplified.length}`);
-  check('...and the enclosed area barely moves (within a couple cells\' worth)',
-    Math.abs(totalArea([simplified]) - totalArea([staircase])) < 10,
-    `before=${totalArea([staircase])} after=${totalArea([simplified])}`);
+  const loops = floorPlanRasterOutline([sq(0, 0, 100, 60)], 0, 5);
+  const xs = loops[0].map(p => p[0]), ys = loops[0].map(p => p[1]);
+  check('margin puts every side exactly `margin` off its wall, not a third of a room away',
+    loops.length === 1 && approx(Math.min(...xs), -5, 0.01) && approx(Math.max(...xs), 105, 0.01)
+      && approx(Math.min(...ys), -5, 0.01) && approx(Math.max(...ys), 65, 0.01),
+    JSON.stringify(loops[0]));
+  check('...and has exactly four sides', loops[0].length === 4, `got ${loops[0].length}`);
 }
 
-// A plain rectangle has no sawtooth to remove -- simplification must leave
-// its real corners alone rather than treating every corner as noise.
+// Bridging does NOT move the line off the walls any more. Two rooms with a
+// 10-unit hallway between them, a bridge wide enough to close it, and a
+// 3-unit margin: one border, its extent the rooms' own extent plus 3.
 {
-  const rect = [[0, 0], [50, 0], [50, 30], [0, 30]];
-  const simplified = floorPlanSimplifyLoop(rect, 1.5);
-  check('a rectangle with no staircase keeps its own area (corners aren\'t eaten)',
-    approx(totalArea([simplified]), 1500, 5), `got ${totalArea([simplified])}`);
+  const loops = floorPlanRasterOutline([sq(0, 0, 100, 100), sq(110, 0, 100, 100)], 6, 3);
+  const xs = loops[0].map(p => p[0]), ys = loops[0].map(p => p[1]);
+  check('a wide bridge still leaves the line `margin` off the walls (the two jobs are separate)',
+    loops.length === 1 && approx(Math.min(...xs), -3, 0.01) && approx(Math.max(...xs), 213, 0.01)
+      && approx(Math.min(...ys), -3, 0.01) && approx(Math.max(...ys), 103, 0.01),
+    JSON.stringify(loops[0]));
 }
 
-// The full pipeline: two shapes meeting along a DIAGONAL edge (not an
-// axis-aligned one) still traces to roughly their combined area once
-// simplified, confirming the smoothing runs inside floorPlanRasterOutline
-// itself and not just when called directly.
+// An L of three rooms with a LARGE bridge: the inside corner must stay a
+// corner. A disc-shaped grow rounds it into an arc (extra area, off-angle
+// sides); a square one keeps it -- exactly 30000, every side at 0 or 90.
 {
-  const lower = [[0, 0], [100, 0], [100, 100], [0, 0]]; // triangle, hypotenuse (0,0)-(100,100)
-  const upper = [[0, 0], [100, 100], [0, 100]]; // the other half of the same square
-  const loops = floorPlanRasterOutline([lower, upper], 0);
-  check('two triangles sharing a diagonal still trace to ~the combined 10000 square',
-    loops && approx(totalArea(loops), 10000, 800), `got ${loops && totalArea(loops)}`);
+  const loops = floorPlanRasterOutline([sq(0, 0, 100, 100), sq(100, 0, 100, 100), sq(100, 100, 100, 100)], 30, 0);
+  check('a big bridge does not round the inside corner of an L (area stays exactly 30000)',
+    loops.length === 1 && approx(totalArea(loops), 30000, 1), `got ${totalArea(loops)}`);
+  check('...and every side of it is parallel to a wall',
+    allNear(sideAngles(loops[0]), [0, 90], 0.01), JSON.stringify(sideAngles(loops[0])));
+  check('...with six sides, not a staircase or a chamfered corner', loops[0].length === 6, `got ${loops[0].length}`);
+}
+
+// Rooms that don't line up (one dropped 20 units, a gap between): the
+// bridge between them is built from walls-parallel sides too, not a
+// diagonal from one room's corner to the other's.
+{
+  const loops = floorPlanRasterOutline([sq(0, 0, 100, 100), sq(108, 20, 100, 100)], 10, 4);
+  check('staggered rooms bridge with sides parallel to the walls, not a diagonal',
+    loops.length === 1 && allNear(sideAngles(loops[0]), [0, 90], 0.01), JSON.stringify(sideAngles(loops[0])));
+}
+
+// A building at an angle: the SAME L, rotated 30 degrees. The grid follows
+// the building, so every side lands at exactly 30 or 120 -- not a staircase
+// of 0/90 steps, and not whatever angle smoothing a staircase happens to give.
+{
+  const loops = floorPlanRasterOutline([sq(0, 0, 100, 100), sq(100, 0, 100, 100), sq(100, 100, 100, 100)].map(p => turned(p, 30)), 30, 4);
+  check('a building at 30 degrees gets a border at exactly 30/120 degrees',
+    loops.length === 1 && allNear(sideAngles(loops[0]), [30, 120], 0.01), JSON.stringify(sideAngles(loops[0])));
+}
+
+// One genuinely angled wall among square ones: that side snaps to the wall's
+// own 30 degrees, the rest stay square.
+{
+  const trapezoid = [[0, 0], [200, 0], [200, 60], [103.923, 60]]; // left wall at 30 degrees
+  const loops = floorPlanRasterOutline([trapezoid, sq(-120, 0, 120, 60)], 5, 3);
+  const angles = sideAngles(loops[0]);
+  check('an angled wall gets a border side at its own angle, the rest square',
+    loops.length === 1 && allNear(angles, [0, 90, 30], 0.05) && angles.some(a => Math.abs(a - 30) < 0.05),
+    JSON.stringify(angles));
+}
+
+// Two triangles meeting along a diagonal: that shared wall is interior, and
+// the border is the square around both.
+{
+  const lower = [[0, 0], [100, 0], [100, 100], [0, 0]];
+  const upper = [[0, 0], [100, 100], [0, 100]];
+  const loops = floorPlanRasterOutline([lower, upper], 0, 0);
+  check('two triangles sharing a diagonal trace to the 10000 square around them',
+    loops && approx(totalArea(loops), 10000, 5), `got ${loops && totalArea(loops)}`);
+  check('...a clean four-sided square, no leftover corner nub',
+    loops && loops[0].length === 4 && allNear(sideAngles(loops[0]), [0, 90], 0.01), JSON.stringify(loops && loops[0]));
+}
+
+// An enclosed courtyard wider than the bridge stays a HOLE, offset away from
+// the walls around it like every other side.
+{
+  const ring = [sq(0, 0, 300, 40), sq(0, 260, 300, 40), sq(0, 40, 40, 220), sq(260, 40, 40, 220)];
+  const loops = floorPlanRasterOutline(ring, 5, 2);
+  const areas = loops ? loops.map(shoelaceArea).sort((a, b) => b - a) : [];
+  check('a courtyard wider than the bridge is traced as a hole',
+    loops && loops.length === 2 && approx(areas[0], 304 * 304, 1) && approx(areas[1], 216 * 216, 1),
+    JSON.stringify(areas));
+}
+
+// The wall-direction finder: the longest run of wall wins first place.
+{
+  const angles = floorPlanWallAngles([turned(sq(0, 0, 200, 50), 12)]).map(a => a * 180 / Math.PI);
+  check('floorPlanWallAngles finds a building\'s own directions (12 and 102 degrees)',
+    angles.length === 2 && approx(angles[0], 12, 0.01) && approx(angles[1], 102, 0.01), JSON.stringify(angles));
 }
 
 // --- 2c. clustering by PROXIMITY, not by shared walls --------------------------
