@@ -3301,6 +3301,83 @@ const ICON_FAVORITES_STORAGE_KEY = CLIENT.storageKey("asset-tracker-icon-favorit
 // tenant has its OWN deployment, so a backend change has to reach all of them.
 const SHEET_API_URL = CLIENT.apiUrl;
 
+// EVERY CALL TO THE BACKEND GOES THROUGH backendPost, and it RETRIES a reply
+// that is not one of ours (2026-09-24). Google's serving layer in front of Apps
+// Script fails intermittently -- measured against the live dev tenant: the same
+// request answered in 1.6s and then, seconds later, with Google's own "Sorry,
+// unable to open the file at this time" 404 page after 18s. Before this, any one
+// such blip was treated as the final word:
+//   - a failed READ left the app on its cached copy with every save blocked
+//     until a manual reload ("This is the last inventory this device saved"),
+//   - a failed SAVE showed the not-saved modal,
+//   - and the sharpest: Google occasionally delivers a POST WITHOUT ITS BODY, so
+//     it lands in doGet, whose bare-GET reply is authFailed with "This endpoint
+//     requires sign-in." -- and the app, reading authFailed, SIGNED THE USER
+//     OUT. That was the "regularly logged out while linking spaces" report.
+//
+// What counts as a blip: a network error, any non-2xx status (Apps Script's own
+// replies are always 200), a body that is not JSON (an HTML error page), or
+// doGet's bare-GET reply -- which no POST of ours can legitimately produce,
+// since doPost words every one of its own auth failures differently. Anything
+// else is a real answer and is returned as-is, including a genuine authFailed.
+//
+// RETRYING A WRITE IS SAFE, and the revision counters are why. If an attempt
+// actually wrote but its reply was lost, the retry posts the same, now-stale
+// `_revisions`, the backend refuses it as a conflict and writes nothing, and the
+// app reloads -- the worst case is a "your change wasn't saved" prompt for a
+// change that was. The audit append is keyed off `auditBase`, so a repeat
+// appends nothing twice. Without optimistic concurrency this would not be safe.
+const BACKEND_GET_FALLBACK_ERROR = "This endpoint requires sign-in.";
+const BACKEND_RETRY_DELAYS_MS = [1000, 3000, 7000];
+// A limit PER ATTEMPT. Without one, a request Google's layer simply leaves
+// hanging holds everything behind it for as long as it hangs -- measured at 54s
+// on dev before failing, and one probe never came back at all. A healthy call is
+// 1-2s and a heavy save a few seconds, so 30s only ever cuts off the stuck ones.
+// Abandoning a SAVE that was in fact still running is covered by the same
+// argument as any retried write: its retry is refused as a conflict.
+const BACKEND_ATTEMPT_TIMEOUT_MS = 30000;
+async function backendPost(url, body, opts) {
+  const o = opts || {};
+  // Wrapped rather than referenced: window.fetch called unbound throws
+  // "Illegal invocation" in some browsers.
+  const doFetch = o.fetchImpl || ((u, init) => fetch(u, init));
+  const sleep = o.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms)));
+  const delays = o.delays || BACKEND_RETRY_DELAYS_MS;
+  const timeoutMs = o.timeoutMs || BACKEND_ATTEMPT_TIMEOUT_MS;
+  let problem = "";
+  for (let attempt = 0; ; attempt++) {
+    const abort = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = abort ? setTimeout(() => abort.abort(), timeoutMs) : null;
+    try {
+      const res = await doFetch(url, {
+        method: "POST",
+        // text/plain keeps this a "simple" request with no CORS preflight, which
+        // Apps Script cannot answer -- see writeSnapshot's original note.
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify(body),
+        cache: "no-store",
+        signal: abort ? abort.signal : undefined,
+      });
+      const text = await res.text();
+      clearTimeout(timer);
+      let parsed = null;
+      try { parsed = JSON.parse(text); } catch (e) { parsed = null; }
+      if (!res.ok) problem = "HTTP " + res.status;
+      else if (!parsed || typeof parsed !== "object") problem = "a reply that wasn't the app's";
+      else if (parsed.error === BACKEND_GET_FALLBACK_ERROR) problem = "a request that arrived without its contents";
+      else return parsed;
+    } catch (err) {
+      clearTimeout(timer);
+      problem = abort && abort.signal.aborted
+        ? "no answer within " + Math.round(timeoutMs / 1000) + "s"
+        : (err && err.message) || "no response";
+    }
+    if (attempt >= delays.length) break;
+    await sleep(delays[attempt]);
+  }
+  throw new Error("The server didn't answer properly after " + (delays.length + 1) + " tries (" + problem + ").");
+}
+
 // Google Sign-In client, matching OAUTH_CLIENT_ID in AssetTrackerSync.gs — the
 // backend rejects any token not minted for exactly this id, so the two must stay
 // in step. Safe in public source: a client id names the app, it doesn't authorize
@@ -3508,7 +3585,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-24.2";
+const APP_VERSION = "2026-09-24.3";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -5758,13 +5835,7 @@ function AssetTracker() {
       auditFullRef.current = (async () => {
         setAuditLoadingFull(true);
         try {
-          const res = await fetch(SHEET_API_URL, {
-            method: "POST",
-            headers: { "Content-Type": "text/plain;charset=utf-8" },
-            body: JSON.stringify({ op: "auditFull", sessionId: sessionId }),
-            cache: "no-store",
-          });
-          const data = await res.json().catch(() => null);
+          const data = await backendPost(SHEET_API_URL, { op: "auditFull", sessionId: sessionId }).catch(err => ({ ok: false, error: err.message }));
           if (!data || !data.ok || !Array.isArray(data.auditLog)) {
             throw new Error((data && data.error) || "Couldn't load the full history.");
           }
@@ -5878,10 +5949,11 @@ function AssetTracker() {
         // save is rejected as a conflict, and the conflict handler's own
         // loadData() gets served the same cached response — leaving the user
         // unable to ever save, with no way out from inside the app. See
-        // "Optimistic concurrency" in CLAUDE.md.
-        const res = await fetch(SHEET_API_URL, {
-          method: "POST",
-          headers: { "Content-Type": "text/plain;charset=utf-8" },
+        // "Optimistic concurrency" in CLAUDE.md. (backendPost sends no-store.)
+        //
+        // Through backendPost, so one blip from Google's side is retried rather
+        // than stranding a cached view with saving blocked until a reload.
+        data = await backendPost(SHEET_API_URL,
           // `_dirty` all-false is a SAFETY GUARD against a version mismatch, not
           // something v18 itself needs — v18's doPost routes op:"read" away
           // before it looks at _dirty at all.
@@ -5903,13 +5975,9 @@ function AssetTracker() {
           // backend exchanges it for a session and returns both the session and
           // the inventory together, so signing in stays one round trip. Every
           // load after that presents the session instead.
-          body: JSON.stringify(authIdToken
+          authIdToken
             ? { op: "signin", idToken: authIdToken, _dirty: { assets: false, config: false, breakerTypes: false, photos: false } }
-            : { op: "read", sessionId: sessionId, _dirty: { assets: false, config: false, breakerTypes: false, photos: false } }),
-          cache: "no-store",
-        });
-        if (!res.ok) throw new Error("HTTP " + res.status);
-        data = await res.json();
+            : { op: "read", sessionId: sessionId, _dirty: { assets: false, config: false, breakerTypes: false, photos: false } });
         // Not signed in, expired, or not on the allowlist. An expected outcome
         // rather than a transport failure, so it resets to the sign-in screen
         // instead of showing the generic "couldn't reach the backend" error.
@@ -6124,22 +6192,12 @@ function AssetTracker() {
   // request that skips the browser's CORS preflight (which Apps Script doesn't
   // handle), avoiding a class of failures that has nothing to do with the data itself.
   async function writeSnapshot(payload) {
-    const res = await fetch(SHEET_API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain;charset=utf-8" },
-      // The ID token goes in the body, not a header: a custom header would make
-      // this a non-simple CORS request, and the browser's preflight OPTIONS is
-      // exactly what Apps Script can't answer — see the text/plain note above.
-      body: JSON.stringify({ ...payload, sessionId: sessionId }),
-    });
-    const text = await res.text();
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
-    let result;
-    try {
-      result = JSON.parse(text);
-    } catch (e) {
-      throw new Error(`Non-JSON response: ${text.slice(0, 200)}`);
-    }
+    // The session goes in the body, not a header: a custom header would make
+    // this a non-simple CORS request, and the browser's preflight OPTIONS is
+    // exactly what Apps Script can't answer — see the text/plain note above.
+    // Through backendPost, which retries a reply that isn't the backend's own;
+    // see its comment for why retrying a WRITE is safe here.
+    const result = await backendPost(SHEET_API_URL, { ...payload, sessionId: sessionId });
     // A rejected save (someone else saved first — see REVISION_DOMAINS) comes
     // back as a normal 200 with { ok: false, conflict: [...] }. That's an
     // expected outcome, not a transport failure, so it's returned to persist()
@@ -7723,6 +7781,17 @@ function AssetTracker() {
     const chosen = Array.from(files || []).filter(Boolean);
     if (!chosen.length || !ownerId) return;
     if (!PHOTO_OWNER_TYPES.includes(ownerType)) return;
+    // Refused BEFORE uploading, not after. persist() will not save anything
+    // while the inventory on screen is unconfirmed, and this used to find that
+    // out only at the very end -- every photo already uploaded to the host, then
+    // discarded, with the only explanation a toast (which the detail page does
+    // not even render; see BUGS.md). Said in the gallery, where the user is.
+    if (revalidating || staleSnapshot) {
+      setPhotoError(staleSnapshot
+        ? "Can't add files right now — the server hasn't confirmed this inventory. Reload the page, then try again."
+        : "Still catching up with the server — try again in a moment.");
+      return;
+    }
     setPhotoError("");
     setPhotoBusy(true);
     setPhotoProgress({ done: 0, total: chosen.length, pct: 0 });
@@ -7934,12 +8003,7 @@ function AssetTracker() {
   // slow -- see attachPhotos. `count` is bounded server-side, so asking for a
   // hundred signatures does not mint a hundred.
   async function signPhotoUploads(count) {
-    const res = await fetch(SHEET_API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ op: "photoSign", sessionId: sessionId, count: count }),
-    });
-    const data = await res.json().catch(() => null);
+    const data = await backendPost(SHEET_API_URL, { op: "photoSign", sessionId: sessionId, count: count }).catch(err => ({ ok: false, error: err.message }));
     if (!data || !data.ok) throw new Error((data && data.error) || "Could not get permission to upload.");
     // A v36-or-older backend answers with ONE signature at the top level and no
     // `signatures` array. Reading that shape as a batch of one keeps a frontend
@@ -7959,12 +8023,7 @@ function AssetTracker() {
   // for Cloudinary's RAW pipeline (see handleFloorPlanSign_), not the N-file
   // array shape a photo batch needs.
   async function signFloorPlanUpload() {
-    const res = await fetch(SHEET_API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ op: "floorPlanSign", sessionId: sessionId }),
-    });
-    const data = await res.json().catch(() => null);
+    const data = await backendPost(SHEET_API_URL, { op: "floorPlanSign", sessionId: sessionId }).catch(err => ({ ok: false, error: err.message }));
     if (!data || !data.ok) throw new Error((data && data.error) || "Could not get permission to upload.");
     return data;
   }
@@ -8164,6 +8223,10 @@ function AssetTracker() {
   function attachLink(ownerType, ownerId, rawUrl, rawName) {
     if (savingRef.current || photoBusy) return "Still saving — try again in a moment.";
     if (!ownerId || !PHOTO_OWNER_TYPES.includes(ownerType)) return "There's nothing to attach this to yet.";
+    // Said here rather than left to persist(), whose toast the detail page does
+    // not render -- the form stays open with the typing intact.
+    if (staleSnapshot) return "Can't add a link right now — the server hasn't confirmed this inventory. Reload the page, then try again.";
+    if (revalidating) return "Still catching up with the server — try again in a moment.";
     const url = normalizeLinkUrl(rawUrl);
     if (!url) return "That isn't a web address. Paste the full link, starting with https://.";
     const row = {

@@ -3225,6 +3225,41 @@ and the window matters — "categories work in-session and vanish on reload unti
 deployed" — that note goes in the branch's commit message or its plan file, where it dies
 with the branch instead of outliving it here.
 
+### Google's layer in front of Apps Script fails intermittently (2026-09-24)
+
+**Every backend call goes through `backendPost`, which retries anything that isn't one of
+our own replies** — 3 retries at 1s/3s/7s, and a 30s limit per attempt. Measured on the live
+dev tenant: the same trivial request answered in 1.6s, then seconds later with Google's own
+"Sorry, unable to open the file at this time" 404 page after 18s; another attempt hung 54s.
+3C's backend, sampled at the same moment, was healthy — it comes and goes per project.
+- **What the app used to do with one such blip**: a failed READ stranded it on the cached
+  snapshot with every save blocked until a manual reload ("This is the last inventory this
+  device saved…"); a failed SAVE showed the not-saved modal; and **Google occasionally
+  delivers a POST without its body, which lands in `doGet`**, whose bare-GET reply is
+  authFailed "This endpoint requires sign-in." — so the app SIGNED THE USER OUT. That was the
+  "regularly logged out while linking spaces" report. No POST of ours can legitimately get
+  that reply (doPost words all its own auth failures differently), so it is now a retry.
+- **What counts as a blip**: a network error or timeout, any non-2xx status (Apps Script's own
+  replies are always 200), a body that isn't a JSON object (an HTML error page), or doGet's
+  bare-GET reply. **Everything else is a real answer and is returned untouched** — a genuine
+  expired session still signs out, a conflict still reloads.
+- **Retrying a WRITE is safe only because of the revision counters.** A save that actually
+  landed but whose reply was lost is retried with the same, now-stale `_revisions`; the
+  backend refuses it as a conflict and writes nothing, and the audit append is keyed off
+  `auditBase` so nothing appends twice. The cost is a rare false "your change wasn't saved".
+- **The one raw `fetch` left is sign-out**, fire-and-forget by design.
+- **Uploads are refused BEFORE they start while the view is unconfirmed** (`revalidating` /
+  `staleSnapshot`), with the reason shown in the gallery itself. They used to upload every
+  file and then have `persist()` discard the rows.
+- **Not done, and the next step if this keeps biting**: the backend's `lock.waitLock(10000)`
+  in the read and write paths sits OUTSIDE any try/catch, so a lock timeout crashes the
+  execution into an HTML page. `backendPost` now retries that, but catching it and replying
+  `{ ok: false, busy: true }` would be the honest fix — a backend release.
+- Covered by `test-frontend-backend-post.js`, which runs the real function against scripted
+  replies (Google's 404, an HTML crash page, the bare-GET reply, a hang, a real expiry, a
+  conflict). Mutation-checked that accepting the bare-GET reply, any error status, a non-object
+  body, dropping the retries, or a save bypassing it each fail it.
+
 ### What costs a backend release, and what a removal destroys
 
 - **A property on an existing Config blob is free; a Config KEY of its own is a release.**
