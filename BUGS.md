@@ -16,6 +16,25 @@ version that fixed them.
 
 ## Open
 
+### The notice toast never renders on an asset's detail page
+**Found:** 2026-09-24, while verifying link attachments (a hand-edited bad link, tapped on an
+asset's Files tab, is refused but its explanation never appears).
+**Needs a deploy:** no — `index.html` only.
+**Confirmed:** in Sandbox. `setNotice(...)` from the detail view sets state and paints
+nothing; the same message appears the moment you go back to the list.
+
+`{notice && (...)}` is rendered only inside the LIST view's return. The detail view is a
+separate early return and never renders it. So every notice raised while an asset is open
+is invisible there, and those include `persist()`'s own "Still catching up with the server
+— try that again in a moment" and "This is the last inventory this device saved…" refusals.
+An edit made on the detail page during the ~1.5s revalidation window therefore just doesn't
+happen, silently, which is the exact outcome the notice exists to prevent. Fix is rendering
+the same toast in the detail view's return too (or lifting it above both returns); the
+toast is `position: fixed`, so it needs no layout work either way.
+
+**Blocks:** nothing outright. Link attachments degrade safely (a bad link simply doesn't
+open), but the "why" is lost wherever the tap happened on a detail page.
+
 ### `sheet.mjs copy` does not carry a client's type categories
 **Found:** 2026-09-21, while dry-running `copy bca dev`.
 **Needs a deploy:** no — `sheet.mjs` only.

@@ -3336,6 +3336,48 @@ three decisions.
   asset, one on a work entry beside its own history — while every image row still carries no
   `kind` at all, so Sandbox exercises the adoption and both kinds rather than one.
 
+**Links attach too, and a link is a photo row with `kind: "link"`** (2026-09-24). The answer
+to "I need to attach a PDF bigger than 10MB" — and to the ImageMeter question, which landed
+on the same design independently. **No backend change and no deploy**: the Photos tab already
+has a `url` column, the backend stores whatever `kind` it is sent, and nothing is uploaded or
+signed, so a link is a row and nothing more.
+- **Why a link rather than a bigger host.** The 10MB cap is Cloudinary's free plan, not ours;
+  paid plans only move it to roughly 20–40MB, for a monthly fee. Writing to Drive from the
+  app needs an OAuth scope the live manifests do not hold — the trap every user's requests
+  failing during re-authorization, which v29's import already hit. A link has no size limit,
+  costs nothing, and keeps the bytes wherever the school already keeps files. **The cost:**
+  no thumbnail, and who can open it is governed by where the file lives, not by the app's
+  allowlist — the form says so.
+- **ImageMeter (a cloud session's analysis, 2026-09-24):** it has no public API, no web
+  viewer, and no documented deep link, so the app cannot show or edit a measurement. Editing
+  together is ImageMeter's own Business-plan cloud sync over a shared Drive/Dropbox/OneDrive
+  folder. **The app may only LINK to that folder, never write into it** — ImageMeter says its
+  sync folder is touched by ImageMeter alone. Exporting a finished measurement as JPG/PDF
+  and attaching it remains the read-only alternative.
+- **THE URL IS CHECKED ON THE WAY IN AND AGAIN ON THE WAY OUT**, and that is the security half
+  of the feature. It ends up in `window.open`, so a `javascript:` URL would run inside this
+  origin with the session sitting in localStorage. `normalizeLinkUrl` allows http(s) with a
+  dotted host and nothing else; `openPhotoViewer` re-runs it before opening, because a cell
+  can be hand-edited in the Sheet after the form checked it. The scheme check is load-bearing
+  on its own: `javascript://example.com/%0Aalert(1)` has a perfectly good host and only the
+  scheme stops it. Opened with `noopener,noreferrer`.
+- **A link never publishes**, with no change to the public page: its filter already takes
+  `kind === "image"` only. So the tile offers no public/private toggle — a control that does
+  nothing is worse than none. It points into someone's private folder, the same reasoning
+  that keeps documents off that page.
+- **It follows the same-save rule as a photo** (`attachLink` passes `assets.slice()` for a
+  `change` or `maintenance` owner), since a link naming a memory-only id is orphaned exactly
+  the way the first work-entry photos were.
+- **One branch in `openPhotoViewer` makes it work everywhere a file can appear** — every
+  gallery tile and both read-only strips come through it. `photoThumbUrl` returns nothing
+  for a link (its url is a web page; an `<img>` would fetch it for nothing), and
+  `AttachmentImage` draws a link icon plus the site's name.
+- An unnamed link reads as its host (`linkDisplayName`). `MOCK_PHOTOS` carries one named link
+  on an asset beside a photo and a PDF, and one unnamed on a work entry, so the gallery and
+  the History strip both exercise it. Covered in `test-frontend-photos.js` and
+  `test-backend-photos.js`; mutation-checked that allowing any scheme, opening without the
+  re-check, feeding a link to `<img>`, and dropping the same-save rule each fail them.
+
 **Where a photo's gallery lives follows what the photo is FOR** (2026-09-11), and the two
 work-item cases deliberately differ:
 
