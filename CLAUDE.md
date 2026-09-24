@@ -1943,10 +1943,32 @@ unidentifiable standing in front of four panels. It listed bare ids before. It s
 
 **`HierarchyNav` is the drill-down that sits above the asset list** (added 2026-08-20): a
 breadcrumb plus a row of child places, narrowing the list to everything *beneath* wherever you
-are, at any depth — drill to a building and you get the equipment in all its rooms, not just
-what hangs directly off the building. Its state (`scopeId`) is **navigation**, deliberately
-separate from the column **filters**: they intersect rather than override, and the scope
-excludes the place itself (you're looking inside it).
+are, at any depth, PLUS the place itself — drill to a building and you get the building's own
+row, the equipment in all its rooms, and (on Tasks/Audit) anything logged against the building
+directly, not just what hangs off it. Its state (`scopeId`) is **navigation**, deliberately
+separate from the column **filters**: they intersect rather than override.
+- **The scope including itself is a 2026-09-23 reversal** of what this said until then — the
+  place used to be excluded on the reasoning that "you're looking inside it, and listing it as
+  one of its own contents reads as an error." That held right up until Tasks and Audit shared
+  the same scope test: a Building has its own row, can carry its own tasks (a roof inspection,
+  not tied to any room) and its own audit history, and hiding those from a view scoped to that
+  exact Building was the one place scoping disagreed with itself. `inHierarchyScope(a, scopeId,
+  assets, exact)` is the one shared test now — `a.id === scopeId` short-circuits true before
+  the `ancestorsOf` walk, so the place counts as inside its own scope everywhere the test is
+  used: the Assets list, Tasks (both Scheduled and History), and the master Audit tab.
+- **`roomMovable` (the bulk move-to-room toolbar) is UNCHANGED by this**, because it was never
+  built on the exclusion — it separately filters `a.id !== bulkMoveSourceId`, by id, regardless
+  of what the underlying `filtered` list contains. The old reasoning about a room "dragging
+  itself along" was really about that filter, not about the scope test, and it still holds.
+- **"Hide children" is a checkbox under HierarchyNav** (`scopeExact`, shared the same way
+  `scopeId` is — narrowing on one tab and switching to another keeps the checkbox where you
+  left it), rendered only where a scope is actually applied to a list — Assets, Tasks, Audit —
+  and only once something is scoped (unchecked, inert, and hidden with nothing chosen). Checked
+  narrows `inHierarchyScope` from "this place and everything beneath it" to "this place's own
+  row only," for "what does this location's own record say" without every device in every room
+  in the way. The Map tab's own `HierarchyNav` doesn't pass `setScopeExact` at all — it has no
+  filtered list for the checkbox to act on, the same reason it doesn't get one on the Add
+  asset/Add task prefill either.
 
 It's deliberately NOT built on `HierarchyBrowserModal` despite the overlap. That component
 picks one thing out of a tree and closes, and to do it it hides rows you can't pick and

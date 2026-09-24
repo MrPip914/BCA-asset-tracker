@@ -2196,6 +2196,30 @@ function nearestAncestorOfType(asset, assets, type) {
   return ancestorsOf(asset, assets).find(a => a.type === type) || null;
 }
 
+// The one scope test the Assets, Tasks and Audit tabs all apply, so
+// HierarchyNav's scopeId means the same thing everywhere it's used (see
+// CLAUDE.md).
+//
+// The scoped place counts as INSIDE ITS OWN scope (2026-09-23) -- reversing
+// what this used to say, which was that listing a place as one of its own
+// contents "reads as an error". That reasoning held for the bulk
+// move-to-room picker, which is a different computation (roomMovable) that
+// separately excludes bulkMoveSourceId by id and is untouched by this --
+// but for a plain filtered LIST, a Building has its own row, its own tasks,
+// its own audit history, and hiding them from a view scoped to that exact
+// Building was the one place this app disagreed with "narrowing to a
+// building narrows every view."
+//
+// `exact` is the "hide children" checkbox: true means ONLY the scope's own
+// record, nothing beneath it at any depth -- for "what does this location's
+// own row say" without every device in every room in the way.
+function inHierarchyScope(a, scopeId, assets, exact) {
+  if (!scopeId) return true;
+  if (a.id === scopeId) return true;
+  if (exact) return false;
+  return ancestorsOf(a, assets).some(p => p.id === scopeId);
+}
+
 // Everything anywhere below `asset`, at any depth. Asks each candidate for its
 // own chain rather than walking down from the parent, which keeps it loop-safe
 // for free (ancestorsOf already is) and needs no child index. Fine at this
@@ -3448,7 +3472,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-23.12";
+const APP_VERSION = "2026-09-23.13";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -5131,6 +5155,14 @@ function AssetTracker() {
   // those are *filters* (match one exact value). Both can be on at once and
   // simply intersect.
   const [scopeId, setScopeId] = useState("");
+  // The "hide children" checkbox under HierarchyNav -- true narrows a scope
+  // from "this place and everything beneath it" to "this place's own row
+  // only". Shared across Assets/Tasks/Audit for the same reason scopeId
+  // itself is: narrowing on one tab and switching to another should keep
+  // you where you were, not silently widen back out. Inert with no scope
+  // set (inHierarchyScope reads it only when scopeId is truthy), so it
+  // doesn't need clearing when scopeId does.
+  const [scopeExact, setScopeExact] = useState(false);
   // Set by "Show on map" (see showOnMap below) and cleared by the Map tab
   // once it's acted on it -- a one-shot instruction ("zoom to and pulse this
   // shape next time its plan loads"), not standing state the tab reads every
@@ -6355,12 +6387,11 @@ function AssetTracker() {
     if (!assets) return [];
     const q = query.trim().toLowerCase();
     const list = assets.filter(a => {
-      // Scope: everything BENEATH the chosen place, at any depth — drilling to a
-      // building shows the equipment in all its rooms, not just what sits
-      // directly on the building. The place itself is excluded: you're looking
-      // *inside* it, and listing it as one of its own contents reads as an error
-      // (it's also what made the bulk move-to-room drag the room along).
-      if (scopeId && !ancestorsOf(a, assets).some(p => p.id === scopeId)) return false;
+      // Scope: the chosen place itself, plus everything BENEATH it at any depth
+      // — drilling to a building shows the building's own row and the
+      // equipment in all its rooms, not just what sits directly on it. See
+      // inHierarchyScope; scopeExact is the "hide children" checkbox.
+      if (!inHierarchyScope(a, scopeId, assets, scopeExact)) return false;
       if (typeFilter !== "All types" && (a.type || "Other") !== typeFilter) return false;
       // Compared as match keys, not as display strings: the filter holds the name
       // as it was spelled when it was picked, so flipping the sort to last-name
@@ -6447,7 +6478,7 @@ function AssetTracker() {
     // personNameOrder IS a dependency: the name sort compares the composed
     // string, so changing the setting genuinely reorders this list. (The
     // search does not need it -- that matches both spellings either way.)
-  }, [assets, query, scopeId, typeFilter, userFilter, statusFilter, sortConfig, columns, typesList, personNameOrder]);
+  }, [assets, query, scopeId, scopeExact, typeFilter, userFilter, statusFilter, sortConfig, columns, typesList, personNameOrder]);
 
   // Which of the filtered assets the bulk "Move filtered to room" action can
   // actually touch: only types that are allowed to sit inside a Room. Asking the
@@ -6544,8 +6575,8 @@ function AssetTracker() {
   const filteredWorkRows = useMemo(() => {
     const q = maintenanceQuery.trim().toLowerCase();
     const list = allWorkRows.filter(r => {
-      // Same scope rule the Assets list uses: anything BENEATH where you are.
-      if (scopeId && !ancestorsOf(r.asset, assets).some(pa => pa.id === scopeId)) return false;
+      // Same scope rule the Assets list uses: this place and anything BENEATH it.
+      if (!inHierarchyScope(r.asset, scopeId, assets, scopeExact)) return false;
       if (workTypeFilter !== "All work types" && r.change.changeType !== workTypeFilter) return false;
       if (workVendorFilter !== "All vendors" && r.change.vendor !== workVendorFilter) return false;
       if (!q) return true;
@@ -6566,7 +6597,7 @@ function AssetTracker() {
       list.sort((a, b) => String(b.performedOn || "").localeCompare(String(a.performedOn || "")));
     }
     return list;
-  }, [allWorkRows, assets, scopeId, maintenanceQuery, workTypeFilter, workVendorFilter, workSortConfig]);
+  }, [allWorkRows, assets, scopeId, scopeExact, maintenanceQuery, workTypeFilter, workVendorFilter, workSortConfig]);
   const workTotalCost = filteredWorkRows.reduce((sum, r) => sum + (parseFloat(r.change.cost) || 0), 0);
   const maintenanceFrequencyOptions = useMemo(() => (
     ["All frequencies", ...Array.from(new Set(allMaintenanceRows.map(r => r.item.frequencyLabel).filter(Boolean))).sort()]
@@ -6609,7 +6640,7 @@ function AssetTracker() {
     const list = allMaintenanceRows.filter(r => {
       // Scope applies here exactly as it does on the Assets tab and to History:
       // narrowing to a building should narrow every view, not just one.
-      if (scopeId && !ancestorsOf(r.asset, assets).some(pa => pa.id === scopeId)) return false;
+      if (!inHierarchyScope(r.asset, scopeId, assets, scopeExact)) return false;
       // "Open" is not a status -- it is every status but done, and it is the
       // default so a finished job leaves the triage view without being deleted.
       if (maintenanceStatusFilter === MAINTENANCE_STATUS_OPEN) {
@@ -6639,7 +6670,7 @@ function AssetTracker() {
       list.sort((a, b) => maintenanceSortKey(a) - maintenanceSortKey(b));
     }
     return list;
-  }, [allMaintenanceRows, assets, scopeId, maintenanceQuery, maintenanceStatusFilter, maintenanceKindFilter, maintenanceFrequencyFilter, maintenanceOwnerFilter, maintenanceSortConfig]);
+  }, [allMaintenanceRows, assets, scopeId, scopeExact, maintenanceQuery, maintenanceStatusFilter, maintenanceKindFilter, maintenanceFrequencyFilter, maintenanceOwnerFilter, maintenanceSortConfig]);
 
   // ---- the site-wide Audit tab ----
   // One row per auditLog entry, with its subject resolved once. `assets.find`
@@ -6709,11 +6740,11 @@ function AssetTracker() {
       query: auditQuery, action: auditActionFilter, by: auditUserFilter,
       type: auditTypeFilter, period: auditPeriodFilter, now: Date.now(), scopeId,
       // The same test the Assets and Maintenance tabs apply, so one scope means
-      // one thing everywhere: anything BENEATH where you are.
-      inScope: a => ancestorsOf(a, assets).some(pa => pa.id === scopeId),
+      // one thing everywhere: this place, plus anything BENEATH it.
+      inScope: a => inHierarchyScope(a, scopeId, assets, scopeExact),
     });
     return sortAuditRows(rows, auditSortConfig, typesList);
-  }, [allAuditRows, assets, scopeId, auditQuery, auditActionFilter, auditUserFilter, auditTypeFilter, auditPeriodFilter, auditSortConfig, typesList]);
+  }, [allAuditRows, assets, scopeId, scopeExact, auditQuery, auditActionFilter, auditUserFilter, auditTypeFilter, auditPeriodFilter, auditSortConfig, typesList]);
 
   // Paging resets whenever the question changes. "Show more" raised past row 300
   // of the previous filter means nothing against a new one, and leaving it
@@ -6721,7 +6752,7 @@ function AssetTracker() {
   // promises.
   useEffect(() => {
     setAuditVisibleCount(AUDIT_PAGE_SIZE);
-  }, [auditQuery, auditActionFilter, auditUserFilter, auditTypeFilter, auditPeriodFilter, auditSortConfig, scopeId]);
+  }, [auditQuery, auditActionFilter, auditUserFilter, auditTypeFilter, auditPeriodFilter, auditSortConfig, scopeId, scopeExact]);
 
   // Per-device override wins when set; otherwise falls back to the column's
   // server-defined default (e.g. true for a newly added custom column this
@@ -13523,7 +13554,7 @@ function AssetTracker() {
       <div style={{ padding: "18px 20px 80px", maxWidth: 1300, margin: "0 auto" }}>
         {mainTab === "assets" && (
         <>
-        <HierarchyNav assets={assets} scopeId={scopeId} setScopeId={setScopeId} />
+        <HierarchyNav assets={assets} scopeId={scopeId} setScopeId={setScopeId} scopeExact={scopeExact} setScopeExact={setScopeExact} />
 
         {/* Add asset is a visible button, not a hamburger entry — the same shape
             and position as Maintenance's Add task / Log work, so the one thing
@@ -13786,7 +13817,7 @@ function AssetTracker() {
               deliberately shared, so narrowing to a building and switching tabs
               keeps you where you were rather than silently widening. It sits
               ABOVE the sub-tabs because it scopes both of them. */}
-          <HierarchyNav assets={assets} scopeId={scopeId} setScopeId={setScopeId} />
+          <HierarchyNav assets={assets} scopeId={scopeId} setScopeId={setScopeId} scopeExact={scopeExact} setScopeExact={setScopeExact} />
 
           <div style={{ display: "flex", gap: 6, marginBottom: 16, alignItems: "center", flexWrap: "wrap" }}>
             {[
@@ -14049,7 +14080,7 @@ function AssetTracker() {
             <>
               {/* The same drill-down the other two tabs use, on the same
                   scopeId -- narrowing to a building narrows this too. */}
-              <HierarchyNav assets={assets} scopeId={scopeId} setScopeId={setScopeId} />
+              <HierarchyNav assets={assets} scopeId={scopeId} setScopeId={setScopeId} scopeExact={scopeExact} setScopeExact={setScopeExact} />
 
               {auditPartialNotice}
 
@@ -14670,7 +14701,7 @@ function AssetPickerField({ label, assets, value, onChange, hint }) {
 // view, and a scoped asset with no plan of its own, which is where a
 // double-tap on a linked shape (see onShapeClick) can land you. Without the
 // chips there, that screen would be a dead end.
-function HierarchyNav({ assets, scopeId, setScopeId, showChildren = true }) {
+function HierarchyNav({ assets, scopeId, setScopeId, showChildren = true, scopeExact, setScopeExact }) {
   const all = assets || [];
   const scope = scopeId ? all.find(a => a.id === scopeId) : null;
   // A scope whose asset has vanished (deleted in another tab) falls back to the
@@ -14748,6 +14779,24 @@ function HierarchyNav({ assets, scopeId, setScopeId, showChildren = true }) {
             );
           })}
         </div>
+      )}
+      {/* "Hide children" narrows the scope from "this place and everything
+          beneath it" (the default -- see inHierarchyScope) to "this place's
+          own row only". Only offered where a caller actually applies a scope
+          test to a list -- setScopeExact is omitted on the Map tab, which
+          has no such list, the same way showChildren distinguishes callers
+          -- and only once something is actually scoped, since there is
+          nothing to hide otherwise. */}
+      {setScopeExact && scope && (
+        <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 9, fontSize: 12.5, color: C.muted, cursor: "pointer" }}>
+          <input
+            type="checkbox"
+            checked={!!scopeExact}
+            onChange={e => setScopeExact(e.target.checked)}
+            style={{ margin: 0 }}
+          />
+          Hide children — {nameOf(scope)} only
+        </label>
       )}
     </div>
   );
