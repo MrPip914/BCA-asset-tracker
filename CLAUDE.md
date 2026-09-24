@@ -1222,9 +1222,14 @@ onboard one.
     stays blank rather than pointing a brand-new Computer at a parent its own type would
     reject; the same asymmetry `openMaintenanceAdd`/`openChangeAdd` don't have, since a
     place is always a legal target for a task or a change but not always a legal PARENT
-    for whatever type happens to default. It's a one-time starting point, not a live rule
-    — changing Type in the form afterward doesn't re-derive it, matching how the tag
-    suggestion already works. Neither tab has a "Showing X of Y" count line: on Assets,
+    for whatever type happens to default.
+  - **Changing Type in the form RE-DERIVES it** (2026-09-24, `reScopedParentId`). This
+    said the opposite for a day, and it read as the prefill being broken: scoped to a
+    Building, the form opens on Computer with a blank Parent, and switching to Room left it
+    blank. It re-derives only while the Parent is blank or still the scope itself — a
+    parent picked by hand is never overwritten — and switching to a type the scope cannot
+    hold clears it rather than leaving an illegal parent. The tag suggestion still does not
+    re-derive. Neither tab has a "Showing X of Y" count line: on Assets,
   the one thing that lived there besides the count (clearing an active sort) moved to a small ×
   chip next to the sort arrow on the sorted column's own header; on Maintenance, the overdue
   count that lived there is now a standalone badge above the table.

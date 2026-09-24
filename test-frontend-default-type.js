@@ -75,5 +75,32 @@ check('startAdd no longer hardcodes Computer',
 check('saveTypeSettings writes typesList through renameTypeInList with the draft flag',
   /renameTypeInList\(typesList, id, name, !!draft\.isDefault\)/.test(src));
 
+// --- the scoped Parent follows a Type change -----------------------------------
+// Scoped to a Building, the form opens on Computer (which only takes a Room), so
+// the Parent starts blank. Switching to Room must then fill it in -- that it
+// didn't read as "the prefill doesn't work". canBeParentOf is stubbed with the
+// shipped rule for these three types; the real one reads the registry.
+const scopeCode = [
+  sliceTopLevel('function scopedParentFor(type, scopeId, assets) {'),
+  sliceTopLevel('function reScopedParentId(currentParentId, newType, scopeId, assets) {'),
+].join('\n');
+const PARENTS = { Computer: ['Room'], Room: ['Room', 'Building'], Building: ['Campus'] };
+const { scopedParentFor, reScopedParentId } = new Function('canBeParentOf',
+  scopeCode + '\nreturn { scopedParentFor, reScopedParentId };')((p, c) => (PARENTS[c] || []).includes(p));
+const place = [{ id: 'B1', type: 'Building' }, { id: 'R1', type: 'Room' }, { id: 'R2', type: 'Room' }];
+check('scoped to a Building, a Computer starts with no parent (it cannot sit there)',
+  scopedParentFor('Computer', 'B1', place) === '');
+check('...and switching the type to Room fills the Building in',
+  reScopedParentId('', 'Room', 'B1', place) === 'B1');
+check('switching back to a type the scope cannot hold clears it rather than leaving an illegal parent',
+  reScopedParentId('B1', 'Computer', 'B1', place) === '');
+check('a parent picked BY HAND survives any type change',
+  reScopedParentId('R2', 'Room', 'B1', place) === 'R2' && reScopedParentId('R2', 'Computer', 'B1', place) === 'R2');
+check('no scope: a type change leaves a blank parent blank', reScopedParentId('', 'Room', '', place) === '');
+check('the add form\'s Type field re-derives the parent through it',
+  /type: v, parentId: reScopedParentId\(draft\.parentId, v, scopeId, assets\)/.test(src));
+check('startAdd seeds the parent through the same rule',
+  /const startParentId = scopedParentFor\(startType, scopeId, assets\)/.test(startAddBody));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
