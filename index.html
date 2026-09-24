@@ -604,6 +604,42 @@ function typeNameOf(typeId, typesList) {
   return found ? found.name : (typeId || "");
 }
 
+// Which type a brand-new asset starts as. Chosen in the type editor and stored
+// as `isDefault: true` on that type's typesList entry -- a property on an
+// existing Config blob, so it costs no backend release (the typeCategories
+// lesson), and on the LIST rather than in typeSettings because "which one of
+// these is the default" is a fact about the list: "Reset to default" deletes a
+// type's typeSettings override wholesale, and resetting a type's FIELDS must
+// not quietly stop it being the default too.
+//
+// Falls back to Computer (what startAdd always hardcoded) and then to the first
+// type listed, so a tenant that removed Computer -- nothing locks it -- still
+// opens the add form on a type that actually exists. A flagged type that has
+// since been removed is simply not in the list, so it falls through the same way.
+function defaultNewAssetType(typesList) {
+  const list = typesList || [];
+  const chosen = list.find(t => t && t.isDefault);
+  if (chosen) return chosen.id;
+  if (list.some(t => t && t.id === "Computer")) return "Computer";
+  return list.length ? list[0].id : "Computer";
+}
+
+// The type editor's write to typesList: the rename, plus the default flag when
+// this save makes the type the default. Doing so CLEARS the flag everywhere
+// else in the same pass, so the list can never hold two -- defaultNewAssetType
+// would quietly pick whichever came first. `makeDefault` false writes nothing
+// about defaults at all: the editor locks the box on the type that already is
+// the default (there has to be one), so false only ever means "wasn't, and
+// still isn't".
+function renameTypeInList(list, id, name, makeDefault) {
+  return (list || []).map(t => {
+    if (t.id === id) return makeDefault ? { ...t, name, isDefault: true } : { ...t, name };
+    if (!makeDefault || !t.isDefault) return t;
+    const { isDefault, ...rest } = t;
+    return rest;
+  });
+}
+
 // Locked types can't be removed in the type manager (see `locked` above).
 function isLockedType(typeId) {
   return !!TYPE_REGISTRY[typeId]?.locked;
@@ -3472,7 +3508,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-23.13";
+const APP_VERSION = "2026-09-23.14";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -7118,9 +7154,10 @@ function AssetTracker() {
     // one. Switching the type in the form does not re-suggest -- the tag is
     // ordinary editable data now, and silently rewriting something someone typed
     // would be worse than leaving a tag on a type that will just hide the field.
-    const startType = "Computer";
+    // The type editor's "Default for new assets" -- see defaultNewAssetType.
+    const startType = defaultNewAssetType(typesList);
     // Prefilled from wherever HierarchyNav is drilled to, when that place is a
-    // legal parent for the starting type -- Computer only takes a Room, so
+    // legal parent for the starting type -- a Computer only takes a Room, so
     // scoping to a Building leaves this blank rather than pointing a new
     // Computer at a parent its own type rejects. Changing the type in the form
     // does not re-derive this any more than it re-derives the tag; it's a
@@ -9310,7 +9347,7 @@ function AssetTracker() {
     const isRestricted = k => SHIPPED_RESTRICTED_FIELDS.has(k)
       || nextColumns.some(c => c.key === k && c.restricted);
 
-    const nextTypesList = typesList.map(t => (t.id === id ? { ...t, name } : t));
+    const nextTypesList = renameTypeInList(typesList, id, name, !!draft.isDefault);
     const nextTypeSettings = {
       ...typeSettings,
       [id]: {
@@ -15476,6 +15513,9 @@ function TypeManagerModal({
       // Type-level, not per-field -- whether THIS type can carry a floor plan
       // at all, seeded from the same merged entry every other override reads.
       floorPlan: !!entry.floorPlan,
+      // Whether new assets start as this type -- resolved, not read off the
+      // flag, so Computer shows as the default on a list nobody has flagged.
+      isDefault: defaultNewAssetType(types) === t.id,
       categoryIds: typeLabelIdsOf(t.id).slice(),
       // Seeded from the EFFECTIVE data type — the column's override if it has
       // one, otherwise the shipped default — so the picker shows what is in
@@ -15993,6 +16033,45 @@ function TypeManagerModal({
               </div>
             </div>
 
+            {/* Which type the Add asset form opens on. Stored on the type LIST,
+                not in this type's settings -- see defaultNewAssetType. LOCKED
+                ON for the type that already is the default: there always has
+                to be one, so it moves by ticking a different type, never by
+                unticking this one into a state nothing could name. */}
+            {(() => {
+              const alreadyDefault = defaultNewAssetType(types) === draft.id;
+              return (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>New assets</span>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: alreadyDefault ? "default" : "pointer" }}>
+                    <button
+                      type="button"
+                      role="checkbox"
+                      aria-checked={!!draft.isDefault}
+                      aria-disabled={alreadyDefault}
+                      aria-label="Default type for new assets"
+                      onClick={() => { if (!alreadyDefault) setDraft({ ...draft, isDefault: !draft.isDefault }); }}
+                      style={{
+                        width: 16, height: 16, flexShrink: 0, borderRadius: 4, padding: 0,
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        border: `1.5px solid ${draft.isDefault ? C.brand : C.border}`,
+                        background: draft.isDefault ? C.brand : "transparent",
+                        opacity: alreadyDefault ? 0.6 : 1,
+                      }}
+                    >
+                      {draft.isDefault && <Check size={11} color="#fff" />}
+                    </button>
+                    <span style={{ fontSize: 13, color: C.ink }}>Default type for new assets</span>
+                  </label>
+                  <div style={{ fontSize: 12, color: C.empty }}>
+                    {alreadyDefault
+                      ? "Add asset opens on this type. To change that, tick this box on a different type."
+                      : `Add asset opens on ${typeNameOf(defaultNewAssetType(types), types)} today. Tick this to open on this type instead.`}
+                  </div>
+                </div>
+              );
+            })()}
+
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Fields</span>
               {/* A ROW PER FIELD, not the chip row this used to be. The chip
@@ -16211,6 +16290,7 @@ function TypeManagerModal({
                           {locked && <Lock size={11} style={{ flexShrink: 0 }} />}
                           {inUse > 0 && <span style={{ fontSize: 11, color: C.empty, flexShrink: 0 }}>{inUse}</span>}
                           {hasOverrides(t.id) && <span style={{ fontSize: 10, color: C.accent, flexShrink: 0, fontFamily: "'IBM Plex Mono', monospace" }}>EDITED</span>}
+                          {defaultNewAssetType(types) === t.id && <span title="New assets start as this type" style={{ fontSize: 10, color: C.brand, flexShrink: 0, fontFamily: "'IBM Plex Mono', monospace" }}>DEFAULT</span>}
                           {/* What the headings used to say, now per row — the
                               only place a type's labels can be read once the
                               list is flat. Names, not ids, and a dangling id is
