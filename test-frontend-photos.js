@@ -337,13 +337,15 @@ eq('the completion WRITES the id its files were attached to',
 // every list from the ORIGINAL array and each save would drop the ones before
 // it — N writes, one photo surviving. That failure looks like "only the last
 // photo uploaded", which reads as a flaky network rather than a bug.
-function runAttach({ files, failOn = [], ownerType = 'asset', signFails = false, slow = [], emitBytes = [] }) {
+function runAttach({ files, failOn = [], ownerType = 'asset', signFails = false, slow = [], emitBytes = [], stale = null }) {
   const calls = { persist: [], persistAssets: [], errors: [], progress: [], busy: [], signCounts: [] };
   const fn = new Function(
     'savingRef', 'photoBusy', 'PHOTO_OWNER_TYPES', 'setPhotoError', 'setPhotoBusy',
     'setPhotoProgress', 'preparePhotoRow', 'persist', 'photos', 'assets',
     // v37: the batch is signed once up front and uploads run in a bounded pool.
-    'sandboxMode', 'signPhotoUploads', 'PHOTO_UPLOAD_CONCURRENCY', 'module',
+    'sandboxMode', 'signPhotoUploads', 'PHOTO_UPLOAD_CONCURRENCY',
+    // 2026-09-24: refused up front while the view is unconfirmed.
+    'revalidating', 'staleSnapshot', 'module',
     grab('attachPhotos') + '\nmodule.f = attachPhotos;'
   );
   const mod = {};
@@ -379,6 +381,8 @@ function runAttach({ files, failOn = [], ownerType = 'asset', signFails = false,
       return Array.from({ length: count }, (_, i) => ({ publicId: 'sig-' + i }));
     },
     3,
+    stale === 'revalidating',
+    stale === 'stale',
     mod
   );
   return mod.f(ownerType, 'owner-1', files).then(() => calls);
@@ -441,6 +445,18 @@ runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg')], slow: ['a.jpg'] }).then
   eq('the written rows follow the order the FILES were chosen, not finished',
      (calls.persist[0] || []).map(r => r.id).join(','),
      'existing,row-a.jpg,row-b.jpg,row-c.jpg');
+});
+
+// 2026-09-24, from a phone screenshot: while the inventory on screen is an
+// unconfirmed cached copy, persist() refuses every save -- and attachPhotos used
+// to find that out only AFTER uploading every photo, which were then thrown away.
+runAttach({ files: [F('a.jpg'), F('b.jpg')], stale: 'stale' }).then(calls => {
+  eq('an unconfirmed view uploads NOTHING (no signing, no upload)', calls.signCounts.length, 0);
+  eq('...writes nothing', calls.persist.length, 0);
+  eq('...and says why, in the gallery', /server hasn't confirmed/.test(calls.errors[0] || ''), true);
+});
+runAttach({ files: [F('a.jpg')], stale: 'revalidating' }).then(calls => {
+  eq('mid-revalidation also uploads nothing, and asks for a moment', calls.signCounts.length === 0 && /catching up/.test(calls.errors[0] || ''), true);
 });
 
 runAttach({ files: [F('a.jpg'), F('b.jpg')], signFails: true }).then(calls => {
