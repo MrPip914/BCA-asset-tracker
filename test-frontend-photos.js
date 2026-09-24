@@ -586,11 +586,11 @@ runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg')] }).then(calls => {
   // progress, so with fetch there is nothing to put in that percentage until a
   // file finishes -- which is the frozen indicator all over again.
   eq('the upload uses XHR so the bytes going out can be reported',
-     /xhr\.upload\.onprogress = /.test(grab('uploadPhotoToCloudinary')), true);
+     /xhr\.upload\.onprogress = /.test(grab('sendUploadOnce')), true);
   eq('and not fetch, which cannot report a request body at all',
-     /fetch\(/.test(grab('uploadPhotoToCloudinary')), false);
+     /fetch\(/.test(grab('sendUploadOnce') + grab('uploadPhotoToCloudinary')), false);
   eq('and it reports 1 on load, so the bar cannot stop short of the response',
-     /if \(onProgress\) onProgress\(1\);/.test(grab('uploadPhotoToCloudinary')), true);
+     /if \(onProgress\) onProgress\(1\);/.test(grab('sendUploadOnce')), true);
   // The resize is worth a fixed slice of each file's share, which is what keeps
   // the number moving where byte progress never arrives: a body small enough
   // that the network stack swallows it whole and reports once at the end, a

@@ -2924,7 +2924,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-24.3";
+const APP_VERSION = "2026-09-24.4";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -3408,16 +3408,18 @@ async function downscalePhoto(file) {
 // its first page renderable later (see PDF_THUMB_TRANSFORM). Raw storage would
 // have been the obvious home for a document and would have left it thumbnailless.
 //
-// XHR RATHER THAN FETCH, FOR ONE REASON: fetch cannot report how much of a
-// request body has gone out. Nothing else here wants XHR, and the error
-// handling below is deliberately the same shape fetch had -- status, then the
-// host's own message, then a fallback -- so the swap changes what the button
-// can SAY and nothing about what happens when an upload fails.
+// The XHR itself is sendUploadOnce, shared with the floor-plan upload.
 //
 // `onProgress(fraction)` is called with 0..1 for THIS file as the bytes leave.
 // Optional: a browser that reports no total (a stream, an old engine) simply
 // never calls it and the caller falls back to counting whole files.
-function uploadPhotoToCloudinary(blob, sig, uploadName, onProgress) {
+//
+// A DROPPED CONNECTION IS RETRIED (2026-09-24), via retryTransientUpload below.
+// Found on a 3C PDF: "could not reach the image host" arrived partway through a
+// several-megabyte upload from a phone. Probing Cloudinary directly answered
+// every size up to 10.6MB with a readable reply, so it was neither the size nor
+// CORS -- the connection went mid-body, and one wobble cost the whole file.
+function uploadPhotoToCloudinary(blob, sig, uploadName, onProgress, opts) {
   const form = new FormData();
   // The third argument is the multipart part's filename, and its EXTENSION is
   // what Cloudinary reads to name the format: a Blob posted without one arrives
@@ -3433,9 +3435,30 @@ function uploadPhotoToCloudinary(blob, sig, uploadName, onProgress) {
     const value = k === "public_id" ? sig.publicId : sig[k];
     if (value !== undefined && value !== null && value !== "") form.append(k, value);
   });
+  const url = "https://api.cloudinary.com/v1_1/" + encodeURIComponent(sig.cloudName) + "/image/upload";
+  return retryTransientUpload(report => sendUploadOnce(url, form, report, "image host"), onProgress, opts);
+}
+
+// ONE attempt at posting an upload form, shared by both upload paths. It rejects
+// with `transient: true` for the failures worth a second try -- the connection
+// dropping, a timeout, a 5xx or a 429 -- and without it for a real refusal (a bad
+// signature, a disallowed format, a file too large), which would only fail the
+// same way again.
+//
+// XHR RATHER THAN FETCH, FOR ONE REASON: fetch cannot report how much of a
+// request body has gone out. Nothing else here wants XHR, and the error
+// handling is deliberately the same shape fetch had -- status, then the host's
+// own message, then a fallback.
+function sendUploadOnce(url, form, onProgress, hostWord) {
+  const host = hostWord || "file host";
   return new Promise((resolve, reject) => {
+    const fail = (message, transient) => {
+      const err = new Error(message);
+      err.transient = !!transient;
+      reject(err);
+    };
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", "https://api.cloudinary.com/v1_1/" + encodeURIComponent(sig.cloudName) + "/image/upload");
+    xhr.open("POST", url);
     if (onProgress && xhr.upload) {
       xhr.upload.onprogress = e => {
         if (e.lengthComputable && e.total > 0) onProgress(Math.min(1, e.loaded / e.total));
@@ -3444,15 +3467,15 @@ function uploadPhotoToCloudinary(blob, sig, uploadName, onProgress) {
     // A network failure is the one case fetch worded for us. Say which half
     // failed, since "the host refused it" would be wrong here -- it was never
     // reached.
-    xhr.onerror = () => reject(new Error("the upload could not reach the image host."));
-    xhr.ontimeout = () => reject(new Error("the upload to the image host timed out."));
+    xhr.onerror = () => fail("the upload could not reach the " + host + ".", true);
+    xhr.ontimeout = () => fail("the upload to the " + host + " timed out.", true);
     xhr.onload = () => {
       let data = null;
       try { data = JSON.parse(xhr.responseText); } catch (err) { data = null; }
       const ok = xhr.status >= 200 && xhr.status < 300;
       if (!ok || !data || !data.secure_url) {
         const detail = data && data.error && data.error.message ? data.error.message : "HTTP " + xhr.status;
-        reject(new Error("The image host refused the upload: " + detail));
+        fail("The " + host + " refused the upload: " + detail, xhr.status >= 500 || xhr.status === 429);
         return;
       }
       // The last progress event can land before the response does, and a bar
@@ -3463,6 +3486,43 @@ function uploadPhotoToCloudinary(blob, sig, uploadName, onProgress) {
     };
     xhr.send(form);
   });
+}
+
+// Retries an upload whose failure was TRANSIENT, twice, with a pause between.
+//
+// SAFE TO REPEAT, which is what makes this a retry rather than a gamble: the
+// signature names ONE object (the backend chose its public_id), it is valid for
+// about an hour, and posting the same object again overwrites rather than
+// duplicates. So an attempt whose response was lost after the bytes landed costs
+// a second copy of the same bytes over the wire, and nothing else.
+//
+// PROGRESS NEVER GOES BACKWARDS. A retry starts its bytes from zero; reporting
+// that would drag the batch percentage down mid-upload, which reads as the app
+// losing work. The bar holds until the new attempt passes where the last one got.
+const UPLOAD_RETRY_DELAYS_MS = [2000, 5000];
+async function retryTransientUpload(attempt, onProgress, opts) {
+  const delays = (opts && opts.delays) || UPLOAD_RETRY_DELAYS_MS;
+  const sleep = (opts && opts.sleep) || (ms => new Promise(r => setTimeout(r, ms)));
+  let best = 0;
+  const report = onProgress ? f => { if (f > best) { best = f; onProgress(f); } } : null;
+  for (let i = 0; ; i++) {
+    try {
+      return await attempt(report);
+    } catch (err) {
+      if (!err || !err.transient) throw err;
+      if (i >= delays.length) {
+        // Say it kept happening, not just what happened last: "could not reach
+        // the host" once reads like the host is down, and three times on the
+        // same file reads like what it is -- an unsteady connection.
+        const giveUp = new Error("the connection kept dropping before the upload finished (tried "
+          + (i + 1) + " times). Try again on a steadier connection"
+          + ((opts && opts.giveUpHint) ? " — " + opts.giveUpHint : "") + ".");
+        giveUp.transient = true;
+        throw giveUp;
+      }
+      await sleep(delays[i]);
+    }
+  }
 }
 
 // The floor plan's own upload, to Cloudinary's RAW pipeline rather than
@@ -3482,30 +3542,8 @@ function uploadFloorPlanToCloudinary(file, sig, onProgress) {
     if (value !== undefined && value !== null && value !== "") form.append(k, value);
   });
   const resourceType = sig.resourceType || "raw";
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("POST", "https://api.cloudinary.com/v1_1/" + encodeURIComponent(sig.cloudName) + "/" + resourceType + "/upload");
-    if (onProgress && xhr.upload) {
-      xhr.upload.onprogress = e => {
-        if (e.lengthComputable && e.total > 0) onProgress(Math.min(1, e.loaded / e.total));
-      };
-    }
-    xhr.onerror = () => reject(new Error("the upload could not reach the file host."));
-    xhr.ontimeout = () => reject(new Error("the upload to the file host timed out."));
-    xhr.onload = () => {
-      let data = null;
-      try { data = JSON.parse(xhr.responseText); } catch (err) { data = null; }
-      const ok = xhr.status >= 200 && xhr.status < 300;
-      if (!ok || !data || !data.secure_url) {
-        const detail = data && data.error && data.error.message ? data.error.message : "HTTP " + xhr.status;
-        reject(new Error("The file host refused the upload: " + detail));
-        return;
-      }
-      if (onProgress) onProgress(1);
-      resolve(data);
-    };
-    xhr.send(form);
-  });
+  const url = "https://api.cloudinary.com/v1_1/" + encodeURIComponent(sig.cloudName) + "/" + resourceType + "/upload";
+  return retryTransientUpload(report => sendUploadOnce(url, form, report, "file host"), onProgress);
 }
 
 // Sandbox fixture. Deliberately MIXED, the same way the asset ids and the work
@@ -7296,7 +7334,10 @@ function AssetTracker() {
         const uploadName = kind === "image" ? "upload.jpg"
           : (/\.pdf$/i.test(fileName) ? fileName : "document.pdf");
         const uploaded = await uploadPhotoToCloudinary(prepared.blob, sig, uploadName,
-          onProgress ? f => onProgress(PHOTO_RESIZE_SHARE + (1 - PHOTO_RESIZE_SHARE) * f) : null);
+          onProgress ? f => onProgress(PHOTO_RESIZE_SHARE + (1 - PHOTO_RESIZE_SHARE) * f) : null,
+          // A big PDF is the upload most likely to keep dropping, and a link to
+          // wherever it already lives is the way round that needs no upload.
+          kind === "pdf" ? { giveUpHint: "or attach it as a link instead" } : undefined);
         row = {
           id: crypto.randomUUID(), ownerType: ownerType, ownerId: ownerId,
           url: uploaded.secure_url,

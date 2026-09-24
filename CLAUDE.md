@@ -3227,6 +3227,19 @@ v39** — see "Documents" below, which is a small change resting entirely on thi
       the percentage reverting to a whole-file count, and either half of the
       resize/upload split being dropped.
 
+- **An upload that drops mid-body is RETRIED, twice** (2026-09-24). A 3C PDF failed with
+  "could not reach the image host" partway through; direct probes of Cloudinary answered
+  every size to 10.6MB, so it was the phone's connection, and one wobble cost the whole
+  file. `sendUploadOnce` is the one XHR both upload paths share, and marks a network
+  error, a timeout, a 5xx or a 429 `transient`; `retryTransientUpload` repeats only those.
+  - **Safe to repeat because the signature names ONE object**, chosen by the backend and
+    valid for about an hour — a repeat overwrites rather than duplicates.
+  - **A real refusal is never retried**: a bad signature or a disallowed format fails the
+    same way every time, and waiting seven seconds to hear it twice more is the bug.
+  - **Progress never goes backwards** — a retry restarts its bytes at zero, and the bar
+    holds until it passes where the last attempt got.
+  - Giving up says it KEPT dropping, with the count, and a PDF's message points at the
+    link option. Covered by `test-frontend-upload-retry.js`, run against a scripted XHR.
 - **`photos` is a revision domain of its own, not part of `assets`.** A photo can belong to
   a breaker or a work entry, so folding it in would make attaching one conflict with anyone
   editing any asset anywhere.
