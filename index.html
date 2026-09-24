@@ -2787,7 +2787,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-23.11";
+const APP_VERSION = "2026-09-23.12";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -12457,9 +12457,13 @@ function AssetTracker() {
           </div>
         )}
 
-        {/* No hamburger menu here -- Link & group spaces / Replace / Free
-            zoom already live inside FloorPlanTabContent's own toolbar, and
-            there's nothing else (yet) worth a second menu for. */}
+        {/* No hamburger menu HERE -- Link & group spaces / Free zoom /
+            Replace moved into a menu of their own (2026-09-23) below the
+            map, inside FloorPlanTabContent, rather than up here next to
+            search. That component already owns setupTab/freeZoom/the file
+            input; threading them up just to drive a menu in this row would
+            be prop-drilling for no reason, and this row has nothing else
+            (yet) worth a menu for. */}
         {mainTab === "map" && (
           <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
             {searchOpen || mapQuery ? (
@@ -16459,6 +16463,17 @@ function FloorPlanTabContent({
   const [vbTick, setVbTick] = useState(0);
   const [freeZoom, setFreeZoom] = useState(false);
   const fittedForRef = useRef(null); // which plan's spaces this has already auto-fitted to
+  // Link & group / Free zoom / Replace used to be three always-visible
+  // buttons below the map -- chrome paid on every visit for actions most
+  // visits don't need, the exact complaint the Assets/Maintenance/Audit
+  // hamburgers were built to answer. Folded into the identical menu pattern
+  // (Menu icon, absolute dropdown, click-outside overlay) rather than lifted
+  // into that SHARED showToolbarMenu state: this component owns setupTab,
+  // freeZoom and the file input already, and threading three more callbacks
+  // up through AssetTracker to drive a menu that only ever opens THIS
+  // component's own state would be the prop-drilling BreakersTabContent's
+  // extraction was meant to avoid, not a step toward it.
+  const [menuOpen, setMenuOpen] = useState(false);
 
   const applyVB = () => {
     if (svgElRef.current) {
@@ -17065,34 +17080,71 @@ function FloorPlanTabContent({
         </svg>
       </div>
 
-      {/* ---------- toolbar: enter setup, replace file, free zoom -- BELOW
+      {/* ---------- toolbar: one menu for setup / free zoom / replace -- BELOW
           the map, not above it, so the map itself sits as close to the top
           of the tab as the setup bar (which still renders above it, while
           active, since its status text is exactly what you're looking at
-          mid-tap) allows. ---------- */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
-        {canEdit && !setupTab && (
-          <button type="button" onClick={() => setSetupTab("link")}
-            style={{ padding: "6px 11px", borderRadius: 9, border: `1.5px solid ${C.border}`, background: "none", color: C.ink, fontSize: 12.5, fontWeight: 600 }}>
-            Link &amp; group spaces…
+          mid-tap) allows. The menu itself is the Assets/Maintenance/Audit
+          hamburger, byte for byte: Menu icon, absolute dropdown, a
+          fixed-inset click-catcher to close it, icon-btn rows. ---------- */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+        <div style={{ position: "relative", flexShrink: 0 }}>
+          <button
+            type="button"
+            onClick={() => setMenuOpen(v => !v)}
+            aria-label="Floor plan actions"
+            className="icon-btn"
+            style={{ padding: "6px 9px", borderRadius: 9, border: `1.5px solid ${C.border}`, background: "none", color: C.brandDark, display: "flex" }}
+          >
+            <Menu size={16} />
           </button>
-        )}
-        <button type="button" onClick={() => setFreeZoom(z => !z)}
-          style={{ padding: "6px 11px", borderRadius: 9, border: `1.5px solid ${C.border}`, background: freeZoom ? C.hover : "none", color: C.ink, fontSize: 12.5, fontWeight: 600 }}>
-          Free zoom {freeZoom ? "on" : "off"}
-        </button>
+          {menuOpen && (
+            <>
+              <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
+              <div style={{ position: "absolute", left: 0, top: "100%", marginTop: 6, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, minWidth: 190, overflow: "hidden", padding: 4 }}>
+                {/* Hidden while already in setup -- the Link/Group tab
+                    switcher in the bar above the map does this job once
+                    you're in it, the same way "Add asset" hides itself
+                    while its own form is already open. */}
+                {canEdit && !setupTab && (
+                  <button
+                    type="button"
+                    onClick={() => { setMenuOpen(false); setSetupTab("link"); }}
+                    className="icon-btn"
+                    style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
+                  >
+                    <Settings size={15} /> Link &amp; group spaces…
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => { setMenuOpen(false); setFreeZoom(z => !z); }}
+                  className="icon-btn"
+                  style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
+                >
+                  <Repeat size={15} /> Free zoom ({freeZoom ? "on" : "off"})
+                </button>
+                {canEdit && (
+                  <button
+                    type="button"
+                    disabled={uploadBusy}
+                    onClick={() => { setMenuOpen(false); fileInputRef.current && fileInputRef.current.click(); }}
+                    className="icon-btn"
+                    style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6, opacity: uploadBusy ? 0.6 : 1 }}
+                  >
+                    <RotateCcw size={15} /> {uploadBusy ? "Uploading…" : "Replace…"}
+                  </button>
+                )}
+              </div>
+            </>
+          )}
+        </div>
         {selectedAsset.floorPlanFileName && (
-          <span style={{ fontSize: 12, color: C.empty, marginLeft: "auto" }}>{selectedAsset.floorPlanFileName}</span>
+          <span style={{ fontSize: 12, color: C.empty }}>{selectedAsset.floorPlanFileName}</span>
         )}
         {canEdit && (
-          <>
-            <button type="button" disabled={uploadBusy} onClick={() => fileInputRef.current && fileInputRef.current.click()}
-              style={{ padding: "6px 11px", borderRadius: 9, border: `1.5px solid ${C.border}`, background: "none", color: C.ink, fontSize: 12.5, fontWeight: 600 }}>
-              {uploadBusy ? "Uploading…" : "Replace…"}
-            </button>
-            <input ref={fileInputRef} type="file" accept=".svg,image/svg+xml" style={{ display: "none" }}
-              onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (f) onUploadPlan(f, plan.status === "ready" ? plan.spaces : []); }} />
-          </>
+          <input ref={fileInputRef} type="file" accept=".svg,image/svg+xml" style={{ display: "none" }}
+            onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (f) onUploadPlan(f, plan.status === "ready" ? plan.spaces : []); }} />
         )}
       </div>
       {uploadError && <p style={{ margin: "8px 0 0", fontSize: 13, color: C.danger }}>{uploadError}</p>}
