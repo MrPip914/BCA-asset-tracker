@@ -1215,7 +1215,16 @@ onboard one.
     why the `canEdit` gate moved out with the button.
   - **It is hidden while the add form is open**, because `startAdd()` reseeds the draft: a
     second press with the form already open would silently discard whatever was half-typed
-    in it. The form has its own header and × to close, so nothing is lost by hiding it. Neither tab has a "Showing X of Y" count line: on Assets,
+    in it. The form has its own header and × to close, so nothing is lost by hiding it.
+  - **`startAdd()` seeds `parentId` from `scopeId`** (2026-09-23), when the scope's own
+    type is a legal parent for the starting type (Computer, which only takes a Room) —
+    `canBeParentOf(scopeAsset.type, "Computer")`. Scoped to a Building or Campus, this
+    stays blank rather than pointing a brand-new Computer at a parent its own type would
+    reject; the same asymmetry `openMaintenanceAdd`/`openChangeAdd` don't have, since a
+    place is always a legal target for a task or a change but not always a legal PARENT
+    for whatever type happens to default. It's a one-time starting point, not a live rule
+    — changing Type in the form afterward doesn't re-derive it, matching how the tag
+    suggestion already works. Neither tab has a "Showing X of Y" count line: on Assets,
   the one thing that lived there besides the count (clearing an active sort) moved to a small ×
   chip next to the sort arrow on the sorted column's own header; on Maintenance, the overdue
   count that lived there is now a standalone badge above the table.
@@ -2523,8 +2532,13 @@ filter, then **Scheduled** / **History** sub-tabs, then Add task / Log work.
   only" to "anything not archived". Everything being selectable means you drill with the
   chevron and select with the row body — the two-affordance design that component was built
   around, working as intended rather than by accident.
-- **Nothing is pre-selected from the scope.** The scope is always a PLACE, and pre-filling a
-  Room when most work is on a device inside it would be wrong more often than right.
+- **The scope IS pre-selected, as of 2026-09-23** (Eric's call, reversing the original
+  design here). `openMaintenanceAdd`/`openChangeAdd` are called with `scopeId` rather than
+  `""` from these two buttons, so the Asset picker opens already pointed at wherever
+  `HierarchyNav` is drilled to — a place is itself a valid asset to log work against, and
+  starting there beats starting blank on every visit where the work genuinely is on the
+  room or building itself. `scopeId` is `""` with no scope set, which the openers already
+  read as "nothing picked yet" — so an unscoped main view is unchanged.
 - Save is disabled until an asset is chosen, in both dialogs — `workTarget` is the guard, so
   a main-page dialog cannot write to whatever happened to be open last.
 **The Change Log is no longer a top-level tab — it is Maintenance › History (2026-09-10).**
