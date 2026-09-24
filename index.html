@@ -3508,7 +3508,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-24.1";
+const APP_VERSION = "2026-09-24.2";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -3824,6 +3824,37 @@ function fileKindOf(file) {
   return "";
 }
 
+// LINKS ARE THE THIRD KIND OF FILE (2026-09-24): a row whose `url` points at
+// something kept elsewhere -- a PDF over the image host's 10MB limit in a Drive
+// folder, a Dropbox drawing set, an ImageMeter measurement folder. Nothing is
+// uploaded or signed; the row is the whole attachment. See the Files section of
+// CLAUDE.md for why a link and not a bigger host.
+//
+// The URL, or "" when it is not one that is safe to open. http(s) ONLY, and that
+// is the security half of this feature rather than tidiness: the value is stored
+// as data and later handed to window.open, so a `javascript:` URL pasted in --
+// or typed into the Sheet by hand -- would run inside the app's own origin, with
+// the signed-in session sitting in its localStorage. So it is checked on the way
+// in AND again on the way out (openPhotoViewer), since a cell can change behind
+// the app. A bare "drive.google.com/..." gains https://, which is what copying
+// from a phone's address bar tends to drop; a host with no dot is refused as a
+// typo rather than guessed at.
+function normalizeLinkUrl(input) {
+  let s = String(input || "").trim();
+  if (!s) return "";
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(s)) s = "https://" + s;
+  let u;
+  try { u = new URL(s); } catch (e) { return ""; }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return "";
+  if (!u.hostname || u.hostname.indexOf(".") === -1) return "";
+  return u.href;
+}
+// What a link reads as when nobody named it: the site it lives on, which is
+// usually the most useful thing to know about a bare URL ("drive.google.com").
+function linkDisplayName(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ""); } catch (e) { return "Link"; }
+}
+
 // Owner kinds a photo can attach to. Every one of these has a stable id --
 // assets since the key refactor, breakers and circuits always, work entries and
 // maintenance items since v34. Comments are deliberately absent: nothing
@@ -3888,6 +3919,9 @@ const PDF_PREVIEW_TRANSFORM = "w_1200,c_limit,q_auto,f_jpg,pg_1";
 // makes a move to a different host a copy plus one column rewrite; the derive
 // is only a fallback for a row written before it was stored, or by hand.
 function photoThumbUrl(photo) {
+  // A link has no image. Its url is a web page (a Drive folder), and handing
+  // that to an <img> would fetch it for nothing and then fail into the icon.
+  if (photo.kind === "link") return "";
   if (photo.thumbUrl) return photo.thumbUrl;
   return photoTransformUrl(photo, photo.kind === "pdf" ? PDF_THUMB_TRANSFORM : PHOTO_THUMB_TRANSFORM);
 }
@@ -4136,6 +4170,28 @@ const MOCK_PHOTOS = [
     caption: "Interior — withheld from the QR page",
     width: 400, height: 300, bytes: 4096,
     hiddenFromPublic: true, at: "2026-09-01T17:28:00.000Z", by: "Eric Stamage",
+  },
+  // LINKS (2026-09-24), deliberately two shapes: one NAMED, on an asset that
+  // also carries photos and a PDF, so the gallery shows all three kinds side by
+  // side; one UNNAMED on a work entry, which reads as its host through
+  // linkDisplayName and appears in the read-only History strip. Both addresses
+  // are placeholders -- Sandbox opens them in a new tab like any link, and the
+  // page they land on does not matter to anything here.
+  {
+    id: "photo-8", ownerType: "asset", ownerId: "BCA0082",
+    url: "https://drive.google.com/drive/folders/sandbox-imagemeter-panel-measurements",
+    thumbUrl: "", storageKey: "",
+    kind: "link", fileName: "ImageMeter — panel measurements",
+    caption: "", width: "", height: "", bytes: "",
+    hiddenFromPublic: false, at: "2026-09-03T16:00:00.000Z", by: "Eric Stamage",
+  },
+  {
+    id: "photo-9", ownerType: "change", ownerId: "chg-0086-coil-mar",
+    url: "https://www.dropbox.com/scl/fi/sandbox/coil-service-report-full.pdf",
+    thumbUrl: "", storageKey: "",
+    kind: "link", fileName: "",
+    caption: "", width: "", height: "", bytes: "",
+    hiddenFromPublic: false, at: "2026-03-02T18:08:00.000Z", by: "Eric Stamage",
   },
 ];
 
@@ -8086,8 +8142,49 @@ function AssetTracker() {
   // this rather than setPhotoViewer directly, or the draft would carry the last
   // photo's caption into the next one.
   function openPhotoViewer(photo) {
+    // A LINK opens where it points, in a new tab -- there is nothing for the
+    // lightbox to show. Every tile and strip in the app comes through here, so
+    // this one branch is what makes a link work everywhere a file can appear.
+    // Re-validated on the way OUT, not trusted from when it was added: the cell
+    // can be hand-edited in the Sheet, and window.open on a javascript: URL runs
+    // in this origin. `noopener` keeps the opened page from reaching back here.
+    if (photo && photo.kind === "link") {
+      const safe = normalizeLinkUrl(photo.url);
+      if (safe) window.open(safe, "_blank", "noopener,noreferrer");
+      else setNotice("That link isn't a web address this app will open. Delete it and add it again.");
+      return;
+    }
     setPhotoViewer(photo);
     setPhotoCaptionDraft((photo && photo.caption) || "");
+  }
+
+  // Adds a LINK as a file row. No upload and no signature -- the row is the
+  // whole attachment -- so this is one persist, and it can't partially fail.
+  // Returns an error message for the form to show, or "" on success.
+  function attachLink(ownerType, ownerId, rawUrl, rawName) {
+    if (savingRef.current || photoBusy) return "Still saving — try again in a moment.";
+    if (!ownerId || !PHOTO_OWNER_TYPES.includes(ownerType)) return "There's nothing to attach this to yet.";
+    const url = normalizeLinkUrl(rawUrl);
+    if (!url) return "That isn't a web address. Paste the full link, starting with https://.";
+    const row = {
+      id: crypto.randomUUID(),
+      ownerType, ownerId,
+      url, thumbUrl: "", storageKey: "",
+      kind: "link",
+      fileName: String(rawName || "").trim() || linkDisplayName(url),
+      caption: "", width: "", height: "", bytes: "",
+      // Never published whatever this says -- the public page takes images only
+      // -- but written false so the row reads the same as every other.
+      hiddenFromPublic: false,
+      at: new Date().toISOString(), by: currentUser || "",
+    };
+    // The same rule attachPhotos follows, for the same reason: a work entry's
+    // or a schedule's id can exist only in memory until something saves the
+    // assets domain, and a link naming it must be written in that same save or
+    // it points at an id the next load replaces. See attachPhotos.
+    const ownerIdMayBeMemoryOnly = ownerType === "change" || ownerType === "maintenance";
+    persist(ownerIdMayBeMemoryOnly ? assets.slice() : assets, { photos: [...photos, row] });
+    return "";
   }
 
   async function savePhotoCaption() {
@@ -11030,6 +11127,7 @@ function AssetTracker() {
                     progress={photoProgress}
                     error={photoError}
                     onAdd={(files) => attachPhotos("change", changeDraft.id, files)}
+                    onAddLink={(url, name) => attachLink("change", changeDraft.id, url, name)}
                     onDelete={deletePhoto}
                     onToggleHidden={setPhotoHiddenFromPublic}
                     onOpen={openPhotoViewer}
@@ -11225,6 +11323,7 @@ function AssetTracker() {
                     progress={photoProgress}
                     error={photoError}
                     onAdd={(files) => attachPhotos("maintenance", maintenanceDraft.id, files)}
+                    onAddLink={(url, name) => attachLink("maintenance", maintenanceDraft.id, url, name)}
                     onDelete={deletePhoto}
                     onToggleHidden={setPhotoHiddenFromPublic}
                     onOpen={openPhotoViewer}
@@ -11404,6 +11503,7 @@ function AssetTracker() {
                     progress={photoProgress}
                     error={photoError}
                     onAdd={(files) => attachPhotos("change", maintenanceCompleteModal.changeId, files)}
+                    onAddLink={(url, name) => attachLink("change", maintenanceCompleteModal.changeId, url, name)}
                     onDelete={deletePhoto}
                     onToggleHidden={setPhotoHiddenFromPublic}
                     onOpen={openPhotoViewer}
@@ -12341,7 +12441,8 @@ function AssetTracker() {
                                 <button
                                   key={ph.id}
                                   onClick={() => openPhotoViewer(ph)}
-                                  title={ph.caption || ph.fileName || (ph.kind === "pdf" ? "Open document" : "Open photo")}
+                                  title={ph.kind === "link" ? "Open " + (ph.fileName || "link") + " in a new tab"
+                                    : ph.caption || ph.fileName || (ph.kind === "pdf" ? "Open document" : "Open photo")}
                                   style={{ width: 54, height: 54, padding: 0, border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden", background: C.hover, cursor: "pointer" }}
                                 >
                                   {/* Through AttachmentImage like every other
@@ -12386,6 +12487,7 @@ function AssetTracker() {
                 progress={photoProgress}
                 error={photoError}
                 onAdd={(files) => attachPhotos("asset", selectedAsset.id, files)}
+                onAddLink={(url, name) => attachLink("asset", selectedAsset.id, url, name)}
                 onDelete={deletePhoto}
                 onToggleHidden={setPhotoHiddenFromPublic}
                 onOpen={openPhotoViewer}
@@ -19781,17 +19883,23 @@ function AttachmentImage({ photo, src, alt, style, iconSize, hideName }) {
   const [failed, setFailed] = React.useState(false);
   React.useEffect(() => { setFailed(false); }, [src]);
   if (!src || failed) {
+    // A link is ALWAYS this state -- it has no image -- so it gets its own icon
+    // and says which site it opens, rather than reading as a file that failed.
+    const isLink = photo && photo.kind === "link";
+    const Icon = isLink ? ExternalLink : FileText;
     return (
       <div style={{
         ...style, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
         gap: 6, padding: 10, background: C.hover, color: C.muted, textAlign: "center",
       }}>
-        <FileText size={iconSize || 28} color={C.muted} />
+        <Icon size={iconSize || 28} color={isLink ? C.brand : C.muted} />
         {/* Suppressed on the small strip tiles, where a file name is more
             characters than the box has pixels and lands as a grey smear. */}
         {!hideName && (
           <span style={{ fontSize: 11, wordBreak: "break-all", lineHeight: 1.3 }}>
-            {(photo && photo.fileName) || (photo && photo.kind === "pdf" ? "PDF" : "Image unavailable")}
+            {isLink
+              ? linkDisplayName(photo.url)
+              : (photo && photo.fileName) || (photo && photo.kind === "pdf" ? "PDF" : "Image unavailable")}
           </span>
         )}
       </div>
@@ -19803,9 +19911,26 @@ function AttachmentImage({ photo, src, alt, style, iconSize, hideName }) {
 // The gallery is called PhotoGallery and holds photos AND documents: the stored
 // key never moved when PDFs landed in v39, and the code follows the stored key.
 // See the Files section near the top of this file.
-function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onDelete, onToggleHidden, onOpen, emptyText }) {
+function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onAddLink, onDelete, onToggleHidden, onOpen, emptyText }) {
   const [confirmDelete, setConfirmDelete] = React.useState(null);
   const inputRef = React.useRef(null);
+  // The Add link form, as ONE object -- url, name and its error open and close
+  // together, so closing it is `setLinkDraft(null)` and leaves nothing behind.
+  // Same shape as newFieldDraft in the type editor.
+  const [linkDraft, setLinkDraft] = React.useState(null);
+
+  function submitLink() {
+    if (!linkDraft) return;
+    // Checked here for the friendly message, and again by attachLink, which is
+    // the rule -- the same courtesy/control split the file picker takes.
+    if (!normalizeLinkUrl(linkDraft.url)) {
+      setLinkDraft({ ...linkDraft, error: "That isn't a web address. Paste the full link, starting with https://." });
+      return;
+    }
+    const failure = onAddLink(linkDraft.url, linkDraft.name);
+    if (failure) setLinkDraft({ ...linkDraft, error: failure });
+    else setLinkDraft(null);
+  }
 
   function pick(e) {
     // The whole FileList, not just [0] -- a phone's picker and a desktop file
@@ -19849,10 +19974,62 @@ function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onDelete,
                   : "Uploading…")
               : "Add files"}
           </button>
+          {/* Offered only where a caller wired it, the same way canEdit gates
+              the whole row -- a gallery without an owner to attach to has no
+              use for it. */}
+          {onAddLink && (
+            <button
+              onClick={() => setLinkDraft(linkDraft ? null : { url: "", name: "", error: "" })}
+              disabled={busy}
+              style={{
+                display: "flex", alignItems: "center", gap: 6, padding: "8px 14px",
+                background: "transparent", color: C.brandDark, border: `1.5px solid ${C.brandDark}`,
+                borderRadius: 10, fontWeight: 600, fontSize: 13, cursor: busy ? "default" : "pointer",
+              }}
+            >
+              <ExternalLink size={14} /> Add link
+            </button>
+          )}
           <span style={{ fontSize: 11, color: C.muted }}>
             Photos or PDFs, several at once. Photos are resized and stripped of location data before they
-            leave this device; a PDF is uploaded as it is.
+            leave this device; a PDF is uploaded as it is, up to 10MB. For anything bigger, or kept elsewhere, add a link.
           </span>
+        </div>
+      )}
+
+      {canEdit && onAddLink && linkDraft && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12, padding: 12, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface }}>
+          <input
+            autoFocus
+            value={linkDraft.url}
+            onChange={e => setLinkDraft({ ...linkDraft, url: e.target.value, error: "" })}
+            onKeyDown={e => { if (e.key === "Enter") submitLink(); if (e.key === "Escape") setLinkDraft(null); }}
+            placeholder="Link — a Google Drive, OneDrive or Dropbox file, or an ImageMeter folder"
+            aria-label="Link address"
+            style={{ padding: "8px 10px", border: `1.5px solid ${linkDraft.error ? C.danger : C.border}`, borderRadius: 8, fontSize: 13, color: C.ink, background: C.surface }}
+          />
+          <input
+            value={linkDraft.name}
+            onChange={e => setLinkDraft({ ...linkDraft, name: e.target.value })}
+            onKeyDown={e => { if (e.key === "Enter") submitLink(); if (e.key === "Escape") setLinkDraft(null); }}
+            placeholder="Name (optional) — e.g. Boiler room drawings"
+            aria-label="Link name"
+            style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, borderRadius: 8, fontSize: 13, color: C.ink, background: C.surface }}
+          />
+          {linkDraft.error && <div style={{ fontSize: 12, color: C.danger }}>{linkDraft.error}</div>}
+          <div style={{ fontSize: 11, color: C.muted }}>
+            Opens in a new tab. Whoever taps it needs access where the file lives — share the folder with them there.
+          </div>
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+            <button onClick={() => setLinkDraft(null)} style={{ padding: "7px 12px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+            <button
+              onClick={submitLink}
+              disabled={!linkDraft.url.trim()}
+              style={{ padding: "7px 12px", background: linkDraft.url.trim() ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+            >
+              Add link
+            </button>
+          </div>
         </div>
       )}
 
@@ -19870,7 +20047,8 @@ function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onDelete,
             <div key={ph.id} style={{ position: "relative", borderRadius: 10, overflow: "hidden", border: `1px solid ${C.border}`, background: C.surface }}>
               <button
                 onClick={() => onOpen(ph)}
-                title={ph.caption || ph.fileName || (ph.kind === "pdf" ? "Open document" : "Open photo")}
+                title={ph.kind === "link" ? "Open " + (ph.fileName || "link") + " in a new tab"
+                  : ph.caption || ph.fileName || (ph.kind === "pdf" ? "Open document" : "Open photo")}
                 style={{ display: "block", width: "100%", aspectRatio: "1 / 1", padding: 0, border: "none", background: C.hover, cursor: "pointer" }}
               >
                 <AttachmentImage
@@ -19883,11 +20061,11 @@ function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onDelete,
               {/* A document says so on its face. Its tile is often its first
                   page, which at thumbnail size is a grey rectangle that could be
                   anything. */}
-              {ph.kind === "pdf" && (
+              {(ph.kind === "pdf" || ph.kind === "link") && (
                 <div
                   style={{ position: "absolute", bottom: ph.caption || ph.fileName ? 28 : 6, left: 6, display: "flex", alignItems: "center", gap: 4, padding: "2px 6px", borderRadius: 6, background: "rgba(42,52,57,0.78)", color: "#fff", fontSize: 10, fontWeight: 700 }}
                 >
-                  <FileText size={11} /> PDF
+                  {ph.kind === "link" ? <><ExternalLink size={11} /> LINK</> : <><FileText size={11} /> PDF</>}
                 </div>
               )}
               {ph.hiddenFromPublic && (
@@ -19900,6 +20078,10 @@ function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onDelete,
               )}
               {canEdit && (
                 <div style={{ position: "absolute", top: 6, right: 6, display: "flex", gap: 4 }}>
+                  {/* No public/private toggle on a link: it never publishes,
+                      whatever the flag says (the public page takes images only),
+                      so offering one would be a control that does nothing. */}
+                  {ph.kind !== "link" && (
                   <button
                     onClick={() => onToggleHidden(ph.id, !ph.hiddenFromPublic)}
                     aria-label={ph.hiddenFromPublic ? "Show on the public page" : "Hide from the public page"}
@@ -19908,6 +20090,7 @@ function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onDelete,
                   >
                     {ph.hiddenFromPublic ? <EyeOff size={12} /> : <Eye size={12} />}
                   </button>
+                  )}
                   <button
                     onClick={() => setConfirmDelete(ph.id)}
                     aria-label="Delete file"
@@ -19922,7 +20105,7 @@ function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onDelete,
                   "central-coast-invoice-4471.pdf" says what a caption would. Not
                   on a photo: "IMG_4821.HEIC" under every tile is noise, and a
                   photo already shows what it is by being one. */}
-              {(ph.caption || (ph.kind === "pdf" && ph.fileName)) && (
+              {(ph.caption || (ph.kind !== "image" && ph.fileName)) && (
                 <div
                   title={ph.caption || ph.fileName}
                   style={{ padding: "6px 8px", fontSize: 11, color: C.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
@@ -19938,10 +20121,20 @@ function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onDelete,
       {confirmDelete && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20 }}>
           <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 340 }}>
-            <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Delete this file?</div>
-            <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>
-              The record is removed from the sheet. The file itself stays at the host.
-            </div>
+            {(() => {
+              const target = photos.find(p => p.id === confirmDelete);
+              const isLink = target && target.kind === "link";
+              return (
+                <>
+                  <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>{isLink ? "Remove this link?" : "Delete this file?"}</div>
+                  <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>
+                    {isLink
+                      ? "Only the link is removed. Whatever it points to is left exactly where it is."
+                      : "The record is removed from the sheet. The file itself stays at the host."}
+                  </div>
+                </>
+              );
+            })()}
             <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
               <button onClick={() => setConfirmDelete(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
               <button

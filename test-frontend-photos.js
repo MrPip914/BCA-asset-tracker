@@ -43,12 +43,16 @@ new Function('crypto', 'module', `
   ${grab('photoThumbUrl')}
   ${grab('photoPreviewUrl')}
   ${grab('fileKindOf')}
+  ${grab('normalizeLinkUrl')}
+  ${grab('linkDisplayName')}
   module.adoptPhoto = adoptPhoto;
   module.photoThumbUrl = photoThumbUrl;
   module.photoPreviewUrl = photoPreviewUrl;
   module.fileKindOf = fileKindOf;
+  module.normalizeLinkUrl = normalizeLinkUrl;
+  module.linkDisplayName = linkDisplayName;
 `)({ randomUUID: () => 'generated-uuid' }, mod);
-const { adoptPhoto, photoThumbUrl, photoPreviewUrl, fileKindOf } = mod;
+const { adoptPhoto, photoThumbUrl, photoPreviewUrl, fileKindOf, normalizeLinkUrl, linkDisplayName } = mod;
 
 let pass = 0, fail = 0;
 const eq = (name, got, want) => {
@@ -88,6 +92,52 @@ eq('a real ownerType is untouched', adoptPhoto({ ownerType: 'change' }).ownerTyp
 eq('a blank kind is an image', adoptPhoto({}).kind, 'image');
 eq('a stored kind is kept', adoptPhoto({ kind: 'pdf' }).kind, 'pdf');
 eq('a missing fileName is blank rather than undefined', adoptPhoto({}).fileName, '');
+
+// ------------------------------------------------------------------- links
+// A LINK is the third kind of file (2026-09-24): a row whose url points at
+// something kept elsewhere -- a PDF too big for the image host, an ImageMeter
+// folder. The url ends up in window.open, so the check below is the security
+// half of the feature: only http(s) may ever be opened from this origin.
+eq('an https link is kept', normalizeLinkUrl('https://drive.google.com/drive/folders/abc'), 'https://drive.google.com/drive/folders/abc');
+eq('an http link is kept', normalizeLinkUrl('http://example.com/a.pdf'), 'http://example.com/a.pdf');
+eq('a bare host gains https:// (what a phone address bar drops)', normalizeLinkUrl('  drive.google.com/file/d/xyz  '), 'https://drive.google.com/file/d/xyz');
+eq('javascript: is REFUSED -- it would run in this origin', normalizeLinkUrl('javascript:alert(document.cookie)'), '');
+eq('JavaScript: in another case is refused too', normalizeLinkUrl('JaVaScRiPt:alert(1)'), '');
+// The one that matters: this HAS a host with a dot, so only the scheme check
+// stops it -- "//example.com/" is a comment to the JavaScript engine and the
+// encoded newline ends it, so alert(1) runs.
+eq('javascript:// with a real-looking host is refused', normalizeLinkUrl('javascript://example.com/%0Aalert(1)'), '');
+eq('an ftp link is refused -- http(s) only', normalizeLinkUrl('ftp://files.example.com/a.pdf'), '');
+eq('data: is refused', normalizeLinkUrl('data:text/html,<script>alert(1)</script>'), '');
+eq('a file:// path is refused', normalizeLinkUrl('file:///C:/secret.pdf'), '');
+eq('a word with no dot is a typo, not a host', normalizeLinkUrl('boilerroom'), '');
+eq('blank is refused', normalizeLinkUrl('   '), '');
+eq('an unnamed link reads as its host', linkDisplayName('https://www.dropbox.com/s/abc/report.pdf'), 'dropbox.com');
+eq('an unreadable url still gets a name', linkDisplayName('not a url'), 'Link');
+eq('a link has NO thumbnail -- its url is a web page, not an image',
+   photoThumbUrl({ kind: 'link', url: 'https://drive.google.com/x', thumbUrl: '' }), '');
+eq('...even if a stale thumbUrl is sitting on the row',
+   photoThumbUrl({ kind: 'link', url: 'https://drive.google.com/x', thumbUrl: 'https://evil/pixel.gif' }), '');
+eq('adoptPhoto keeps a link a link', adoptPhoto({ kind: 'link', url: 'https://x.y' }).kind, 'link');
+// The rule that stops a hand-edited cell running code: openPhotoViewer must
+// re-check on the way OUT, not trust what was checked on the way in.
+{
+  const at = src.indexOf('function openPhotoViewer(');
+  const body = src.slice(at, src.indexOf('function attachLink(', at));
+  eq('openPhotoViewer re-validates a link before opening it', /normalizeLinkUrl\(photo\.url\)/.test(body) && /window\.open\(safe,/.test(body), true);
+  eq('...and opens it with noopener', /noopener/.test(body), true);
+}
+// attachLink carries the same same-save rule attachPhotos does, or a link on a
+// work entry lands naming an id the next load replaces.
+{
+  const at = src.indexOf('function attachLink(');
+  const body = src.slice(at, src.indexOf('function ', at + 20));
+  eq('attachLink writes a work entry\'s or schedule\'s id in the same save as the link',
+    /ownerType === "change" \|\| ownerType === "maintenance"/.test(body) && /assets\.slice\(\)/.test(body), true);
+  eq('attachLink refuses what normalizeLinkUrl refuses (the rule, not just the form)',
+    /const url = normalizeLinkUrl\(rawUrl\);\s*if \(!url\) return/.test(body), true);
+  eq('attachLink stores the kind as "link" and uploads nothing', /kind: "link"/.test(body) && !/signPhotoUploads|uploadPhotoToCloudinary/.test(body), true);
+}
 
 // ------------------------------------------------------------ photoThumbUrl
 const FULL = 'https://res.cloudinary.com/demo/image/upload/v1712345678/assets/abc.jpg';
