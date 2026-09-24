@@ -3583,6 +3583,14 @@ three decisions.
     A signature covers exactly the parameters it was computed over, so an allowlist signed
     onto the first signature and omitted from the rest would refuse every upload in a batch
     but the first — which reads as a flaky host rather than as a missing parameter.
+- **Photos and files are TWO buttons with two pickers** (2026-09-24): **Add photos**
+  (`accept="image/*"`) and **Add files** (`accept="application/pdf,image/*"`), both
+  `multiple`, both into the same `pick()`. A phone builds its picker menu from `accept`:
+  an images-only input gets iOS's Photo Library / Take Photo / Choose File sheet, where the
+  library multi-selects. v39 added PDFs to the ONE input, which dropped Photo Library from
+  that sheet and left the camera and the Files app — where a tap returns one file — so
+  picking several photos, the everyday case, got harder for everyone. **Never put a
+  non-image type back on the photos input.**
 - **The multipart part's FILENAME is what tells Cloudinary the format**, and it is not the
   user's file name. A photo is re-encoded to JPEG here, so it is announced as `upload.jpg`
   — sending the original `IMG_4821.HEIC` would declare a format those bytes no longer are.
