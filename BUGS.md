@@ -70,35 +70,6 @@ deploy unchanged to every school. Two honest options:
 inventory that already carries their own asset tags — worth fixing before that import
 rather than after, since the counter is written once and then lived with.
 
-### An add-form draft keeps its Asset ID after switching to a type that has none
-**Found:** 2026-09-12, while adding a person to test the first/last name work.
-**Needs a deploy:** no — `index.html` only.
-**Confirmed:** in a browser against Sandbox. Add asset (defaults to Computer, which
-suggests an Asset ID), switch Type to User, Save.
-
-`startAdd` seeds the draft with a suggested Asset ID because the default type carries
-one. Switching the type to one whose registry entry EXCLUDES `tag` — User, Room,
-Building, Campus — removes the field from the form but leaves the value on the draft.
-Two consequences, in order of how much they matter:
-
-- **The save can be refused by a field that is not on screen.** `findTagConflict` still
-  runs against the carried value, so a collision reports `Asset ID "BCA0001" is already
-  in use (Computer)` on a form with no Asset ID field to correct. Same shape as the Bulk
-  Item parentId bug in CLAUDE.md: an error about a control the type does not have.
-- **Otherwise it saves a hidden tag** onto a type that is meant to have none, and burns
-  an asset number doing it.
-
-**Sandbox shows it every time; a real sheet mostly hides it.** `MOCK_SNAPSHOT` carries no
-`nextAssetNumber`, so `peekAssetNumber()` returns 1 and the suggested ID is `BCA0001`,
-which the fixture's own first Computer already holds. On a live sheet the counter is real,
-so the suggestion is unused and the save goes through — quietly writing the hidden tag.
-
-**The fix is one line in the shape the codebase already uses**: clear `tag` when the
-draft's type stops accepting one, the way the edit path clears `parentId` for a type that
-takes no parent — a repair rather than a refusal, since no tag is that type's only correct
-value. Worth checking at the same time whether any other excluded field survives a type
-change on a draft.
-
 ### A value that doesn't match its field's kind shows as BLANK, then refuses the save
 **Found:** 2026-09-10. **Mostly closed the same day** — see below.
 **Needs a deploy:** no — `index.html` only.
@@ -346,6 +317,35 @@ user is least sure whether their click worked.
 ---
 
 ## Fixed
+
+### An add-form draft kept its Asset ID after switching to a type that has none — fixed 2026-09-23
+**Found:** 2026-09-12, while adding a person to test the first/last name work. **Fixed**
+2026-09-23, at Eric's request after asking for the bug's own details.
+**Needed a deploy:** no — `index.html` only.
+**Confirmed:** in a browser against Sandbox, both before and after. Before: Add asset
+(defaults to Computer, suggesting `BCA0001`), switch Type to User, Save — refused with
+`Asset ID "BCA0001" is already in use (Computer)` on a form with no Asset ID field to
+correct. After: the same sequence saves a User with no tag at all.
+
+`startAdd` seeded the draft with a suggested Asset ID because the default type (Computer)
+carries one. Switching the type to one whose registry entry EXCLUDES `tag` — User, Room,
+Building, Campus — removed the field from the FORM but left the value on the DRAFT, so
+`findTagConflict` still ran against it at save time: a collision reported an error about a
+field that was no longer on screen to fix, and a non-collision quietly saved a hidden tag
+onto a type meant to have none, burning an asset number doing it.
+
+**Fixed the way the edit path already fixed the equivalent `parentId` case**: `tag` is now
+cleared whenever the draft's type stops accepting one, rather than trusted from whatever
+was on the draft before the type changed. The add path clears it inline, where `tag` is
+first computed (`fieldAppliesTo("tag", draft.type) ? (draft.tag || "").trim() : ""`); the
+edit path folds it into the same `draftToSave` repair that already existed for `parentId`,
+rather than adding a second one-off `typeTakesParent`-shaped check beside it.
+
+**The edit path's half was latent, not reported** — editing an EXISTING asset's type to
+one that excludes tag couldn't previously create a NEW collision (the stored tag was
+unchanged, so no write happened), but it left a tag-carrying asset of a type meant to have
+none, un-repaired, which the same fix now cleans up on the next Save the same way it
+already does for a stray `parentId`.
 
 ### The Contents tab's Rooms section shows every room with a blank name — fixed 2026-09-23
 **Found:** 2026-09-23, while extracting the Contents tab's row rendering into a shared

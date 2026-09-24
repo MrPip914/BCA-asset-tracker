@@ -3448,7 +3448,7 @@ const FRONTEND_SCRIPT_VERSION = "v41";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-23.9";
+const APP_VERSION = "2026-09-23.10";
 
 // Builds the address-bar URL for a given in-app location: an asset id + detail
 // tab, or the bare list when assetId is null.
@@ -7158,7 +7158,15 @@ function AssetTracker() {
       // The tag is NOT required as of v32: an asset can exist before anyone
       // prints a sticker for it, and a Room or a User is never given one at all.
       // Only the TYPE is required, since every field rule hangs off it.
-      const tag = (draft.tag || "").trim();
+      //
+      // Cleared here rather than trusted from the draft: startAdd seeds a
+      // suggested tag because the default type (Computer) carries one, and
+      // switching to a type that EXCLUDES tag (User, Room, Building, Campus)
+      // removes the field from the form but used to leave that suggestion on
+      // the draft -- so a collision got reported against a field with no
+      // control on screen to fix it, or a hidden tag got saved onto a type
+      // meant to have none. See BUGS.md.
+      const tag = fieldAppliesTo("tag", draft.type) ? (draft.tag || "").trim() : "";
       if (!draft.type?.trim()) { setDraft({ ...draft, formError: "Type is required.", errorFields: ["type"] }); return; }
       const conflict = findTagConflict(tag, draft.id);
       if (conflict) {
@@ -7210,7 +7218,16 @@ function AssetTracker() {
       // type, no parent is the only correct value, so this is a repair rather
       // than a loss. This is how an asset damaged by the old migration (see
       // adoptLegacyParentage) gets fixed — by opening it and pressing Save.
-      const draftToSave = typeTakesParent(draft.type) ? draft : { ...draft, parentId: "" };
+      //
+      // `tag` gets the same repair for the same reason, once a type switch
+      // hides its field: a stored tag surviving a switch to a tag-less type
+      // (User, Room, Building, Campus) is what let a collision get reported
+      // against a field with no control on screen to fix it — see BUGS.md.
+      const draftToSave = {
+        ...draft,
+        ...(typeTakesParent(draft.type) ? null : { parentId: "" }),
+        ...(fieldAppliesTo("tag", draft.type) ? null : { tag: "" }),
+      };
       const parentError = validateParentChoice(original.id, draftToSave.type, draftToSave.parentId, assets, typesList);
       // The message is shown BOTH inside ParentField and as a form-level line at
       // the top of the form — which is what `errorFields` naming "parent" selects.
