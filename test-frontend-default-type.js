@@ -99,6 +99,13 @@ check('a parent picked BY HAND survives any type change',
 check('no scope: a type change leaves a blank parent blank', reScopedParentId('', 'Room', '', place) === '');
 check('the add form\'s Type field re-derives the parent through it',
   /type: v, parentId: reScopedParentId\(draft\.parentId, v, scopeId, assets\)/.test(src));
+// Changing the default FROM the open add form (its gear opens the type editor)
+// must move that form onto the new default -- not only the next one opened.
+const saveAt = src.indexOf('  function saveTypeSettings(id, draft) {');
+const saveBody = src.slice(saveAt, src.indexOf(NL + '  }' + NL, saveAt));
+check('saving a new default moves an open, untouched add form onto it',
+  /if \(showAdd && newDefault !== oldDefault\)/.test(saveBody)
+  && /d && d\.type === oldDefault\s*\?\s*\{ \.\.\.d, type: newDefault, parentId: reScopedParentId\(d\.parentId, newDefault, scopeId, assets\) \}/.test(saveBody));
 check('startAdd seeds the parent through the same rule',
   /const startParentId = scopedParentFor\(startType, scopeId, assets\)/.test(startAddBody));
 
