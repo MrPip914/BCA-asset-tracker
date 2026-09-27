@@ -436,6 +436,64 @@ its very best.
   verified by driving the real page in Chromium against a mocked backend,
   including a CONTROL case proving the harness can see a write at all.
 
+## Diagnostics logs (backend v41, 2026-09-27)
+
+About has a **Diagnostics** section with two logs: **This device's log** (everyone) and
+**Backend log** (editors, not in Sandbox). Each has Copy, which prefixes the tenant, the
+app build and the backend version, so a pasted log needs no follow-up questions. Built
+after a week of save errors and surprise sign-outs that nothing in the app had recorded:
+the failure modal and the sign-in screen both said *that* it happened and kept nothing.
+
+- **The device log is `localStorage`, per tenant, capped at 300** (`diagLog()`). It
+  records app start (and whether the browser still HELD a session, plus its user agent),
+  every load and save outcome with its duration, sign-outs (button vs server), and
+  uncaught errors. **It is NOT cleared on sign-out**, deliberately: "why was I signed
+  out" is the question it exists to answer, and the sign-out would erase the answer.
+- **The backend log is a `Diagnostics` tab in the bound Sheet** (`logDiag_`), newest
+  1000 rows. It records auth refusals WITH A REASON (`session none/malformed/missing/
+  unreadable/expired`, `notallowed`, `readonly`, a rejected Google token), sign-ins,
+  sign-outs, conflicts (posted vs stored revision), refused saves, server errors, lock
+  timeouts, and saves slower than `DIAG_SLOW_MS`. **An ordinary successful save logs
+  nothing** — a row per save would cost every save a Sheet write to record nothing.
+  - **Why a tab and not Google's Executions page:** the script cannot read that without a
+    new OAuth scope, and a new scope locks every user out until the owner re-approves
+    it. A tab costs no scope. The Executions page is still the fuller record and is
+    still worth checking; it keeps about a week.
+  - **Not in `SHEET_NAMES`**, so the admin wipe leaves it alone — a wipe is exactly when
+    you might want to know what happened just before.
+  - **Every string cell is written with a leading apostrophe.** Sheets stores that as
+    text and drops it on read. Without it a timestamp can become a Date cell, and an
+    error message starting with `=` would be evaluated as a formula in a tab an editor
+    opens.
+  - **`logDiag_` never throws and takes no lock.** The most important thing it records
+    is a lock that could not be had, and logging must not become the failure.
+  - **Editors only** (`op:"diagnostics"`), because it names other people. A viewer still
+    has their own device log, which is the half that describes them.
+  - **Neither log ever holds a session id** — it is a week-long bearer credential, and
+    the tab is readable by anyone the Sheet is shared with. Emails are logged, the same
+    exposure as AuditLog's `by` column.
+- **The lock timeout is now an ANSWER, not a crash**, and it was the most likely cause of
+  the save errors. `waitLock()` throws on timeout, and the three authenticated paths
+  called it OUTSIDE their `try` — so a save queued behind others for 10 seconds got Apps
+  Script's HTML error page, which the app could only report as "Non-JSON response".
+  `acquireLock_()` uses `tryLock` and the handler answers
+  `{ ok: false, busy: true, error }`. Nothing was read or written, so the client treats it
+  as any other failed save (the restore offer applies). **No automatic retry was added**:
+  retrying is safe here, but that is a behaviour change worth deciding separately.
+- **The backend-log request carries the all-false `_dirty` guard**, the same one
+  `loadData`'s read does. A pre-v41 backend does not know `op:"diagnostics"` and would
+  otherwise treat it as a rewrite-everything save of a payload holding no data. With the
+  guard it writes nothing and answers `{ ok, revisions }`, which the panel reports as a
+  backend too old to keep a log.
+- A load refused as busy or as a caught server error (`ok:false`, no assets) is now
+  thrown onto the ordinary load-failure path with its own words, instead of failing
+  later as "Malformed response".
+- Covered by `test-backend-diagnostics.js` and `test-frontend-diagnostics.js`, verified
+  by mutation (the apostrophe dropped, the log returned oldest-first, the trim losing its
+  slack, `readSession_` no longer saying why, a `waitLock` restored, the device log
+  uncapped, the backend button shown in Sandbox, the `_dirty` guard dropped). The panel
+  and the busy and HTML load failures were driven in Chromium against a mocked backend.
+
 ## Local Sandbox mode
 
 Sandbox swaps the real Google Sheet for a local fixture (`MOCK_SNAPSHOT` in

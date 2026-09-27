@@ -49,7 +49,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v40";
+const SCRIPT_VERSION = "v41";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -729,24 +729,32 @@ function createSession_(email) {
 
 // Returns { email, expires } or null. Deletes anything expired or unreadable as
 // it goes, so a bad record can't linger and can't be retried.
-function readSession_(sessionId) {
-  if (!sessionId || typeof sessionId !== "string") return null;
+//
+// `out`, when passed, is told WHY a null came back (v41) -- "none", "malformed",
+// "missing", "unreadable" or "expired". The caller still sees only null; the
+// distinction exists for the diagnostics log, where "missing" (the record is gone
+// -- signed out elsewhere, removed from the list, or never existed on this
+// tenant) and "none" (the browser sent no session at all, i.e. it lost its own
+// storage) point at completely different causes of the same sign-in screen.
+function readSession_(sessionId, out) {
+  const why = (reason) => { if (out) out.why = reason; return null; };
+  if (!sessionId || typeof sessionId !== "string") return why("none");
   // Shape check before touching storage: sessionId lands in a property key, and
   // this keeps a crafted value from being used to probe unrelated properties.
-  if (!/^[0-9a-f]{40,80}$/i.test(sessionId)) return null;
+  if (!/^[0-9a-f]{40,80}$/i.test(sessionId)) return why("malformed");
   const props = PropertiesService.getScriptProperties();
   const raw = props.getProperty(sessionKey_(sessionId));
-  if (!raw) return null;
+  if (!raw) return why("missing");
   let session;
   try {
     session = JSON.parse(raw);
   } catch (err) {
     props.deleteProperty(sessionKey_(sessionId));
-    return null;
+    return why("unreadable");
   }
   if (!session || !session.email || !(Number(session.expires) > Date.now())) {
     props.deleteProperty(sessionKey_(sessionId));
-    return null;
+    return why("expired");
   }
   return session;
 }
@@ -813,14 +821,170 @@ function sweepExpiredSessions_(props) {
 // Resolves a request's sessionId to an authorized identity. The allowlist is
 // re-read on EVERY request, so removing someone or dropping them to view-only
 // takes effect on their next action rather than whenever their session expires.
+//
+// Every refusal is written to the diagnostics log HERE rather than at each of the
+// call sites, so a new op that authorizes through this function is logged without
+// anyone remembering to.
 function authorizeSession_(sessionId, configMap) {
-  const session = readSession_(sessionId);
+  const out = {};
+  const session = readSession_(sessionId, out);
   if (!session) {
+    logDiag_({ event: "auth_failed", reason: "signin", detail: "session " + (out.why || "unknown") });
     return { ok: false, reason: "signin", error: "Your session has expired. Sign in again to continue." };
   }
   const auth = authorizeIdentity_({ email: session.email, name: "" }, configMap);
   if (auth.ok) touchSession_(sessionId, session);
+  else logDiag_({ event: "auth_failed", email: session.email, reason: auth.reason });
   return auth;
+}
+
+// --- Diagnostics log (v41) ----------------------------------------------------
+// A short record of what went WRONG, kept by the backend itself, so the About
+// panel can show it. Google's own Executions page is the fuller record, but this
+// script cannot read it without a new OAuth scope -- and a new scope locks every
+// user out until the owner re-approves it (see "Wipe and import" in CLAUDE.md).
+// A tab in the bound Sheet costs no scope at all.
+//
+// WHAT IS LOGGED IS FAILURES AND SESSION BOUNDARIES, NOT EVERY REQUEST: auth
+// refusals (with why), a lock that could not be had, conflicts, refused saves,
+// server errors, sign-ins, sign-outs, and saves slow enough to be worth seeing.
+// An ordinary successful save writes nothing here -- a row per save would cost
+// every save a Sheet write to record that nothing happened.
+//
+// NEVER A SESSION ID. It is a week-long bearer credential and this tab is readable
+// by anyone the Sheet is shared with. Emails are logged; that is the same exposure
+// as the AuditLog's `by` column and the allowlist in Config.
+//
+// Not in SHEET_NAMES, deliberately: that map is what the admin wipe and the data
+// tabs are built from, and a diagnostics log is neither inventory nor something a
+// wipe should take with it.
+const DIAGNOSTICS_SHEET = "Diagnostics";
+const DIAG_FIELDS = ["at", "event", "op", "email", "reason", "detail", "ms", "scriptVersion"];
+// Kept to the newest DIAG_MAX_ROWS, trimmed in a batch once it overshoots by the
+// slack -- deleting one row per append would double the Sheet calls of every log.
+const DIAG_MAX_ROWS = 1000;
+const DIAG_TRIM_SLACK = 100;
+// How many rows op:"diagnostics" hands back, newest first.
+const DIAG_READ_LIMIT = 300;
+// A save slower than this is logged even though it succeeded. Saves run in the
+// background, so nobody feels one -- which is exactly why a slow backend would
+// otherwise go unnoticed until it started timing out.
+const DIAG_SLOW_MS = 8000;
+
+// Set by doPost as it routes, so a helper deep inside a handler can say which op
+// it was serving without every call site passing it. Per-execution: Apps Script
+// runs each request in a fresh global scope.
+let diagOp_ = "";
+let diagStarted_ = 0;
+
+// One log row as values, in DIAG_FIELDS order. Every string is prefixed with an
+// apostrophe, which Sheets stores as plain text and drops on read: without it a
+// timestamp can be auto-converted into a Date cell (the writeTable_ hazard) and a
+// value beginning with "=" -- an error message quoting user input -- would be
+// evaluated as a FORMULA in a tab an editor opens.
+function diagRow_(entry, now) {
+  const e = entry || {};
+  const text = (v) => "'" + String(v === undefined || v === null ? "" : v).slice(0, 500);
+  return [
+    text(now.toISOString()),
+    text(e.event),
+    text(e.op !== undefined ? e.op : diagOp_),
+    text(e.email),
+    text(e.reason),
+    text(e.detail),
+    e.ms !== undefined ? Number(e.ms) : (diagStarted_ ? now.getTime() - diagStarted_ : ""),
+    text(SCRIPT_VERSION),
+  ];
+}
+
+// Never throws. Logging exists to explain failures, so it must not be able to
+// become one -- a full Sheet or a quota blip here is swallowed.
+//
+// Takes NO LOCK, deliberately: the most important thing this records is a lock
+// that could not be had. appendRow is atomic on its own, and the trim racing
+// another execution's trim can only delete a few extra of the oldest rows.
+function logDiag_(entry) {
+  try {
+    const sheet = getSheet_(DIAGNOSTICS_SHEET);
+    if (sheet.getLastRow() === 0) sheet.appendRow(DIAG_FIELDS);
+    sheet.appendRow(diagRow_(entry, new Date()));
+    const dataRows = sheet.getLastRow() - 1;
+    if (dataRows > DIAG_MAX_ROWS + DIAG_TRIM_SLACK) {
+      sheet.deleteRows(2, dataRows - DIAG_MAX_ROWS);
+    }
+  } catch (err) {
+    /* never let logging break the request it describes */
+  }
+}
+
+// The script lock, or null if it could not be had in time. Replaces a bare
+// waitLock(), which THROWS on timeout -- and a throw outside a handler's try is
+// answered by Apps Script's HTML error page, which the app can only report as
+// "Non-JSON response": a failed save with no reason attached. That was the most
+// likely cause of the save errors this log was built to diagnose, so the
+// timeout is now an answer rather than a crash.
+function acquireLock_(ms) {
+  const lock = LockService.getScriptLock();
+  if (lock.tryLock(ms)) return lock;
+  logDiag_({ event: "busy", detail: "lock not acquired in " + ms + "ms" });
+  return null;
+}
+
+// The response to a request that could not get the lock. NOTHING was read or
+// written, so the client can safely treat it like any other failed request.
+function busyResponse_() {
+  return {
+    ok: false,
+    busy: true,
+    error: "The tracker was busy with other saves and couldn't take this one. Nothing was changed -- try again.",
+    scriptVersion: SCRIPT_VERSION,
+  };
+}
+
+// op:"diagnostics" -- the newest rows of the log, for the About panel.
+// EDITORS ONLY: the log names other people's email addresses. A viewer still has
+// their own browser's log, which is the half that describes them.
+function handleDiagnostics_(body, e) {
+  const lock = acquireLock_(10000);
+  if (!lock) return respond_(busyResponse_(), e);
+  let auth;
+  try {
+    // Config is read under the lock for the reason every read is: mid-rewrite it
+    // can be empty, which would read as "not on the allowlist".
+    auth = authorizeSession_(body.sessionId, readConfigMap_());
+  } finally {
+    lock.releaseLock();
+  }
+  if (!auth.ok) {
+    return respond_({ ok: false, authFailed: true, reason: auth.reason, error: auth.error, scriptVersion: SCRIPT_VERSION }, e);
+  }
+  if (auth.role !== ROLE_EDITOR) {
+    return respond_({ ok: false, forbidden: true, error: "Only editors can read the backend log.", scriptVersion: SCRIPT_VERSION }, e);
+  }
+  // Outside the lock: saves never rewrite this tab, so there is nothing for a
+  // concurrent save to half-finish underneath the read.
+  const sheet = getSheet_(DIAGNOSTICS_SHEET);
+  const values = sheet.getLastRow() > 0 ? sheet.getDataRange().getDisplayValues() : [];
+  return respond_({
+    ok: true,
+    entries: diagEntries_(values, DIAG_READ_LIMIT),
+    total: Math.max(0, values.length - 1),
+    scriptVersion: SCRIPT_VERSION,
+  }, e);
+}
+
+// Sheet values -> objects keyed by the tab's OWN header row (readTable_'s rule),
+// newest first, capped. Pure, so the ordering and the cap are testable.
+function diagEntries_(values, limit) {
+  if (!values || values.length < 2) return [];
+  const headers = values[0];
+  const rows = values.slice(1);
+  const newest = rows.slice(Math.max(0, rows.length - limit)).reverse();
+  return newest.map(row => {
+    const obj = {};
+    headers.forEach((h, i) => { if (h) obj[h] = row[i]; });
+    return obj;
+  });
 }
 
 function jsonOut_(obj) {
@@ -1228,6 +1392,7 @@ function handleSignIn_(body, e) {
   // Verified outside the lock — it's a network round trip to Google.
   const identity = verifyIdToken_(body.idToken);
   if (!identity.ok) {
+    logDiag_({ event: "auth_failed", reason: "signin", detail: "google token rejected: " + (identity.detail || "") });
     return respond_({
       ok: false,
       authFailed: true,
@@ -1251,8 +1416,8 @@ function handleSignIn_(body, e) {
 // clear()s a tab before rewriting it, so an unlocked read landing mid-save can
 // legitimately observe an empty tab.
 function handleAuthenticatedRead_(body, e) {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(10000);
+  const lock = acquireLock_(10000);
+  if (!lock) return respond_(busyResponse_(), e);
   try {
     // Allowlist read under the same lock as the data: outside it, a Config
     // rewrite in flight would show an empty list and reject everyone.
@@ -1265,7 +1430,12 @@ function handleAuthenticatedRead_(body, e) {
     let sessionId;
     if (body._identity) {
       auth = authorizeIdentity_(body._identity, configMap);
-      if (auth.ok) sessionId = createSession_(auth.email);
+      if (auth.ok) {
+        sessionId = createSession_(auth.email);
+        logDiag_({ event: "signin", email: auth.email, detail: auth.role });
+      } else {
+        logDiag_({ event: "auth_failed", email: auth.email || "", reason: auth.reason });
+      }
     } else {
       sessionId = body.sessionId;
       auth = authorizeSession_(sessionId, configMap);
@@ -1481,6 +1651,11 @@ function handleAuthenticatedRead_(body, e) {
     // tag isn't subject to the CORS restrictions a plain fetch() can hit here,
     // Apps Script not sending Access-Control-Allow-Origin headers.
     return respond_(payload, e);
+  } catch (err) {
+    // Used to escape as Apps Script's HTML error page, which the app can only
+    // call "Non-JSON response". Answered as JSON now, and recorded.
+    logDiag_({ event: "error", detail: err && err.message });
+    return respond_({ ok: false, error: "The server couldn't load the inventory: " + (err && err.message), scriptVersion: SCRIPT_VERSION }, e);
   } finally {
     lock.releaseLock();
   }
@@ -1678,8 +1853,8 @@ function handlePhotoSign_(body) {
 // one -- though AuditLog is appended to rather than rewritten, so that is
 // belt-and-braces here rather than the live hazard it is for the other tabs.
 function handleAuditFull_(body, e) {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(10000);
+  const lock = acquireLock_(10000);
+  if (!lock) return respond_(busyResponse_(), e);
   try {
     const configMap = readConfigMap_();
     const auth = authorizeSession_(body.sessionId, configMap);
@@ -1702,6 +1877,7 @@ function handleAuditFull_(body, e) {
 }
 
 function doPost(e) {
+  diagStarted_ = Date.now();
   // Parsed before the lock so a read can be routed away without ever taking the
   // write lock — handleAuthenticatedRead_ acquires its own, and the script lock
   // is not reentrant.
@@ -1714,6 +1890,10 @@ function doPost(e) {
 
   // Sign-in — the only op that accepts a Google ID token. Returns a session plus
   // the inventory in one response.
+  // Which request this is, for the diagnostics log. An ordinary save carries no
+  // op at all, so it is named here rather than left blank.
+  diagOp_ = body.op ? String(body.op).slice(0, 40) : "save";
+
   if (body.op === "signin") {
     return handleSignIn_(body, e);
   }
@@ -1744,12 +1924,21 @@ function doPost(e) {
   // still returns ok, because "this session is gone" is exactly what the caller
   // asked for and reporting failure would only invite a retry loop.
   if (body.op === "signout") {
+    // Read before it is deleted, purely so the log can say WHO signed out --
+    // a deliberate sign-out and a lost session look identical from the app.
+    const ending = readSession_(body.sessionId);
     deleteSession_(body.sessionId);
+    logDiag_({ event: "signout", email: ending ? ending.email : "", detail: ending ? "" : "no live session" });
     return jsonOut_({ ok: true });
   }
 
-  const lock = LockService.getScriptLock();
-  lock.waitLock(10000);
+  // The backend's own log, for the About panel. See handleDiagnostics_.
+  if (body.op === "diagnostics") {
+    return handleDiagnostics_(body, e);
+  }
+
+  const lock = acquireLock_(10000);
+  if (!lock) return jsonOut_(busyResponse_());
   try {
     const assets = body.assets || [];
     // Which domains actually changed, as reported by the client (see persist()
@@ -1801,6 +1990,7 @@ function doPost(e) {
       });
     }
     if (auth.role !== ROLE_EDITOR) {
+      logDiag_({ event: "auth_failed", email: auth.email, reason: "readonly" });
       return jsonOut_({
         ok: false,
         authFailed: true,
@@ -1819,6 +2009,10 @@ function doPost(e) {
         return Math.floor(posted) !== revisions[d];
       });
       if (conflict.length) {
+        logDiag_({
+          event: "conflict", email: auth.email,
+          detail: conflict.map(d => d + " posted " + Math.floor(Number(postedRevisions[d])) + ", stored " + revisions[d]).join("; "),
+        });
         // Write NOTHING — not the tabs, and not the audit rows either, since
         // those describe the very changes being rejected. Returning the current
         // revisions lets the client resync without a second round trip.
@@ -1844,6 +2038,7 @@ function doPost(e) {
     if (dirty.assets && assets.length === 0 && body.confirmEmptyAssets !== true) {
       const existingRows = Math.max(0, getSheet_(SHEET_NAMES.assets).getLastRow() - 1);
       if (existingRows > 0) {
+        logDiag_({ event: "refused", email: auth.email, reason: "emptyAssets", detail: existingRows + " rows on the tab" });
         return jsonOut_({
           ok: false,
           refused: "emptyAssets",
@@ -1863,6 +2058,7 @@ function doPost(e) {
     if (dirty.photos && (body.photos || []).length === 0 && body.confirmEmptyPhotos !== true) {
       const existingPhotoRows = Math.max(0, getSheet_(SHEET_NAMES.photos).getLastRow() - 1);
       if (existingPhotoRows > 0) {
+        logDiag_({ event: "refused", email: auth.email, reason: "emptyPhotos", detail: existingPhotoRows + " rows on the tab" });
         return jsonOut_({
           ok: false,
           refused: "emptyPhotos",
@@ -2079,8 +2275,11 @@ function doPost(e) {
     // The post-write revisions go back with the response so the client can keep
     // saving without a reload first — otherwise its very next save would post
     // the pre-bump numbers and conflict with its own write.
+    const tookMs = Date.now() - diagStarted_;
+    if (tookMs > DIAG_SLOW_MS) logDiag_({ event: "slow_save", email: auth.email, ms: tookMs });
     return jsonOut_({ ok: true, revisions: revisions });
   } catch (err) {
+    logDiag_({ event: "error", detail: err && err.message });
     return jsonOut_({ ok: false, error: err.message });
   } finally {
     lock.releaseLock();
