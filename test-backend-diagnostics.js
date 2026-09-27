@@ -1,4 +1,4 @@
-// The backend diagnostics log (v41). Everything here fails SILENTLY — a log that
+// The backend diagnostics log (v42). Everything here fails SILENTLY — a log that
 // quietly stops writing, a lock timeout that goes back to crashing into an HTML
 // page, or a session id leaking into a tab anyone with the Sheet can read — and
 // none of it can be exercised from Sandbox, which never contacts Apps Script.

@@ -57,14 +57,14 @@ const writeBlock = between('assets.forEach(a => {', TAB_WRITE_CALL + '(SHEET_NAM
 
 const readSide = new Function(
   'assetRows', 'commentRows', 'changeRows', 'allocationRows', 'maintenanceRows',
-  'breakerRows', 'circuitRows',
+  'breakerRows', 'circuitRows', 'spaceLinkRows', 'spaceGroupRows',
   readBlock + '\n return assets;'
 );
 const writeSide = new Function('assets', `
   const commentRows = [], changeRows = [], allocationRows = [], maintenanceRows = [],
-        breakerRows = [], circuitRows = [];
+        breakerRows = [], circuitRows = [], spaceLinkRows = [], spaceGroupRows = [];
   ${writeBlock}
-  return { commentRows, changeRows, allocationRows, maintenanceRows, breakerRows, circuitRows };
+  return { commentRows, changeRows, allocationRows, maintenanceRows, breakerRows, circuitRows, spaceLinkRows, spaceGroupRows };
 `);
 
 // --- fixtures ---------------------------------------------------------------
@@ -105,7 +105,8 @@ const check = (name, ok, detail) => {
   const written = writeSide([assetWithChildren(row)]);
   const back = readSide(
     [row], written.commentRows, written.changeRows, written.allocationRows,
-    written.maintenanceRows, written.breakerRows, written.circuitRows
+    written.maintenanceRows, written.breakerRows, written.circuitRows,
+    written.spaceLinkRows, written.spaceGroupRows
   )[0];
   const counts = {
     comments: back.comments.length,
@@ -128,7 +129,8 @@ const check = (name, ok, detail) => {
   const written = writeSide(assets);
   const back = readSide(
     [LEGACY, MODERN], written.commentRows, written.changeRows, written.allocationRows,
-    written.maintenanceRows, written.breakerRows, written.circuitRows
+    written.maintenanceRows, written.breakerRows, written.circuitRows,
+    written.spaceLinkRows, written.spaceGroupRows
   );
   check('a mixed sheet does not cross-attach child rows',
         back.every(a => a.comments.length === 1 && a.breakers.length === 1),

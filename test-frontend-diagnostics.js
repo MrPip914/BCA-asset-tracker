@@ -1,4 +1,4 @@
-// The device diagnostics log and the About panel's two logs (v41). Each failure
+// The device diagnostics log and the About panel's two logs (v42). Each failure
 // here is silent: a log that stops recording, a log erased by the very sign-out
 // it was meant to explain, or a backend-log request that an older backend reads
 // as a rewrite-everything save.

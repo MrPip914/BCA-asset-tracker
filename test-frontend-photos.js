@@ -43,12 +43,16 @@ new Function('crypto', 'module', `
   ${grab('photoThumbUrl')}
   ${grab('photoPreviewUrl')}
   ${grab('fileKindOf')}
+  ${grab('normalizeLinkUrl')}
+  ${grab('linkDisplayName')}
   module.adoptPhoto = adoptPhoto;
   module.photoThumbUrl = photoThumbUrl;
   module.photoPreviewUrl = photoPreviewUrl;
   module.fileKindOf = fileKindOf;
+  module.normalizeLinkUrl = normalizeLinkUrl;
+  module.linkDisplayName = linkDisplayName;
 `)({ randomUUID: () => 'generated-uuid' }, mod);
-const { adoptPhoto, photoThumbUrl, photoPreviewUrl, fileKindOf } = mod;
+const { adoptPhoto, photoThumbUrl, photoPreviewUrl, fileKindOf, normalizeLinkUrl, linkDisplayName } = mod;
 
 let pass = 0, fail = 0;
 const eq = (name, got, want) => {
@@ -88,6 +92,52 @@ eq('a real ownerType is untouched', adoptPhoto({ ownerType: 'change' }).ownerTyp
 eq('a blank kind is an image', adoptPhoto({}).kind, 'image');
 eq('a stored kind is kept', adoptPhoto({ kind: 'pdf' }).kind, 'pdf');
 eq('a missing fileName is blank rather than undefined', adoptPhoto({}).fileName, '');
+
+// ------------------------------------------------------------------- links
+// A LINK is the third kind of file (2026-09-24): a row whose url points at
+// something kept elsewhere -- a PDF too big for the image host, an ImageMeter
+// folder. The url ends up in window.open, so the check below is the security
+// half of the feature: only http(s) may ever be opened from this origin.
+eq('an https link is kept', normalizeLinkUrl('https://drive.google.com/drive/folders/abc'), 'https://drive.google.com/drive/folders/abc');
+eq('an http link is kept', normalizeLinkUrl('http://example.com/a.pdf'), 'http://example.com/a.pdf');
+eq('a bare host gains https:// (what a phone address bar drops)', normalizeLinkUrl('  drive.google.com/file/d/xyz  '), 'https://drive.google.com/file/d/xyz');
+eq('javascript: is REFUSED -- it would run in this origin', normalizeLinkUrl('javascript:alert(document.cookie)'), '');
+eq('JavaScript: in another case is refused too', normalizeLinkUrl('JaVaScRiPt:alert(1)'), '');
+// The one that matters: this HAS a host with a dot, so only the scheme check
+// stops it -- "//example.com/" is a comment to the JavaScript engine and the
+// encoded newline ends it, so alert(1) runs.
+eq('javascript:// with a real-looking host is refused', normalizeLinkUrl('javascript://example.com/%0Aalert(1)'), '');
+eq('an ftp link is refused -- http(s) only', normalizeLinkUrl('ftp://files.example.com/a.pdf'), '');
+eq('data: is refused', normalizeLinkUrl('data:text/html,<script>alert(1)</script>'), '');
+eq('a file:// path is refused', normalizeLinkUrl('file:///C:/secret.pdf'), '');
+eq('a word with no dot is a typo, not a host', normalizeLinkUrl('boilerroom'), '');
+eq('blank is refused', normalizeLinkUrl('   '), '');
+eq('an unnamed link reads as its host', linkDisplayName('https://www.dropbox.com/s/abc/report.pdf'), 'dropbox.com');
+eq('an unreadable url still gets a name', linkDisplayName('not a url'), 'Link');
+eq('a link has NO thumbnail -- its url is a web page, not an image',
+   photoThumbUrl({ kind: 'link', url: 'https://drive.google.com/x', thumbUrl: '' }), '');
+eq('...even if a stale thumbUrl is sitting on the row',
+   photoThumbUrl({ kind: 'link', url: 'https://drive.google.com/x', thumbUrl: 'https://evil/pixel.gif' }), '');
+eq('adoptPhoto keeps a link a link', adoptPhoto({ kind: 'link', url: 'https://x.y' }).kind, 'link');
+// The rule that stops a hand-edited cell running code: openPhotoViewer must
+// re-check on the way OUT, not trust what was checked on the way in.
+{
+  const at = src.indexOf('function openPhotoViewer(');
+  const body = src.slice(at, src.indexOf('function attachLink(', at));
+  eq('openPhotoViewer re-validates a link before opening it', /normalizeLinkUrl\(photo\.url\)/.test(body) && /window\.open\(safe,/.test(body), true);
+  eq('...and opens it with noopener', /noopener/.test(body), true);
+}
+// attachLink carries the same same-save rule attachPhotos does, or a link on a
+// work entry lands naming an id the next load replaces.
+{
+  const at = src.indexOf('function attachLink(');
+  const body = src.slice(at, src.indexOf('function ', at + 20));
+  eq('attachLink writes a work entry\'s or schedule\'s id in the same save as the link',
+    /ownerType === "change" \|\| ownerType === "maintenance"/.test(body) && /assets\.slice\(\)/.test(body), true);
+  eq('attachLink refuses what normalizeLinkUrl refuses (the rule, not just the form)',
+    /const url = normalizeLinkUrl\(rawUrl\);\s*if \(!url\) return/.test(body), true);
+  eq('attachLink stores the kind as "link" and uploads nothing', /kind: "link"/.test(body) && !/signPhotoUploads|uploadPhotoToCloudinary/.test(body), true);
+}
 
 // ------------------------------------------------------------ photoThumbUrl
 const FULL = 'https://res.cloudinary.com/demo/image/upload/v1712345678/assets/abc.jpg';
@@ -175,7 +225,7 @@ eq('persist computes a photos dirty flag',
 eq('persist sends photos in the payload',
    /photos: nextPhotos,/.test(src), true);
 // Three: the sign-in and read shapes of loadData's request, and the About
-// panel's op:"diagnostics" (v41), which a pre-v41 backend would otherwise treat
+// panel's op:"diagnostics" (v42), which a pre-v42 backend would otherwise treat
 // as a rewrite-everything save.
 eq('every non-save request declares photos:false, matching the _dirty read guard',
    (src.match(/_dirty: \{ assets: false, config: false, breakerTypes: false, photos: false \}/g) || []).length, 3);
@@ -290,13 +340,15 @@ eq('the completion WRITES the id its files were attached to',
 // every list from the ORIGINAL array and each save would drop the ones before
 // it — N writes, one photo surviving. That failure looks like "only the last
 // photo uploaded", which reads as a flaky network rather than a bug.
-function runAttach({ files, failOn = [], ownerType = 'asset', signFails = false, slow = [], emitBytes = [] }) {
+function runAttach({ files, failOn = [], ownerType = 'asset', signFails = false, slow = [], emitBytes = [], stale = null }) {
   const calls = { persist: [], persistAssets: [], errors: [], progress: [], busy: [], signCounts: [] };
   const fn = new Function(
     'savingRef', 'photoBusy', 'PHOTO_OWNER_TYPES', 'setPhotoError', 'setPhotoBusy',
     'setPhotoProgress', 'preparePhotoRow', 'persist', 'photos', 'assets',
     // v37: the batch is signed once up front and uploads run in a bounded pool.
-    'sandboxMode', 'signPhotoUploads', 'PHOTO_UPLOAD_CONCURRENCY', 'module',
+    'sandboxMode', 'signPhotoUploads', 'PHOTO_UPLOAD_CONCURRENCY',
+    // 2026-09-24: refused up front while the view is unconfirmed.
+    'revalidating', 'staleSnapshot', 'module',
     grab('attachPhotos') + '\nmodule.f = attachPhotos;'
   );
   const mod = {};
@@ -332,6 +384,8 @@ function runAttach({ files, failOn = [], ownerType = 'asset', signFails = false,
       return Array.from({ length: count }, (_, i) => ({ publicId: 'sig-' + i }));
     },
     3,
+    stale === 'revalidating',
+    stale === 'stale',
     mod
   );
   return mod.f(ownerType, 'owner-1', files).then(() => calls);
@@ -394,6 +448,18 @@ runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg')], slow: ['a.jpg'] }).then
   eq('the written rows follow the order the FILES were chosen, not finished',
      (calls.persist[0] || []).map(r => r.id).join(','),
      'existing,row-a.jpg,row-b.jpg,row-c.jpg');
+});
+
+// 2026-09-24, from a phone screenshot: while the inventory on screen is an
+// unconfirmed cached copy, persist() refuses every save -- and attachPhotos used
+// to find that out only AFTER uploading every photo, which were then thrown away.
+runAttach({ files: [F('a.jpg'), F('b.jpg')], stale: 'stale' }).then(calls => {
+  eq('an unconfirmed view uploads NOTHING (no signing, no upload)', calls.signCounts.length, 0);
+  eq('...writes nothing', calls.persist.length, 0);
+  eq('...and says why, in the gallery', /server hasn't confirmed/.test(calls.errors[0] || ''), true);
+});
+runAttach({ files: [F('a.jpg')], stale: 'revalidating' }).then(calls => {
+  eq('mid-revalidation also uploads nothing, and asks for a moment', calls.signCounts.length === 0 && /catching up/.test(calls.errors[0] || ''), true);
 });
 
 runAttach({ files: [F('a.jpg'), F('b.jpg')], signFails: true }).then(calls => {
@@ -523,11 +589,11 @@ runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg')] }).then(calls => {
   // progress, so with fetch there is nothing to put in that percentage until a
   // file finishes -- which is the frozen indicator all over again.
   eq('the upload uses XHR so the bytes going out can be reported',
-     /xhr\.upload\.onprogress = /.test(grab('uploadPhotoToCloudinary')), true);
+     /xhr\.upload\.onprogress = /.test(grab('sendUploadOnce')), true);
   eq('and not fetch, which cannot report a request body at all',
-     /fetch\(/.test(grab('uploadPhotoToCloudinary')), false);
+     /fetch\(/.test(grab('sendUploadOnce') + grab('uploadPhotoToCloudinary')), false);
   eq('and it reports 1 on load, so the bar cannot stop short of the response',
-     /if \(onProgress\) onProgress\(1\);/.test(grab('uploadPhotoToCloudinary')), true);
+     /if \(onProgress\) onProgress\(1\);/.test(grab('sendUploadOnce')), true);
   // The resize is worth a fixed slice of each file's share, which is what keeps
   // the number moving where byte progress never arrives: a body small enough
   // that the network stack swallows it whole and reports once at the end, a
@@ -566,8 +632,33 @@ runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg')] }).then(calls => {
      pcts[pcts.length - 1], 100);
 
   // ---- the input and the wiring, which the execution above cannot see -------
-  eq('the file input accepts several at once, photos and PDFs alike',
-     /type="file" accept="image\/\*,application\/pdf" multiple/.test(src), true);
+  // THREE inputs, because a phone honors only one of `capture`/`multiple` on a
+  // given input, not both at once, and which one it picks when both are set is
+  // not documented or stable across OS versions. `capture` alone launches the
+  // camera directly; plain `multiple` opens the library's own multi-select
+  // picker. Our own two-item menu is the chooser between them, standing in for
+  // the OS action sheet a `multiple` images input no longer reliably offers.
+  // Sliced to the next top-level function: grab() would stop at the destructured
+  // props' closing brace, since that is the first {...} after the name.
+  const galleryAt = src.indexOf('function PhotoGallery(');
+  const gallery = src.slice(galleryAt, galleryAt + src.slice(galleryAt).search(/\r?\nfunction /));
+  eq('the CAMERA input launches the camera directly -- capture, but no multiple',
+     /ref=\{cameraInputRef\} type="file" accept="image\/\*" capture="environment" onChange=\{pick\}/.test(gallery), true);
+  eq('...and it is not ALSO a multi-select input (the two intents do not mix)',
+     /ref=\{cameraInputRef\}[^>]*multiple/.test(gallery), false);
+  eq('the LIBRARY input multi-selects -- multiple, but no capture',
+     /ref=\{libraryInputRef\} type="file" accept="image\/\*" multiple onChange=\{pick\}/.test(gallery), true);
+  eq('...and it does not ALSO try to launch the camera',
+     /ref=\{libraryInputRef\}[^>]*capture/.test(gallery), false);
+  eq('the FILES input takes PDFs, several at once, into the same pick()',
+     /ref=\{docInputRef\} type="file" accept="application\/pdf,image\/\*" multiple onChange=\{pick\}/.test(gallery), true);
+  eq('Add photos opens a CHOOSER rather than clicking an input directly',
+     /onClick=\{\(\) => setPhotoMenuOpen\(v => !v\)\}/.test(gallery), true);
+  eq('...whose two rows are what click each input',
+     /cameraInputRef\.current && cameraInputRef\.current\.click\(\)/.test(gallery)
+     && /libraryInputRef\.current && libraryInputRef\.current\.click\(\)/.test(gallery), true);
+  eq('the files button still opens its own picker directly, no chooser needed',
+     /docInputRef\.current && docInputRef\.current\.click\(\)/.test(gallery), true);
   eq('pick hands over the whole FileList rather than just the first',
      /Array\.from\(e\.target\.files\)/.test(src), true);
   // The split exists so a future call site cannot reintroduce a per-file write.

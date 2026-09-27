@@ -436,7 +436,7 @@ its very best.
   verified by driving the real page in Chromium against a mocked backend,
   including a CONTROL case proving the harness can see a write at all.
 
-## Diagnostics logs (backend v41, 2026-09-27)
+## Diagnostics logs (backend v42, 2026-09-27)
 
 About has a **Diagnostics** section with two logs: **This device's log** (everyone) and
 **Backend log** (editors, not in Sandbox). Each has Copy, which prefixes the tenant, the
@@ -478,10 +478,17 @@ the failure modal and the sign-in screen both said *that* it happened and kept n
   Script's HTML error page, which the app could only report as "Non-JSON response".
   `acquireLock_()` uses `tryLock` and the handler answers
   `{ ok: false, busy: true, error }`. Nothing was read or written, so the client treats it
-  as any other failed save (the restore offer applies). **No automatic retry was added**:
-  retrying is safe here, but that is a behaviour change worth deciding separately.
+  as any other failed save (the restore offer applies).
+  - **This changes what `backendPost`'s retries see.** Before v42 a lock timeout was an
+    HTML page, which `backendPost` counts as "a reply that wasn't the app's" and RETRIES.
+    A busy answer is now valid JSON, so it is returned on the first try and reported,
+    not retried. Retrying it would be safe — nothing was written — so teaching
+    `backendPost` to retry `busy: true` is a reasonable follow-up; it was left out
+    because it changes behaviour the diagnostics are meant to measure first.
+  - `backendPost`'s "wasn't the app's" message now carries the first bytes of the reply
+    (tags stripped), since Apps Script's error page usually names the error.
 - **The backend-log request carries the all-false `_dirty` guard**, the same one
-  `loadData`'s read does. A pre-v41 backend does not know `op:"diagnostics"` and would
+  `loadData`'s read does. A pre-v42 backend does not know `op:"diagnostics"` and would
   otherwise treat it as a rewrite-everything save of a payload holding no data. With the
   guard it writes nothing and answers `{ ok, revisions }`, which the panel reports as a
   backend too old to keep a log.
@@ -1273,7 +1280,21 @@ onboard one.
     why the `canEdit` gate moved out with the button.
   - **It is hidden while the add form is open**, because `startAdd()` reseeds the draft: a
     second press with the form already open would silently discard whatever was half-typed
-    in it. The form has its own header and × to close, so nothing is lost by hiding it. Neither tab has a "Showing X of Y" count line: on Assets,
+    in it. The form has its own header and × to close, so nothing is lost by hiding it.
+  - **`startAdd()` seeds `parentId` from `scopeId`** (2026-09-23), when the scope's own
+    type is a legal parent for the starting type (Computer, which only takes a Room) —
+    `canBeParentOf(scopeAsset.type, "Computer")`. Scoped to a Building or Campus, this
+    stays blank rather than pointing a brand-new Computer at a parent its own type would
+    reject; the same asymmetry `openMaintenanceAdd`/`openChangeAdd` don't have, since a
+    place is always a legal target for a task or a change but not always a legal PARENT
+    for whatever type happens to default.
+  - **Changing Type in the form RE-DERIVES it** (2026-09-24, `reScopedParentId`). This
+    said the opposite for a day, and it read as the prefill being broken: scoped to a
+    Building, the form opens on Computer with a blank Parent, and switching to Room left it
+    blank. It re-derives only while the Parent is blank or still the scope itself — a
+    parent picked by hand is never overwritten — and switching to a type the scope cannot
+    hold clears it rather than leaving an illegal parent. The tag suggestion still does not
+    re-derive. Neither tab has a "Showing X of Y" count line: on Assets,
   the one thing that lived there besides the count (clearing an active sort) moved to a small ×
   chip next to the sort arrow on the sorted column's own header; on Maintenance, the overdue
   count that lived there is now a standalone badge above the table.
@@ -1599,6 +1620,37 @@ no backend change at all, and the exception is the one worth remembering.
   Modules stay uneditable: a tab body needs a render branch, so it can't be switched on by data.
 - **Editing is allowed on locked types.** `locked` means the app depends on the type *existing*
   — its tabs, its field rules — which is about the id, not what it's called or what it holds.
+
+**Which type Add asset opens on is a setting in the type editor** ("Default type for new
+assets", 2026-09-23). `startAdd()` used to hardcode `"Computer"`, which is wrong for a
+tenant like a church whose inventory is mostly rooms and fixtures — and simply broken for
+one that removed Computer, since nothing locks it.
+- **Stored as `isDefault: true` on the chosen `typesList` entry, NOT in `typeSettings`.**
+  Both are free (properties on existing Config blobs — no backend release), but "Reset to
+  default" deletes a type's `typeSettings` override wholesale, and resetting a type's
+  FIELDS must not quietly stop it being the default too. Which type is the default is also
+  genuinely a fact about the list, not about one type's rules.
+- **`defaultNewAssetType(typesList)` is the one resolver**: the flagged type, else Computer
+  if it is still listed, else the first type listed. So an untouched sheet behaves exactly
+  as before, a removed default falls through rather than naming a type that no longer
+  exists, and nothing needs migrating.
+- **There is always exactly one.** `renameTypeInList` clears the flag from every other
+  entry in the same pass that sets it, and the editor LOCKS the box on the type that is
+  already the default — it moves by ticking a different type, never by unticking this one
+  into a state nothing could name. A `DEFAULT` badge on the type list shows which it is.
+- The scope prefill still applies on top: the Parent is prefilled only when the scoped
+  place is a legal parent for whatever the default type is.
+- **Changing the default while the add form is OPEN moves that form onto it**
+  (2026-09-24). The type editor is reached from the form's own Type gear, so the form was
+  seeded on the old default and kept it, and the new default only showed on the next
+  open. `saveTypeSettings` now moves an open form whose Type is still the untouched old
+  default, re-deriving its Parent from the scope. A type someone chose is left alone.
+  - **Found on 3C, and half of that report was the parent rules, not a bug**: 3C's `Other`
+    may sit only inside a Room, so drilled to a Floor or a Building there is no legal
+    parent to prefill. That is the type's "Can sit inside" setting doing its job.
+- Covered by `test-frontend-default-type.js`, which runs the real resolver and list update.
+  Verified by mutation that dropping the clear-others step or re-hardcoding Computer in
+  `startAdd` each fail it.
 
 **The icon catalog is 166 icons in 17 groups, behind a shortcut row (2026-09-20).** The picker
 was a flat wrap of 15, which is why two Facilities types shipped as question marks and "People"
@@ -1992,10 +2044,32 @@ unidentifiable standing in front of four panels. It listed bare ids before. It s
 
 **`HierarchyNav` is the drill-down that sits above the asset list** (added 2026-08-20): a
 breadcrumb plus a row of child places, narrowing the list to everything *beneath* wherever you
-are, at any depth — drill to a building and you get the equipment in all its rooms, not just
-what hangs directly off the building. Its state (`scopeId`) is **navigation**, deliberately
-separate from the column **filters**: they intersect rather than override, and the scope
-excludes the place itself (you're looking inside it).
+are, at any depth, PLUS the place itself — drill to a building and you get the building's own
+row, the equipment in all its rooms, and (on Tasks/Audit) anything logged against the building
+directly, not just what hangs off it. Its state (`scopeId`) is **navigation**, deliberately
+separate from the column **filters**: they intersect rather than override.
+- **The scope including itself is a 2026-09-23 reversal** of what this said until then — the
+  place used to be excluded on the reasoning that "you're looking inside it, and listing it as
+  one of its own contents reads as an error." That held right up until Tasks and Audit shared
+  the same scope test: a Building has its own row, can carry its own tasks (a roof inspection,
+  not tied to any room) and its own audit history, and hiding those from a view scoped to that
+  exact Building was the one place scoping disagreed with itself. `inHierarchyScope(a, scopeId,
+  assets, exact)` is the one shared test now — `a.id === scopeId` short-circuits true before
+  the `ancestorsOf` walk, so the place counts as inside its own scope everywhere the test is
+  used: the Assets list, Tasks (both Scheduled and History), and the master Audit tab.
+- **`roomMovable` (the bulk move-to-room toolbar) is UNCHANGED by this**, because it was never
+  built on the exclusion — it separately filters `a.id !== bulkMoveSourceId`, by id, regardless
+  of what the underlying `filtered` list contains. The old reasoning about a room "dragging
+  itself along" was really about that filter, not about the scope test, and it still holds.
+- **"Hide children" is a checkbox under HierarchyNav** (`scopeExact`, shared the same way
+  `scopeId` is — narrowing on one tab and switching to another keeps the checkbox where you
+  left it), rendered only where a scope is actually applied to a list — Assets, Tasks, Audit —
+  and only once something is scoped (unchecked, inert, and hidden with nothing chosen). Checked
+  narrows `inHierarchyScope` from "this place and everything beneath it" to "this place's own
+  row only," for "what does this location's own record say" without every device in every room
+  in the way. The Map tab's own `HierarchyNav` doesn't pass `setScopeExact` at all — it has no
+  filtered list for the checkbox to act on, the same reason it doesn't get one on the Add
+  asset/Add task prefill either.
 
 It's deliberately NOT built on `HierarchyBrowserModal` despite the overlap. That component
 picks one thing out of a tree and closes, and to do it it hides rows you can't pick and
@@ -2581,8 +2655,13 @@ filter, then **Scheduled** / **History** sub-tabs, then Add task / Log work.
   only" to "anything not archived". Everything being selectable means you drill with the
   chevron and select with the row body — the two-affordance design that component was built
   around, working as intended rather than by accident.
-- **Nothing is pre-selected from the scope.** The scope is always a PLACE, and pre-filling a
-  Room when most work is on a device inside it would be wrong more often than right.
+- **The scope IS pre-selected, as of 2026-09-23** (Eric's call, reversing the original
+  design here). `openMaintenanceAdd`/`openChangeAdd` are called with `scopeId` rather than
+  `""` from these two buttons, so the Asset picker opens already pointed at wherever
+  `HierarchyNav` is drilled to — a place is itself a valid asset to log work against, and
+  starting there beats starting blank on every visit where the work genuinely is on the
+  room or building itself. `scopeId` is `""` with no scope set, which the openers already
+  read as "nothing picked yet" — so an unscoped main view is unchanged.
 - Save is disabled until an asset is chosen, in both dialogs — `workTarget` is the guard, so
   a main-page dialog cannot write to whatever happened to be open last.
 **The Change Log is no longer a top-level tab — it is Maintenance › History (2026-09-10).**
@@ -3005,6 +3084,209 @@ array position can't serve as identity once things move.
   `snake_case` action names: `breaker_added`, `breaker_edited`, `breaker_swapped`,
   `breaker_removed`, `circuit_added`, `circuit_edited`, `circuit_reassigned`, `circuit_removed`.
 
+
+## The Assets tab exports what is SHOWN, and reads it back (2026-09-21)
+
+Export on the Assets tab writes **one sheet of `filtered`** — the hierarchy scope, every
+column filter, the search box and the sort, exactly as on screen — in a shape **Import**
+reads back. "Fix the serials on these eleven monitors" starts by narrowing to them, and a
+dump of four hundred assets is not a starting point for that. **Frontend only: no backend
+change, no version bump, no deploy.** Nothing about what is stored moved.
+
+- **THE TWO EXPORTS ARE DIFFERENT FILES AND HAVE TO BE** (Eric's call). The Tasks and Audit
+  tabs still export the full workbook, which carries resolved, derived and counted columns —
+  Campus/Building/Room, "Comments logged", a whole audit trail — none of which can be read
+  back in. A file that is half round-trippable is worse than one that is wholly one thing or
+  the other, so the Assets sheet is the importable one and the workbook stays a report. They
+  are named apart (`<tenant>-assets.xlsx` against `<tenant>-asset-inventory.xlsx`) because
+  they land in the same downloads folder and only one of them can be imported.
+  - The cost, stated plainly: the full workbook is now only reachable from the other two
+    tabs. `test-frontend-export.js` asserts the two filenames differ, since identical ones
+    would make "which of these is the importable one" unanswerable without opening both.
+- **EVERY COLUMN IS WRITTEN, not just the visible ones.** Column visibility is a per-device
+  reading preference; letting it decide what a file carries would make the round trip
+  silently lossy in a way nobody would connect back to a checkbox ticked a month ago.
+- **`importHeadersFor(columns)` is the contract, and both halves build from it.** Two lists
+  that merely happen to agree today is how a column lands under the wrong heading later, and
+  the import then writes serials into hostnames without a word. A label is the header, and a
+  label already taken (a custom column called "Notes") falls back to the column's KEY — a
+  spreadsheet row is an object, so two identical headers mean the second silently overwrites
+  the first and that field is never exported at all.
+- **Every reference is written as the thing a person READS and resolved back on the way in**
+  — a type by name, a parent by its own full path, a user by their name. The exception is
+  **`Asset Key`, the asset's own `id`**, the one column here that is not for reading: it is
+  what makes "export, edit in Excel, import back" UPDATE rows instead of duplicating them,
+  and it survives a rename, a retag and a move, which no readable value does.
+  - **Matched by key FIRST and by tag only as a fallback**, which is the order that makes a
+    retag work at all: change the Asset ID cell of a row carrying its key and the asset is
+    RETAGGED, where matching on the tag first would make it a stranger and create a second
+    copy of it.
+- **`fullPathOf` exists because `pathOf` deliberately isn't it.** `pathOf(a)` renders the
+  chain ABOVE an asset, so the Path cell written for a child IS its parent's complete
+  address — resolving one back is a lookup, not a reconstruction. If `pathOf` ever starts
+  including the asset itself, every parent in every exported file shifts down a level and
+  the import silently re-parents the inventory; that identity is asserted directly.
+- **A parent resolves in TIERS — full path, then name, then id, then tag — and the order is
+  the whole correctness of it.** The export writes a full path, so that tier round-trips
+  exactly; the rest is for a value somebody typed by hand. **A tier maps to a LIST, never to
+  one asset**: "no match" and "two matches" are different answers, one a typo and the other
+  two rooms sharing a name, and taking the first would move equipment into the wrong
+  building with nothing on screen saying so.
+- **The User column is SLASH-joined, not the comma-joined display string.** Under the
+  "Last, First" name format one person IS "Cantrell, Aaron", so a comma-separated list of
+  people cannot be split back into people — "Aaron" and "Cantrell" both resolve to nobody.
+  Slash is already this app's stored separator for several people (the legacy `person`
+  column), so the export simply writes what is stored. **Found by a round-trip test and by
+  nothing else**: the export and the import each read perfectly well alone, it round-trips
+  under "First Last", and it only breaks once somebody changes a reading preference in the
+  account menu. Peripherals accept either separator, since no peripheral contains a comma.
+- **`personIds` are only written in id mode.** In legacy name mode nothing reads them, so
+  resolving names to ids there would hand the asset an assignment the rest of the app cannot
+  see — the v28 data loss from a new direction.
+
+### A file can build a hierarchy that does not exist yet (2026-09-21)
+
+**THIS IS WHAT THE WHOLE FEATURE IS FOR** — Eric's words: "import all the buildings and
+rooms and detail how they are connected." The first version could not do it. A parent
+reference resolved against the CURRENT inventory alone, so a file describing a new
+Building and the Rooms inside it failed on every child row, and the one job the import
+existed for was the one job it refused.
+
+- **Rows in the file are candidate parents too**, indexed alongside the existing assets.
+  A row may name a parent created by a row further DOWN the sheet: resolution is a second
+  pass over every row, not a first-pass lookup, so **file order does not matter**. Sorting
+  the sheet by name must not break somebody's own import.
+- **IT NEEDS NO ITERATION AND NO DEPENDENCY GRAPH, and that falls straight out of the
+  column holding a FULL PATH rather than a bare parent name.** A row's Path cell IS its
+  parent's complete address, so the row's own address is that cell plus its own name —
+  computable from two cells, without resolving anything, however deep the file nests. A
+  bare-name parent column would have forced a topological sort over the file. That is the
+  strongest argument for the full-path format, and it was not the reason it was chosen.
+- **EVERY row is indexed, not only the creates.** A file that renames a Building and fills
+  it names the NEW name in its children's Path cells, and the existing index only knows the
+  old one. Safe because `addImportRef` dedupes **on id**, not on object identity — the row
+  and the asset it updates are two objects describing one asset, and a second entry would
+  read as "two matches", which is the one answer that has to mean something else.
+- **A row is NAMED before anything is indexed**, since the name is half the address other
+  rows find it by. Currently unobservable — the only rows whose two spellings differ carry
+  a tag and no name, and every shipped place type excludes the tag field — but the type
+  editor lets a school switch tags on for Rooms, at which point it stops being a no-op. Kept
+  deliberately rather than by accident; `test-frontend-import.js` says so rather than
+  faking a test for it.
+- **Classification waits for the second pass.** A row whose only change is its parent
+  cannot be told from an unchanged one until that parent has resolved, so updates, creates
+  and unchanged are decided after parents, not during the read.
+- **A row naming ITSELF is caught as itself**, not reported as a loop — otherwise someone
+  goes looking for a second row that does not exist. A loop among rows that are ALL new is
+  still caught, by the projected-inventory check, which already saw creates.
+- **"Not an asset here" became "not an asset here and no row in this file creates it"**,
+  which is the only honest reading once the file is itself a source of parents.
+
+**The column is called `Parent Path` in the sheet, and it is called `Path` in the app.**
+`IMPORT_HEADER_OVERRIDES` is the one place the two differ and exists for one reason: Eric
+read an export and asked where the parent column was. "Path" is right in the LIST, which
+renders the chain and is read as a breadcrumb; in a file you EDIT it is the field that
+places the asset, and the header has to say what you put in it. **The stored key, the
+column and the value are all unchanged** — labels only, the same trade `changeType`/"Work
+type" takes. **A file carrying the old `Path` header still lands**, because a file outlives
+the wording of the header that produced it — the rule `?tab=changes` already follows.
+
+### What the import refuses, and what it only warns about
+
+**ERRORS REFUSE THE WHOLE FILE** (Eric's call). A spreadsheet is edited as a whole and
+re-imported as a whole, so importing the good half leaves the inventory in a state nobody
+chose and the file on screen no longer describing what landed. **That is made STRUCTURAL
+rather than left as a promise the caller keeps**: a plan carrying errors carries no updates
+and no creates either, so a forgotten guard cannot import eleven rows of a twelve-row file.
+
+**EVERY CHECK RUNS AGAINST THE WHOLE INVENTORY, not just the rows in the file**, which is
+the other half of that call. A merge import can only see its own rows, so the collision that
+matters most — a tag in the file already worn by an asset the file does not mention — is
+invisible from inside it and would otherwise surface as a refused save long afterwards.
+
+- **It is a MERGE and never a replace**, forced by the export being FILTERED: a ten-row file
+  describes ten assets, not an inventory of ten. A row updates the asset its key names, a row
+  matching nothing creates one, and an asset the file omits is untouched. The review says so
+  in as many words, because "will this wipe everything else?" is the first thing anyone
+  thinks looking at it.
+- **REQUIRED FIELDS ARE DELIBERATELY NOT ENFORCED**, and that is not an oversight: required
+  is a FORM rule here and every bulk path bypasses it (`duplicateAsset`,
+  `convertUsersToAssets`, the toolbar actions, the Sheet's own admin import). Enforcing it
+  here alone would make a spreadsheet of forty perfectly good rows unimportable over a rule
+  none of the other bulk paths apply. A column's **data type** IS checked, through the same
+  `validateColumnValue` the edit form uses — that is the path that catches a date typed into
+  a number column, which no form would ever have let through.
+- **PARENTAGE IS CHECKED AGAINST THE PROJECTED INVENTORY, NOT THE CURRENT ONE.** A file that
+  puts A inside B and B inside A is legal on each row read alone AND legal against the assets
+  as they stand, so a per-row check cannot see it. Checked once, after the whole file is
+  read, against what it would leave behind.
+- **A file that is not an asset sheet says so ONCE.** Without that check a bank statement
+  parses into rows with no type and refuses with a hundred identical complaints instead of
+  one sentence saying what happened. `IMPORT_MESSAGE_LIMIT` caps the rest: one wrong column
+  produces a complaint per row, and a wall nobody reads scrolls the buttons off screen.
+- **A managed-list addition rides on the row actually being WRITTEN.** An unchanged row must
+  not extend `peripheralsList`, or a file whose rows all already match advertises a change it
+  can never apply — not hypothetical, since Sandbox ships an EMPTY peripherals list beside
+  assets carrying several, and an untouched re-import advertised four of them. When a row IS
+  written, its new values are adopted: an imported peripheral missing from the managed list
+  renders as a chip no form can re-select, which reads as the field being broken.
+- **A field the row's type doesn't have is a WARNING, not an error** — one sheet covers every
+  type, so a Room's row necessarily carries a blank Serial. A non-blank one is worth a word,
+  since the value is being dropped. The one silent case is a **person's Name**: the export
+  writes the composed string for readability while First/Last are the real fields and travel
+  in their own columns, so warning would fire on every person in every file.
+
+### Applying it
+
+- **ONE `persist()` for the whole file**, which is what makes all-or-nothing true of the
+  WRITE and not only of the validation: every save is a full snapshot behind a revision
+  check, so one save per row would be N round trips, N chances for someone else's edit to
+  land in the middle, and a half-applied file with no way to say which half.
+- **AUDITED PER FIELD, exactly as an edit through the form is** — not one "imported" row per
+  asset. An import moves real values, so the history has to say which ones; a single row
+  naming the file would leave every asset's own page unable to answer what changed about it.
+  A parent move carries its `related` ids, so it lands in both rooms' histories like any
+  other move.
+- **Existing assets keep their position and created ones go on the end**, or every row of the
+  Assets tab moves and the next diff of the Sheet's own version history is unreadable.
+- **Import is gated on `canEdit` and goes through `persist()`** like every other write, so
+  the view-only rule, the revision check and the failed-save recovery all apply unchanged.
+  It works in Sandbox, which is the safe place to try it.
+- **The review modal is a moment, not a progress bar.** Closing it is a complete undo,
+  because nothing has been written. Errors and warnings are different SCREENS rather than
+  two lists in different colours: an error means nothing can be imported at all, so the only
+  button is Close and the file is the thing to go and fix.
+- **The file input is permanently mounted and hidden**, since a menu item cannot open a file
+  picker, and its `value` is cleared on every pick — without that, choosing the same file
+  twice in a row fires no change event the second time, which reads as the app refusing a
+  file it accepted a moment ago.
+
+Covered by `test-frontend-import.js`, which runs the REAL registry, field rules, naming and
+validation against a fixture shaped like an inventory — two rooms sharing a name, a
+parentless room whose whole address is also a name, a device with TWO people on it, a
+user-created type with a uuid id. Verified by mutation that 22 silent failures fail it, among
+them the comma-joined User column, the tier order reversed, the whole-inventory tag check
+dropped, a bad row no longer discarding the good ones, the loop check run against the current
+assets, and an unchanged row extending the managed list. **Three mutations initially survived
+and each named a missing fixture shape rather than a missing assertion** — one person on a
+device cannot show a separator a name can contain, a unique-named room cannot tell the path
+tier from the name tier, and two rows that already cycle today cannot show a cross-row cycle.
+`test-frontend-export.js` scans BOTH export functions for dead references now, which it has
+to: the new one was written by copying the shape of the old, and a bare identifier is only
+resolved when the line RUNS. The browser half — the menu, the download, the review modal,
+applying, and the audit rows that follow — was driven in Chromium against Sandbox.
+
+The hierarchy work added ten more mutations, all killed, among them file rows ceasing to be
+candidate parents, only the CREATES being indexed, the id-dedupe reverting to object
+identity, classification running before parents resolve, and the header override dropped.
+**Two survived at first and each named a missing fixture shape rather than a missing
+assertion** — the same lesson a third and fourth time: a file that only creates cannot show
+that an updated row must be indexed too, and a uniquely-named parent cannot show a rename.
+**A third "survivor" turned out to be a genuine no-op** and was recorded as one instead of
+being papered over with a contorted test. Driven in Chromium: a four-row sheet listing a PC,
+two Rooms and their Building **in that order** — every child above its parent — imported
+clean and landed the PC three levels down.
+
 ## Known constraints / things to watch
 
 **Nothing here records what is deployed, or what is on a live Sheet.** Both are one
@@ -3020,6 +3302,41 @@ is the RULE a version taught, which does not expire. When a version is genuinely
 and the window matters — "categories work in-session and vanish on reload until this is
 deployed" — that note goes in the branch's commit message or its plan file, where it dies
 with the branch instead of outliving it here.
+
+### Google's layer in front of Apps Script fails intermittently (2026-09-24)
+
+**Every backend call goes through `backendPost`, which retries anything that isn't one of
+our own replies** — 3 retries at 1s/3s/7s, and a 30s limit per attempt. Measured on the live
+dev tenant: the same trivial request answered in 1.6s, then seconds later with Google's own
+"Sorry, unable to open the file at this time" 404 page after 18s; another attempt hung 54s.
+3C's backend, sampled at the same moment, was healthy — it comes and goes per project.
+- **What the app used to do with one such blip**: a failed READ stranded it on the cached
+  snapshot with every save blocked until a manual reload ("This is the last inventory this
+  device saved…"); a failed SAVE showed the not-saved modal; and **Google occasionally
+  delivers a POST without its body, which lands in `doGet`**, whose bare-GET reply is
+  authFailed "This endpoint requires sign-in." — so the app SIGNED THE USER OUT. That was the
+  "regularly logged out while linking spaces" report. No POST of ours can legitimately get
+  that reply (doPost words all its own auth failures differently), so it is now a retry.
+- **What counts as a blip**: a network error or timeout, any non-2xx status (Apps Script's own
+  replies are always 200), a body that isn't a JSON object (an HTML error page), or doGet's
+  bare-GET reply. **Everything else is a real answer and is returned untouched** — a genuine
+  expired session still signs out, a conflict still reloads.
+- **Retrying a WRITE is safe only because of the revision counters.** A save that actually
+  landed but whose reply was lost is retried with the same, now-stale `_revisions`; the
+  backend refuses it as a conflict and writes nothing, and the audit append is keyed off
+  `auditBase` so nothing appends twice. The cost is a rare false "your change wasn't saved".
+- **The one raw `fetch` left is sign-out**, fire-and-forget by design.
+- **Uploads are refused BEFORE they start while the view is unconfirmed** (`revalidating` /
+  `staleSnapshot`), with the reason shown in the gallery itself. They used to upload every
+  file and then have `persist()` discard the rows.
+- **Not done, and the next step if this keeps biting**: the backend's `lock.waitLock(10000)`
+  in the read and write paths sits OUTSIDE any try/catch, so a lock timeout crashes the
+  execution into an HTML page. `backendPost` now retries that, but catching it and replying
+  `{ ok: false, busy: true }` would be the honest fix — a backend release.
+- Covered by `test-frontend-backend-post.js`, which runs the real function against scripted
+  replies (Google's 404, an HTML crash page, the bare-GET reply, a hang, a real expiry, a
+  conflict). Mutation-checked that accepting the bare-GET reply, any error status, a non-object
+  body, dropping the retries, or a save bypassing it each fail it.
 
 ### What costs a backend release, and what a removal destroys
 
@@ -3093,6 +3410,15 @@ with the branch instead of outliving it here.
   a branch that was simply behind `main`. An older backend does not merely revert behaviour —
   it drops columns a newer one added, and the next save destroys that data. `deploy.mjs` refuses
   to go backwards, which is the only reason a repeat is merely annoying.
+- **The same version number from a DIFFERENT branch is not caught by anything.**
+  2026-09-27: the diagnostics work was built on `main` as v41 while the floor-plan work on
+  `dev` was already live on the dev tenant (and on `3c`) as ITS v41. `deploy.mjs` refuses
+  only a LOWER version, so the equal one went straight over it and dev ran a backend
+  missing the floor-plan columns for about two minutes, until `dev` was redeployed. The
+  run log said so in plain text — `live script is "AssetTrackerSync.js" (currently v41)`
+  on a deploy OF v41 — and that line is the thing to read. **Before bumping
+  `SCRIPT_VERSION`, check what every branch and every tenant already calls itself**
+  (`node deploy.mjs --status`, and `SCRIPT_VERSION` on `origin/dev`), not only `main`.
 - **Two branches cannot both call themselves the next version.** v14, v15 and v16 were each
   pending on their own branch, each claiming to be next, and all three edited the same `doGet` —
   so deploying one after another would have silently erased the first, while each also bumped
@@ -3191,6 +3517,19 @@ v39** — see "Documents" below, which is a small change resting entirely on thi
       the percentage reverting to a whole-file count, and either half of the
       resize/upload split being dropped.
 
+- **An upload that drops mid-body is RETRIED, twice** (2026-09-24). A 3C PDF failed with
+  "could not reach the image host" partway through; direct probes of Cloudinary answered
+  every size to 10.6MB, so it was the phone's connection, and one wobble cost the whole
+  file. `sendUploadOnce` is the one XHR both upload paths share, and marks a network
+  error, a timeout, a 5xx or a 429 `transient`; `retryTransientUpload` repeats only those.
+  - **Safe to repeat because the signature names ONE object**, chosen by the backend and
+    valid for about an hour — a repeat overwrites rather than duplicates.
+  - **A real refusal is never retried**: a bad signature or a disallowed format fails the
+    same way every time, and waiting seven seconds to hear it twice more is the bug.
+  - **Progress never goes backwards** — a retry restarts its bytes at zero, and the bar
+    holds until it passes where the last attempt got.
+  - Giving up says it KEPT dropping, with the count, and a PDF's message points at the
+    link option. Covered by `test-frontend-upload-retry.js`, run against a scripted XHR.
 - **`photos` is a revision domain of its own, not part of `assets`.** A photo can belong to
   a breaker or a work entry, so folding it in would make attaching one conflict with anyone
   editing any asset anywhere.
@@ -3318,6 +3657,27 @@ three decisions.
     A signature covers exactly the parameters it was computed over, so an allowlist signed
     onto the first signature and omitted from the rest would refuse every upload in a batch
     but the first — which reads as a flaky host rather than as a missing parameter.
+- **Photos and files are TWO buttons; Add photos is now OUR OWN chooser, not the
+  OS's** (2026-09-24, second pass). The first pass split PDFs onto their own **Add files**
+  button (`accept="application/pdf,image/*" multiple`) so an images-only **Add photos**
+  input would get iOS's Photo Library / Take Photo / Choose File action sheet — that part
+  held. What didn't: a phone reported `accept="image/*" multiple` going straight to the
+  library with no camera option at all. Recent iOS Safari drops "Take Photo" from the sheet
+  the moment `multiple` is set — you cannot multi-select while taking a single photo — and
+  there is no single `<input>` that reliably offers both at once; which of `capture`/
+  `multiple` wins when both are set is undocumented and not stable across OS versions.
+  - **Add photos is now a menu we render**, not one input's native sheet: tapping it opens
+    two rows, "Take photo" and "Choose from library", each clicking its OWN hidden input —
+    `cameraInputRef` (`capture="environment"`, no `multiple`, launches the camera directly)
+    and `libraryInputRef` (`multiple`, no `capture`, opens the library's own multi-select
+    picker). Same fixed-inset-click-catcher-plus-card shape as the toolbar hamburger and the
+    floor-plan menu. **Never put both `capture` and `multiple` on the same input again** —
+    that ambiguity is exactly what broke the first pass.
+  - **Add files is UNCHANGED** — one button, one input
+    (`accept="application/pdf,image/*" multiple`), the OS's own sheet. It wasn't reported
+    broken, and the reasoning above doesn't apply to it the same way: a PDF can't come from
+    a camera capture, so there's no capture-vs-multiple conflict to route around.
+  - **Never put a non-image type on the camera or library inputs.**
 - **The multipart part's FILENAME is what tells Cloudinary the format**, and it is not the
   user's file name. A photo is re-encoded to JPEG here, so it is announced as `upload.jpg`
   — sending the original `IMG_4821.HEIC` would declare a format those bytes no longer are.
@@ -3334,6 +3694,48 @@ three decisions.
   re-encoded photo under its original name. `MOCK_SNAPSHOT` carries two documents — one on an
   asset, one on a work entry beside its own history — while every image row still carries no
   `kind` at all, so Sandbox exercises the adoption and both kinds rather than one.
+
+**Links attach too, and a link is a photo row with `kind: "link"`** (2026-09-24). The answer
+to "I need to attach a PDF bigger than 10MB" — and to the ImageMeter question, which landed
+on the same design independently. **No backend change and no deploy**: the Photos tab already
+has a `url` column, the backend stores whatever `kind` it is sent, and nothing is uploaded or
+signed, so a link is a row and nothing more.
+- **Why a link rather than a bigger host.** The 10MB cap is Cloudinary's free plan, not ours;
+  paid plans only move it to roughly 20–40MB, for a monthly fee. Writing to Drive from the
+  app needs an OAuth scope the live manifests do not hold — the trap every user's requests
+  failing during re-authorization, which v29's import already hit. A link has no size limit,
+  costs nothing, and keeps the bytes wherever the school already keeps files. **The cost:**
+  no thumbnail, and who can open it is governed by where the file lives, not by the app's
+  allowlist — the form says so.
+- **ImageMeter (a cloud session's analysis, 2026-09-24):** it has no public API, no web
+  viewer, and no documented deep link, so the app cannot show or edit a measurement. Editing
+  together is ImageMeter's own Business-plan cloud sync over a shared Drive/Dropbox/OneDrive
+  folder. **The app may only LINK to that folder, never write into it** — ImageMeter says its
+  sync folder is touched by ImageMeter alone. Exporting a finished measurement as JPG/PDF
+  and attaching it remains the read-only alternative.
+- **THE URL IS CHECKED ON THE WAY IN AND AGAIN ON THE WAY OUT**, and that is the security half
+  of the feature. It ends up in `window.open`, so a `javascript:` URL would run inside this
+  origin with the session sitting in localStorage. `normalizeLinkUrl` allows http(s) with a
+  dotted host and nothing else; `openPhotoViewer` re-runs it before opening, because a cell
+  can be hand-edited in the Sheet after the form checked it. The scheme check is load-bearing
+  on its own: `javascript://example.com/%0Aalert(1)` has a perfectly good host and only the
+  scheme stops it. Opened with `noopener,noreferrer`.
+- **A link never publishes**, with no change to the public page: its filter already takes
+  `kind === "image"` only. So the tile offers no public/private toggle — a control that does
+  nothing is worse than none. It points into someone's private folder, the same reasoning
+  that keeps documents off that page.
+- **It follows the same-save rule as a photo** (`attachLink` passes `assets.slice()` for a
+  `change` or `maintenance` owner), since a link naming a memory-only id is orphaned exactly
+  the way the first work-entry photos were.
+- **One branch in `openPhotoViewer` makes it work everywhere a file can appear** — every
+  gallery tile and both read-only strips come through it. `photoThumbUrl` returns nothing
+  for a link (its url is a web page; an `<img>` would fetch it for nothing), and
+  `AttachmentImage` draws a link icon plus the site's name.
+- An unnamed link reads as its host (`linkDisplayName`). `MOCK_PHOTOS` carries one named link
+  on an asset beside a photo and a PDF, and one unnamed on a work entry, so the gallery and
+  the History strip both exercise it. Covered in `test-frontend-photos.js` and
+  `test-backend-photos.js`; mutation-checked that allowing any scheme, opening without the
+  re-check, feeding a link to `<img>`, and dropping the same-save rule each fail them.
 
 **Where a photo's gallery lives follows what the photo is FOR** (2026-09-11), and the two
 work-item cases deliberately differ:

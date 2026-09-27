@@ -108,6 +108,13 @@ const pdfBack = readPhotos(writePhotos({ photos: [Object.assign({}, AUTHORED,
   { kind: 'pdf', fileName: 'boiler-quote.pdf' })] }).rows)[0];
 eq('round trip preserves kind: pdf', pdfBack.kind, 'pdf');
 eq('round trip preserves the original file name', pdfBack.fileName, 'boiler-quote.pdf');
+// A link stores its address in `url` and nothing in storageKey -- no new column,
+// which is why this kind needed no backend release. It has to come back a link.
+const linkBack = readPhotos(writePhotos({ photos: [Object.assign({}, AUTHORED,
+  { kind: 'link', url: 'https://drive.google.com/drive/folders/x', thumbUrl: '', storageKey: '', fileName: 'ImageMeter folder' })] }).rows)[0];
+eq('round trip preserves kind: link', linkBack.kind, 'link');
+eq('round trip preserves a link\'s url', linkBack.url, 'https://drive.google.com/drive/folders/x');
+eq('round trip preserves a link\'s name', linkBack.fileName, 'ImageMeter folder');
 // Pre-v39 rows have no kind cell, and an image is the only thing that could
 // have been uploaded then — so this default is known, not guessed.
 eq('a blank kind reads back as an image',
@@ -151,6 +158,7 @@ const published = projectPublic([
   row({ id: 'a-work-entry', ownerType: 'change', ownerId: 'change-uuid' }),
   row({ id: 'a-panel-pdf', kind: 'pdf', fileName: 'panel-schedule.pdf' }),
   row({ id: 'a-breaker-pdf', kind: 'pdf', ownerType: 'breaker', ownerId: 'brk-1' }),
+  row({ id: 'a-panel-link', kind: 'link', url: 'https://drive.google.com/drive/folders/x', thumbUrl: '', storageKey: '' }),
 ], PANEL, BREAKERS, UNASSIGNED);
 
 eq('publishes exactly the panel, its breakers and its circuits',
@@ -167,6 +175,10 @@ eq('a work entry photo is not published', published.some(p => p.id === 'a-work-e
 // through — only the kind filter stops them.
 eq('a document on the panel itself is not published', published.some(p => p.id === 'a-panel-pdf'), false);
 eq('a document on one of its breakers is not published', published.some(p => p.id === 'a-breaker-pdf'), false);
+// A LINK (2026-09-24) points into someone's private Drive folder -- the same
+// reasoning that keeps documents off this page, met by the same filter with no
+// change to it: the public page takes images and nothing else.
+eq('a link on the panel itself is not published', published.some(p => p.id === 'a-panel-link'), false);
 // A row written before v39 has a blank kind and is an image; reading that as
 // "not an image" would quietly unpublish every photo already on the sheet.
 eq('a pre-v39 row with no kind still publishes',

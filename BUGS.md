@@ -16,6 +16,64 @@ version that fixed them.
 
 ## Open
 
+### `deploy.mjs` lets a DIFFERENT backend with the same version number replace a live one
+**Found:** 2026-09-27, by doing it — see "Release ordering" in `CLAUDE.md`.
+**Needs a deploy:** no — `deploy.mjs` only.
+**Confirmed:** in the Deploy backend run log. The dev tenant was on the floor-plan v41;
+the diagnostics branch, also calling itself v41 but without the floor-plan columns,
+deployed over it with `✓ dev is now v41. Deploy confirmed.` Restored two minutes later by
+redeploying `dev`.
+
+The downgrade guard compares version numbers only, so "equal" reads as "same code". It is
+not: two branches each bumping from v40 produce two different v41s, and the one deployed
+second drops whatever columns the first added — the exact data loss the downgrade guard
+exists to prevent, arriving through the one case it treats as safe.
+
+**The cheap fix is a content check on equal versions**: the tool already pulls the live
+script before pushing, so when the live version EQUALS the one being deployed and the
+pulled source differs from the local file, refuse unless `ALLOW_DOWNGRADE`-style
+confirmation is given, and say which fields each side has that the other lacks
+(`ASSET_FIELDS` and friends are plain arrays, easy to diff). A redeploy of the identical
+file — the normal "deploy v41 again" case — still goes through.
+
+**Blocks:** nothing now, but this is how a client tenant would lose a column: `3c` and `dev`
+both run the floor-plan v41 today, and any branch that bumps v40→v41 from `main` could land
+on them the same way.
+
+
+### The notice toast never renders on an asset's detail page
+**Found:** 2026-09-24, while verifying link attachments (a hand-edited bad link, tapped on an
+asset's Files tab, is refused but its explanation never appears).
+**Needs a deploy:** no — `index.html` only.
+**Confirmed:** in Sandbox. `setNotice(...)` from the detail view sets state and paints
+nothing; the same message appears the moment you go back to the list.
+
+`{notice && (...)}` is rendered only inside the LIST view's return. The detail view is a
+separate early return and never renders it. So every notice raised while an asset is open
+is invisible there, and those include `persist()`'s own "Still catching up with the server
+— try that again in a moment" and "This is the last inventory this device saved…" refusals.
+An edit made on the detail page during the ~1.5s revalidation window therefore just doesn't
+happen, silently, which is the exact outcome the notice exists to prevent. Fix is rendering
+the same toast in the detail view's return too (or lifting it above both returns); the
+toast is `position: fixed`, so it needs no layout work either way.
+
+**Blocks:** nothing outright. Link attachments degrade safely (a bad link simply doesn't
+open), but the "why" is lost wherever the tap happened on a detail page.
+
+### `sheet.mjs copy` does not carry a client's type categories
+**Found:** 2026-09-21, while dry-running `copy bca dev`.
+**Needs a deploy:** no — `sheet.mjs` only.
+**Confirmed:** the dry run lists `typeCategories` under "preserved", i.e. the destination
+keeps its own.
+
+`CONFIG_CONTENT_KEYS` was written before v33 added the `typeCategories` Config key and was
+never extended. So a copy brings over the client's types and their `typeSettings` (each of
+which names a `categoryId`) but leaves the destination's category LIST in place. A client
+category dev doesn't have is a dangling `categoryId`, which the app renders as
+Uncategorized — not an error, but the clone does not look like the client. Fix is adding
+`"typeCategories"` to `CONFIG_CONTENT_KEYS`; worth checking the list against every Config
+key `doPost` writes at the same time, since this is the same drift waiting to recur.
+
 ### The admin import hardcodes the BCA prefix, so a new tenant's counter starts at 1
 **Found:** 2026-09-15, while working out the asset prefix for a second client.
 **Needs a deploy:** YES — `AssetTrackerSync.gs` (`adminParseAssetCsv_`), so a version bump
@@ -55,35 +113,6 @@ deploy unchanged to every school. Two honest options:
 **Blocks:** nothing yet. It blocks only the specific case of importing a second school's
 inventory that already carries their own asset tags — worth fixing before that import
 rather than after, since the counter is written once and then lived with.
-
-### An add-form draft keeps its Asset ID after switching to a type that has none
-**Found:** 2026-09-12, while adding a person to test the first/last name work.
-**Needs a deploy:** no — `index.html` only.
-**Confirmed:** in a browser against Sandbox. Add asset (defaults to Computer, which
-suggests an Asset ID), switch Type to User, Save.
-
-`startAdd` seeds the draft with a suggested Asset ID because the default type carries
-one. Switching the type to one whose registry entry EXCLUDES `tag` — User, Room,
-Building, Campus — removes the field from the form but leaves the value on the draft.
-Two consequences, in order of how much they matter:
-
-- **The save can be refused by a field that is not on screen.** `findTagConflict` still
-  runs against the carried value, so a collision reports `Asset ID "BCA0001" is already
-  in use (Computer)` on a form with no Asset ID field to correct. Same shape as the Bulk
-  Item parentId bug in CLAUDE.md: an error about a control the type does not have.
-- **Otherwise it saves a hidden tag** onto a type that is meant to have none, and burns
-  an asset number doing it.
-
-**Sandbox shows it every time; a real sheet mostly hides it.** `MOCK_SNAPSHOT` carries no
-`nextAssetNumber`, so `peekAssetNumber()` returns 1 and the suggested ID is `BCA0001`,
-which the fixture's own first Computer already holds. On a live sheet the counter is real,
-so the suggestion is unused and the save goes through — quietly writing the hidden tag.
-
-**The fix is one line in the shape the codebase already uses**: clear `tag` when the
-draft's type stops accepting one, the way the edit path clears `parentId` for a type that
-takes no parent — a repair rather than a refusal, since no tag is that type's only correct
-value. Worth checking at the same time whether any other excluded field survives a type
-change on a draft.
 
 ### A value that doesn't match its field's kind shows as BLANK, then refuses the save
 **Found:** 2026-09-10. **Mostly closed the same day** — see below.
@@ -332,6 +361,59 @@ user is least sure whether their click worked.
 ---
 
 ## Fixed
+
+### An add-form draft kept its Asset ID after switching to a type that has none — fixed 2026-09-23
+**Found:** 2026-09-12, while adding a person to test the first/last name work. **Fixed**
+2026-09-23, at Eric's request after asking for the bug's own details.
+**Needed a deploy:** no — `index.html` only.
+**Confirmed:** in a browser against Sandbox, both before and after. Before: Add asset
+(defaults to Computer, suggesting `BCA0001`), switch Type to User, Save — refused with
+`Asset ID "BCA0001" is already in use (Computer)` on a form with no Asset ID field to
+correct. After: the same sequence saves a User with no tag at all.
+
+`startAdd` seeded the draft with a suggested Asset ID because the default type (Computer)
+carries one. Switching the type to one whose registry entry EXCLUDES `tag` — User, Room,
+Building, Campus — removed the field from the FORM but left the value on the DRAFT, so
+`findTagConflict` still ran against it at save time: a collision reported an error about a
+field that was no longer on screen to fix, and a non-collision quietly saved a hidden tag
+onto a type meant to have none, burning an asset number doing it.
+
+**Fixed the way the edit path already fixed the equivalent `parentId` case**: `tag` is now
+cleared whenever the draft's type stops accepting one, rather than trusted from whatever
+was on the draft before the type changed. The add path clears it inline, where `tag` is
+first computed (`fieldAppliesTo("tag", draft.type) ? (draft.tag || "").trim() : ""`); the
+edit path folds it into the same `draftToSave` repair that already existed for `parentId`,
+rather than adding a second one-off `typeTakesParent`-shaped check beside it.
+
+**The edit path's half was latent, not reported** — editing an EXISTING asset's type to
+one that excludes tag couldn't previously create a NEW collision (the stored tag was
+unchanged, so no write happened), but it left a tag-carrying asset of a type meant to have
+none, un-repaired, which the same fix now cleans up on the next Save the same way it
+already does for a stray `parentId`.
+
+### The Contents tab's Rooms section shows every room with a blank name — fixed 2026-09-23
+**Found:** 2026-09-23, while extracting the Contents tab's row rendering into a shared
+`ContentsList` component for the Map tab's own room-contents panel. **Fixed the same
+day**, reported by Eric after being told about it.
+**Needed a deploy:** no — `index.html` only.
+**Confirmed:** in a browser against Sandbox, both before and after. Before: Building
+100's Contents tab lists Room 102/Kitchen/Storage Room/Room 101 as four blank rows (icon,
+blank space, Asset ID); the Map tab's own room-contents panel showed the same blank for
+Building 200's Room 200. After: both show the real name.
+
+`ContentsList`'s Rooms section rendered each child room as `<span>{r.room}</span>` — the
+pre-name-refactor field, retired when "Room, Building and Campus are not columns at all"
+removed it 2026-08-25. `r.room` is `undefined` on every Room asset, so the row rendered
+with an icon, its Asset ID, and a blank space where the name belonged; the ID and chevron
+still worked, so the row stayed clickable and opened the right room, which is why it went
+unnoticed for four weeks. Fixed by reading `nameOf(r, typesList)` instead, same as every
+other name-showing site in the app.
+
+**One fix, two places.** `ContentsList` is shared between the asset Contents tab and the
+Map tab's room-contents panel (extracted byte-for-byte from this exact render a few hours
+earlier), so both were broken identically and both are fixed by the same one-line change.
+
+---
 
 ### Maintenance › History's column filters never opened — fixed 2026-09-15
 **Found:** 2026-09-15, while building the site-wide Audit tab (its filters go through the
