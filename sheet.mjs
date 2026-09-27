@@ -454,8 +454,13 @@ const COPY_DESTINATIONS = new Set(["dev"]);
 //                the source's counters could hand it a number it already has.
 const CONFIG_CONTENT_KEYS = [
   "columns", "changeTypes", "vendors", "peripheralsList", "usersList",
-  "bulkItemTypes", "typesList", "typeSettings", "nextAssetNumber",
+  "bulkItemTypes", "typesList", "typeSettings", "typeCategories", "nextAssetNumber",
 ];
+// typeCategories is the type-LABEL vocabulary (the key kept its v33 name). It
+// was missing here, so a copy carried every type's label ids in typeSettings
+// but left the destination's own vocabulary in place — a source's custom labels
+// then dangled and the types silently read as carrying fewer labels. Any Config
+// key doPost writes as content belongs in this list the day it is added.
 
 // Sheet1 is the leftover default tab every new Google Sheet is born with. The
 // backend never touches it and it has no header row, so it is not data.
