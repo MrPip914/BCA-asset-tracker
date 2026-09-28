@@ -348,7 +348,7 @@ function runAttach({ files, failOn = [], ownerType = 'asset', signFails = false,
     // v37: the batch is signed once up front and uploads run in a bounded pool.
     'sandboxMode', 'signPhotoUploads', 'PHOTO_UPLOAD_CONCURRENCY',
     // 2026-09-24: refused up front while the view is unconfirmed.
-    'revalidating', 'staleSnapshot', 'module',
+    'revalidating', 'staleSnapshot', 'diagLog', 'module',
     grab('attachPhotos') + '\nmodule.f = attachPhotos;'
   );
   const mod = {};
@@ -386,6 +386,7 @@ function runAttach({ files, failOn = [], ownerType = 'asset', signFails = false,
     3,
     stale === 'revalidating',
     stale === 'stale',
+    (event, detail) => (calls.diag = calls.diag || []).push(event + ' ' + detail),
     mod
   );
   return mod.f(ownerType, 'owner-1', files).then(() => calls);
@@ -397,13 +398,13 @@ function runAttach({ files, failOn = [], ownerType = 'asset', signFails = false,
 // is which PATH a file takes, and that cannot be read off the source. A PDF put
 // through the canvas step comes back a picture of nothing, or throws "could not
 // be read as an image" on a file that is perfectly fine.
-function runPrepare({ file, sandbox = false }) {
-  const seen = { downscaled: 0, uploadNames: [] };
+function runPrepare({ file, sandbox = false, readFails = false }) {
+  const seen = { downscaled: 0, uploadNames: [], uploadedBlobs: [], reads: 0 };
   const mod = {};
   new Function(
     'fileKindOf', 'PHOTO_MAX_BYTES', 'DOC_MAX_BYTES', 'downscalePhoto', 'sandboxMode',
     'crypto', 'currentUser', 'uploadPhotoToCloudinary', 'photoThumbUrl',
-    'PHOTO_RESIZE_SHARE', 'URL', 'module',
+    'PHOTO_RESIZE_SHARE', 'URL', 'readFileIntoMemory', 'module',
     grab('preparePhotoRow') + '\nmodule.f = preparePhotoRow;'
   )(
     fileKindOf, 25 * 1024 * 1024, 10 * 1024 * 1024,
@@ -413,11 +414,17 @@ function runPrepare({ file, sandbox = false }) {
     'Eric Stamage',
     async (blob, sig, uploadName, onProgress) => {
       seen.uploadNames.push(uploadName);
+      seen.uploadedBlobs.push(blob);
       return { secure_url: 'https://res.cloudinary.com/x/image/upload/v1/dev/uuid-fixed.pdf', public_id: 'dev/uuid-fixed', bytes: 404 };
     },
     photoThumbUrl,
     0.15,
     { createObjectURL: () => 'blob:sandbox' },
+    async (f) => {
+      seen.reads++;
+      if (readFails) throw new Error("couldn't be read from this device.");
+      return { inMemoryCopyOf: f.name, size: f.size };
+    },
     mod,
   );
   // v37 signs the whole batch up front, so the signature arrives as an argument
@@ -471,6 +478,10 @@ runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg')], failOn: ['b.jpg'] }).th
   eq('one bad file still lets the others through', (calls.persist[0] || []).length, 3);
   eq('and the good rows keep their order',
      (calls.persist[0] || []).map(r => r.id).join(','), 'existing,row-a.jpg,row-c.jpg');
+  // The gallery message is gone once dismissed; a diagnostics export taken
+  // afterwards must still show the failure it was exported to explain.
+  eq('a failed file is written to the diagnostics log',
+     (calls.diag || []).length === 1 && /^upload_failed .*nope/.test(calls.diag[0]), true);
 });
 
 
@@ -542,6 +553,28 @@ runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg')] }).then(calls => {
   // Cloudinary reads the FORMAT off the posted part's filename, so this is what
   // decides whether the upload is accepted at all.
   eq('a PDF is announced to the host as a PDF', asPdf.seen.uploadNames, ['Quote 4471.pdf']);
+
+  // 2026-09-28, 3C: a PDF was posted as the File the picker returned, which on
+  // Android is a content-provider handle re-read AT SEND TIME. When the provider
+  // could not serve it again, every retry failed identically and read as "the
+  // connection kept dropping". It has to be an in-memory copy by upload time.
+  eq('a PDF is read into memory before it is posted', asPdf.seen.reads, 1);
+  eq('and the upload is handed that copy, never the picked File',
+     asPdf.seen.uploadedBlobs[0] && asPdf.seen.uploadedBlobs[0].inMemoryCopyOf, 'Quote 4471.pdf');
+  const unreadable = await runPrepare({ file: { name: 'Drive.pdf', type: 'application/pdf', size: 900000 }, readFails: true });
+  eq('a PDF the device cannot read is never posted', unreadable.seen.uploadNames, []);
+  eq('and says it could not be READ, not that the network dropped',
+     /read from this device/.test(unreadable.error || ''), true);
+  // And the real helper, run against Node's Blob: the copy must be detached
+  // from the source, and a failing read must NOT be marked transient (that
+  // would send it round the retry loop and blame the network again).
+  const readFileIntoMemory = new Function('Blob', grab('readFileIntoMemory') + '\nreturn readFileIntoMemory;')(Blob);
+  const src1 = new Blob([new Uint8Array([37, 80, 68, 70])], { type: 'application/pdf' });
+  const copy = await readFileIntoMemory(src1);
+  eq('readFileIntoMemory returns a NEW blob with the same bytes and type',
+     copy !== src1 && copy.size === 4 && copy.type === 'application/pdf', true);
+  const readErr = await readFileIntoMemory({ arrayBuffer: () => Promise.reject(new Error('NotReadableError')) }).catch(e => e);
+  eq('a failed read is reported, and not as transient', /read from this device/.test(readErr.message) && !readErr.transient, true);
 
   const asJpg = await runPrepare({ file: { name: 'IMG_4821.HEIC', type: 'image/heic', size: 4000000 } });
   eq('a photo is downscaled exactly once', asJpg.seen.downscaled, 1);

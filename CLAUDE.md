@@ -3562,6 +3562,26 @@ v39** — see "Documents" below, which is a small change resting entirely on thi
     holds until it passes where the last attempt got.
   - Giving up says it KEPT dropping, with the count, and a PDF's message points at the
     link option. Covered by `test-frontend-upload-retry.js`, run against a scripted XHR.
+  - **THE RETRY DID NOT FIX THE 3C PDF, AND THE REASON IS WORTH KNOWING** (2026-09-28).
+    It failed again, three times out of three, on a 4.2MB ML Kit scan the host accepts
+    whole from anywhere else. A PDF was posted as the File the picker returned, and on
+    Android that is a content-provider handle (Drive, Files, a scanner app) that XHR
+    re-reads AT SEND TIME. When the provider cannot serve it again, or reports it
+    changed since picking, Chrome aborts with a bare network error — indistinguishable
+    from a dropped connection, and identical on every retry. **A deterministic failure
+    dressed as a transient one is exactly what a retry cannot fix.**
+    - `readFileIntoMemory` copies a PDF's bytes into a Blob before anything is posted.
+      A photo never had the problem: `downscalePhoto` already posts a fresh in-memory
+      JPEG. `DOC_MAX_BYTES` is what makes holding it in memory harmless.
+    - A read that fails says the file could not be READ from the device, and is not
+      transient, so it is never retried and never blamed on the network.
+    - Every failed file is now written to the diagnostics log (`upload_failed`, with
+      type, size and message). The export Eric sent for this one showed nothing about
+      the upload at all, because nothing logged it.
+    - **Unconfirmed on the device**: the hypothesis fits every symptom (host accepts the
+      file, three identical failures, photos never affected), but the cloud session
+      cannot drive an Android content provider. If it recurs, the new log line says
+      whether the read or the post failed.
 - **`photos` is a revision domain of its own, not part of `assets`.** A photo can belong to
   a breaker or a work entry, so folding it in would make attaching one conflict with anyone
   editing any asset anywhere.
