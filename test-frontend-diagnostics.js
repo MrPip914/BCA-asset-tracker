@@ -174,6 +174,15 @@ function loadLog(storage) {
     /if \(diagWantsBackend\)/.test(gather));
   check('closing Diagnostics does not also close About (the click is stopped)',
     /onClick=\{\(e\) => \{ e\.stopPropagation\(\); setShowDiagnostics\(false\); \}\}/.test(SRC));
+  const dl = grab('async function downloadDiagnostics()');
+  check('Download reports its progress: working first, then done or error',
+    /setDiagDownload\(\{ state: "working" \}\)/.test(dl)
+      && /setDiagDownload\(\{ state: "done"/.test(dl)
+      && /catch \(e\) \{\s*setDiagDownload\(\{ state: "error"/.test(dl));
+  check('the working state is announced before anything slow runs',
+    dl.indexOf('state: "working"') < dl.indexOf('gatherDiagnostics()'));
+  check('the status line renders, and says so to a screen reader',
+    /\{diagDownload && \(\s*<div\s*role="status"/.test(SRC));
   check('About opens Diagnostics from a single button', (SRC.match(/setShowDiagnostics\(true\)/g) || []).length === 1);
   check('no session id is ever written into the device log',
     !/diagLog\([^;]*sessionId/.test(SRC));

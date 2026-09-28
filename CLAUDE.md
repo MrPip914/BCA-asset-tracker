@@ -456,6 +456,12 @@ failure modal and the sign-in screen both said *that* it happened and kept nothi
 - **The window is applied in the browser**, and the backend only ever returns its
   newest 300 rows — so a long window can be cut short on a busy tenant. When the backend
   holds more than it returned, a note saying so appears on screen AND in the file.
+- **Download shows its own status** (`diagDownload`): a spinner and "Preparing…" on the
+  button while the logs are gathered — the backend half is a round trip with retries and
+  can take several seconds on a phone — then a line naming the file and its entry count,
+  or saying why it failed. On a phone the file lands in a tray or share sheet the page
+  cannot see, so without that line the button reads as doing nothing. The line is
+  `role="status"` and clears whenever the window or a checkbox changes.
 - **A backend that fails or is too old becomes a note, not a failed view**: the device
   half still shows. An entry whose time will not parse is dropped once a window is chosen
   and kept under "everything" — the Audit tab's Date-filter rule.

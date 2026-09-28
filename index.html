@@ -3606,7 +3606,7 @@ const FRONTEND_SCRIPT_VERSION = "v42";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-28.1";
+const APP_VERSION = "2026-09-28.2";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -5511,6 +5511,14 @@ function AssetTracker() {
   const [diagIncludeDevice, setDiagIncludeDevice] = useState(true);
   const [diagIncludeBackend, setDiagIncludeBackend] = useState(true);
   const [diagResult, setDiagResult] = useState(null);
+  // The Download button's own status: null, { state: "working" } while the logs
+  // are gathered (the backend half is a round trip, with retries, and can take
+  // several seconds on a phone), then { state: "done", fileName, count } or
+  // { state: "error", message }. Separate from diagResult because a download is
+  // a different act from viewing — and on a phone the file lands somewhere the
+  // page cannot show, so "it went, and here is its name" is the only
+  // confirmation anyone gets.
+  const [diagDownload, setDiagDownload] = useState(null);
 
   const authSatisfied = sandboxMode || !!auth;
   // View-only users are stopped in persist() and again in the backend. Buttons
@@ -10579,25 +10587,32 @@ function AssetTracker() {
 
   // A plain text file through a Blob URL — no library, and it opens anywhere.
   async function downloadDiagnostics() {
-    const got = await gatherDiagnostics();
-    setDiagResult({ loading: false, ...got });
-    const now = new Date();
-    const text = formatDiagReport(got.entries, {
-      org: CLIENT.orgName, tenant: CLIENT.id, app: APP_VERSION,
-      backend: backendScriptVersion || (sandboxMode ? "sandbox" : "unknown"),
-      exportedAt: now.toISOString(),
-      logs: [diagIncludeDevice && "device", diagWantsBackend && "backend"].filter(Boolean),
-      window: diagWindowDef.label, notes: got.notes,
-    });
-    const stamp = now.toISOString().slice(0, 16).replace(/[-:]/g, "").replace("T", "-");
-    const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = CLIENT.id + "-diagnostics-" + stamp + ".txt";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setDiagDownload({ state: "working" });
+    try {
+      const got = await gatherDiagnostics();
+      setDiagResult({ loading: false, ...got });
+      const now = new Date();
+      const text = formatDiagReport(got.entries, {
+        org: CLIENT.orgName, tenant: CLIENT.id, app: APP_VERSION,
+        backend: backendScriptVersion || (sandboxMode ? "sandbox" : "unknown"),
+        exportedAt: now.toISOString(),
+        logs: [diagIncludeDevice && "device", diagWantsBackend && "backend"].filter(Boolean),
+        window: diagWindowDef.label, notes: got.notes,
+      });
+      const stamp = now.toISOString().slice(0, 16).replace(/[-:]/g, "").replace("T", "-");
+      const fileName = CLIENT.id + "-diagnostics-" + stamp + ".txt";
+      const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setDiagDownload({ state: "done", fileName, count: got.entries.length });
+    } catch (e) {
+      setDiagDownload({ state: "error", message: (e && e.message) || String(e) });
+    }
   }
 
   const diagButtonStyle = (primary, disabled) => ({
@@ -10606,7 +10621,8 @@ function AssetTracker() {
     fontSize: 13, fontWeight: 700, cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.5 : 1,
   });
   const diagNothingSelected = !diagIncludeDevice && !diagWantsBackend;
-  const diagBusy = !!(diagResult && diagResult.loading);
+  const diagDownloading = !!(diagDownload && diagDownload.state === "working");
+  const diagBusy = !!(diagResult && diagResult.loading) || diagDownloading;
 
   // Rendered INSIDE the About overlay's tree, so it stacks above About and the
   // time-window picker nested in it stacks above this in turn — the layering
@@ -10634,7 +10650,7 @@ function AssetTracker() {
           hideLabel
           label="Time window"
           value={diagWindow}
-          onChange={(v) => { setDiagWindow(v); setDiagResult(null); }}
+          onChange={(v) => { setDiagWindow(v); setDiagResult(null); setDiagDownload(null); }}
           options={DIAG_WINDOWS.map(w => w.id)}
           labelForOption={(id) => (DIAG_WINDOWS.find(w => w.id === id) || {}).label || id}
           title="Time window"
@@ -10642,11 +10658,11 @@ function AssetTracker() {
 
         <div style={{ display: "flex", flexDirection: "column", gap: 8, margin: "14px 0 16px" }}>
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: C.ink, cursor: "pointer" }}>
-            <input type="checkbox" checked={diagIncludeDevice} onChange={e => { setDiagIncludeDevice(e.target.checked); setDiagResult(null); }} />
+            <input type="checkbox" checked={diagIncludeDevice} onChange={e => { setDiagIncludeDevice(e.target.checked); setDiagResult(null); setDiagDownload(null); }} />
             Device log <span style={{ color: C.muted }}>— this browser</span>
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: diagBackendAvailable ? C.ink : C.muted, cursor: diagBackendAvailable ? "pointer" : "default" }}>
-            <input type="checkbox" disabled={!diagBackendAvailable} checked={diagWantsBackend} onChange={e => { setDiagIncludeBackend(e.target.checked); setDiagResult(null); }} />
+            <input type="checkbox" disabled={!diagBackendAvailable} checked={diagWantsBackend} onChange={e => { setDiagIncludeBackend(e.target.checked); setDiagResult(null); setDiagDownload(null); }} />
             Backend log <span style={{ color: C.muted }}>
               {sandboxMode ? "— not available in Sandbox" : !canEdit ? "— editors only" : "— from the server"}
             </span>
@@ -10655,8 +10671,36 @@ function AssetTracker() {
 
         <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
           <button disabled={diagNothingSelected || diagBusy} onClick={viewDiagnostics} style={diagButtonStyle(true, diagNothingSelected || diagBusy)}>View logs</button>
-          <button disabled={diagNothingSelected || diagBusy} onClick={downloadDiagnostics} style={diagButtonStyle(false, diagNothingSelected || diagBusy)}>Download</button>
+          <button
+            disabled={diagNothingSelected || diagBusy}
+            onClick={downloadDiagnostics}
+            style={{ ...diagButtonStyle(false, diagNothingSelected || (diagBusy && !diagDownloading)), display: "flex", alignItems: "center", gap: 6 }}
+          >
+            {diagDownloading && <Loader2 size={14} className="spin" />}
+            {diagDownloading ? "Preparing…" : "Download"}
+          </button>
         </div>
+
+        {/* What happened to the file. Mostly for phones, where the download
+            lands in a tray or a share sheet the page cannot see, so without this
+            line the button would appear to do nothing. */}
+        {diagDownload && (
+          <div
+            role="status"
+            style={{
+              fontSize: 12, lineHeight: 1.5, borderRadius: 8, padding: "6px 10px", marginBottom: 12,
+              color: diagDownload.state === "error" ? C.danger : C.ink,
+              background: diagDownload.state === "error" ? C.dangerSurface : C.bg,
+              border: diagDownload.state === "error" ? "none" : `1px solid ${C.border}`,
+            }}
+          >
+            {diagDownload.state === "working"
+              ? (diagWantsBackend ? "Gathering the logs — the backend log can take a few seconds…" : "Gathering the logs…")
+              : diagDownload.state === "done"
+                ? `Downloaded ${diagDownload.fileName} (${diagDownload.count} entr${diagDownload.count === 1 ? "y" : "ies"}). Check your downloads.`
+                : `The download didn't complete: ${diagDownload.message}`}
+          </div>
+        )}
 
         {diagResult && (
           <div style={{ display: "flex", flexDirection: "column", minHeight: 0, flex: 1 }}>
@@ -10743,7 +10787,7 @@ function AssetTracker() {
 
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
           <button
-            onClick={() => { setDiagResult(null); setShowDiagnostics(true); }}
+            onClick={() => { setDiagResult(null); setDiagDownload(null); setShowDiagnostics(true); }}
             style={{ background: C.surface, color: C.ink, border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
           >
             Diagnostics…
