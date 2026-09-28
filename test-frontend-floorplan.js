@@ -688,5 +688,17 @@ const { floorPlanShapeMatches } = matchMod.exports;
     !floorPlanShapeMatches(null, assets, [], 'kitchen'));
 }
 
+// ---- Group tab: existing groups are visible, and a group takes two taps ----
+{
+  const i = src.indexOf('function onShapeClick(');
+  const body = src.slice(i, src.indexOf('// Normal view:', i));
+  check('Group tab: a tap on a member of an UNselected group selects it (openGroupId) rather than editing',
+    /if \(openGroupId === owner\.id\) \{ startGroupEdit\(owner\.id\); return; \}\s*setOpenGroupId\(owner\.id\)/.test(body));
+  check('Group tab: existing groups render a count pill and their own colour when at rest',
+    /grp && !groupEditingId && groupPick\.size === 0/.test(src) && /FLOOR_PLAN_GROUP_COLOR/.test(src) && /hoverGroupId === grp\.id/.test(src));
+  check('Group tab: the selection frame is drawn in Group mode too, but not while editing',
+    /setupTab === "group" && !groupEditingId && groupPick\.size === 0\)\) && openGroupId/.test(src));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

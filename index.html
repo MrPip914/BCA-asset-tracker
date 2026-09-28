@@ -3606,7 +3606,7 @@ const FRONTEND_SCRIPT_VERSION = "v42";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-28.3";
+const APP_VERSION = "2026-09-28.4";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -18525,14 +18525,17 @@ function FloorPlanTabContent({
   const [groupNaming, setGroupNaming] = useState(null); // array of shapeIds pending a name, or null
   const [openGroupId, setOpenGroupId] = useState(null); // normal view: which group is expanded
   const [selectedShapeId, setSelectedShapeId] = useState(null);
+  // Group tab: which existing group the pointer is over, so ALL its members
+  // light up together (the per-shape CSS :hover can only ever light one).
+  const [hoverGroupId, setHoverGroupId] = useState(null);
 
   function exitSetup() {
-    setSetupTab(null); setPickerShapeId(null);
+    setSetupTab(null); setPickerShapeId(null); setHoverGroupId(null); setOpenGroupId(null);
     setGroupPick(new Set()); setGroupEditingId(null); setGroupNaming(null);
   }
   function switchSetupTab(tab) {
     if (tab === setupTab) return;
-    setSetupTab(tab); setPickerShapeId(null);
+    setSetupTab(tab); setPickerShapeId(null); setHoverGroupId(null); setOpenGroupId(null);
     setGroupPick(new Set()); setGroupEditingId(null); setGroupNaming(null);
   }
   function startGroupEdit(groupId) {
@@ -18549,6 +18552,7 @@ function FloorPlanTabContent({
       onSaveGroup({ id: groupEditingId, name: g ? g.name : "", hideLabel: g ? g.hideLabel : false, memberShapeIds: [...groupPick] });
     }
     setGroupEditingId(null); setGroupPick(new Set());
+    if (groupPick.size < 2) setOpenGroupId(null);
   }
   function finishGroupPick() {
     if (groupPick.size < 2) { setGroupPick(new Set()); return; }
@@ -18568,7 +18572,17 @@ function FloorPlanTabContent({
         setGroupPick(p => { const n = new Set(p); n.has(shapeId) ? n.delete(shapeId) : n.add(shapeId); return n; });
         return;
       }
-      if (owner) { startGroupEdit(owner.id); return; }
+      if (owner) {
+        // Same two-step as the main view: the first tap SELECTS the group
+        // (frames it, draws its border), and only a second tap on the
+        // already-selected group enters edit mode.
+        if (openGroupId === owner.id) { startGroupEdit(owner.id); return; }
+        setOpenGroupId(owner.id);
+        const members = plan.status === "ready" ? plan.spaces.filter(s => (owner.memberShapeIds || []).includes(s.gid)) : [];
+        if (members.length) zoomToBbox(floorPlanBbox(members.flatMap(s => s.pts)), 0.15);
+        return;
+      }
+      setOpenGroupId(null);
       setGroupPick(p => { const n = new Set(p); n.has(shapeId) ? n.delete(shapeId) : n.add(shapeId); return n; });
       return;
     }
@@ -18852,6 +18866,27 @@ function FloorPlanTabContent({
                   </g>
                 );
               }
+              if (grp && !groupEditingId && groupPick.size === 0) {
+                // An existing group at rest: its own colour (purple, which
+                // nothing else on this map uses), lit as one unit on hover
+                // or when selected, and ONE count pill per group.
+                const lit = hoverGroupId === grp.id || openGroupId === grp.id;
+                const anchor = plan.spaces
+                  .filter(m => (grp.memberShapeIds || []).includes(m.gid))
+                  .reduce((best, m) => (!best || m.pole.clear > best.pole.clear) ? m : best, null);
+                const dim = !!openGroupId && openGroupId !== grp.id;
+                return (
+                  <g key={s.gid} className="fp-room" onClick={() => onShapeClick(s.gid)}
+                    onMouseEnter={() => setHoverGroupId(grp.id)} onMouseLeave={() => setHoverGroupId(h => h === grp.id ? null : h)}
+                    style={dim ? { opacity: 0.4 } : undefined}>
+                    <path className="fp-area" d={d} fill={FLOOR_PLAN_GROUP_COLOR} fillOpacity={lit ? 0.5 : 0.26}
+                      stroke={FLOOR_PLAN_GROUP_COLOR} strokeWidth={lit ? 3 : 1.6} />
+                    {anchor && anchor.gid === s.gid && (
+                      <FloorPlanGroupBadge cx={s.pole.x} cy={s.pole.y} k={k} count={(grp.memberShapeIds || []).length} />
+                    )}
+                  </g>
+                );
+              }
               return (
                 <g key={s.gid} className="fp-room" onClick={() => onShapeClick(s.gid)}>
                   <path className="fp-area" d={d}
@@ -18970,7 +19005,7 @@ function FloorPlanTabContent({
               repeats above every cluster rather than floating once over an
               arbitrary one of them, so a scattered group never leaves a
               border with no visible label of its own. */}
-          {!setupTab && openGroupId && (() => {
+          {(!setupTab || (setupTab === "group" && !groupEditingId && groupPick.size === 0)) && openGroupId && (() => {
             const grp = groups.find(g => g.id === openGroupId);
             const members = grp && plan.status === "ready"
               ? plan.spaces.filter(m => (grp.memberShapeIds || []).includes(m.gid)) : [];
@@ -19239,6 +19274,7 @@ function FloorPlanLabel({ x, y, k, clear, maxPx, text, fill, fontWeight }) {
 // -- this badge was left out of that fix and stayed a flat, illegibly small
 // pill at the default whole-floor zoom for exactly the reason the room
 // labels were.
+const FLOOR_PLAN_GROUP_COLOR = "#7B5EA7";
 function FloorPlanGroupBadge({ cx, cy, k, count }) {
   const label = `${count} spaces`;
   const fs = 10 * k;
