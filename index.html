@@ -3606,7 +3606,7 @@ const FRONTEND_SCRIPT_VERSION = "v42";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-28.5";
+const APP_VERSION = "2026-09-28.6";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -5619,6 +5619,9 @@ function AssetTracker() {
   // inventory -- see floorPlanShapeMatches's own comment on why this is a
   // deliberately separate, smaller match than the Assets tab's search.
   const [mapQuery, setMapQuery] = useState("");
+  // The DOM node in the header row where the Map tab's actions menu is drawn --
+  // see FloorPlanTabContent, which portals into it.
+  const [mapMenuSlot, setMapMenuSlot] = useState(null);
   const [maintenanceStatusFilter, setMaintenanceStatusFilter] = useState(MAINTENANCE_STATUS_OPEN);
   const [maintenanceKindFilter, setMaintenanceKindFilter] = useState("All kinds");
   const [maintenanceFrequencyFilter, setMaintenanceFrequencyFilter] = useState("All frequencies");
@@ -14160,13 +14163,11 @@ function AssetTracker() {
           </div>
         )}
 
-        {/* No hamburger menu HERE -- Link & group spaces / Free zoom /
-            Replace moved into a menu of their own (2026-09-23) below the
-            map, inside FloorPlanTabContent, rather than up here next to
-            search. That component already owns setupTab/freeZoom/the file
-            input; threading them up just to drive a menu in this row would
-            be prop-drilling for no reason, and this row has nothing else
-            (yet) worth a menu for. */}
+        {/* The Map tab's actions menu (Link & group spaces / Free zoom /
+            Replace) is the hamburger at the right end of this row, like the
+            other tabs'. Its state lives in FloorPlanTabContent, which draws it
+            INTO mapMenuSlot with a portal rather than having setupTab,
+            freeZoom and the file input threaded up through here. */}
         {mainTab === "map" && (
           <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
             {searchOpen || mapQuery ? (
@@ -14201,6 +14202,7 @@ function AssetTracker() {
                 <Search size={18} />
               </button>
             )}
+            <div ref={setMapMenuSlot} style={{ display: "flex" }} />
           </div>
         )}
 
@@ -14774,6 +14776,7 @@ function AssetTracker() {
           onOpenAsset={openDetail}
           onNavigateToPlan={navigateFloorPlanTo}
           query={mapQuery}
+          menuSlot={mapMenuSlot}
         />
         </>
           );
@@ -18319,7 +18322,7 @@ function fetchFloorPlanSvgText(url) {
 function MapTabContent({
   canEdit, assets, typesList, scopeAsset,
   uploadBusy, uploadError, onUploadPlan, onSaveLink, onSaveGroup, onDeleteGroup,
-  focusShapeId, onFocusHandled, onOpenAsset, onNavigateToPlan, query,
+  focusShapeId, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot,
 }) {
   if (!scopeAsset) {
     return (
@@ -18356,6 +18359,7 @@ function MapTabContent({
       onOpenAsset={onOpenAsset}
       onNavigateToPlan={onNavigateToPlan}
       query={query}
+      menuSlot={menuSlot}
     />
   );
 }
@@ -18379,7 +18383,7 @@ function FloorPlanTabContent({
   canEdit, selectedAsset, assets, typesList,
   uploadBusy, uploadError, onUploadPlan,
   onSaveLink, onSaveGroup, onDeleteGroup,
-  focusShapeId, onFocusHandled, onOpenAsset, onNavigateToPlan, query,
+  focusShapeId, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot,
 }) {
   const plan = useFloorPlanSvg(selectedAsset.floorPlanUrl);
   // Filtered to shapes the CURRENTLY LOADED plan actually has. uploadFloorPlanSvg
@@ -19062,65 +19066,65 @@ function FloorPlanTabContent({
         </svg>
       </div>
 
-      {/* ---------- toolbar: one menu for setup / free zoom / replace -- BELOW
-          the map, not above it, so the map itself sits as close to the top
-          of the tab as the setup bar (which still renders above it, while
-          active, since its status text is exactly what you're looking at
-          mid-tap) allows. The menu itself is the Assets/Maintenance/Audit
-          hamburger, byte for byte: Menu icon, absolute dropdown, a
-          fixed-inset click-catcher to close it, icon-btn rows. ---------- */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-        <div style={{ position: "relative", flexShrink: 0 }}>
-          <button
-            type="button"
-            onClick={() => setMenuOpen(v => !v)}
-            aria-label="Floor plan actions"
-            className="icon-btn"
-            style={{ padding: "6px 9px", borderRadius: 9, border: `1.5px solid ${C.border}`, background: "none", color: C.brandDark, display: "flex" }}
-          >
-            <Menu size={16} />
-          </button>
-          {menuOpen && (
-            <>
-              <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
-              <div style={{ position: "absolute", left: 0, top: "100%", marginTop: 6, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, minWidth: 190, overflow: "hidden", padding: 4 }}>
-                {/* Hidden while already in setup -- the Link/Group tab
-                    switcher in the bar above the map does this job once
-                    you're in it, the same way "Add asset" hides itself
-                    while its own form is already open. */}
-                {canEdit && !setupTab && (
-                  <button
-                    type="button"
-                    onClick={() => { setMenuOpen(false); setSetupTab("link"); }}
-                    className="icon-btn"
-                    style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
-                  >
-                    <Settings size={15} /> Link &amp; group spaces…
-                  </button>
-                )}
+      {/* ---------- actions menu: drawn into the header row (menuSlot),
+          beside the search icon, the way Assets/Tasks/Audit carry theirs.
+          It used to sit below the map at the lower left. Portalled so its
+          state (setupTab, freeZoom, the file input) stays in this component.
+          ---------- */}
+      {menuSlot && createPortal(
+      <div style={{ position: "relative", flexShrink: 0 }}>
+        <button
+          type="button"
+          onClick={() => setMenuOpen(v => !v)}
+          aria-label="Floor plan actions"
+          className="icon-btn"
+          style={{ background: "none", border: "none", padding: 8, borderRadius: 8, color: C.brandDark, display: "flex" }}
+        >
+          <Menu size={18} />
+        </button>
+        {menuOpen && (
+          <>
+            <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
+            <div style={{ position: "absolute", right: 0, top: "100%", marginTop: 6, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, minWidth: 190, overflow: "hidden", padding: 4 }}>
+              {/* Hidden while already in setup -- the Link/Group tab
+                  switcher in the bar above the map does this job once
+                  you're in it, the same way "Add asset" hides itself
+                  while its own form is already open. */}
+              {canEdit && !setupTab && (
                 <button
                   type="button"
-                  onClick={() => { setMenuOpen(false); setFreeZoom(z => !z); }}
+                  onClick={() => { setMenuOpen(false); setSetupTab("link"); }}
                   className="icon-btn"
                   style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
                 >
-                  <Repeat size={15} /> Free zoom ({freeZoom ? "on" : "off"})
+                  <Settings size={15} /> Link &amp; group spaces…
                 </button>
-                {canEdit && (
-                  <button
-                    type="button"
-                    disabled={uploadBusy}
-                    onClick={() => { setMenuOpen(false); fileInputRef.current && fileInputRef.current.click(); }}
-                    className="icon-btn"
-                    style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6, opacity: uploadBusy ? 0.6 : 1 }}
-                  >
-                    <RotateCcw size={15} /> {uploadBusy ? "Uploading…" : "Replace…"}
-                  </button>
-                )}
-              </div>
-            </>
-          )}
-        </div>
+              )}
+              <button
+                type="button"
+                onClick={() => { setMenuOpen(false); setFreeZoom(z => !z); }}
+                className="icon-btn"
+                style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
+              >
+                <Repeat size={15} /> Free zoom ({freeZoom ? "on" : "off"})
+              </button>
+              {canEdit && (
+                <button
+                  type="button"
+                  disabled={uploadBusy}
+                  onClick={() => { setMenuOpen(false); fileInputRef.current && fileInputRef.current.click(); }}
+                  className="icon-btn"
+                  style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6, opacity: uploadBusy ? 0.6 : 1 }}
+                >
+                  <RotateCcw size={15} /> {uploadBusy ? "Uploading…" : "Replace…"}
+                </button>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+      , menuSlot)}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
         {selectedAsset.floorPlanFileName && (
           <span style={{ fontSize: 12, color: C.empty }}>{selectedAsset.floorPlanFileName}</span>
         )}
