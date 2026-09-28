@@ -16,6 +16,18 @@ version that fixed them.
 
 ## Open
 
+### Choosing a type in the Add asset form also opens "Manage asset types"
+**Found:** 2026-09-28, while adding search to the Type picker.
+**Needs a deploy:** no — frontend only.
+**Confirmed:** in Chromium against Sandbox, with and without the search change. Add asset >
+Type > pick any type: the type is set, and the type manager opens on top of the form.
+
+`TypeField` renders its `SelectionModal` inside its `<label>`, and the label's first
+labelable control is the gear (Manage asset types). Picking an option closes the modal
+mid-click; the click then activates the label, which clicks the gear. Same family as the
+`PickerField` entry above (the fix there was `hideLabel`); `ParentField` is built the same
+way but has no control ahead of its trigger, so it is not hit.
+
 ### Choosing an option in a `PickerField` can re-open the picker
 **Found:** 2026-09-28, building the Diagnostics window's time-window picker.
 **Needs a deploy:** no — `index.html` only.

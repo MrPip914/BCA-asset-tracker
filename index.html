@@ -3611,7 +3611,7 @@ const FRONTEND_SCRIPT_VERSION = "v42";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-28.7";
+const APP_VERSION = "2026-09-28.8";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -15333,6 +15333,7 @@ function TypeField({ value, onChange, types, onManage, labels }) {
           onClose={() => setOpen(false)}
           onManage={onManage}
           manageLabel="Manage asset types"
+          searchable
         />
       )}
     </label>
@@ -15983,6 +15984,7 @@ function ParentField({ value, onChange, childType, childId, assets, error }) {
           isSelectable={a => allowedTypes.includes(a.type)}
           excluded={excluded}
           noneLabel={UNASSIGNED_LABEL}
+          searchable
           value={value || ""}
           onChange={onChange}
           onClose={() => setOpen(false)}
@@ -17278,14 +17280,21 @@ function useLabelFilter(options, labelOptions, labelsForOption) {
 // Generic modal picker mirroring the column-filter popup's look: centered card,
 // scrollable list of option buttons, checkmark on the selected one. Used for any
 // single-select field (Type/Room/Building) that shouldn't use a native <select>.
-function SelectionModal({ title, options, value, onChange, onClose, labelForOption, emptyLabel, onManage, manageLabel, labelOptions, labelsForOption }) {
+function SelectionModal({ title, options, value, onChange, onClose, labelForOption, emptyLabel, onManage, manageLabel, labelOptions, labelsForOption, searchable }) {
   const getLabel = labelForOption || (o => o);
+  const [searchQuery, setSearchQuery] = useState("");
   // OPTIONAL label filter, absent for every caller but the Type picker — see
   // useLabelFilter. It replaced the optional GROUPING this took while a type had
   // exactly one category; forking this into a second, filtered picker is how the
   // app would end up with two dropdown behaviours, which is the thing
   // SelectionModal exists to prevent.
-  const { options: shown, bar } = useLabelFilter(options, labelOptions, labelsForOption);
+  const { options: labelled, bar } = useLabelFilter(options, labelOptions, labelsForOption);
+  // OPTIONAL text search (Type picker), ANDed with the label chips: narrowing by
+  // "Equipment" and then typing "mon" means monitors carrying that label.
+  const searchNorm = searchable ? searchQuery.trim().toLowerCase() : "";
+  const shown = searchNorm
+    ? labelled.filter(opt => String(getLabel(opt) ?? "").toLowerCase().includes(searchNorm))
+    : labelled;
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 40, padding: 16 }}>
       {/* A flex column that never scrolls; only the option list inside it does —
@@ -17304,6 +17313,19 @@ function SelectionModal({ title, options, value, onChange, onClose, labelForOpti
             <button onClick={onClose} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
           </div>
         </div>
+        {searchable && (
+          <div style={{ position: "relative", marginBottom: 8, flexShrink: 0 }}>
+            <Search size={14} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: C.placeholder, pointerEvents: "none" }} />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              placeholder="Search…"
+              aria-label={`Search ${title.toLowerCase()}`}
+              style={{ width: "100%", boxSizing: "border-box", padding: "8px 10px 8px 30px", borderRadius: 10, border: `1.5px solid ${C.border}`, fontSize: 14, color: C.ink, background: C.bg }}
+            />
+          </div>
+        )}
         {bar}
         {options.length === 0 && emptyLabel && (
           <div style={{ fontSize: 13, color: C.empty, padding: "4px 2px 8px" }}>{emptyLabel}</div>
@@ -17329,7 +17351,9 @@ function SelectionModal({ title, options, value, onChange, onClose, labelForOpti
           {/* Says which control emptied the list. A picker that simply goes blank
               reads as a broken picker. */}
           {shown.length === 0 && options.length > 0 && (
-            <div style={{ fontSize: 13, color: C.empty, padding: "8px 2px" }}>Nothing carries that label.</div>
+            <div style={{ fontSize: 13, color: C.empty, padding: "8px 2px" }}>
+              {searchNorm ? `Nothing matches "${searchQuery.trim()}".` : "Nothing carries that label."}
+            </div>
           )}
         </div>
       </div>
