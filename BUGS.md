@@ -331,6 +331,43 @@ user is least sure whether their click worked.
 
 ---
 
+### One tap on a file tile's eye icon is an unconfirmed save, and on a bad connection it reads as "not saved" for nothing
+**Found:** 2026-09-28, diagnosing two "wasn't saved" modals Eric got on the 3c tenant
+(dev build, app 2026-09-27.1, backend v42) while not knowingly saving anything.
+**Needs a deploy:** NO — frontend only (`PhotoGallery` in `index.html`).
+**Confirmed:** from the device and backend diagnostics logs, reasoned against the dev
+source. Which control was tapped is inferred, not observed — see below.
+
+What the logs show, on an Android phone with a bad connection (the load at 17:49 had
+already failed after 75s on "Failed to fetch"):
+- Two saves were enqueued together; the second started the instant the first finished
+  (its 69.8s duration ends exactly at the first's failure), i.e. it sat in
+  `writeQueueRef` behind it.
+- Save 1 failed after four tries on "Failed to fetch". **It almost certainly landed
+  anyway**: the backend's only event is save 2 refused as a conflict, `photos posted 23,
+  stored 24` — the client loaded at 23, nobody else was saving, so 24 is save 1. The
+  retry path documents this worst case ("a 'your change wasn't saved' prompt for a change
+  that was") and it is exactly what happened.
+- Save 2's conflict reply was itself lost (its final attempt came back as Google's 404),
+  so the client never saw "conflict" — it reported a plain failure rather than reloading.
+
+Why a save at all: the conflict names ONLY the photos domain, so save 2 touched nothing
+else. The photos-only writes are upload, caption, delete, add link and the public/hidden
+toggle. Every one but the last takes a form, a confirmation or a file picker. **The eye
+button is a 22px target in the corner of every tile that writes immediately on one tap**,
+beside the tile body that opens the photo — so two stray taps while opening or scrolling
+past photos on a phone is two saves nobody meant. The `Hidden` badge it produces is small
+enough to miss.
+
+Consequence on the Sheet: one file's public/hidden flag was probably flipped by save 1 and
+is live on the public `?panel=` page (if it is a panel's photo). Save 2 wrote nothing.
+
+Candidate fixes, not decided: move the toggle into the lightbox (where captions already
+live, and where you are looking at the thing you are publishing); or keep it on the tile
+but larger and further from the open target. Separately, the not-saved modal could say
+"may not have saved" when every attempt died on a network error rather than a reply —
+it cannot know, and "wasn't" is the one wording that is sometimes false.
+
 ## Fixed
 
 ### Maintenance › History's column filters never opened — fixed 2026-09-15
