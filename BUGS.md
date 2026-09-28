@@ -96,6 +96,17 @@ Uncategorized — not an error, but the clone does not look like the client. Fix
 `"typeCategories"` to `CONFIG_CONTENT_KEYS`; worth checking the list against every Config
 key `doPost` writes at the same time, since this is the same drift waiting to recur.
 
+### A save conflict on dev where the client's revision was 34 behind the sheet
+**Found:** 2026-09-28, in the diagnostics export from a task-with-photo test on dev.
+**Needs a deploy:** unknown.
+**Confirmed:** not reproduced. Backend log: `assets posted 79, stored 113`.
+
+A conflict is expected when someone else saves, but a gap of 34 means this device
+held a very old snapshot (or its revision was never advanced by an earlier save).
+Not explained. Worth checking whether the snapshot cache's painted revisions can
+outlive a revalidation, or whether `sheet.mjs` bumps on dev were involved.
+**Blocks:** nothing known.
+
 ### The admin import hardcodes the BCA prefix, so a new tenant's counter starts at 1
 **Found:** 2026-09-15, while working out the asset prefix for a second client.
 **Needs a deploy:** YES — `AssetTrackerSync.gs` (`adminParseAssetCsv_`), so a version bump
