@@ -3611,7 +3611,7 @@ const FRONTEND_SCRIPT_VERSION = "v42";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-28.9";
+const APP_VERSION = "2026-09-28.10";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -18543,8 +18543,24 @@ function FloorPlanTabContent({
     const r = stageElRef.current && stageElRef.current.getBoundingClientRect();
     return r && r.width ? r.height / r.width : 0.66;
   };
-  const zoomToBbox = (bbox, pad) => {
-    vbRef.current = floorPlanZoomViewBox(bbox, pad == null ? 0.08 : pad, stageAspect());
+  // keepIfFits: a SELECTION never zooms OUT for padding's sake. If the shape
+  // already fits the current view (with a sliver of margin), keep the current
+  // zoom and just recentre on it -- the generous selection padding would
+  // otherwise pull a tall space on a wide desktop stage further away than
+  // where it started.
+  const zoomToBbox = (bbox, pad, keepIfFits) => {
+    const next = floorPlanZoomViewBox(bbox, pad == null ? 0.08 : pad, stageAspect());
+    const cur = vbRef.current;
+    if (keepIfFits && cur && next.w > cur.w) {
+      const snug = floorPlanZoomViewBox(bbox, 0.04, stageAspect());
+      if (snug.w <= cur.w) {
+        vbRef.current = { x: bbox.x + bbox.w / 2 - cur.w / 2, y: bbox.y + bbox.h / 2 - cur.h / 2, w: cur.w, h: cur.h };
+        applyVB();
+        setVbTick(t => t + 1);
+        return;
+      }
+    }
+    vbRef.current = next;
     applyVB();
     setVbTick(t => t + 1);
   };
@@ -18583,7 +18599,7 @@ function FloorPlanTabContent({
     if (plan.status !== "ready" || !focusShapeId) return;
     const shape = plan.spaces.find(s => s.gid === focusShapeId);
     if (!shape) { onFocusHandled(); return; }
-    zoomToBbox(floorPlanBbox(shape.pts), 0.5);
+    zoomToBbox(floorPlanBbox(shape.pts), 0.5, true);
     setPulsingShapeId(focusShapeId);
     clearTimeout(pulseTimerRef.current);
     pulseTimerRef.current = setTimeout(() => setPulsingShapeId(null), 3600);
@@ -18703,7 +18719,7 @@ function FloorPlanTabContent({
         if (openGroupId === owner.id) { startGroupEdit(owner.id); return; }
         setOpenGroupId(owner.id);
         const members = plan.status === "ready" ? plan.spaces.filter(s => (owner.memberShapeIds || []).includes(s.gid)) : [];
-        if (members.length) zoomToBbox(floorPlanBbox(members.flatMap(s => s.pts)), 0.15);
+        if (members.length) zoomToBbox(floorPlanBbox(members.flatMap(s => s.pts)), 0.15, true);
         return;
       }
       setOpenGroupId(null);
@@ -18730,7 +18746,7 @@ function FloorPlanTabContent({
       setOpenGroupId(grp.id);
       setSelectedShapeId(null);
       const members = plan.status === "ready" ? plan.spaces.filter(s => (grp.memberShapeIds || []).includes(s.gid)) : [];
-      if (members.length) zoomToBbox(floorPlanBbox(members.flatMap(s => s.pts)), 0.15);
+      if (members.length) zoomToBbox(floorPlanBbox(members.flatMap(s => s.pts)), 0.15, true);
       return;
     }
     if (selectedShapeId === shapeId) {
@@ -18745,7 +18761,7 @@ function FloorPlanTabContent({
     }
     setSelectedShapeId(shapeId);
     const shape = plan.status === "ready" ? plan.spaces.find(s => s.gid === shapeId) : null;
-    if (shape) zoomToBbox(floorPlanBbox(shape.pts), 0.5);
+    if (shape) zoomToBbox(floorPlanBbox(shape.pts), 0.5, true);
   }
   function clearSelection() {
     setSelectedShapeId(null); setOpenGroupId(null);
