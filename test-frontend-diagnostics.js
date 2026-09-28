@@ -48,10 +48,11 @@ function loadLog(storage) {
     (SRC.match(/^const DIAG_LOG_MAX = [^\n]+/m) || [''])[0],
     grab('function readDiagLog()'),
     grab('function diagLog('),
-    grab('function clearDiagLog()'),
     grab('function diagLogSave('),
-    grab('function formatDiagLines('),
-    'return { readDiagLog, diagLog, clearDiagLog, diagLogSave, formatDiagLines, DIAG_LOG_MAX };',
+    (SRC.match(/^const DIAG_WINDOWS = \[[\s\S]*?\n\];/m) || [''])[0],
+    grab('function combineDiagLogs('),
+    grab('function formatDiagReport('),
+    'return { readDiagLog, diagLog, diagLogSave, combineDiagLogs, formatDiagReport, DIAG_LOG_MAX, DIAG_WINDOWS };',
   ].join('\n');
   return new Function('localStorage', code)(storage);
 }
@@ -93,13 +94,55 @@ function loadLog(storage) {
   check('and every outcome carries how long it took', L.readDiagLog().every(e => /\d+ms/.test(e.detail)));
 }
 
+// ------------------------------------------------- the window and the merge
+{
+  const L = loadLog(makeStorage());
+  const now = Date.parse('2026-09-27T12:00:00.000Z');
+  const ago = (min) => new Date(now - min * 60000).toISOString();
+  const device = [
+    { at: ago(90), event: 'app_start' },
+    { at: ago(3), event: 'save_failed' },
+    { at: 'not a date', event: 'mystery' },
+  ];
+  const backend = [
+    { at: ago(2), event: 'busy', op: 'save' },
+    { at: ago(3000), event: 'signin' },
+  ];
+  const win = (id) => L.DIAG_WINDOWS.find(w => w.id === id).ms;
+  eq('the windows offered are 5 minutes, an hour, a day, a week, and everything',
+    L.DIAG_WINDOWS.map(w => w.id), ['5m', '1h', '24h', '7d', 'all']);
+  eq('the last 5 minutes keeps only what happened in them, from BOTH logs',
+    L.combineDiagLogs(device, backend, win('5m'), now).map(e => e.event), ['busy', 'save_failed']);
+  eq('the two logs are ONE list, newest first, each entry tagged with its source',
+    L.combineDiagLogs(device, backend, win('24h'), now).map(e => e.source + ':' + e.event),
+    ['backend:busy', 'device:save_failed', 'device:app_start']);
+  eq('an unparseable time is dropped once a window is chosen',
+    L.combineDiagLogs(device, [], win('7d'), now).some(e => e.event === 'mystery'), false);
+  eq('...and kept under "everything", at the end',
+    L.combineDiagLogs(device, backend, null, now).map(e => e.event).pop(), 'mystery');
+  eq('an unticked log contributes nothing',
+    L.combineDiagLogs([], backend, win('1h'), now).map(e => e.source), ['backend']);
+
+  const text = L.formatDiagReport(L.combineDiagLogs(device, backend, win('24h'), now), {
+    org: 'Brookside', tenant: 'bca', app: '2026-09-28.1', backend: 'v42',
+    exportedAt: '2026-09-27T12:00:00.000Z', logs: ['device', 'backend'], window: 'Last 24 hours',
+    notes: ['The backend returned its newest 300 of 900 rows; anything older is not included.'],
+  });
+  const lines = text.split('\n');
+  check('the file names the tenant, the build, the backend, the logs and the window',
+    /bca/.test(lines[0]) && /2026-09-28\.1/.test(lines[1]) && /v42/.test(lines[1]) && /device, backend/.test(lines[2]) && /Last 24 hours/.test(lines[2]));
+  check('a truncation note reaches the file, not only the screen', /Note: The backend returned its newest 300/.test(text));
+  check('each entry line carries its time, its source and its event',
+    lines.some(l => l.startsWith(ago(2)) && /\[backend\]/.test(l) && /busy/.test(l) && /op=save/.test(l)));
+}
+
 // --------------------------------------------------------------------- wiring
 {
   const endSession = grab('function endSession(');
   check('ending a session is logged, and says whether it was the button or the server',
     /diagLog\(manualSignOut \? "signed_out" : "session_ended"/.test(endSession));
   check('signing out does NOT clear the log — it is the question the log answers',
-    !/clearDiagLog\(/.test(endSession));
+    !/removeItem\(DIAG_LOG_KEY\)/.test(endSession) && !/removeItem\(DIAG_LOG_KEY\)/.test(SRC));
   check('app start records whether the browser still held a session',
     /diagLog\("app_start", \(restored \? "stored session found" : "no stored session"\)/.test(SRC));
   const load = grab('async function loadData()');
@@ -115,10 +158,23 @@ function loadLog(storage) {
     /op: "diagnostics"[^}]*_dirty: \{ assets: false, config: false, breakerTypes: false, photos: false \}/.test(fetchDiag));
   check('a backend too old to log is reported as such, not as an empty log',
     /!Array\.isArray\(data\.entries\)/.test(fetchDiag));
-  check('the Backend log button is editors-only and hidden in Sandbox',
-    /\{!sandboxMode && canEdit && \(\s*<button onClick=\{\(\) => openDiagView\("backend"\)\}/.test(SRC));
-  check('the device log is offered to everyone',
-    /<button onClick=\{\(\) => openDiagView\("device"\)\}/.test(SRC));
+  check('the backend log is editors-only and never in Sandbox',
+    /const diagBackendAvailable = !sandboxMode && canEdit;/.test(SRC)
+      && /const diagWantsBackend = diagIncludeBackend && diagBackendAvailable;/.test(SRC)
+      && /disabled=\{!diagBackendAvailable\}/.test(SRC));
+  check('the device log checkbox is not gated on anything',
+    /<input type="checkbox" checked=\{diagIncludeDevice\}/.test(SRC));
+  const gather = grab('async function gatherDiagnostics()');
+  check('View and Download both go through the ONE gather, so the file is what View shows',
+    /gatherDiagnostics\(\)/.test(grab('async function viewDiagnostics()'))
+      && /gatherDiagnostics\(\)/.test(grab('async function downloadDiagnostics()')));
+  check('a backend failure becomes a note instead of failing the device half',
+    /catch \(e\) \{\s*notes\.push\("Backend log unavailable/.test(gather));
+  check('the backend is only asked when its checkbox is effectively on',
+    /if \(diagWantsBackend\)/.test(gather));
+  check('closing Diagnostics does not also close About (the click is stopped)',
+    /onClick=\{\(e\) => \{ e\.stopPropagation\(\); setShowDiagnostics\(false\); \}\}/.test(SRC));
+  check('About opens Diagnostics from a single button', (SRC.match(/setShowDiagnostics\(true\)/g) || []).length === 1);
   check('no session id is ever written into the device log',
     !/diagLog\([^;]*sessionId/.test(SRC));
 }

@@ -438,11 +438,34 @@ its very best.
 
 ## Diagnostics logs (backend v42, 2026-09-27)
 
-About has a **Diagnostics** section with two logs: **This device's log** (everyone) and
-**Backend log** (editors, not in Sandbox). Each has Copy, which prefixes the tenant, the
-app build and the backend version, so a pasted log needs no follow-up questions. Built
-after a week of save errors and surprise sign-outs that nothing in the app had recorded:
-the failure modal and the sign-in screen both said *that* it happened and kept nothing.
+About has one **Diagnostics…** button, which opens a Diagnostics window: a **time
+window** picker (last 5 minutes, hour, 24 hours, week, or everything kept), checkboxes for
+the **device log** and the **backend log**, **View logs** and **Download**. Built after a
+week of save errors and surprise sign-outs that nothing in the app had recorded: the
+failure modal and the sign-in screen both said *that* it happened and kept nothing.
+
+- **The two logs are shown as ONE list, newest first, each entry tagged with its
+  source** (`combineDiagLogs`). The question is nearly always "what happened around
+  10:14", which is answered by the device's `save_failed` sitting next to the backend's
+  `busy` from the same second — two side-by-side lists make the reader do that merge.
+- **View and Download go through one gather**, so the file is exactly what View shows
+  for the same settings. The file (`<tenant>-diagnostics-<stamp>.txt`) leads with the
+  tenant, the app build, the backend version, which logs and which window, so an
+  attached file needs no follow-up questions. Times in the file are UTC so two devices'
+  files line up; on screen they are local.
+- **The window is applied in the browser**, and the backend only ever returns its
+  newest 300 rows — so a long window can be cut short on a busy tenant. When the backend
+  holds more than it returned, a note saying so appears on screen AND in the file.
+- **A backend that fails or is too old becomes a note, not a failed view**: the device
+  half still shows. An entry whose time will not parse is dropped once a window is chosen
+  and kept under "everything" — the Audit tab's Date-filter rule.
+- **The backend checkbox is disabled, not hidden, for viewers and in Sandbox**, with the
+  reason beside it, so nobody wonders where it went.
+- **The window is rendered inside About's overlay** (so it stacks above About, and its
+  picker above it), and its backdrop STOPS the click — otherwise closing Diagnostics
+  bubbles up and closes About as well.
+- **The time-window picker uses `hideLabel` with its own heading.** Inside PickerField's
+  `<label>` wrapper, choosing an option re-opened the picker here; see `BUGS.md`.
 
 - **The device log is `localStorage`, per tenant, capped at 300** (`diagLog()`). It
   records app start (and whether the browser still HELD a session, plus its user agent),
@@ -498,8 +521,11 @@ the failure modal and the sign-in screen both said *that* it happened and kept n
 - Covered by `test-backend-diagnostics.js` and `test-frontend-diagnostics.js`, verified
   by mutation (the apostrophe dropped, the log returned oldest-first, the trim losing its
   slack, `readSession_` no longer saying why, a `waitLock` restored, the device log
-  uncapped, the backend button shown in Sandbox, the `_dirty` guard dropped). The panel
-  and the busy and HTML load failures were driven in Chromium against a mocked backend.
+  uncapped, the `_dirty` guard dropped, the window cutoff ignored, the merged list
+  sorted oldest-first, the backend offered in Sandbox, the truncation note kept off the
+  file, and the Diagnostics backdrop letting the click through to About). The window —
+  picking a time window, View, Download, the disabled state with nothing ticked, and
+  About surviving a close — was driven in Chromium against a mocked backend.
 
 ## Local Sandbox mode
 

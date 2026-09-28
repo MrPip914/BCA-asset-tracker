@@ -16,6 +16,28 @@ version that fixed them.
 
 ## Open
 
+### Choosing an option in a `PickerField` can re-open the picker
+**Found:** 2026-09-28, building the Diagnostics window's time-window picker.
+**Needs a deploy:** no — `index.html` only.
+**Confirmed:** in Chromium, for that one picker: choosing "Last hour" set the value and
+the picker opened again at once. Worked around there with `hideLabel`. **NOT confirmed
+anywhere else** — a check against the Tasks tab's Frequency picker was attempted and
+abandoned before it reached the picker, so whether this is general is unknown.
+
+The likely cause is structural: `PickerField` wraps its trigger in a `<label>` when a
+label is shown, and renders its `SelectionModal` INSIDE that label. A click anywhere in a
+label is forwarded to the label's first labelable control — the trigger button — which
+opens the picker again. If that is right, every labelled `PickerField` in the app does
+this, and the reason it has not been reported would need explaining first; it may be
+that the forwarded click is swallowed elsewhere by a parent's handler.
+
+**The fix, if it is general**: render the `SelectionModal` outside the `<label>` (a
+fragment sibling), or make the wrapper a `div` with the heading as a plain element —
+which is what `hideLabel` already does.
+
+**Blocks:** nothing.
+
+
 ### `deploy.mjs` lets a DIFFERENT backend with the same version number replace a live one
 **Found:** 2026-09-27, by doing it — see "Release ordering" in `CLAUDE.md`.
 **Needs a deploy:** no — `deploy.mjs` only.

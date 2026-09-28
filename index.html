@@ -3606,7 +3606,7 @@ const FRONTEND_SCRIPT_VERSION = "v42";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-27.1";
+const APP_VERSION = "2026-09-28.1";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -3652,10 +3652,6 @@ function diagLog(event, detail) {
   }
 }
 
-function clearDiagLog() {
-  try { localStorage.removeItem(DIAG_LOG_KEY); } catch (e) { /* nothing to clear */ }
-}
-
 // One save's outcome, in the words the log reads back. Every shape writeSnapshot
 // can resolve or reject with has its own event, because "save failed" alone is
 // exactly the report this log exists to improve on.
@@ -3678,9 +3674,65 @@ function diagTimeText(at) {
   return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit" });
 }
 
-// The log as plain text, in the order given — what the Copy button hands over.
-function formatDiagLines(entries, fields) {
-  return entries.map(e => fields.map(f => (e[f] === undefined || e[f] === null ? "" : String(e[f]))).filter(Boolean).join("  ")).join("\n");
+// The time windows the Diagnostics window offers. `ms: null` is "everything
+// kept" — the device keeps 300 entries and the backend returns its newest 300.
+const DIAG_WINDOWS = [
+  { id: "5m", label: "Last 5 minutes", ms: 5 * 60 * 1000 },
+  { id: "1h", label: "Last hour", ms: 60 * 60 * 1000 },
+  { id: "24h", label: "Last 24 hours", ms: 24 * 60 * 60 * 1000 },
+  { id: "7d", label: "Last week", ms: 7 * 24 * 60 * 60 * 1000 },
+  { id: "all", label: "Everything kept", ms: null },
+];
+const DIAG_DEFAULT_WINDOW = "24h";
+
+// Both logs as ONE list, tagged with where each entry came from, newest first.
+// One list rather than two side by side because the question is almost always
+// "what happened around 10:14", and that is answered by reading the device's
+// save_failed next to the backend's busy row from the same second.
+//
+// An entry whose time will not parse is dropped once a window is chosen and
+// kept under "everything" — the same rule the master Audit tab's Date filter
+// follows: nothing is hidden unless a window was asked for.
+function combineDiagLogs(deviceEntries, backendEntries, windowMs, now) {
+  const cutoff = windowMs ? now - windowMs : null;
+  const tag = (list, source) => (list || []).map(e => ({ ...e, source }));
+  const all = tag(deviceEntries, "device").concat(tag(backendEntries, "backend"));
+  const kept = all.filter(e => {
+    if (cutoff === null) return true;
+    const t = new Date(e.at).getTime();
+    return !isNaN(t) && t >= cutoff;
+  });
+  return kept
+    .map((e, i) => ({ e, i, t: new Date(e.at).getTime() }))
+    .sort((a, b) => ((isNaN(b.t) ? -Infinity : b.t) - (isNaN(a.t) ? -Infinity : a.t)) || (a.i - b.i))
+    .map(x => x.e);
+}
+
+// The downloadable file. It leads with the context a reader needs and would
+// otherwise have to ask for — which tenant, which build, which backend, which
+// logs, which window — then one line per entry, in UTC so two devices' files
+// line up.
+function formatDiagReport(entries, meta) {
+  const m = meta || {};
+  const head = [
+    "Diagnostics — " + (m.org || "") + " (" + (m.tenant || "") + ")",
+    "App " + (m.app || "unknown") + " · backend " + (m.backend || "unknown") + " · exported " + (m.exportedAt || ""),
+    "Logs: " + (m.logs || []).join(", ") + " · window: " + (m.window || ""),
+  ].concat((m.notes || []).map(n => "Note: " + n)).concat([
+    entries.length + " entr" + (entries.length === 1 ? "y" : "ies") + ", newest first.",
+    "",
+  ]);
+  const lines = entries.map(e => [
+    e.at || "",
+    "[" + e.source + "]",
+    e.event || "",
+    e.op ? "op=" + e.op : "",
+    e.email || "",
+    e.reason ? "reason=" + e.reason : "",
+    e.ms ? e.ms + "ms" : "",
+    e.detail || "",
+  ].filter(Boolean).join("  "));
+  return head.concat(lines).join("\n") + "\n";
 }
 
 // Uncaught errors are logged too: a render crash or a failed promise nobody
@@ -5450,13 +5502,15 @@ function AssetTracker() {
   // opened or closed together — About outlives the menu that launched it.
   const [showAccountMenu, setShowAccountMenu] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
-  // About's diagnostics section: which log is open ("device" | "backend" | null),
-  // the backend's rows as last fetched ({ loading, entries, total, error }), this
-  // device's rows as last read, and the Copy button's brief confirmation.
-  const [diagView, setDiagView] = useState(null);
-  const [backendDiag, setBackendDiag] = useState(null);
-  const [deviceDiag, setDeviceDiag] = useState([]);
-  const [diagCopied, setDiagCopied] = useState(false);
+  // The Diagnostics window, opened from About. The window and the two log
+  // choices persist across openings within a session; `diagResult` is what View
+  // last produced ({ loading, entries, notes }) and is cleared on every open, so
+  // it never shows a previous question's answer under a new one's settings.
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [diagWindow, setDiagWindow] = useState(DIAG_DEFAULT_WINDOW);
+  const [diagIncludeDevice, setDiagIncludeDevice] = useState(true);
+  const [diagIncludeBackend, setDiagIncludeBackend] = useState(true);
+  const [diagResult, setDiagResult] = useState(null);
 
   const authSatisfied = sandboxMode || !!auth;
   // View-only users are stopped in persist() and again in the backend. Buttons
@@ -10471,61 +10525,177 @@ function AssetTracker() {
     { label: "Access", value: sandboxMode ? "editor (sandbox)" : (canEdit ? "editor" : "view-only") },
   ];
   // The backend's own log (op:"diagnostics", v42). Editors only — the backend
-  // refuses anyone else, and the button is hidden to match.
+  // refuses anyone else, and the checkbox is disabled to match.
   //
   // `_dirty` all-false is the same guard loadData's read carries, for the same
   // reason: a pre-v42 backend does not know this op and treats the request as an
   // ordinary save, and with `_dirty` absent that means "rewrite everything" from a
   // payload holding no data. All-false makes it write nothing and answer with a
-  // bare { ok, revisions }, which is reported below as a backend too old to log.
+  // bare { ok, revisions }, which is reported as a backend too old to log.
+  //
+  // Throws with a readable message; the caller turns it into a note rather than
+  // failing the whole view, so the device half still shows when this half can't.
   async function fetchBackendDiagnostics() {
-    setBackendDiag({ loading: true, entries: [], total: 0, error: "" });
-    try {
-      const data = await backendPost(SHEET_API_URL,
-        { op: "diagnostics", sessionId: sessionId, _dirty: { assets: false, config: false, breakerTypes: false, photos: false } });
-      if (!data || data.ok === false) throw new Error((data && data.error) || "The backend refused the request.");
-      if (!Array.isArray(data.entries)) throw new Error("This backend (" + (data.scriptVersion || backendScriptVersion || "unknown") + ") is too old to keep a log — it needs v42 or later.");
-      setBackendDiag({ loading: false, entries: data.entries, total: data.total || data.entries.length, error: "" });
-    } catch (e) {
-      setBackendDiag({ loading: false, entries: [], total: 0, error: (e && e.message) || String(e) });
+    const data = await backendPost(SHEET_API_URL,
+      { op: "diagnostics", sessionId: sessionId, _dirty: { assets: false, config: false, breakerTypes: false, photos: false } });
+    if (!data || data.ok === false) throw new Error((data && data.error) || "The backend refused the request.");
+    if (!Array.isArray(data.entries)) throw new Error("This backend (" + (data.scriptVersion || backendScriptVersion || "unknown") + ") is too old to keep a log — it needs v42 or later.");
+    return { entries: data.entries, total: data.total || data.entries.length };
+  }
+
+  // The backend log exists only against a real backend, and only for editors.
+  const diagBackendAvailable = !sandboxMode && canEdit;
+  const diagWantsBackend = diagIncludeBackend && diagBackendAvailable;
+  const diagWindowDef = DIAG_WINDOWS.find(w => w.id === diagWindow) || DIAG_WINDOWS[2];
+
+  // One gather for both View and Download, so the file is always exactly what
+  // View would have shown for the same settings.
+  async function gatherDiagnostics() {
+    const notes = [];
+    let backend = [];
+    if (diagWantsBackend) {
+      try {
+        const got = await fetchBackendDiagnostics();
+        backend = got.entries;
+        // The backend hands back its newest DIAG_READ_LIMIT rows only. Say so
+        // when that cut could be hiding part of the chosen window.
+        if (got.total > got.entries.length) {
+          notes.push("The backend returned its newest " + got.entries.length + " of " + got.total + " rows; anything older is not included.");
+        }
+      } catch (e) {
+        notes.push("Backend log unavailable: " + ((e && e.message) || String(e)));
+      }
     }
+    const device = diagIncludeDevice ? readDiagLog() : [];
+    const entries = combineDiagLogs(device, backend, diagWindowDef.ms, Date.now());
+    return { entries, notes };
   }
 
-  function openDiagView(which) {
-    setDiagCopied(false);
-    if (diagView === which) { setDiagView(null); return; }
-    setDiagView(which);
-    if (which === "device") setDeviceDiag(readDiagLog().slice().reverse());
-    else fetchBackendDiagnostics();
+  async function viewDiagnostics() {
+    setDiagResult({ loading: true, entries: [], notes: [] });
+    const got = await gatherDiagnostics();
+    setDiagResult({ loading: false, ...got });
   }
 
-  const DEVICE_DIAG_FIELDS = ["at", "event", "detail"];
-  const BACKEND_DIAG_FIELDS = ["at", "event", "op", "email", "reason", "detail", "ms"];
-  const diagEntries = diagView === "device" ? deviceDiag : ((backendDiag && backendDiag.entries) || []);
-  const diagFields = diagView === "device" ? DEVICE_DIAG_FIELDS : BACKEND_DIAG_FIELDS;
-
-  // Copied text leads with the context a reader needs and would otherwise have
-  // to ask for: which tenant, which build, which backend, which log.
-  function copyDiagnostics() {
-    const header = [
-      (diagView === "device" ? "Device log" : "Backend log") + " — " + CLIENT.orgName + " (" + CLIENT.id + ")",
-      "App " + APP_VERSION + " · backend " + (backendScriptVersion || "unknown") + " · copied " + new Date().toISOString(),
-      "Newest first.",
-      "",
-    ].join("\n");
-    const text = header + formatDiagLines(diagEntries, diagFields);
-    const onCopied = () => { setDiagCopied(true); setTimeout(() => setDiagCopied(false), 1500); };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(onCopied).catch(() => fallbackCopyToClipboard(text, onCopied));
-    } else {
-      fallbackCopyToClipboard(text, onCopied);
-    }
+  // A plain text file through a Blob URL — no library, and it opens anywhere.
+  async function downloadDiagnostics() {
+    const got = await gatherDiagnostics();
+    setDiagResult({ loading: false, ...got });
+    const now = new Date();
+    const text = formatDiagReport(got.entries, {
+      org: CLIENT.orgName, tenant: CLIENT.id, app: APP_VERSION,
+      backend: backendScriptVersion || (sandboxMode ? "sandbox" : "unknown"),
+      exportedAt: now.toISOString(),
+      logs: [diagIncludeDevice && "device", diagWantsBackend && "backend"].filter(Boolean),
+      window: diagWindowDef.label, notes: got.notes,
+    });
+    const stamp = now.toISOString().slice(0, 16).replace(/[-:]/g, "").replace("T", "-");
+    const url = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = CLIENT.id + "-diagnostics-" + stamp + ".txt";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
-  const diagButtonStyle = (active) => ({
-    background: active ? C.hover : C.surface, color: C.ink, border: `1px solid ${C.border}`,
-    borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer",
+  const diagButtonStyle = (primary, disabled) => ({
+    background: primary ? C.brand : C.surface, color: primary ? "#fff" : C.ink,
+    border: primary ? "none" : `1px solid ${C.border}`, borderRadius: 8, padding: "8px 14px",
+    fontSize: 13, fontWeight: 700, cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.5 : 1,
   });
+  const diagNothingSelected = !diagIncludeDevice && !diagWantsBackend;
+  const diagBusy = !!(diagResult && diagResult.loading);
+
+  // Rendered INSIDE the About overlay's tree, so it stacks above About and the
+  // time-window picker nested in it stacks above this in turn — the layering
+  // the type-manager's add-field dialog relies on. Its backdrop stops the click
+  // there, or closing Diagnostics would bubble up and close About with it.
+  const diagnosticsModal = showDiagnostics && (
+    <div
+      onClick={(e) => { e.stopPropagation(); setShowDiagnostics(false); }}
+      style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", zIndex: 75, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{ background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 12, width: "100%", maxWidth: 560, maxHeight: "90vh", display: "flex", flexDirection: "column", padding: 22, boxShadow: "0 8px 28px rgba(42,52,57,0.28)" }}
+      >
+        <div style={{ fontWeight: 700, fontSize: 16, color: C.ink, marginBottom: 4 }}>Diagnostics</div>
+        <div style={{ fontSize: 13, color: C.muted, marginBottom: 16, lineHeight: 1.5 }}>
+          Recent loads, saves, sign-ins and errors. Download a file to attach to a bug report.
+        </div>
+
+        {/* hideLabel, with the heading outside it: PickerField's own wrapper is a
+            <label>, and a click on a chosen option inside one re-opened the
+            picker here. A plain heading and a div wrapper avoid that. */}
+        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, marginBottom: 4 }}>Time window</div>
+        <PickerField
+          hideLabel
+          label="Time window"
+          value={diagWindow}
+          onChange={(v) => { setDiagWindow(v); setDiagResult(null); }}
+          options={DIAG_WINDOWS.map(w => w.id)}
+          labelForOption={(id) => (DIAG_WINDOWS.find(w => w.id === id) || {}).label || id}
+          title="Time window"
+        />
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, margin: "14px 0 16px" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: C.ink, cursor: "pointer" }}>
+            <input type="checkbox" checked={diagIncludeDevice} onChange={e => { setDiagIncludeDevice(e.target.checked); setDiagResult(null); }} />
+            Device log <span style={{ color: C.muted }}>— this browser</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: diagBackendAvailable ? C.ink : C.muted, cursor: diagBackendAvailable ? "pointer" : "default" }}>
+            <input type="checkbox" disabled={!diagBackendAvailable} checked={diagWantsBackend} onChange={e => { setDiagIncludeBackend(e.target.checked); setDiagResult(null); }} />
+            Backend log <span style={{ color: C.muted }}>
+              {sandboxMode ? "— not available in Sandbox" : !canEdit ? "— editors only" : "— from the server"}
+            </span>
+          </label>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+          <button disabled={diagNothingSelected || diagBusy} onClick={viewDiagnostics} style={diagButtonStyle(true, diagNothingSelected || diagBusy)}>View logs</button>
+          <button disabled={diagNothingSelected || diagBusy} onClick={downloadDiagnostics} style={diagButtonStyle(false, diagNothingSelected || diagBusy)}>Download</button>
+        </div>
+
+        {diagResult && (
+          <div style={{ display: "flex", flexDirection: "column", minHeight: 0, flex: 1 }}>
+            <div style={{ fontSize: 12, color: C.muted, marginBottom: 6 }}>
+              {diagResult.loading ? "Loading…" : `${diagResult.entries.length} entr${diagResult.entries.length === 1 ? "y" : "ies"}, newest first`}
+            </div>
+            {(diagResult.notes || []).map((n, i) => (
+              <div key={i} style={{ fontSize: 12, color: C.danger, background: C.dangerSurface, borderRadius: 8, padding: "6px 10px", lineHeight: 1.5, marginBottom: 6 }}>{n}</div>
+            ))}
+            {!diagResult.loading && (
+              <div style={{ border: `1px solid ${C.border}`, borderRadius: 8, overflowY: "auto", minHeight: 60, maxHeight: "45vh", background: C.bg }}>
+                {diagResult.entries.length === 0 ? (
+                  <div style={{ fontSize: 12, color: C.muted, padding: "10px 12px" }}>Nothing logged in this window.</div>
+                ) : diagResult.entries.map((entry, i) => (
+                  <div key={i} style={{ padding: "6px 10px", borderTop: i === 0 ? "none" : `1px solid ${C.border}`, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, lineHeight: 1.45, wordBreak: "break-word" }}>
+                    <div style={{ color: C.muted }}>
+                      {diagTimeText(entry.at)}{" "}
+                      <span style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: 0.5 }}>{entry.source}</span>{" "}
+                      <span style={{ color: /fail|error|rejection|conflict|refused|busy|ended/.test(entry.event || "") ? C.danger : C.ink, fontWeight: 700 }}>{entry.event}</span>
+                      {entry.op ? <span> · {entry.op}</span> : null}
+                      {entry.ms ? <span> · {entry.ms}ms</span> : null}
+                    </div>
+                    {(entry.email || entry.reason) && (
+                      <div style={{ color: C.ink }}>{[entry.email, entry.reason].filter(Boolean).join(" · ")}</div>
+                    )}
+                    {entry.detail && <div style={{ color: C.ink }}>{entry.detail}</div>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
+          <button onClick={() => setShowDiagnostics(false)} style={diagButtonStyle(false, false)}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
 
   const aboutModal = showAbout && (
     <div
@@ -10571,72 +10741,13 @@ function AssetTracker() {
               : "The deployed backend doesn't match what this build expects — some saves may not persist. Redeploy AssetTrackerSync.gs (Deploy › Manage deployments › New version)."}
         </div>
 
-        {/* Diagnostics — both halves of a failure side by side. The device log is
-            always offered (it is this browser's own record, and viewers need it
-            as much as anyone); the backend log is editors only, because it names
-            other people, and is hidden in Sandbox, which has no backend. */}
-        <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 14, marginBottom: 18 }}>
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.muted, marginBottom: 4 }}>Diagnostics</div>
-          <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.5, marginBottom: 10 }}>
-            Recent loads, saves, sign-ins and errors. Copy one into a bug report.
-          </div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button onClick={() => openDiagView("device")} style={diagButtonStyle(diagView === "device")}>This device's log</button>
-            {!sandboxMode && canEdit && (
-              <button onClick={() => openDiagView("backend")} style={diagButtonStyle(diagView === "backend")}>Backend log</button>
-            )}
-          </div>
-          {diagView && (
-            <div style={{ marginTop: 10 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                <div style={{ flex: 1, fontSize: 12, color: C.muted }}>
-                  {diagView === "device"
-                    ? `${diagEntries.length} entr${diagEntries.length === 1 ? "y" : "ies"} on this device, newest first`
-                    : backendDiag && backendDiag.loading
-                      ? "Loading…"
-                      : backendDiag && backendDiag.error
-                        ? ""
-                        : `Newest ${diagEntries.length} of ${(backendDiag && backendDiag.total) || 0}`}
-                </div>
-                {diagView === "backend" && (
-                  <button onClick={fetchBackendDiagnostics} style={diagButtonStyle(false)}>Refresh</button>
-                )}
-                {diagView === "device" && diagEntries.length > 0 && (
-                  <button onClick={() => { clearDiagLog(); setDeviceDiag([]); }} style={diagButtonStyle(false)}>Clear</button>
-                )}
-                {diagEntries.length > 0 && (
-                  <button onClick={copyDiagnostics} style={diagButtonStyle(false)}>{diagCopied ? "Copied" : "Copy"}</button>
-                )}
-              </div>
-              {diagView === "backend" && backendDiag && backendDiag.error ? (
-                <div style={{ fontSize: 12, color: C.danger, background: C.dangerSurface, borderRadius: 8, padding: "8px 10px", lineHeight: 1.5 }}>{backendDiag.error}</div>
-              ) : (
-                <div style={{ border: `1px solid ${C.border}`, borderRadius: 8, maxHeight: 260, overflowY: "auto", background: C.bg }}>
-                  {diagEntries.length === 0 ? (
-                    <div style={{ fontSize: 12, color: C.muted, padding: "10px 12px" }}>
-                      {diagView === "backend" && backendDiag && backendDiag.loading ? "" : "Nothing logged yet."}
-                    </div>
-                  ) : diagEntries.map((entry, i) => (
-                    <div key={i} style={{ padding: "6px 10px", borderTop: i === 0 ? "none" : `1px solid ${C.border}`, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, lineHeight: 1.45, wordBreak: "break-word" }}>
-                      <div style={{ color: C.muted }}>
-                        {diagTimeText(entry.at)}{" "}
-                        <span style={{ color: /fail|error|rejection|conflict|refused|busy|ended/.test(entry.event || "") ? C.danger : C.ink, fontWeight: 700 }}>{entry.event}</span>
-                        {diagView === "backend" && entry.op ? <span> · {entry.op}</span> : null}
-                        {diagView === "backend" && entry.ms ? <span> · {entry.ms}ms</span> : null}
-                      </div>
-                      {diagView === "backend" && (entry.email || entry.reason) && (
-                        <div style={{ color: C.ink }}>{[entry.email, entry.reason].filter(Boolean).join(" · ")}</div>
-                      )}
-                      {entry.detail && <div style={{ color: C.ink }}>{entry.detail}</div>}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        <div style={{ display: "flex", justifyContent: "flex-end" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+          <button
+            onClick={() => { setDiagResult(null); setShowDiagnostics(true); }}
+            style={{ background: C.surface, color: C.ink, border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
+          >
+            Diagnostics…
+          </button>
           <button
             onClick={() => setShowAbout(false)}
             style={{ background: C.brand, color: "#fff", border: "none", borderRadius: 8, padding: "8px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
@@ -10645,6 +10756,7 @@ function AssetTracker() {
           </button>
         </div>
       </div>
+      {diagnosticsModal}
     </div>
   );
 
@@ -10743,7 +10855,7 @@ function AssetTracker() {
               </button>
             )}
             <button
-              onClick={() => { setShowAccountMenu(false); setDiagView(null); setShowAbout(true); }}
+              onClick={() => { setShowAccountMenu(false); setShowDiagnostics(false); setShowAbout(true); }}
               className="icon-btn"
               style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
             >
