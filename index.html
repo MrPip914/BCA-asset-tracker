@@ -68,7 +68,7 @@ import {
   Search, Plus, X, Pencil, Trash2, Save, ChevronRight, ChevronDown, ChevronUp, ArrowLeft, MessageSquare,
   Monitor, Phone, Tv, Camera, HardDrive, HelpCircle, Columns3, Lock, Filter, Check, DoorOpen, Download,
   Wrench, UserCircle, Settings, History, Archive, ArchiveRestore, Building2, Package, Copy, Zap, Repeat, ArrowLeftRight, Menu,
-  FlaskConical, RotateCcw, AlertTriangle, Loader2, Printer, MapPin, QrCode, Info, LogOut, Users, Maximize,
+  FlaskConical, RotateCcw, RotateCw, AlertTriangle, Loader2, Printer, MapPin, QrCode, Info, LogOut, Users, Maximize,
   ImagePlus, Eye, EyeOff, Home, Paperclip, FileText, ExternalLink, Upload,
   // Star is the favorite toggle in the icon browser, not a type icon.
   Star,
@@ -3313,6 +3313,7 @@ const NAME_ORDER_STORAGE_KEY = CLIENT.storageKey("asset-tracker-name-order");
 // The trade, stated plainly: two people editing types on two devices curate two
 // different rows. That is the same trade column visibility takes, and the thing
 // they are curating is a shortcut rather than a fact about the school.
+const FLOOR_PLAN_ROTATION_STORAGE_KEY = CLIENT.storageKey("asset-tracker-floorplan-rotation"); // localStorage — { [assetId]: quarter turns }, per device
 const ICON_FAVORITES_STORAGE_KEY = CLIENT.storageKey("asset-tracker-icon-favorites");
 // This tenant's deployed Apps Script Web App URL, from clients.js. Redeploy with
 // `node deploy.mjs` any time you change AssetTrackerSync.gs — and note that each
@@ -3611,7 +3612,7 @@ const FRONTEND_SCRIPT_VERSION = "v42";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-28.10";
+const APP_VERSION = "2026-09-28.11";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -17723,6 +17724,20 @@ function floorPlanPole(poly) {
   }
   return { x: best[0], y: best[1], clear: bd < 0 ? 0 : bd };
 }
+// Turns every space 90 degrees clockwise `turns` times about the origin. Done to
+// the DATA rather than by rotating the <g>, so labels stay upright and every
+// consumer downstream (bbox, zoom, group borders, pole) sees one coordinate
+// system. Shape ids are untouched, so links and groups are unaffected.
+function floorPlanRotateSpaces(spaces, turns) {
+  const t = ((turns % 4) + 4) % 4;
+  if (!t) return spaces;
+  const rot = (x, y) => t === 1 ? [-y, x] : t === 2 ? [-x, -y] : [y, -x];
+  return spaces.map(sp => {
+    const pts = sp.pts.map(p => rot(p[0], p[1]));
+    const [px, py] = rot(sp.pole.x, sp.pole.y);
+    return { ...sp, pts, pole: { ...sp.pole, x: px, y: py }, bbox: floorPlanBbox(pts) };
+  });
+}
 function floorPlanBbox(pts) {
   const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
   return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
@@ -18489,7 +18504,21 @@ function FloorPlanTabContent({
   onSaveLink, onSaveGroup, onDeleteGroup,
   focusShapeId, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot,
 }) {
-  const plan = useFloorPlanSvg(selectedAsset.floorPlanUrl);
+  const rawPlan = useFloorPlanSvg(selectedAsset.floorPlanUrl);
+  // Rotation is a per-device reading preference (like column visibility), so it
+  // stores nothing on the asset and needs no backend change.
+  const readRotations = () => { try { return JSON.parse(localStorage.getItem(FLOOR_PLAN_ROTATION_STORAGE_KEY) || "{}") || {}; } catch (e) { return {}; } };
+  const [rotation, setRotation] = useState(() => (readRotations()[selectedAsset.id] || 0) % 4);
+  useEffect(() => { setRotation((readRotations()[selectedAsset.id] || 0) % 4); }, [selectedAsset.id]);
+  const rotatePlan = () => {
+    const next = (rotation + 1) % 4;
+    setRotation(next);
+    try { localStorage.setItem(FLOOR_PLAN_ROTATION_STORAGE_KEY, JSON.stringify({ ...readRotations(), [selectedAsset.id]: next })); } catch (e) {}
+  };
+  const plan = useMemo(
+    () => rawPlan.status === "ready" ? { ...rawPlan, spaces: floorPlanRotateSpaces(rawPlan.spaces, rotation) } : rawPlan,
+    [rawPlan, rotation]
+  );
   // Filtered to shapes the CURRENTLY LOADED plan actually has. uploadFloorPlanSvg
   // prunes a link/group that doesn't survive a REPLACE, but that only runs at
   // the moment of the next upload -- this is what keeps data already left
@@ -18575,12 +18604,12 @@ function FloorPlanTabContent({
   // render, or selecting a shape (which also touches state) would fight it.
   useEffect(() => {
     if (plan.status !== "ready") return;
-    const key = selectedAsset.id + ":" + plan.spaces.length;
+    const key = selectedAsset.id + ":" + plan.spaces.length + ":" + rotation;
     if (fittedForRef.current === key) return;
     fittedForRef.current = key;
     const allPts = plan.spaces.flatMap(s => s.pts);
     if (allPts.length) zoomToBbox(floorPlanBbox(allPts), 0.06);
-  }, [plan.status, plan.spaces, selectedAsset.id]);
+  }, [plan.status, plan.spaces, selectedAsset.id, rotation]);
 
   // One-shot "zoom to and pulse this shape" instruction from showOnMap (see
   // AssetTracker) -- armed the moment this plan's spaces are available,
@@ -19227,6 +19256,14 @@ function FloorPlanTabContent({
                 style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
               >
                 <Repeat size={15} /> Free zoom ({freeZoom ? "on" : "off"})
+              </button>
+              <button
+                type="button"
+                onClick={() => { setMenuOpen(false); rotatePlan(); }}
+                className="icon-btn"
+                style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
+              >
+                <RotateCw size={15} /> Rotate 90°
               </button>
               {canEdit && (
                 <button
