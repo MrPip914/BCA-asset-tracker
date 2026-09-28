@@ -700,6 +700,15 @@ onboard one.
   `DEFAULT_CLIENT_ID` ever changed. **The adoption is default-tenant-only** — the bare keys
   were written when there was one tenant, so they belong to whoever the default is; adopting
   them for an arbitrary `?client=` would hand a second school the first one's session.
+- **The location navigator survives a refresh** (2026-09-28). `scopeId` and `scopeExact`
+  ("Hide children") are written to the address bar (`?scope=<id>&exact=1`, by
+  `replaceState`, never a push) and to per-device `localStorage`
+  (`asset-tracker-scope:<tenant>`); the URL wins when it names a scope, storage is the
+  fallback for a bare open. `navUrl()` rebuilds from the current search string, so the
+  params ride along through asset navigation untouched. A remembered id that no longer
+  matches an asset (deleted, or another tenant's) is dropped once the assets load, which
+  also clears the URL and storage. Frontend only. Covered by `test-frontend-scope.js`;
+  driven in Chromium against Sandbox (URL, storage fallback, dangling id).
 - **Every URL the app builds carries the tenant**, via `CLIENT.urlParam()` — the panel deep
   link, the QR-sheet link, and every printed sticker. It returns `""` for the default, so
   Brookside's links and stickers keep exactly the shape they already have. **A sticker is

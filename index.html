@@ -3606,7 +3606,7 @@ const FRONTEND_SCRIPT_VERSION = "v42";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-28.5";
+const APP_VERSION = "2026-09-28.6";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -3766,6 +3766,56 @@ function navUrl(assetId, tab) {
   }
   const q = params.toString();
   return window.location.pathname + (q ? "?" + q : "") + window.location.hash;
+}
+
+// THE LOCATION NAVIGATOR SURVIVES A REFRESH. `scopeId` / `scopeExact` are plain
+// in-memory state, so a reload used to drop the user back to "everywhere".
+// They live in TWO places: the address bar (`?scope=<id>&exact=1`), so a
+// refresh or a copied link lands where you were, and per-device localStorage as
+// the fallback for opening the app with no scope in the URL. The URL wins when
+// it names one. navUrl() rebuilds from the CURRENT search string, so the scope
+// params ride along through every asset push/replace without it knowing about them.
+const SCOPE_STORAGE_KEY = CLIENT.storageKey("asset-tracker-scope");
+
+function readInitialScope() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const fromUrl = params.get("scope");
+    if (fromUrl) return { scopeId: fromUrl, scopeExact: params.get("exact") === "1" };
+  } catch (e) { /* no window — a Node test harness */ }
+  try {
+    const raw = window.localStorage.getItem(SCOPE_STORAGE_KEY);
+    const s = raw ? JSON.parse(raw) : null;
+    if (s && typeof s.scopeId === "string" && s.scopeId) {
+      return { scopeId: s.scopeId, scopeExact: s.scopeExact === true };
+    }
+  } catch (e) { /* storage blocked or corrupt — start unscoped, as before */ }
+  return { scopeId: "", scopeExact: false };
+}
+
+// Writes the scope into the address bar (replace, never push — narrowing is not
+// a place you go Back to) and into localStorage. The history STATE is passed
+// through untouched, since it carries navDepth/backTo/homeDepth.
+function persistScope(scopeId, scopeExact) {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    if (scopeId) {
+      params.set("scope", scopeId);
+      if (scopeExact) params.set("exact", "1"); else params.delete("exact");
+    } else {
+      params.delete("scope");
+      params.delete("exact");
+    }
+    const q = params.toString();
+    const url = window.location.pathname + (q ? "?" + q : "") + window.location.hash;
+    if (url !== window.location.pathname + window.location.search + window.location.hash) {
+      window.history.replaceState(window.history.state, "", url);
+    }
+  } catch (e) { /* no history API */ }
+  try {
+    if (scopeId) window.localStorage.setItem(SCOPE_STORAGE_KEY, JSON.stringify({ scopeId, scopeExact: !!scopeExact }));
+    else window.localStorage.removeItem(SCOPE_STORAGE_KEY);
+  } catch (e) { /* storage blocked — the URL half still works */ }
 }
 
 // What this app writes into each history entry.
@@ -5573,7 +5623,11 @@ function AssetTracker() {
   // filters below: this is *navigation* (drill in, see everything beneath) while
   // those are *filters* (match one exact value). Both can be on at once and
   // simply intersect.
-  const [scopeId, setScopeId] = useState("");
+  // Seeded from the address bar / localStorage so a refresh keeps the place
+  // (see readInitialScope). Read once; both states share the one parse.
+  const initialScopeRef = useRef(null);
+  if (initialScopeRef.current === null) initialScopeRef.current = readInitialScope();
+  const [scopeId, setScopeId] = useState(initialScopeRef.current.scopeId);
   // The "hide children" checkbox under HierarchyNav -- true narrows a scope
   // from "this place and everything beneath it" to "this place's own row
   // only". Shared across Assets/Tasks/Audit for the same reason scopeId
@@ -5581,7 +5635,17 @@ function AssetTracker() {
   // you where you were, not silently widen back out. Inert with no scope
   // set (inHierarchyScope reads it only when scopeId is truthy), so it
   // doesn't need clearing when scopeId does.
-  const [scopeExact, setScopeExact] = useState(false);
+  const [scopeExact, setScopeExact] = useState(initialScopeRef.current.scopeExact);
+  // Keep the address bar and localStorage in step with the scope. A remembered
+  // place that no longer exists (deleted, or another tenant's id) is dropped once
+  // the assets are in, rather than leaving a list scoped to nothing.
+  useEffect(() => {
+    if (assets !== null && scopeId && !assets.some(a => a.id === scopeId)) {
+      setScopeId("");
+      return;
+    }
+    persistScope(scopeId, scopeExact);
+  }, [scopeId, scopeExact, assets === null]);
   // Set by "Show on map" (see showOnMap below) and cleared by the Map tab
   // once it's acted on it -- a one-shot instruction ("zoom to and pulse this
   // shape next time its plan loads"), not standing state the tab reads every
