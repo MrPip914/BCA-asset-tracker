@@ -3503,8 +3503,13 @@ async function writeSnapshotCache(id, data) {
   if (!id || !window.caches) return;
   try {
     const cache = await caches.open(SNAPSHOT_CACHE_NAME);
+    // Only THIS tenant's entries. The cache is shared by every tenant on this
+    // origin, and wiping all of it meant opening another school (or its dev
+    // twin) threw this one's snapshot away -- so the next refresh here had
+    // nothing to paint and sat on a loading screen for the whole round trip.
+    const prefix = "/snapshot/" + encodeURIComponent(CLIENT.id) + "/";
     const keys = await cache.keys();
-    await Promise.all(keys.map(k => cache.delete(k)));
+    await Promise.all(keys.filter(k => new URL(k.url).pathname.startsWith(prefix)).map(k => cache.delete(k)));
     await cache.put(
       snapshotCacheKey(id),
       new Response(JSON.stringify(data), { headers: { "Content-Type": "application/json" } })
@@ -3606,7 +3611,7 @@ const FRONTEND_SCRIPT_VERSION = "v42";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-28.6";
+const APP_VERSION = "2026-09-28.7";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -10382,9 +10387,20 @@ function AssetTracker() {
   // and leave a dead end with no way to retry.
   if (!authSatisfied) {
     const notAllowed = authError && authError.reason === "notallowed";
+    // Resuming a STORED session on a refresh (no Google credential in hand, no
+    // error yet) is not a sign-in and must not look like one: the person is
+    // already signed in and the only thing missing is the backend's answer,
+    // which can take 20s+ when Google is slow and there is no cached snapshot.
+    // The sign-in card is HIDDEN, not unmounted -- the Google button is injected
+    // into its node once, and if the resume fails the card has to come back with
+    // the button already there.
+    const resuming = authPending && !authIdToken && !authError;
     return (
       <div style={{ minHeight: "100vh", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'IBM Plex Sans', sans-serif", padding: 16 }}>
-        <div style={{ background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 10, padding: 28, width: "100%", maxWidth: 380, textAlign: "center", boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)" }}>
+        {resuming && (
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", color: C.muted }}>Loading inventory…</div>
+        )}
+        <div style={{ background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 10, padding: 28, width: "100%", maxWidth: 380, textAlign: "center", boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)", ...(resuming ? { visibility: "hidden", position: "absolute" } : null) }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 4 }}>
             <div style={{ fontWeight: 700, fontSize: 17, color: C.ink }}>{APP_NAME}</div>
             <DevBuildBadge />
