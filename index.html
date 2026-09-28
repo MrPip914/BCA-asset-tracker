@@ -3606,7 +3606,7 @@ const FRONTEND_SCRIPT_VERSION = "v42";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-28.1";
+const APP_VERSION = "2026-09-28.2";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -4214,6 +4214,36 @@ async function downscalePhoto(file) {
   const blob = await new Promise(res => canvas.toBlob(res, "image/jpeg", PHOTO_JPEG_QUALITY));
   if (!blob) throw new Error("That photo could not be prepared for upload.");
   return { blob, width: outW, height: outH };
+}
+
+// Copies a picked file's bytes into memory BEFORE anything is posted.
+//
+// A PDF used to be handed to the upload as the File the picker returned, and on
+// Android that File is a handle onto a content provider (Drive, Files, a
+// scanner app), not bytes. XHR streams it from the provider AT SEND TIME, and
+// when the provider cannot serve it again -- or reports it as changed since it
+// was picked, which Drive-backed files do -- Chrome aborts the request with a
+// bare network error. Every retry re-reads the same handle and fails the same
+// way, so it surfaced as "the connection kept dropping (tried 3 times)" on a
+// connection that was fine. Found on 3C, 2026-09-28, with a 4.2MB ML Kit scan
+// that probes of Cloudinary accepted whole.
+//
+// A photo never had this problem, because downscalePhoto already reads it into
+// a canvas and posts a fresh in-memory JPEG. This gives a document the same
+// property. The size cap (DOC_MAX_BYTES) is what makes holding it in memory
+// harmless.
+//
+// A read that fails here is NOT transient and says so in its own words, rather
+// than being retried and reported as the network.
+async function readFileIntoMemory(file) {
+  let buf;
+  try {
+    buf = await file.arrayBuffer();
+  } catch (err) {
+    throw new Error("couldn't be read from this device. If it lives in Drive or another cloud app, "
+      + "download it to the phone first, or attach it as a link instead.");
+  }
+  return new Blob([buf], { type: file.type || "application/pdf" });
 }
 
 // Posts the prepared bytes straight to Cloudinary with a signature the backend
@@ -8096,6 +8126,11 @@ function AssetTracker() {
               // uploaded, and throwing away good work because the fourth photo
               // was a screenshot of a video would be worse than reporting it.
               failedAt[i] = (file.name || "A file") + ": " + ((err && err.message) || "could not be uploaded.");
+              // Logged because the gallery message is gone the moment it is
+              // dismissed, and a diagnostics export taken afterwards used to show
+              // nothing at all for the upload it was exported to explain.
+              diagLog("upload_failed", (file.type || "?") + " " + (file.size || 0) + "B · "
+                + ((err && err.message) || "unknown"));
             }
             // A finished file owns its whole share whatever the byte events said
             // -- Sandbox emits none at all, and a failed one is still not coming
@@ -8171,7 +8206,7 @@ function AssetTracker() {
       // that is the reason documents do not publish on the public panel page.
       const prepared = kind === "image"
         ? await downscalePhoto(file)
-        : { blob: file, width: undefined, height: undefined };
+        : { blob: await readFileIntoMemory(file), width: undefined, height: undefined };
       const fileName = (file.name || "").slice(0, 200);
       // A document skips the resize, so its share of the bar is already spent:
       // reporting it anyway keeps one file's progress monotonic whichever kind
