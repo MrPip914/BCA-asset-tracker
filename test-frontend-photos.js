@@ -340,15 +340,15 @@ eq('the completion WRITES the id its files were attached to',
 // every list from the ORIGINAL array and each save would drop the ones before
 // it — N writes, one photo surviving. That failure looks like "only the last
 // photo uploaded", which reads as a flaky network rather than a bug.
-function runAttach({ files, failOn = [], ownerType = 'asset', signFails = false, slow = [], emitBytes = [], stale = null }) {
-  const calls = { persist: [], persistAssets: [], errors: [], progress: [], busy: [], signCounts: [] };
+function runAttach({ files, failOn = [], ownerType = 'asset', signFails = false, slow = [], emitBytes = [], stale = null, latest = null }) {
+  const calls = { persist: [], persistAssets: [], stalePersist: 0, errors: [], progress: [], busy: [], signCounts: [] };
   const fn = new Function(
     'savingRef', 'photoBusy', 'PHOTO_OWNER_TYPES', 'setPhotoError', 'setPhotoBusy',
     'setPhotoProgress', 'preparePhotoRow', 'persist', 'photos', 'assets',
     // v37: the batch is signed once up front and uploads run in a bounded pool.
     'sandboxMode', 'signPhotoUploads', 'PHOTO_UPLOAD_CONCURRENCY',
     // 2026-09-24: refused up front while the view is unconfirmed.
-    'revalidating', 'staleSnapshot', 'diagLog', 'module',
+    'revalidating', 'staleSnapshot', 'diagLog', 'latestRef', 'module',
     grab('attachPhotos') + '\nmodule.f = attachPhotos;'
   );
   const mod = {};
@@ -374,9 +374,12 @@ function runAttach({ files, failOn = [], ownerType = 'asset', signFails = false,
       if (slow.includes(file.name)) await new Promise(r => setTimeout(r, 30));
       return { id: 'row-' + file.name, ownerType, ownerId };
     },
-    async (a, overrides) => { calls.persist.push(overrides.photos); calls.persistAssets.push(a); },
-    [{ id: 'existing' }],
-    ASSETS,
+    // The closure's own persist/photos/assets are the render that STARTED the
+    // upload. Anything written through them is the stale write; the real one
+    // goes through latestRef.
+    async () => { calls.stalePersist++; },
+    [{ id: 'stale-photo' }],
+    [{ id: 'stale-asset' }],
     false,
     async (count) => {
       calls.signCounts.push(count);
@@ -387,6 +390,13 @@ function runAttach({ files, failOn = [], ownerType = 'asset', signFails = false,
     stale === 'revalidating',
     stale === 'stale',
     (event, detail) => (calls.diag = calls.diag || []).push(event + ' ' + detail),
+    {
+      current: {
+        persist: async (a, overrides) => { calls.persist.push(overrides.photos); calls.persistAssets.push(a); },
+        photos: (latest && latest.photos) || [{ id: 'existing' }],
+        assets: (latest && latest.assets) || ASSETS,
+      },
+    },
     mod
   );
   return mod.f(ownerType, 'owner-1', files).then(() => calls);
@@ -433,6 +443,7 @@ function runPrepare({ file, sandbox = false, readFails = false }) {
   return mod.f('asset', 'BCA0082', file, sig).then(row => ({ row, seen }), err => ({ error: err.message, seen }));
 }
 
+const SAVED_MEANWHILE = [{ id: 'the-new-task-owner', maintenanceItems: [{ id: 'new-task' }] }];
 // The one array identity the assets-domain assertions below compare against.
 // persist() decides which tabs to rewrite by reference equality, so "did this
 // save carry the assets domain" is literally "is this a different array".
@@ -540,6 +551,20 @@ runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg')] }).then(calls => {
 }).then(calls => {
   eq('nor does a breaker photo — breaker ids are minted inside an asset save',
      calls.persistAssets[0], ASSETS);
+
+  // THE TASK THAT VANISHED. Save pressed while a photo is still uploading closes
+  // the form and persists the new task; the upload then finishes and used to
+  // write back the assets it closed over, which did not contain the task.
+  return runAttach({
+    files: [F('a.jpg')], ownerType: 'maintenance',
+    latest: { assets: SAVED_MEANWHILE, photos: [{ id: 'added-meanwhile' }] },
+  });
+}).then(calls => {
+  eq('a save that landed mid-upload is not written over',
+     calls.persistAssets[0], SAVED_MEANWHILE);
+  eq('nor is a photo attached mid-upload dropped',
+     calls.persist[0].map(p => p.id), ['added-meanwhile', 'row-a.jpg']);
+  eq('and the stale closure is never used to write', calls.stalePersist, 0);
 
   return runAttach({ files: [] });
 }).then(async (calls) => {
@@ -698,7 +723,9 @@ runAttach({ files: [F('a.jpg'), F('b.jpg'), F('c.jpg')] }).then(calls => {
   eq('preparePhotoRow writes nothing — it returns a row',
      /persist\(/.test(grab('preparePhotoRow')), false);
   eq('attachPhotos writes exactly once in its source too',
-     (grab('attachPhotos').match(/await persist\(/g) || []).length, 1);
+     (grab('attachPhotos').match(/await [\w.]*persist\(/g) || []).length, 1);
+  eq('and that write goes through the LATEST persist, never the closure\'s',
+     /await latest\.persist\(/.test(grab('attachPhotos')), true);
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

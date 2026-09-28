@@ -3606,7 +3606,7 @@ const FRONTEND_SCRIPT_VERSION = "v42";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-28.4";
+const APP_VERSION = "2026-09-28.5";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -5395,6 +5395,12 @@ function AssetTracker() {
   // toolbar, the panel diagram), and refusing one of those would silently drop a
   // real edit.
   const savingRef = useRef(false);
+  // The NEWEST render's persist, assets and photos. attachPhotos awaits uploads
+  // that can outlast the form it was started from, and its own closure still
+  // holds the assets and photos of the render that STARTED it -- so a task saved
+  // while a photo was uploading was written over by a stale copy that did not
+  // contain it. Anything that persists after an await must read this instead.
+  const latestRef = useRef(null);
   function rememberRevisions(raw) {
     const next = normalizeRevisions(raw);
     revisionsRef.current = next;
@@ -6663,6 +6669,7 @@ function AssetTracker() {
       );
     }
   }
+  latestRef.current = { persist, assets, photos };
 
   // The outcome of a backgrounded write. Split out of persist() because it now
   // runs long after persist() returned, and because both the resolved and the
@@ -8174,8 +8181,18 @@ function AssetTracker() {
       // at creation inside an asset save, so theirs are stored too. Only these
       // two owner types are adopted at random.
       const ownerIdMayBeMemoryOnly = ownerType === "change" || ownerType === "maintenance";
-      const assetsToWrite = ownerIdMayBeMemoryOnly ? assets.slice() : assets;
-      if (added.length) await persist(assetsToWrite, { photos: [...photos, ...added] });
+      //
+      // THE WRITE READS THE LATEST state, not this closure's. The uploads above
+      // can outlast the dialog: Save pressed mid-upload closes the form and
+      // persists the new task, and a write built from `assets`/`photos` here
+      // would put back the copy from before it existed -- the task vanishing
+      // after appearing to save. The latest persist is used too, since the stale
+      // one would also default every other domain to its old value.
+      if (added.length) {
+        const latest = latestRef.current;
+        await latest.persist(ownerIdMayBeMemoryOnly ? latest.assets.slice() : latest.assets,
+          { photos: [...latest.photos, ...added] });
+      }
       if (failures.length) {
         setPhotoError(failures.length === 1 ? failures[0]
           : failures.length + " of " + chosen.length + " files failed — " + failures.join("; "));
