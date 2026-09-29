@@ -3906,7 +3906,7 @@ const FRONTEND_SCRIPT_VERSION = "v43";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-29.7";
+const APP_VERSION = "2026-09-29.8";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -5633,6 +5633,15 @@ const MOCK_SNAPSHOT = {
           { id: "c98-8", breakerId: "b98-8", label: "Kitchen lights", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "" },
         ] },
         { id: "b98-10", panelLabel: "BCA0098", cells: ["10a", "10b"], breakerTypeId: "type-single-pole", ampRating: "20", serial: "", installedDate: "", notes: "", groupId: "grp98-10", circuits: [] },
+        // NON-CONTIGUOUS breakers, so Sandbox draws the bar (panelDiagramLayout).
+        // Odd side: one unit, a 2-pole on 13a+15b wrapping two single-poles in
+        // 13b and 15a. Even side: a 2-pole on 14a+16b around a single-pole from a
+        // DIFFERENT unit in 14b, with 16a left empty — the half-slot spare case.
+        { id: "b98-13-15", panelLabel: "BCA0098", cells: ["13a", "15b"], breakerTypeId: "", ampRating: "30", serial: "", installedDate: "", notes: "", groupId: "grp98-13", circuits: [] },
+        { id: "b98-13b", panelLabel: "BCA0098", cells: ["13b"], breakerTypeId: "", ampRating: "15", serial: "", installedDate: "", notes: "", groupId: "grp98-13", circuits: [] },
+        { id: "b98-15a", panelLabel: "BCA0098", cells: ["15a"], breakerTypeId: "", ampRating: "20", serial: "", installedDate: "", notes: "", groupId: "grp98-13", circuits: [] },
+        { id: "b98-14-16", panelLabel: "BCA0098", cells: ["14a", "16b"], breakerTypeId: "", ampRating: "25", serial: "", installedDate: "", notes: "", groupId: "grp98-14", circuits: [] },
+        { id: "b98-14b", panelLabel: "BCA0098", cells: ["14b"], breakerTypeId: "", ampRating: "15", serial: "", installedDate: "", notes: "", groupId: "grp98-14b", circuits: [] },
       ],
       unassignedCircuits: [],
     },
@@ -20622,6 +20631,170 @@ function PanelLegendCard({ slotCount, breakers, unassignedCircuits, allAssets, p
   );
 }
 
+// ── Where every breaker sits on the diagram, at HALF-SLOT precision (2026-09-29) ──
+// A breaker type may use NON-CONTIGUOUS cells — 1a+3b, with something else in
+// 1b and 3a — and drawing a group as one box split into equal stripes could not
+// show that: the sandwiched breakers and the outer one read as three stacked
+// siblings. So the diagram works in half-slot POSITIONS down each column
+// (1a, 1b, 3a, 3b … in two-column layout) and draws:
+//   - a breaker whose positions are contiguous as a box over exactly those
+//     positions, its label centred in whatever room it has;
+//   - a NON-contiguous breaker as its own cells ("pieces") joined by a vertical
+//     BAR carrying its label, on the side of the column facing the panel's
+//     centre — right of the odd column, left of the even one. Several bars
+//     nest, shortest nearest the breakers they wrap.
+// Groups whose ROWS touch are merged into one cluster and laid out together,
+// which also draws two single-half breakers from different groups in one slot
+// (1a from one unit, 1b from another) — the old slot-anchored walk only ever
+// drew the first. A lone contiguous breaker stays kind "breaker", drawn exactly
+// as before.
+// The inner grid gives every slot two equal half rows and keeps the outer
+// grid's row gap (rowGapPx) as a row of its own, so a half-slot edge lands on the same
+// line as the slot numbers beside it. An item that ends a slot and is followed
+// by more of the cluster swallows that gap row, so no strip of divider colour
+// shows through between slots.
+// ES5 on purpose: panel.html carries a verbatim copy, pinned by
+// test-frontend-panel-diagram.js.
+function panelDiagramLayout(breakers, slotCount, columns, rowGapPx) {
+  var rowOf = function (n) { return columns === 1 ? n : Math.ceil(n / 2); };
+  var colOf = function (n) { return columns === 1 ? 0 : (n % 2 === 1 ? 0 : 1); };
+  var posOf = function (cell) {
+    var m = /^(\d+)([ab])$/.exec(String(cell));
+    if (!m || !(parseInt(m[1], 10) > 0)) return null;
+    return (rowOf(parseInt(m[1], 10)) - 1) * 2 + (m[2] === "b" ? 1 : 0);
+  };
+  var slotAtPos = function (col, pos) {
+    var row = Math.floor(pos / 2) + 1;
+    return columns === 1 ? row : row * 2 - 1 + col;
+  };
+  var byGroup = {}, order = [];
+  breakers.forEach(function (b) {
+    var key = b.groupId || ("solo-" + b.id);
+    if (!byGroup[key]) { byGroup[key] = []; order.push(key); }
+    byGroup[key].push(b);
+  });
+  var units = [];
+  order.forEach(function (key) {
+    var slots = [], positions = [];
+    byGroup[key].forEach(function (b) {
+      (b.cells || []).forEach(function (c) {
+        var p = posOf(c);
+        if (p === null) return;
+        positions.push(p);
+        var n = parseInt(String(c), 10);
+        if (slots.indexOf(n) === -1) slots.push(n);
+      });
+    });
+    if (!positions.length) return;
+    var minSlot = Math.min.apply(null, slots);
+    if (minSlot > slotCount) return;
+    units.push({ breakers: byGroup[key], col: colOf(minSlot), minSlot: minSlot,
+      min: Math.min.apply(null, positions), max: Math.max.apply(null, positions) });
+  });
+  units.sort(function (a, b) { return a.col - b.col || a.min - b.min; });
+  // Merge by ROW, not by position: two half-slot units in one slot share a row
+  // without sharing a position, and still have to be drawn in one box.
+  var clusters = [];
+  units.forEach(function (u) {
+    var last = clusters[clusters.length - 1];
+    if (last && last.col === u.col && Math.floor(u.min / 2) <= Math.floor(last.max / 2)) {
+      last.units.push(u);
+      last.max = Math.max(last.max, u.max);
+      last.minSlot = Math.min(last.minSlot, u.minSlot);
+    } else {
+      clusters.push({ col: u.col, min: u.min, max: u.max, minSlot: u.minSlot, units: [u] });
+    }
+  });
+
+  var cells = [], usedRows = {};
+  clusters.forEach(function (c) {
+    var rowStart = Math.floor(c.min / 2) + 1;
+    var rowSpan = Math.floor(c.max / 2) + 1 - rowStart + 1;
+    for (var r = rowStart; r < rowStart + rowSpan; r++) usedRows[c.col + ":" + r] = true;
+    var base = (rowStart - 1) * 2, last = rowSpan * 2 - 1;
+    var infos = [];
+    c.units.forEach(function (u) {
+      u.breakers.forEach(function (b) {
+        var ps = [];
+        (b.cells || []).forEach(function (cell) {
+          var p = posOf(cell);
+          if (p !== null && ps.indexOf(p - base) === -1) ps.push(p - base);
+        });
+        if (!ps.length) return;
+        ps.sort(function (x, y) { return x - y; });
+        infos.push({ breaker: b, ps: ps, from: ps[0], to: ps[ps.length - 1],
+          contiguous: ps[ps.length - 1] - ps[0] + 1 === ps.length });
+      });
+    });
+    infos.sort(function (a, b) { return a.from - b.from || a.to - b.to; });
+    var ordered = infos.map(function (i) { return i.breaker; });
+    var key = "unit-" + (c.units[0].breakers[0].groupId || c.units[0].breakers[0].id);
+    if (infos.length === 1 && infos[0].contiguous) {
+      cells.push({ key: key, kind: "breaker", breaker: ordered[0], breakers: ordered, slot: c.minSlot, col: c.col, row: rowStart, rowSpan: rowSpan });
+      return;
+    }
+    var bars = infos.filter(function (i) { return !i.contiguous; })
+      .sort(function (a, b) { return (a.to - a.from) - (b.to - b.from); });
+    var nb = bars.length;
+    var barsLeft = columns !== 1 && c.col === 1;
+    var mainTrack = barsLeft ? nb + 1 : 1;
+    var barTrack = function (i) { return barsLeft ? nb - i : 2 + i; };
+    var colTemplate = [];
+    for (var t = 0; t < nb; t++) colTemplate.push("26px");
+    colTemplate[barsLeft ? "push" : "unshift"]("minmax(0, 1fr)");
+    var rowTemplate = [];
+    for (var k = 0; k < rowSpan; k++) rowTemplate.push(k < rowSpan - 1 ? "1fr 1fr " + (rowGapPx || 6) + "px" : "1fr 1fr");
+    var gridRowOf = function (from, to) {
+      var start = from + Math.floor(from / 2) + 1;
+      var end = to + Math.floor(to / 2) + 2 + (to % 2 === 1 && to < last ? 1 : 0);
+      return start + " / " + end;
+    };
+    var items = [];
+    var add = function (type, track, from, to, extra) {
+      var it = { type: type, gridColumn: track, gridRow: gridRowOf(from, to), from: from, to: to };
+      for (var x in extra) it[x] = extra[x];
+      items.push(it);
+    };
+    // Runs of consecutive positions, optionally broken at every slot boundary.
+    var runs = function (list, splitAtSlot) {
+      var out = [];
+      list.forEach(function (p) {
+        var r = out[out.length - 1];
+        if (r && p === r.to + 1 && !(splitAtSlot && p % 2 === 0)) r.to = p;
+        else out.push({ from: p, to: p });
+      });
+      return out;
+    };
+    var covered = {};
+    infos.forEach(function (i) {
+      if (i.contiguous) {
+        add("main", mainTrack, i.from, i.to, { breaker: i.breaker });
+        for (var p = i.from; p <= i.to; p++) covered[p] = true;
+      } else {
+        runs(i.ps, false).forEach(function (r) { add("piece", mainTrack, r.from, r.to, { breaker: i.breaker }); });
+        i.ps.forEach(function (p) { covered[p] = true; });
+      }
+    });
+    var empty = [];
+    for (var p = 0; p <= last; p++) if (!covered[p]) empty.push(p);
+    runs(empty, true).forEach(function (r) { add("spare", mainTrack, r.from, r.to, { slot: slotAtPos(c.col, base + r.from) }); });
+    bars.forEach(function (i, idx) {
+      add("bar", barTrack(idx), i.from, i.to, { breaker: i.breaker });
+      var free = [];
+      for (var q = 0; q <= last; q++) if (q < i.from || q > i.to) free.push(q);
+      runs(free, false).forEach(function (r) { add("fill", barTrack(idx), r.from, r.to, {}); });
+    });
+    cells.push({ key: key, kind: "cluster", breakers: ordered, slot: c.minSlot, col: c.col, row: rowStart, rowSpan: rowSpan,
+      barsLeft: barsLeft, colTemplate: colTemplate.join(" "), rowTemplate: rowTemplate.join(" "), items: items });
+  });
+  for (var s = 1; s <= slotCount; s++) {
+    if (usedRows[colOf(s) + ":" + rowOf(s)]) continue;
+    cells.push({ key: "spare-" + s, kind: "spare", slot: s, col: colOf(s), row: rowOf(s), rowSpan: 1 });
+  }
+  cells.sort(function (a, b) { return a.slot - b.slot; });
+  return cells;
+}
+
 function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAssets, breakerTypes, panelAsset, panelLabel, onReconfigure, onSlotClick, onSpareClick, onExportSchedule, onImportSchedule, onManageBreakerTypes, canEdit }) {
   // Clicking an empty slot is how a breaker gets ADDED, so it's inert for a
   // viewer. Guarded here rather than by not rendering the cells, because the
@@ -20730,56 +20903,11 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
   const gridTemplateColumns = columns === 1 ? "40px 1fr" : "40px 1fr 1fr 40px";
   const threePhase = panelIsThreePhase(panelAsset);
 
-  // Every slot a breaker touches is derived from its cells (see
-  // BREAKER_TYPES_ARCHITECTURE.md) — slotMap is just "which breakers touch
-  // this slot at all," used below to find the group anchored there.
-  const slotMap = {};
-  breakers.forEach(b => slotsFromCells(b.cells).forEach(s => {
-    const n = parseInt(s, 10);
-    if (!n) return;
-    (slotMap[n] = slotMap[n] || []).push(b);
-  }));
-
-  const covered = new Set();
-  const cells = [];
-  for (let s = 1; s <= slotCount; s++) {
-    if (covered.has(s)) continue;
-    const here = slotMap[s] || [];
-    const col = colOf(s);
-    const row = rowOf(s);
-
-    if (here.length === 0) {
-      cells.push({ key: `spare-${s}`, col, row, rowSpan: 1, kind: "spare", slot: s });
-      continue;
-    }
-    // Every breaker placed via Add Breaker carries a groupId (even a lone
-    // single-pole/double-pole — a "group" of one) — so grouping is always
-    // just "every breaker sharing this groupId," regardless of how many
-    // slots or members it has. A group of >1 renders as a vertical stack
-    // (the same cell shape whether it's a tandem, quad, or any custom
-    // BreakerType); a group of 1 renders as the plain single cell.
-    const groupId = here[0].groupId;
-    const groupBreakers = groupId ? breakers.filter(b => b.groupId === groupId) : [here[0]];
-    const groupSlots = [...new Set(groupBreakers.flatMap(b => slotsFromCells(b.cells).map(x => parseInt(x, 10))))].sort((a, b2) => a - b2);
-    if (groupSlots[0] !== s) continue; // reached via a non-primary slot; the primary slot already covers it
-    groupSlots.filter(x => x !== s).forEach(x => covered.add(x));
-    const rows = groupSlots.map(rowOf);
-    const rowSpan = Math.max(...rows) - Math.min(...rows) + 1;
-    if (groupBreakers.length > 1) {
-      // Sort each breaker ONCE by its own minimum slot — not by bucketing
-      // "which slots does this breaker touch" (a breaker spanning 2 slots,
-      // like the middle breaker of a split double-pole, would then get
-      // listed once per slot it touches and render as a duplicate box).
-      const orderedBreakers = [...groupBreakers].sort((b1, b2) => {
-        const s1 = Math.min(...slotsFromCells(b1.cells).map(Number));
-        const s2 = Math.min(...slotsFromCells(b2.cells).map(Number));
-        return s1 - s2;
-      });
-      cells.push({ key: `group-${groupId}`, col, row: Math.min(...rows), rowSpan, kind: "tandem", breakers: orderedBreakers, slot: s });
-    } else {
-      cells.push({ key: `breaker-${groupBreakers[0].id}`, col, row: Math.min(...rows), rowSpan, kind: "breaker", breaker: groupBreakers[0], slot: s });
-    }
-  }
+  // Every breaker's box, at half-slot precision — see panelDiagramLayout. Cells
+  // are "spare" (a whole empty slot), "breaker" (one contiguous breaker, drawn
+  // as a single box) or "cluster" (several breakers sharing rows, laid out on an
+  // inner grid, with a bar for any breaker whose cells are not contiguous).
+  const cells = panelDiagramLayout(breakers, slotCount, columns, 6);
 
   // Slot numbers print independently of the breaker cells above — every
   // slot gets its own number at its own row, even when a double-pole
@@ -20988,9 +21116,9 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
             tableRows.push({ key: cell.key, breakerId: null, spareSlot: cell.slot, slotSort: cell.slot, slotLabel: String(cell.slot), phase: slotPhase(cell.slot, threePhase), typeName: "Spare", ampRating: "", roomIds: [], roomText: "—", notes: "" });
             return;
           }
-          const groupBreakers = cell.kind === "tandem" ? cell.breakers : [cell.breaker];
-          const type = breakerTypes.find(t => t.id === groupBreakers[0].breakerTypeId);
-          groupBreakers.forEach(b => {
+          // A cluster can hold several units, so the type is looked up per breaker.
+          cell.breakers.forEach(b => {
+            const type = breakerTypes.find(t => t.id === b.breakerTypeId);
             const circuits = (b.circuits && b.circuits.length) ? b.circuits : [null];
             circuits.forEach(c => {
               const roomIds = c ? (c.roomsServedIds || []) : [];
@@ -21143,18 +21271,48 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
               </button>
             );
           }
-          if (cell.kind === "tandem") {
+          if (cell.kind === "cluster") {
+            // The container's background shows through the 1px gaps as the
+            // divider lines, so every item paints its own white (or tint).
             return (
-              <div key={cell.key} style={{ gridColumn: breakerTrack(cell.col), gridRow: `${cell.row} / span ${cell.rowSpan}`, border: `1.5px solid ${C.border}`, borderRadius: 8, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-                {cell.breakers.map((b, i) => {
-                  const info = cellInfo(b);
+              <div key={cell.key} style={{ gridColumn: breakerTrack(cell.col), gridRow: `${cell.row} / span ${cell.rowSpan}`, border: `1.5px solid ${C.border}`, borderRadius: 8, overflow: "hidden", display: "grid", gridTemplateColumns: cell.colTemplate, gridTemplateRows: cell.rowTemplate, gap: 1, background: C.border, minWidth: 0 }}>
+                {cell.items.map(it => {
+                  const place = { gridColumn: it.gridColumn, gridRow: it.gridRow, minWidth: 0, minHeight: 0 };
+                  if (it.type === "fill") return <div key={`fill-${it.gridColumn}-${it.from}`} style={{ ...place, background: "#fff" }} />;
+                  if (it.type === "spare") {
+                    return (
+                      <button key={`spare-${it.from}`} type="button" onClick={() => handleSpareClick(it.slot)}
+                        style={{ ...place, border: "none", background: "#fff", color: C.placeholder, fontSize: 8, cursor: "pointer", padding: 0 }}>
+                        spare
+                      </button>
+                    );
+                  }
+                  const info = cellInfo(it.breaker);
+                  // The breaker's own cells, joined by its bar: tinted alike so the
+                  // two read as one breaker, and the label lives in the bar.
+                  if (it.type === "piece") {
+                    return <button key={`piece-${it.breaker.id}-${it.from}`} type="button" onClick={() => onSlotClick(it.breaker.id)} aria-label={`${info.primary} breaker`} style={{ ...place, border: "none", background: C.bg, cursor: "pointer", padding: 0 }} />;
+                  }
+                  if (it.type === "bar") {
+                    return (
+                      <button
+                        key={`bar-${it.breaker.id}`} type="button" onClick={() => onSlotClick(it.breaker.id)}
+                        title={[info.primary, info.secondary].filter(Boolean).join(" · ")}
+                        style={{ ...place, border: "none", background: C.bg, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}
+                      >
+                        <span style={{ writingMode: "vertical-rl", transform: "rotate(180deg)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxHeight: "100%", fontSize: 9, color: C.muted }}>
+                          <b style={{ color: C.brandDark }}>{info.primary}</b>{info.secondary ? ` · ${info.secondary}` : ""}
+                        </span>
+                      </button>
+                    );
+                  }
                   return (
                     <button
-                      key={b.id} onClick={() => onSlotClick(b.id)} type="button"
-                      style={{ flex: 1, border: "none", borderTop: i > 0 ? `1px solid ${C.border}` : "none", background: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", cursor: "pointer", padding: "2px 4px", overflow: "hidden" }}
+                      key={`main-${it.breaker.id}`} onClick={() => onSlotClick(it.breaker.id)} type="button"
+                      style={{ ...place, border: "none", background: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", cursor: "pointer", padding: "1px 4px", overflow: "hidden" }}
                     >
-                      <span style={{ fontSize: 9, fontWeight: 700, color: C.brandDark }}>{info.primary}</span>
-                      <span style={{ fontSize: 8, color: C.muted, whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden", maxWidth: "100%" }}>{info.secondary}</span>
+                      <span style={{ fontSize: 9, fontWeight: 700, color: C.brandDark, lineHeight: 1.1 }}>{info.primary}</span>
+                      {info.secondary && <span style={{ fontSize: 8, color: C.muted, whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden", maxWidth: "100%", lineHeight: 1.1 }}>{info.secondary}</span>}
                     </button>
                   );
                 })}

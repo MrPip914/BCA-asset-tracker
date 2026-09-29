@@ -125,9 +125,16 @@
   /* A multi-member unit (tandem, quad, split double-pole) draws as one bordered
      box with its members stacked inside, so it reads as the single physical
      device it is. */
-  .unit { border: 1.5px solid var(--border); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; }
-  .unit .breaker-cell { border: none; border-radius: 0; flex: 1; min-height: 0; padding: 1px 3px; }
-  .unit .breaker-cell + .breaker-cell { border-top: 1px solid var(--border); }
+  /* Laid out on an inner grid at half-slot precision (panelDiagramLayout): the
+     box's background shows through the 1px gaps as the divider lines. */
+  .unit { border: 1.5px solid var(--border); border-radius: 8px; overflow: hidden; display: grid; gap: 1px; background: var(--border); min-width: 0; }
+  .unit .breaker-cell { border: none; border-radius: 0; min-height: 0; min-width: 0; padding: 1px 3px; }
+  .unit .fill { background: #fff; }
+  .unit .half-spare { background: #fff; display: flex; align-items: center; justify-content: center; font-size: 8px; color: var(--placeholder); }
+  /* A breaker whose cells are not contiguous: its cells and its bar share a
+     tint so they read as one breaker, and the label runs up the bar. */
+  .unit .piece, .unit .bar { background: var(--bg); padding: 0; }
+  .bar-label { writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-height: 100%; font-size: 9px; color: var(--muted); }
   /* A tandem's two members split one 46px slot row, so ~22px each — the type
      sizes above don't fit and the room name is the line that loses. Smaller
      type here keeps both readable, which matters most on exactly these
@@ -254,6 +261,170 @@
     }).join("/");
   }
 
+  // ── Where every breaker sits on the diagram, at HALF-SLOT precision (2026-09-29) ──
+  // A breaker type may use NON-CONTIGUOUS cells — 1a+3b, with something else in
+  // 1b and 3a — and drawing a group as one box split into equal stripes could not
+  // show that: the sandwiched breakers and the outer one read as three stacked
+  // siblings. So the diagram works in half-slot POSITIONS down each column
+  // (1a, 1b, 3a, 3b … in two-column layout) and draws:
+  //   - a breaker whose positions are contiguous as a box over exactly those
+  //     positions, its label centred in whatever room it has;
+  //   - a NON-contiguous breaker as its own cells ("pieces") joined by a vertical
+  //     BAR carrying its label, on the side of the column facing the panel's
+  //     centre — right of the odd column, left of the even one. Several bars
+  //     nest, shortest nearest the breakers they wrap.
+  // Groups whose ROWS touch are merged into one cluster and laid out together,
+  // which also draws two single-half breakers from different groups in one slot
+  // (1a from one unit, 1b from another) — the old slot-anchored walk only ever
+  // drew the first. A lone contiguous breaker stays kind "breaker", drawn exactly
+  // as before.
+  // The inner grid gives every slot two equal half rows and keeps the outer
+  // grid's row gap (rowGapPx) as a row of its own, so a half-slot edge lands on the same
+  // line as the slot numbers beside it. An item that ends a slot and is followed
+  // by more of the cluster swallows that gap row, so no strip of divider colour
+  // shows through between slots.
+  // ES5 on purpose: panel.html carries a verbatim copy, pinned by
+  // test-frontend-panel-diagram.js.
+  function panelDiagramLayout(breakers, slotCount, columns, rowGapPx) {
+    var rowOf = function (n) { return columns === 1 ? n : Math.ceil(n / 2); };
+    var colOf = function (n) { return columns === 1 ? 0 : (n % 2 === 1 ? 0 : 1); };
+    var posOf = function (cell) {
+      var m = /^(\d+)([ab])$/.exec(String(cell));
+      if (!m || !(parseInt(m[1], 10) > 0)) return null;
+      return (rowOf(parseInt(m[1], 10)) - 1) * 2 + (m[2] === "b" ? 1 : 0);
+    };
+    var slotAtPos = function (col, pos) {
+      var row = Math.floor(pos / 2) + 1;
+      return columns === 1 ? row : row * 2 - 1 + col;
+    };
+    var byGroup = {}, order = [];
+    breakers.forEach(function (b) {
+      var key = b.groupId || ("solo-" + b.id);
+      if (!byGroup[key]) { byGroup[key] = []; order.push(key); }
+      byGroup[key].push(b);
+    });
+    var units = [];
+    order.forEach(function (key) {
+      var slots = [], positions = [];
+      byGroup[key].forEach(function (b) {
+        (b.cells || []).forEach(function (c) {
+          var p = posOf(c);
+          if (p === null) return;
+          positions.push(p);
+          var n = parseInt(String(c), 10);
+          if (slots.indexOf(n) === -1) slots.push(n);
+        });
+      });
+      if (!positions.length) return;
+      var minSlot = Math.min.apply(null, slots);
+      if (minSlot > slotCount) return;
+      units.push({ breakers: byGroup[key], col: colOf(minSlot), minSlot: minSlot,
+        min: Math.min.apply(null, positions), max: Math.max.apply(null, positions) });
+    });
+    units.sort(function (a, b) { return a.col - b.col || a.min - b.min; });
+    // Merge by ROW, not by position: two half-slot units in one slot share a row
+    // without sharing a position, and still have to be drawn in one box.
+    var clusters = [];
+    units.forEach(function (u) {
+      var last = clusters[clusters.length - 1];
+      if (last && last.col === u.col && Math.floor(u.min / 2) <= Math.floor(last.max / 2)) {
+        last.units.push(u);
+        last.max = Math.max(last.max, u.max);
+        last.minSlot = Math.min(last.minSlot, u.minSlot);
+      } else {
+        clusters.push({ col: u.col, min: u.min, max: u.max, minSlot: u.minSlot, units: [u] });
+      }
+    });
+
+    var cells = [], usedRows = {};
+    clusters.forEach(function (c) {
+      var rowStart = Math.floor(c.min / 2) + 1;
+      var rowSpan = Math.floor(c.max / 2) + 1 - rowStart + 1;
+      for (var r = rowStart; r < rowStart + rowSpan; r++) usedRows[c.col + ":" + r] = true;
+      var base = (rowStart - 1) * 2, last = rowSpan * 2 - 1;
+      var infos = [];
+      c.units.forEach(function (u) {
+        u.breakers.forEach(function (b) {
+          var ps = [];
+          (b.cells || []).forEach(function (cell) {
+            var p = posOf(cell);
+            if (p !== null && ps.indexOf(p - base) === -1) ps.push(p - base);
+          });
+          if (!ps.length) return;
+          ps.sort(function (x, y) { return x - y; });
+          infos.push({ breaker: b, ps: ps, from: ps[0], to: ps[ps.length - 1],
+            contiguous: ps[ps.length - 1] - ps[0] + 1 === ps.length });
+        });
+      });
+      infos.sort(function (a, b) { return a.from - b.from || a.to - b.to; });
+      var ordered = infos.map(function (i) { return i.breaker; });
+      var key = "unit-" + (c.units[0].breakers[0].groupId || c.units[0].breakers[0].id);
+      if (infos.length === 1 && infos[0].contiguous) {
+        cells.push({ key: key, kind: "breaker", breaker: ordered[0], breakers: ordered, slot: c.minSlot, col: c.col, row: rowStart, rowSpan: rowSpan });
+        return;
+      }
+      var bars = infos.filter(function (i) { return !i.contiguous; })
+        .sort(function (a, b) { return (a.to - a.from) - (b.to - b.from); });
+      var nb = bars.length;
+      var barsLeft = columns !== 1 && c.col === 1;
+      var mainTrack = barsLeft ? nb + 1 : 1;
+      var barTrack = function (i) { return barsLeft ? nb - i : 2 + i; };
+      var colTemplate = [];
+      for (var t = 0; t < nb; t++) colTemplate.push("26px");
+      colTemplate[barsLeft ? "push" : "unshift"]("minmax(0, 1fr)");
+      var rowTemplate = [];
+      for (var k = 0; k < rowSpan; k++) rowTemplate.push(k < rowSpan - 1 ? "1fr 1fr " + (rowGapPx || 6) + "px" : "1fr 1fr");
+      var gridRowOf = function (from, to) {
+        var start = from + Math.floor(from / 2) + 1;
+        var end = to + Math.floor(to / 2) + 2 + (to % 2 === 1 && to < last ? 1 : 0);
+        return start + " / " + end;
+      };
+      var items = [];
+      var add = function (type, track, from, to, extra) {
+        var it = { type: type, gridColumn: track, gridRow: gridRowOf(from, to), from: from, to: to };
+        for (var x in extra) it[x] = extra[x];
+        items.push(it);
+      };
+      // Runs of consecutive positions, optionally broken at every slot boundary.
+      var runs = function (list, splitAtSlot) {
+        var out = [];
+        list.forEach(function (p) {
+          var r = out[out.length - 1];
+          if (r && p === r.to + 1 && !(splitAtSlot && p % 2 === 0)) r.to = p;
+          else out.push({ from: p, to: p });
+        });
+        return out;
+      };
+      var covered = {};
+      infos.forEach(function (i) {
+        if (i.contiguous) {
+          add("main", mainTrack, i.from, i.to, { breaker: i.breaker });
+          for (var p = i.from; p <= i.to; p++) covered[p] = true;
+        } else {
+          runs(i.ps, false).forEach(function (r) { add("piece", mainTrack, r.from, r.to, { breaker: i.breaker }); });
+          i.ps.forEach(function (p) { covered[p] = true; });
+        }
+      });
+      var empty = [];
+      for (var p = 0; p <= last; p++) if (!covered[p]) empty.push(p);
+      runs(empty, true).forEach(function (r) { add("spare", mainTrack, r.from, r.to, { slot: slotAtPos(c.col, base + r.from) }); });
+      bars.forEach(function (i, idx) {
+        add("bar", barTrack(idx), i.from, i.to, { breaker: i.breaker });
+        var free = [];
+        for (var q = 0; q <= last; q++) if (q < i.from || q > i.to) free.push(q);
+        runs(free, false).forEach(function (r) { add("fill", barTrack(idx), r.from, r.to, {}); });
+      });
+      cells.push({ key: key, kind: "cluster", breakers: ordered, slot: c.minSlot, col: c.col, row: rowStart, rowSpan: rowSpan,
+        barsLeft: barsLeft, colTemplate: colTemplate.join(" "), rowTemplate: rowTemplate.join(" "), items: items });
+    });
+    for (var s = 1; s <= slotCount; s++) {
+      if (usedRows[colOf(s) + ":" + rowOf(s)]) continue;
+      cells.push({ key: "spare-" + s, kind: "spare", slot: s, col: colOf(s), row: rowOf(s), rowSpan: 1 });
+    }
+    cells.sort(function (a, b) { return a.slot - b.slot; });
+    return cells;
+  }
+
   // ---------- panel geometry (ported from PanelDiagram) ----------
   function buildLayout(slotCount, layout, breakers) {
     var columns = layout === "single-column" ? 1 : 2;
@@ -263,55 +434,9 @@
     var breakerTrack = function (col) { return columns === 1 ? 2 : col + 2; };
     var numberTrack = function (col) { return columns === 1 ? 1 : (col === 0 ? 1 : 4); };
 
-    var slotMap = {};
-    breakers.forEach(function (b) {
-      slotsFromCells(b.cells).forEach(function (s) {
-        var n = parseInt(s, 10);
-        if (!n) return;
-        (slotMap[n] = slotMap[n] || []).push(b);
-      });
-    });
-
-    var covered = {};
-    var cells = [];
-    for (var s = 1; s <= slotCount; s++) {
-      if (covered[s]) continue;
-      var here = slotMap[s] || [];
-      if (!here.length) {
-        cells.push({ kind: "spare", slot: s, col: colOf(s), row: rowOf(s), rowSpan: 1 });
-        continue;
-      }
-      // Every breaker placed through Add Breaker carries a groupId — even a lone
-      // single-pole, a "group" of one — so grouping never has to special-case
-      // how many members a unit has.
-      var groupId = here[0].groupId;
-      var groupBreakers = groupId
-        ? breakers.filter(function (b) { return b.groupId === groupId; })
-        : [here[0]];
-      var groupSlots = [];
-      groupBreakers.forEach(function (b) {
-        slotsFromCells(b.cells).forEach(function (x) {
-          var n = parseInt(x, 10);
-          if (n && groupSlots.indexOf(n) === -1) groupSlots.push(n);
-        });
-      });
-      groupSlots.sort(function (a, b) { return a - b; });
-      if (groupSlots[0] !== s) continue; // reached via a non-primary slot; already drawn
-      groupSlots.forEach(function (x) { if (x !== s) covered[x] = true; });
-      var rows = groupSlots.map(rowOf);
-      var rowSpan = Math.max.apply(null, rows) - Math.min.apply(null, rows) + 1;
-      // Sort each breaker ONCE by its own lowest slot. Bucketing by "which slots
-      // does this touch" would list a breaker spanning two slots twice, drawing
-      // it as a duplicate box.
-      var ordered = groupBreakers.slice().sort(function (b1, b2) {
-        return Math.min.apply(null, slotsFromCells(b1.cells).map(Number))
-             - Math.min.apply(null, slotsFromCells(b2.cells).map(Number));
-      });
-      cells.push({
-        kind: ordered.length > 1 ? "unit" : "breaker",
-        breakers: ordered, slot: s, col: colOf(s), row: Math.min.apply(null, rows), rowSpan: rowSpan,
-      });
-    }
+    // Every breaker's box at half-slot precision -- the same function the main
+    // app draws with, copied verbatim above (5 = this page's .grid row gap).
+    var cells = panelDiagramLayout(breakers, slotCount, columns, 5);
 
     var numbers = [];
     for (var n2 = 1; n2 <= slotCount; n2++) {
@@ -460,13 +585,23 @@
           grid.appendChild(h("div", { class: "spare", text: "spare", style: place }));
           return;
         }
-        var members = cell.breakers.map(function (b) { return slotButton(b, rooms); });
-        if (cell.kind === "unit") {
-          grid.appendChild(h("div", { class: "unit", style: place }, members));
-        } else {
-          members[0].setAttribute("style", place);
-          grid.appendChild(members[0]);
+        if (cell.kind === "cluster") {
+          // Same drawing as the main app: pieces and a labelled bar for a breaker
+          // whose cells are not contiguous, the rest laid out between them.
+          var kids = cell.items.map(function (it) {
+            var at = "grid-column: " + it.gridColumn + "; grid-row: " + it.gridRow + ";";
+            if (it.type === "fill") return h("div", { class: "fill", style: at });
+            if (it.type === "spare") return h("div", { class: "half-spare", text: "spare", style: at });
+            var btn = slotButton(it.breaker, rooms, it.type);
+            btn.setAttribute("style", at);
+            return btn;
+          });
+          grid.appendChild(h("div", { class: "unit", style: place + " grid-template-columns: " + cell.colTemplate + "; grid-template-rows: " + cell.rowTemplate + ";" }, kids));
+          return;
         }
+        var only = slotButton(cell.breaker, rooms);
+        only.setAttribute("style", place);
+        grid.appendChild(only);
       });
       app.appendChild(h("div", { class: "card" }, [
         h("div", { class: "section-title", text: "Panel layout — " + slotCount + " slots · " + (three ? "3-phase" : "1-phase") + (panel.panelVoltage ? " " + panel.panelVoltage + "V" : "") }),
@@ -527,9 +662,11 @@
   // One tappable cell in the grid. Tapping scrolls to that breaker's written
   // entry and flashes it — this page has no modals by design, so the jump is the
   // whole interaction.
-  function slotButton(b, rooms) {
+  // `part` is the cluster role: "piece" (a non-contiguous breaker's own cell,
+  // unlabelled), "bar" (its label, set vertically), or nothing.
+  function slotButton(b, rooms, part) {
     var btn = h("button", {
-      class: "breaker-cell", type: "button",
+      class: "breaker-cell" + (part === "piece" || part === "bar" ? " " + part : ""), type: "button",
       "aria-label": "Slot " + cellsLabel(b),
       onclick: function () {
         var target = document.getElementById("b-" + b.id);
@@ -539,7 +676,9 @@
         void target.offsetWidth; // restart the animation if it's already played
         target.classList.add("flash");
       },
-    }, [
+    }, part === "piece" ? [] : part === "bar" ? [
+      h("span", { class: "bar-label", text: (b.ampRating ? b.ampRating + "A" : "—") + (feedsSummary(b, rooms) ? " · " + feedsSummary(b, rooms) : "") }),
+    ] : [
       h("span", { class: "amp", text: b.ampRating ? b.ampRating + "A" : "—" }),
       h("span", { class: "feeds", text: feedsSummary(b, rooms) }),
     ]);

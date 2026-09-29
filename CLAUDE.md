@@ -3047,6 +3047,25 @@ array position can't serve as identity once things move.
     legacy blank. Covered by `test-frontend-phases.js`, verified by mutation (phase per slot
     instead of per row, the conflict check never firing, `addBreaker` skipping it, voltage
     always line-to-neutral, the phase not reaching the save).
+- **The diagram draws at HALF-SLOT precision, and a non-contiguous breaker gets a BAR
+  (2026-09-29).** A breaker type may use cells like 1a+3b with other breakers in 1b and
+  3a; drawing a unit as one box split into equal stripes showed three stacked siblings.
+  `panelDiagramLayout` now places every breaker by half-slot position down its column.
+  - **A non-contiguous breaker is its own cells ("pieces") joined by a vertical bar that
+    carries its label**, on the side facing the panel's CENTRE — right of the odd column,
+    left of the even one (right in single-column). The breakers it sandwiches are laid
+    out, and re-centred, in the width that is left. Several bars nest, shortest innermost.
+  - **Units whose ROWS touch are merged into one cluster**, which also fixed a quiet bug:
+    two single-half breakers from different units in one slot — only the first was drawn.
+  - The inner grid keeps the outer grid's row gap as a row of its own, so half-slot edges
+    line up with the slot numbers; an item ending a slot swallows that gap row.
+  - A lone contiguous breaker is still kind `"breaker"`, drawn exactly as before.
+  - **ES5 and copied verbatim into `panel.html`** (it takes the row gap as an argument,
+    since that page's is 5px). `test-frontend-panel-diagram.js` runs the real function
+    and pins the copy. `MOCK_SNAPSHOT`'s BCA0098 carries both shapes: a 13a+15b bar
+    around its own unit's single-poles, and a 14a+16b bar around ANOTHER unit's breaker
+    with 16a left empty (a half-slot spare).
+  - The printed door card lists slots sequentially and is unchanged.
 - **Every panel action is ONE menu, right of the Breaker/Feeds/Table toggle (2026-09-29).**
   Top rows with no descriptions — Configure panel, Manage breaker types (editors; the
   catalog was otherwise reachable only from inside the Add Breaker form), Copy link,
