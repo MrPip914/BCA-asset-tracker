@@ -3058,6 +3058,12 @@ array position can't serve as identity once things move.
   first cut listed all seven actions flat, each with a hint, and read as too busy (Eric,
   same day). They were four bare icons beside the title before that, which on a phone
   wrapped under it.
+  **Configure panel opens a MODAL over the diagram** (2026-09-29, Eric's call) rather than
+  replacing the diagram with the form, which read as leaving the page. An UNCONFIGURED
+  panel still shows the form inline, since there is no diagram to keep in view. The
+  modal's frame is a render FUNCTION called with the fields, not a component declared
+  inside `PanelConfigForm` — that would be a new component type every render and remount
+  the inputs on each keystroke.
   Reads are offered to viewers (someone at the panel is who needs them); Configure and
   Import are `canEdit` only. Opening the menu measures the door card, as the old print
   menu did, so the quoted size is the size that prints.
