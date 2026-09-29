@@ -52,10 +52,12 @@ const items = (cell, type) => cell.items.filter(i => i.type === type);
   const bar = items(cl, 'bar');
   check('...with exactly one bar, for the non-contiguous breaker', bar.length === 1 && bar[0].breaker.id === 'outer');
   check('on the ODD side the bar is to the RIGHT of the breakers (toward the centre)',
-    cl.colTemplate === 'minmax(0, 1fr) 26px' && bar[0].gridColumn === 2 && !cl.barsLeft, cl.colTemplate);
+    cl.colTemplate === 'minmax(0, 1fr) 52px' && bar[0].gridColumn === 2 && !cl.barsLeft, cl.colTemplate);
   const pieces = items(cl, 'piece');
-  check('the breaker\'s own cells are drawn as pieces in the main track, one per run',
-    pieces.length === 2 && pieces.every(p => p.gridColumn === 1 && p.breaker.id === 'outer'));
+  check('the breaker\'s own cells are pieces spanning the main track AND its bar\'s track (no seam)',
+    pieces.length === 2 && pieces.every(p => p.gridColumn === '1 / 3' && p.breaker.id === 'outer'));
+  check('the bar is drawn AFTER its pieces, so it paints over the overlap',
+    cl.items.indexOf(bar[0]) > Math.max(...pieces.map(p => cl.items.indexOf(p))));
   const mains = items(cl, 'main');
   check('the sandwiched breakers are laid out in the main track between the pieces',
     mains.map(m => m.breaker.id).join() === 'in1,in3' && mains.every(m => m.gridColumn === 1));
@@ -75,7 +77,9 @@ const items = (cell, type) => cell.items.filter(i => i.type === type);
   const cells = layout([B('outer', ['2a', '4b']), B('other', ['2b'])], 4, 2);
   const cl = find(cells, c => c.slot === 2);
   check('two DIFFERENT units sharing rows are merged into one cluster', cl.kind === 'cluster' && cl.breakers.length === 2);
-  check('on the EVEN side the bar is to the LEFT', cl.barsLeft && cl.colTemplate === '26px minmax(0, 1fr)' && items(cl, 'bar')[0].gridColumn === 1);
+  check('on the EVEN side the bar is to the LEFT', cl.barsLeft && cl.colTemplate === '52px minmax(0, 1fr)' && items(cl, 'bar')[0].gridColumn === 1);
+  check('on the even side a piece spans from the bar across the main track',
+    items(cl, 'piece').every(p => p.gridColumn === '1 / 3'));
   const spare = items(cl, 'spare');
   check('the empty half (4a) is a spare that adds a breaker at slot 4', spare.length === 1 && spare[0].slot === 4, JSON.stringify(spare));
 }

@@ -3055,6 +3055,10 @@ array position can't serve as identity once things move.
     carries its label**, on the side facing the panel's CENTRE — right of the odd column,
     left of the even one (right in single-column). The breakers it sandwiches are laid
     out, and re-centred, in the width that is left. Several bars nest, shortest innermost.
+  - **The pieces and the bar are ONE shape, with no line between them** (Eric, same day).
+    The cluster draws its dividers as its background showing through 1px grid gaps, so a
+    piece SPANS across to its own bar's track and the bar is emitted after it, painting
+    over the overlap in the same colour. The bar track is 52px.
   - **Units whose ROWS touch are merged into one cluster**, which also fixed a quiet bug:
     two single-half breakers from different units in one slot — only the first was drawn.
   - The inner grid keeps the outer grid's row gap as a row of its own, so half-slot edges
