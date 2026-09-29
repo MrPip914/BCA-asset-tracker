@@ -348,8 +348,21 @@
     return {
       cells: cells, numbers: numbers, columns: columns, parityWarnings: parityWarnings,
       breakerTrack: breakerTrack, numberTrack: numberTrack,
-      gridTemplateColumns: columns === 1 ? "26px 1fr" : "26px 1fr 1fr 26px",
+      gridTemplateColumns: columns === 1 ? "36px 1fr" : "36px 1fr 1fr 36px",
     };
+  }
+
+  // ---------- phases (backend v43) ----------
+  // Same rule as index.html's slotPhase: the bus alternates per ROW of the
+  // odd/even numbering (1+2 share a row), A-B on single-phase, A-B-C on
+  // three-phase. Blank panelPhases reads as single-phase -- a pre-v43 backend
+  // does not send the field at all, and single-phase is all a panel could be.
+  function isThreePhase(panel) { return String(panel.panelPhases || "").trim() === "3"; }
+  function slotPhase(slot, three) {
+    var n = parseInt(slot, 10);
+    if (!n || n < 1) return "";
+    var letters = three ? "ABC" : "AB";
+    return letters.charAt((Math.ceil(n / 2) - 1) % letters.length);
   }
 
   // ---------- what a circuit serves ----------
@@ -389,6 +402,7 @@
     var breakers = data.breakers || [];
     var slotCount = parseInt(panel.panelSlotCount, 10) || 0;
     var L = buildLayout(slotCount, panel.panelLayout || "two-column", breakers);
+    var three = isThreePhase(panel);
 
     app.textContent = "";
 
@@ -433,7 +447,9 @@
       var grid = h("div", { class: "grid", style: "grid-template-columns: " + L.gridTemplateColumns });
       L.numbers.forEach(function (n) {
         grid.appendChild(h("div", {
-          class: "slot-num mono", text: String(n.slot),
+          // Phase letter on the OUTER edge, the number against the breaker.
+          class: "slot-num mono",
+          text: (L.columns === 1 || n.col === 0) ? slotPhase(n.slot, three) + " " + n.slot : n.slot + " " + slotPhase(n.slot, three),
           style: "grid-column: " + L.numberTrack(n.col) + "; grid-row: " + n.row + "; " +
                  "justify-content: " + (L.columns === 1 ? "center" : (n.col === 0 ? "flex-end" : "flex-start")) + ";",
         }));
@@ -453,7 +469,7 @@
         }
       });
       app.appendChild(h("div", { class: "card" }, [
-        h("div", { class: "section-title", text: "Panel layout — " + slotCount + " slots" }),
+        h("div", { class: "section-title", text: "Panel layout — " + slotCount + " slots · " + (three ? "3-phase" : "1-phase") + (panel.panelVoltage ? " " + panel.panelVoltage + "V" : "") }),
         grid,
       ]));
     }
@@ -686,6 +702,7 @@
         // The tag is what this panel is called; `label` is the pre-v32 spelling
         // of the same thing and the name is the last resort for an untagged one.
         label: panelAsset.tag || panelAsset.label || panelAsset.name || "", panelSlotCount: panelAsset.panelSlotCount, panelLayout: panelAsset.panelLayout,
+        panelPhases: panelAsset.panelPhases || "", panelVoltage: panelAsset.panelVoltage || "",
         roomName: roomAsset ? (roomAsset.name || "") : "",
         buildingName: buildingAsset ? (buildingAsset.name || "") : "",
       },

@@ -3594,7 +3594,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v42";
+const FRONTEND_SCRIPT_VERSION = "v43";
 // The version of THIS file — shown in About (the account menu), so "is my browser
 // actually running the build I just deployed, or a cached one?" is answerable in
 // two clicks instead of by reading view-source.
@@ -3612,7 +3612,7 @@ const FRONTEND_SCRIPT_VERSION = "v42";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-28.11";
+const APP_VERSION = "2026-09-29.2";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -3978,6 +3978,81 @@ function resolveTypeSlots(slotSpan, startSlot) {
   return Array.from({ length: slotSpan }, (_, i) => startSlot + 2 * i);
 }
 
+// --- Panel phases (backend v43) -----------------------------------------------
+// A panel is single-phase (two hot legs, A and B) or three-phase (A, B, C).
+// Stored as `panelPhases` "1" | "3" on the panel asset; BLANK READS AS SINGLE,
+// which is the only thing a panel could be before v43, so no row needs
+// migrating and a panel nobody has touched keeps behaving exactly as it did.
+//
+// WHICH PHASE A SLOT IS ON IS DERIVED FROM ITS SLOT NUMBER, NEVER STORED. The
+// bus alternates per ROW of the standard odd-left/even-right numbering, so
+// slots 1 and 2 share a row and a phase, 3 and 4 the next, and so on, cycling
+// A-B on single-phase and A-B-C on three-phase. It deliberately ignores the
+// panel's display layout: placement already stacks a type's slots two apart
+// (resolveTypeSlots) in both layouts, i.e. the numbering IS the two-column
+// scheme even where the diagram draws one column, so the phase follows the
+// numbering too. Storing it per breaker would be a second copy of a fact the
+// slot number already says -- and the one that goes stale when a panel is
+// reconfigured.
+//
+// That derivation is also the whole validity rule: a multi-pole breaker needs
+// every pole on a DIFFERENT phase, which is what a 3-pole on 1/3/5 gets on a
+// three-phase panel (A, B, C) and what it cannot get on a single-phase one
+// (A, B, A).
+const PANEL_PHASE_OPTIONS = ["1", "3"];
+// Service voltages offered per phase. "L-N/L-L" where there is a neutral, a
+// bare number for a corner-grounded or ungrounded delta. Display only -- no rule
+// reads it -- which is why an unlisted stored value still renders as itself.
+const PANEL_VOLTAGE_OPTIONS = {
+  "1": ["120/240"],
+  "3": ["120/208", "277/480", "240", "480"],
+};
+function panelIsThreePhase(panel) {
+  return String((panel && panel.panelPhases) || "").trim() === "3";
+}
+function panelPhaseLabel(panel) {
+  return panelIsThreePhase(panel) ? "Three-phase" : "Single-phase";
+}
+function slotPhase(slot, threePhase) {
+  const n = parseInt(slot, 10);
+  if (!n || n < 1) return "";
+  const letters = threePhase ? "ABC" : "AB";
+  return letters[(Math.ceil(n / 2) - 1) % letters.length];
+}
+// The phase of each pole, in slot order: ["A", "B", "C"] for a 3-pole on 1/3/5.
+function breakerPhases(cells, threePhase) {
+  return slotsFromCells(cells).map(s => slotPhase(s, threePhase)).filter(Boolean);
+}
+// The first phase two poles of one breaker would share, or "" when every pole is
+// on its own phase. A single-pole breaker never conflicts.
+function breakerPhaseConflict(cells, threePhase) {
+  const seen = new Set();
+  for (const p of breakerPhases(cells, threePhase)) {
+    if (seen.has(p)) return p;
+    seen.add(p);
+  }
+  return "";
+}
+// A breaker's voltage from the panel's service: line-to-neutral for one pole,
+// line-to-line for two or more. "" when the panel's voltage isn't set -- an
+// honest blank beats a guessed 240.
+function breakerVoltage(panelVoltage, poles) {
+  const v = String(panelVoltage || "").trim();
+  if (!v) return "";
+  const [ln, ll] = v.split("/").map(x => x.trim());
+  if (!ll) return `${ln}V`;
+  return `${poles > 1 ? ll : ln}V`;
+}
+// "3P · A-B-C · 208V" -- the one-line electrical summary of a breaker, shared by
+// the diagram and the breaker dialog so they cannot word it apart.
+function breakerElectricalSummary(cells, panel) {
+  const three = panelIsThreePhase(panel);
+  const phases = breakerPhases(cells, three);
+  const poles = phases.length || 1;
+  const volts = breakerVoltage(panel && panel.panelVoltage, poles);
+  return [poles > 1 ? `${poles}P` : "", phases.join("-"), volts].filter(Boolean).join(" · ");
+}
+
 // The Move Circuit picker's "Unassigned" option. A circuit with no breaker
 // stores breakerId "", but "" is already the picker's own nothing-selected
 // placeholder, so the option needs a value of its own that can't collide with
@@ -4012,6 +4087,14 @@ const SEEDED_BREAKER_TYPES = [
     { cells: ["1a"], ampRating: "15" },
     { cells: ["1b", "2a"], ampRating: "30" },
     { cells: ["2b"], ampRating: "15" },
+  ] },
+  // Three-phase only: its poles land on A, B and C. Placing it on a
+  // single-phase panel is refused by addBreaker (its 1st and 3rd poles would
+  // share phase A). Seeds a BRAND-NEW sheet only -- an existing catalog is
+  // stored data and is not topped up, since re-adding a shipped type would
+  // resurrect one a school deliberately deleted.
+  { id: "type-triple-pole", name: "Triple-Pole (3-phase)", slotSpan: 3, members: [
+    { cells: ["1a", "1b", "2a", "2b", "3a", "3b"], ampRating: "30" },
   ] },
 ];
 
@@ -5226,6 +5309,36 @@ const MOCK_SNAPSHOT = {
         // the stacking rule in BREAKER_TYPES_ARCHITECTURE.md s4); what it feeds
         // isn't recorded yet, hence no circuit.
         { id: "bH-10-12", panelLabel: "BCA0097", cells: ["10a", "10b", "12a", "12b"], breakerTypeId: "type-double-pole", ampRating: "30", serial: "", installedDate: "", notes: "", groupId: "grpH-10", circuits: [] },
+      ],
+      unassignedCircuits: [],
+    },
+    // The fixture's one THREE-PHASE panel (v43), and the only panel carrying
+    // panelPhases at all: every other panel above has no such key and reads as
+    // single-phase, so Sandbox exercises both the explicit value and the legacy
+    // blank. Two 3-pole breakers (A-B-C on 1/3/5 and 7/9/11), a 2-pole that
+    // lands on A-B, and single-poles on each phase.
+    {
+      label: "BCA0098", type: "Electrical Panel", parentId: "BCR0002", brand: "Square D", model: "NQ", serial: "",
+      notes: "Sandbox fixture: a three-phase kitchen panel.",
+      status: "Active",
+      panelSlotCount: 18, panelLayout: "two-column", panelPhases: "3", panelVoltage: "120/208",
+      breakers: [
+        { id: "b98-1-3-5", panelLabel: "BCA0098", cells: ["1a", "1b", "3a", "3b", "5a", "5b"], breakerTypeId: "type-triple-pole", ampRating: "40", serial: "", installedDate: "", notes: "", groupId: "grp98-1", circuits: [
+          { id: "c98-1", breakerId: "b98-1-3-5", label: "Rooftop HVAC unit", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "- RTU-1 above kitchen" },
+        ] },
+        { id: "b98-2-4", panelLabel: "BCA0098", cells: ["2a", "2b", "4a", "4b"], breakerTypeId: "type-double-pole", ampRating: "30", serial: "", installedDate: "", notes: "", groupId: "grp98-2", circuits: [
+          { id: "c98-2", breakerId: "b98-2-4", label: "Dishwasher booster heater", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "" },
+        ] },
+        { id: "b98-6", panelLabel: "BCA0098", cells: ["6a", "6b"], breakerTypeId: "type-single-pole", ampRating: "20", serial: "", installedDate: "", notes: "", groupId: "grp98-6", circuits: [
+          { id: "c98-6", breakerId: "b98-6", label: "Counter outlets", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "- North counter" },
+        ] },
+        { id: "b98-7-9-11", panelLabel: "BCA0098", cells: ["7a", "7b", "9a", "9b", "11a", "11b"], breakerTypeId: "type-triple-pole", ampRating: "30", serial: "", installedDate: "", notes: "", groupId: "grp98-7", circuits: [
+          { id: "c98-7", breakerId: "b98-7-9-11", label: "Walk-in cooler condenser", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "" },
+        ] },
+        { id: "b98-8", panelLabel: "BCA0098", cells: ["8a", "8b"], breakerTypeId: "type-single-pole", ampRating: "15", serial: "", installedDate: "", notes: "", groupId: "grp98-8", circuits: [
+          { id: "c98-8", breakerId: "b98-8", label: "Kitchen lights", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "" },
+        ] },
+        { id: "b98-10", panelLabel: "BCA0098", cells: ["10a", "10b"], breakerTypeId: "type-single-pole", ampRating: "20", serial: "", installedDate: "", notes: "", groupId: "grp98-10", circuits: [] },
       ],
       unassignedCircuits: [],
     },
@@ -9160,7 +9273,9 @@ function AssetTracker() {
   // Panel slot count/layout drive the visual diagram in the Breakers tab —
   // stored as plain asset fields (like brand/model), not part of the
   // breakers/circuits child tables, since they describe the panel itself.
-  function updatePanelConfig(slotCount, layout) {
+  // Phase and voltage (v43) ride the same save: they are the same kind of fact
+  // about the panel, set from the same form.
+  function updatePanelConfig(slotCount, layout, phases, voltage) {
     if (savingRef.current) return; // double-submit guard, see savingRef
     if (!selectedAsset) return;
     const original = selectedAsset;
@@ -9171,7 +9286,15 @@ function AssetTracker() {
     const entries = [];
     if (String(original.panelSlotCount || "") !== String(slotCount || "")) entries.push(mk("Panel Slot Count", original.panelSlotCount || "—", slotCount || "—"));
     if ((original.panelLayout || "") !== (layout || "")) entries.push(mk("Panel Layout", original.panelLayout || "—", layout || "—"));
-    const next = assets.map(a => (a.id === selectedId ? { ...a, panelSlotCount: slotCount, panelLayout: layout } : a));
+    // Compared as the phase it READS as, not the raw string: a legacy blank and
+    // an explicit "1" are the same panel, and saving the form over a blank must
+    // not log "Phase changed from Single-phase to Single-phase".
+    const nextPhases = phases === "3" ? "3" : "1";
+    if (panelIsThreePhase(original) !== (nextPhases === "3")) {
+      entries.push(mk("Panel Phase", panelPhaseLabel(original), panelPhaseLabel({ panelPhases: nextPhases })));
+    }
+    if ((original.panelVoltage || "") !== (voltage || "")) entries.push(mk("Panel Voltage", original.panelVoltage || "—", voltage || "—"));
+    const next = assets.map(a => (a.id === selectedId ? { ...a, panelSlotCount: slotCount, panelLayout: layout, panelPhases: nextPhases, panelVoltage: voltage || "" } : a));
     persist(next, { auditLog: entries.length ? logAudit(entries) : auditLog });
   }
 
@@ -9217,6 +9340,19 @@ function AssetTracker() {
     });
     const conflictCell = newBreakers.flatMap(b => b.cells).find(c => takenCells.has(c));
     if (conflictCell) return { error: `Slot ${conflictCell.slice(0, -1)} is already in use.` };
+    // Every pole of one breaker on its own phase -- see "Panel phases". Checked
+    // per MEMBER, not per group: a quad's two tandems legitimately share a
+    // phase with each other, while a single breaker's poles never may.
+    const threePhase = panelIsThreePhase(selectedAsset);
+    for (const b of newBreakers) {
+      const shared = breakerPhaseConflict(b.cells, threePhase);
+      if (!shared) continue;
+      const poles = slotsFromCells(b.cells);
+      const hint = !threePhase && poles.length >= 3
+        ? " A breaker with three or more poles needs a three-phase panel — set the phase with the gear above the diagram."
+        : "";
+      return { error: `Slots ${poles.join("/")} would put two poles on phase ${shared} (${breakerPhases(b.cells, threePhase).join("-")}).${hint}` };
+    }
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId, assetType: selectedAsset.type,
       action: "breaker_added", field: `Slot ${resolvedSlots.join("/")}`,
@@ -13425,7 +13561,7 @@ function AssetTracker() {
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
                   <div>
                     {breakerType && <div style={{ fontWeight: 700, fontSize: 16, color: C.brandDark }}>{breakerType.name}</div>}
-                    <div style={{ fontSize: 12, color: C.muted }}>Slot {groupSlotLabel}{breakerType ? ` — ${members.length} breaker${members.length !== 1 ? "s" : ""}` : ""}</div>
+                    <div style={{ fontSize: 12, color: C.muted }}>Slot {groupSlotLabel}{members.length === 1 && breakerElectricalSummary(anchor.cells, selectedAsset) ? ` · ${breakerElectricalSummary(anchor.cells, selectedAsset)}` : ""}{breakerType ? ` — ${members.length} breaker${members.length !== 1 ? "s" : ""}` : ""}</div>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                     {/* The ONE edit affordance in this modal: it puts the whole unit into
@@ -13526,7 +13662,7 @@ function AssetTracker() {
                       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: hasTitle ? 8 : (isActive ? 14 : 0) }}>
                         {hasTitle ? (
                           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: C.ink }}>
-                            {`Breaker ${idx + 1} — Slot ${slotsLabel_(member)}`}
+                            {`Breaker ${idx + 1} — Slot ${slotsLabel_(member)} · ${breakerElectricalSummary(member.cells, selectedAsset)}`}
                           </div>
                         ) : ampContent}
                         {/* A chevron, not a pencil: this only shows/hides that breaker's
@@ -19536,7 +19672,9 @@ function BreakersTabContent({
         <PanelConfigForm
           slotCount={selectedAsset.panelSlotCount}
           layout={selectedAsset.panelLayout}
-          onSave={(count, lay) => { updatePanelConfig(count, lay); setShowPanelConfig(false); }}
+          phases={panelIsThreePhase(selectedAsset) ? "3" : "1"}
+          voltage={selectedAsset.panelVoltage || ""}
+          onSave={(count, lay, ph, volts) => { updatePanelConfig(count, lay, ph, volts); setShowPanelConfig(false); }}
           onCancel={slotCount > 0 ? () => setShowPanelConfig(false) : null}
         />
       ) : (
@@ -19616,7 +19754,10 @@ function BreakersTabContent({
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
-                <label style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 180 }}>
+                {/* A div, not a <label>: a click that closes the picker inside a
+                    label is forwarded to the trigger and re-opens it, which made
+                    choosing any type but the default impossible. See BUGS.md. */}
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 180 }}>
                   <span style={labelStyle}>Breaker Type</span>
                   {breakerTypes.length === 0 ? (
                     <div style={{ fontSize: 13, color: C.empty }}>No breaker types defined yet.</div>
@@ -19634,7 +19775,7 @@ function BreakersTabContent({
                       title="Select breaker type"
                     />
                   )}
-                </label>
+                </div>
                 <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                   <span style={labelStyle}>Starting Slot</span>
                   <input type="number" placeholder="e.g. 5" value={addBreakerDraft.startSlot || ""} onChange={e => setAddBreakerDraft({ ...addBreakerDraft, startSlot: e.target.value })} style={inputStyle} />
@@ -19653,6 +19794,9 @@ function BreakersTabContent({
                     <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
                       <span style={{ fontSize: 13, color: C.muted }}>
                         {m.cells.join("+")} · {new Set(m.cells.map(c => c.slice(0, -1))).size}-pole
+                        {/* Once a starting slot is typed, the phases this pole set
+                            lands on — the thing that decides whether it fits. */}
+                        {parseInt(addBreakerDraft.startSlot, 10) > 0 && ` · ${breakerPhases(resolveRelativeCells(m.cells, parseInt(addBreakerDraft.startSlot, 10)), panelIsThreePhase(selectedAsset)).join("-")}`}
                       </span>
                       <input
                         type="number" placeholder={m.ampRating}
@@ -19707,10 +19851,27 @@ function BreakersTabContent({
 // layout — total slot count plus a layout preset. Kept separate from the
 // generic asset Edit form since it's specific to how the Breakers tab draws
 // the diagram, not a general asset field a user would expect in Details.
-function PanelConfigForm({ slotCount, layout, onSave, onCancel }) {
+// Each picker here is hideLabel under its own heading rather than a labelled
+// PickerField: inside PickerField's <label> wrapper, choosing an option
+// re-opens the picker (see BUGS.md), confirmed on these forms in Chromium.
+function PanelConfigForm({ slotCount, layout, phases, voltage, onSave, onCancel }) {
   const [count, setCount] = useState(slotCount || "");
   const [lay, setLay] = useState(layout || "two-column");
+  const [ph, setPh] = useState(phases === "3" ? "3" : "1");
+  const [volts, setVolts] = useState(voltage || "");
   const valid = count && parseInt(count, 10) > 0;
+  // A stored voltage that is not a preset for this phase (hand-edited, or left
+  // over from an older build) is still offered, so opening the form never
+  // silently swaps it for something else.
+  const voltageOptions = ["", ...PANEL_VOLTAGE_OPTIONS[ph], ...(volts && !PANEL_VOLTAGE_OPTIONS[ph].includes(volts) ? [volts] : [])];
+  // Switching phase clears a voltage the OTHER phase offers and this one does
+  // not (120/240 on a three-phase panel is a leftover, not a choice). A value
+  // neither list offers is left alone.
+  const changePhase = next => {
+    setPh(next);
+    const other = PANEL_VOLTAGE_OPTIONS[next === "3" ? "1" : "3"];
+    if (volts && other.includes(volts) && !PANEL_VOLTAGE_OPTIONS[next].includes(volts)) setVolts("");
+  };
   return (
     <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14, marginBottom: 20, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)" }}>
       <div style={{ fontSize: 13, color: C.muted, marginBottom: 10 }}>
@@ -19724,14 +19885,42 @@ function PanelConfigForm({ slotCount, layout, onSave, onCancel }) {
             style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
           />
         </label>
-        <PickerField
-          label="Layout"
-          value={lay}
-          onChange={setLay}
-          options={["two-column", "single-column"]}
-          labelForOption={v => (v === "two-column" ? "Two-column (odd left / even right)" : "Single column")}
-          title="Select layout"
-        />
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Layout</span>
+          <PickerField
+            label="Layout"
+            hideLabel
+            value={lay}
+            onChange={setLay}
+            options={["two-column", "single-column"]}
+            labelForOption={v => (v === "two-column" ? "Two-column (odd left / even right)" : "Single column")}
+            title="Select layout"
+          />
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Phase</span>
+          <PickerField
+            label="Phase"
+            hideLabel
+            value={ph}
+            onChange={changePhase}
+            options={PANEL_PHASE_OPTIONS}
+            labelForOption={v => (v === "3" ? "Three-phase (A / B / C)" : "Single-phase (A / B)")}
+            title="Select phase"
+          />
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Voltage</span>
+          <PickerField
+            label="Voltage"
+            hideLabel
+            value={volts}
+            onChange={setVolts}
+            options={voltageOptions}
+            labelForOption={v => (v ? `${v}V` : "Not set")}
+            title="Select voltage"
+          />
+        </div>
       </div>
       <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
         {onCancel && (
@@ -19740,7 +19929,7 @@ function PanelConfigForm({ slotCount, layout, onSave, onCancel }) {
           </button>
         )}
         <button
-          onClick={() => onSave(parseInt(count, 10) || 0, lay)}
+          onClick={() => onSave(parseInt(count, 10) || 0, lay, ph, volts)}
           disabled={!valid}
           style={{ padding: "8px 14px", background: (valid) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
         >
@@ -19910,7 +20099,7 @@ function PanelLegendCard({ slotCount, breakers, unassignedCircuits, allAssets, p
           <div>
             <div style={{ fontSize: "13pt", fontWeight: 700, lineHeight: 1.1 }}>{panelAsset.tag || nameOf(panelAsset)} — Circuit Directory</div>
             <div style={{ fontSize: "8pt", color: "#333", marginTop: "2pt" }}>
-              {place ? `${place} · ` : ""}{slotCount} slots
+              {place ? `${place} · ` : ""}{slotCount} slots · {panelIsThreePhase(panelAsset) ? "3-phase" : "1-phase"}{panelAsset && panelAsset.panelVoltage ? ` ${panelAsset.panelVoltage}V` : ""}
             </div>
           </div>
           <div style={{ fontSize: "7.5pt", color: "#333", whiteSpace: "nowrap" }}>Printed {new Date().toLocaleDateString()}</div>
@@ -19932,7 +20121,7 @@ function PanelLegendCard({ slotCount, breakers, unassignedCircuits, allAssets, p
           <tbody>
             {slots.map(({ slot, lines }) => lines.map((ln, i) => (
               <tr key={`${slot}-${i}`} style={{ height: `${LEGEND_ROW_IN / lines.length}in` }}>
-                {i === 0 && <td rowSpan={lines.length} style={slotCell}>{slot}</td>}
+                {i === 0 && <td rowSpan={lines.length} style={slotCell}>{slot}<span style={{ display: "block", fontSize: "7pt", fontWeight: 400, color: "#666" }}>{slotPhase(slot, panelIsThreePhase(panelAsset))}</span></td>}
                 {ln.kind === "spare" ? (
                   /* Left deliberately blank — a spare slot is where an
                      electrician hand-writes a newly added circuit at the panel. */
@@ -20094,7 +20283,9 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
   // the number track on that same side.
   const breakerTrack = col => (columns === 1 ? 2 : col + 2);
   const numberTrack = col => (columns === 1 ? 1 : (col === 0 ? 1 : 4));
-  const gridTemplateColumns = columns === 1 ? "28px 1fr" : "28px 1fr 1fr 28px";
+  // Number tracks are wide enough for the slot number AND its phase letter.
+  const gridTemplateColumns = columns === 1 ? "40px 1fr" : "40px 1fr 1fr 40px";
+  const threePhase = panelIsThreePhase(panelAsset);
 
   // Every slot a breaker touches is derived from its cells (see
   // BREAKER_TYPES_ARCHITECTURE.md) — slotMap is just "which breakers touch
@@ -20178,6 +20369,15 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
       if (slots.length > 1 && new Set(slots.map(n => n % 2)).size > 1) parityWarnings.push(slots.join("+"));
     });
   }
+  // Same posture as parityWarnings: Add Breaker refuses a breaker whose poles
+  // share a phase, but a panel RECONFIGURED from three-phase to single-phase
+  // leaves its 3-pole breakers where they are (A-B-A now), and so can an
+  // imported or scripted write. Reconfiguring is not refused over it — the
+  // panel's phase is a fact about the panel, and a wrong breaker record is the
+  // thing to fix — so it is flagged here instead.
+  const phaseWarnings = breakers
+    .filter(b => breakerPhaseConflict(b.cells, threePhase))
+    .map(b => `${slotsFromCells(b.cells).join("/")} (${breakerPhases(b.cells, threePhase).join("-")})`);
 
   // What a cell shows in "feeds" mode — what the breaker's circuit(s) actually
   // serve (rooms, or a downstream sub-panel), not the circuit's own label or
@@ -20190,8 +20390,11 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
     const parts = [...roomIds.map(id => roomNameFor(id, allAssets)), ...subPanels.map(p => `→ ${p}`)];
     return { primary: parts.join(", ") || "—", secondary: "" };
   }
+  // A multi-pole breaker says which phases it spans ("2P · A-B"); a single-pole
+  // one says nothing extra, since its phase is already beside its slot number.
   function breakerInfo(breaker) {
-    return { primary: breaker.ampRating ? `${breaker.ampRating}A` : "—", secondary: "" };
+    const multiPole = slotsFromCells(breaker.cells).length > 1;
+    return { primary: breaker.ampRating ? `${breaker.ampRating}A` : "—", secondary: multiPole ? breakerElectricalSummary(breaker.cells, panelAsset) : "" };
   }
   const cellInfo = infoMode === "feeds" ? feedInfo : breakerInfo;
 
@@ -20205,7 +20408,7 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>
-            Panel Layout — {slotCount} slots
+            Panel Layout — {slotCount} slots · {threePhase ? "3-phase" : "1-phase"}{panelAsset && panelAsset.panelVoltage ? ` ${panelAsset.panelVoltage}V` : ""}
           </span>
           {canEdit && (
           <button onClick={onReconfigure} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex", alignItems: "center", color: C.muted }} aria-label="Reconfigure panel layout">
@@ -20271,6 +20474,16 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
           </div>
         </div>
       )}
+      {phaseWarnings.length > 0 && (
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "10px 12px", marginBottom: 12, border: `1.5px solid ${C.danger}`, borderRadius: 8, background: "#fff" }}>
+          <AlertTriangle size={16} style={{ color: C.danger, flexShrink: 0, marginTop: 1 }} />
+          <div style={{ fontSize: 13, color: C.ink }}>
+            <b>Poles sharing a phase:</b> slots {phaseWarnings.join("; ")}.{" "}
+            Each pole of a breaker must sit on a different phase.{" "}
+            {threePhase ? "Check where these breakers really are." : "If this is a three-phase panel, set its phase with the gear above; otherwise these breaker records need correcting."}
+          </div>
+        </div>
+      )}
       {infoMode === "table" ? (() => {
         // One row per circuit (a breaker with no circuits yet still gets a single
         // row, circuit fields blank) — flat rows are what makes per-column sort
@@ -20281,7 +20494,7 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
         const tableRows = [];
         [...cells].sort((a, b2) => a.slot - b2.slot).forEach(cell => {
           if (cell.kind === "spare") {
-            tableRows.push({ key: cell.key, breakerId: null, spareSlot: cell.slot, slotSort: cell.slot, slotLabel: String(cell.slot), typeName: "Spare", ampRating: "", roomIds: [], roomText: "—", notes: "" });
+            tableRows.push({ key: cell.key, breakerId: null, spareSlot: cell.slot, slotSort: cell.slot, slotLabel: String(cell.slot), phase: slotPhase(cell.slot, threePhase), typeName: "Spare", ampRating: "", roomIds: [], roomText: "—", notes: "" });
             return;
           }
           const groupBreakers = cell.kind === "tandem" ? cell.breakers : [cell.breaker];
@@ -20296,6 +20509,7 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
               tableRows.push({
                 key: `${b.id}-${c ? c.id : "none"}`, breakerId: b.id,
                 slotSort: Math.min(...slotsFromCells(b.cells).map(Number)), slotLabel: cellsLabel_(b),
+                phase: breakerPhases(b.cells, threePhase).join("-"),
                 typeName: type ? type.name : "—", ampRating: b.ampRating || "",
                 roomIds, roomText, notes: c ? (c.notes || "") : "",
               });
@@ -20318,7 +20532,7 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
           const sortValue = r => {
             if (tableSortConfig.key === "slot") return r.slotSort;
             if (tableSortConfig.key === "amp") return parseFloat(r.ampRating) || 0;
-            return { type: r.typeName, room: r.roomText, notes: r.notes }[tableSortConfig.key] || "";
+            return { phase: r.phase, type: r.typeName, room: r.roomText, notes: r.notes }[tableSortConfig.key] || "";
           };
           displayRows = [...displayRows].sort((a2, b2) => {
             const av = sortValue(a2), bv = sortValue(b2);
@@ -20349,7 +20563,7 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
         // now all share ONE grid container (needed for the Slot/Type/Amp row-span
         // above), so that particular failure mode can't recur here anymore, but the
         // header is still a separate grid and needs to land on the same boundaries.
-        const tableCols = "70px 190px 220px 210px 90px";
+        const tableCols = "70px 70px 190px 220px 210px 90px";
         const cellStyle = (col, span, borderTop) => ({
           gridColumn: col, gridRow: span ? `span ${span}` : undefined,
           padding: "10px 12px", borderTop: borderTop ? `1px solid ${C.border}` : "none",
@@ -20362,7 +20576,7 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
               style={{ border: `1px solid ${C.border}` }}
               header={(
               <div style={{ display: "grid", gridTemplateColumns: tableCols, background: C.brandDark, color: C.onBrand, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", minWidth: "max-content" }}>
-                {[["slot", "Slot"], ["room", "Room"], ["notes", "Notes"], ["type", "Type"], ["amp", "Amp"]].map(([key, label]) => (
+                {[["slot", "Slot"], ["phase", "Phase"], ["room", "Room"], ["notes", "Notes"], ["type", "Type"], ["amp", "Amp"]].map(([key, label]) => (
                   <ColumnHeaderCell key={key} label={label} colKey={key} filterConfigs={tableFilterConfigs} sortConfig={tableSortConfig} setSortConfig={setTableSortConfig} onOpenFilter={setTableActiveFilterCol} />
                 ))}
               </div>
@@ -20382,15 +20596,20 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
                             {r.slotLabel}
                           </div>
                         )}
-                        <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(2, 0, top), fontSize: 13, color: C.ink }}>{r.roomText}</div>
-                        <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(3, 0, top), fontSize: 12, color: C.muted, whiteSpace: "pre-line" }}>{r.notes || "—"}</div>
                         {r.mergeSpan !== 0 && (
-                          <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(4, r.mergeSpan, top), fontSize: 13, color: C.ink }}>
+                          <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(2, r.mergeSpan, top), fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", color: C.ink }}>
+                            {r.phase || "—"}
+                          </div>
+                        )}
+                        <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(3, 0, top), fontSize: 13, color: C.ink }}>{r.roomText}</div>
+                        <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(4, 0, top), fontSize: 12, color: C.muted, whiteSpace: "pre-line" }}>{r.notes || "—"}</div>
+                        {r.mergeSpan !== 0 && (
+                          <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(5, r.mergeSpan, top), fontSize: 13, color: C.ink }}>
                             {r.typeName}
                           </div>
                         )}
                         {r.mergeSpan !== 0 && (
-                          <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(5, r.mergeSpan, top), fontSize: 13, color: C.ink }}>
+                          <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(6, r.mergeSpan, top), fontSize: 13, color: C.ink }}>
                             {r.ampRating ? `${r.ampRating}A` : "—"}
                           </div>
                         )}
@@ -20412,10 +20631,14 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
               gridColumn: numberTrack(n.col), gridRow: n.row,
               display: "flex", alignItems: "center",
               justifyContent: columns === 1 ? "center" : (n.col === 0 ? "flex-end" : "flex-start"),
-              fontSize: 11, fontWeight: 700, color: C.muted, fontFamily: "'IBM Plex Mono', monospace",
+              gap: 4, fontSize: 11, fontWeight: 700, color: C.muted, fontFamily: "'IBM Plex Mono', monospace",
             }}
           >
-            {n.slot}
+            {/* The phase letter sits on the OUTER edge, the slot number against
+                the breaker — so the number still lines up with its cell. */}
+            {(n.col === 0 || columns === 1) && <span style={{ fontSize: 9, color: C.accent }} title={`Phase ${slotPhase(n.slot, threePhase)}`}>{slotPhase(n.slot, threePhase)}</span>}
+            <span>{n.slot}</span>
+            {n.col === 1 && columns !== 1 && <span style={{ fontSize: 9, color: C.accent }} title={`Phase ${slotPhase(n.slot, threePhase)}`}>{slotPhase(n.slot, threePhase)}</span>}
           </div>
         ))}
         {cells.map(cell => {
