@@ -3048,8 +3048,9 @@ array position can't serve as identity once things move.
     instead of per row, the conflict check never firing, `addBreaker` skipping it, voltage
     always line-to-neutral, the phase not reaching the save).
 - **Every panel action is ONE menu, right of the Breaker/Feeds/Table toggle (2026-09-29).**
-  Four top rows with no descriptions — Configure panel, Copy link, **Print**, **Import /
-  Export** — the last two opening their options IN PLACE beneath them (an accordion, one
+  Top rows with no descriptions — Configure panel, Manage breaker types (editors; the
+  catalog was otherwise reachable only from inside the Add Breaker form), Copy link,
+  **Print**, **Import / Export** — the last two opening their options IN PLACE beneath them (an accordion, one
   group at a time; a flyout has nowhere to go on a phone). Print holds QR sticker and the
   two door-card geometries; Import / Export holds the schedule export and import. Only the
   sub-rows carry hints, and only where they say something (the printed size, that import
