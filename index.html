@@ -3906,7 +3906,7 @@ const FRONTEND_SCRIPT_VERSION = "v43";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-29.3";
+const APP_VERSION = "2026-09-29.4";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -20596,6 +20596,9 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
   // immediately switched tabs would get no print dialog at all until they came
   // back. A timer fires either way.
   const [panelMenuOpen, setPanelMenuOpen] = useState(false);
+  // Which group of the actions menu is expanded ("print" | "io"), reset every
+  // time the menu opens so it always opens folded.
+  const [panelSubmenu, setPanelSubmenu] = useState(null);
   const [printMode, setPrintMode] = useState("exact"); // "exact" | "tiled"
   const [printPageHeightIn, setPrintPageHeightIn] = useState(null);
   const [printRequest, setPrintRequest] = useState(0);
@@ -20623,6 +20626,7 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
     setPrintPageHeightIn(h);
   }
   function togglePanelMenu() {
+    setPanelSubmenu(null);
     setPanelMenuOpen(open => {
       if (!open) measureCard();
       return !open;
@@ -20838,29 +20842,65 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
             <>
               <div onClick={() => setPanelMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
               <div style={{ position: "absolute", top: "100%", right: 0, marginTop: 4, zIndex: 41, background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 10, boxShadow: "0 4px 12px rgba(42,52,57,0.15)", minWidth: 260, overflow: "hidden" }}>
-                {[
-                  canEdit && { key: "configure", icon: Settings, title: "Configure panel", hint: "Slots, layout, phase and voltage.", run: onReconfigure },
-                  { key: "link", icon: Copy, title: "Copy link", run: copyPanelLink },
-                  { key: "qr", icon: QrCode, title: "Print QR sticker", run: openPanelQrSheet },
-                  { key: "exact", icon: Printer, title: "Print directory at panel size", hint: `${LEGEND_WIDTH_IN}" × ${Math.max(slotCount * LEGEND_ROW_IN + LEGEND_BAND_IN * 2, printPageHeightIn || 0).toFixed(1)}" — one page, true scale. Save as PDF.`, run: () => runPrint("exact") },
-                  { key: "tiled", icon: Printer, title: "Print directory on letter pages", hint: "Cut and tape end-to-end. For printing at home.", run: () => runPrint("tiled") },
-                  onExportSchedule && { key: "export", icon: Download, title: "Export schedule", hint: "Breakers and circuits as a spreadsheet.", run: onExportSchedule },
-                  canEdit && onImportSchedule && { key: "import", icon: Upload, title: "Import schedule…", hint: "Replace this panel's layout from a spreadsheet.", run: onImportSchedule },
-                ].filter(Boolean).map((item, i) => {
-                  const Icon = item.icon;
-                  return (
-                    <button
-                      key={item.key} type="button" onClick={() => { setPanelMenuOpen(false); item.run(); }}
-                      style={{ display: "flex", gap: 10, alignItems: "flex-start", width: "100%", textAlign: "left", padding: "9px 12px", background: "none", border: "none", borderTop: i > 0 ? `1px solid ${C.border}` : "none" }}
-                    >
-                      <Icon size={15} color={C.muted} style={{ flexShrink: 0, marginTop: 1 }} />
-                      <span>
-                        <span style={{ display: "block", fontSize: 13, fontWeight: 600, color: C.ink }}>{item.title}</span>
-                        {item.hint && <span style={{ display: "block", fontSize: 11, color: C.muted, marginTop: 2 }}>{item.hint}</span>}
-                      </span>
-                    </button>
-                  );
-                })}
+                {(() => {
+                  // Two levels: the top rows are single words with no hints, and
+                  // Print and Import/Export open their options IN PLACE beneath
+                  // them (an accordion, not a flyout — a flyout has nowhere to go
+                  // on a phone). A group left with one option for this user — a
+                  // viewer's Import/Export is only Export — is shown as that option
+                  // rather than as a group, since a tap that reveals one row is a
+                  // wasted tap.
+                  const groups = [
+                    canEdit && { key: "configure", icon: Settings, title: "Configure panel", run: onReconfigure },
+                    { key: "link", icon: Copy, title: "Copy link", run: copyPanelLink },
+                    { key: "print", icon: Printer, title: "Print", children: [
+                      { key: "qr", title: "QR sticker", run: openPanelQrSheet },
+                      { key: "exact", title: "Directory at panel size", hint: `${LEGEND_WIDTH_IN}" × ${Math.max(slotCount * LEGEND_ROW_IN + LEGEND_BAND_IN * 2, printPageHeightIn || 0).toFixed(1)}", one page. Save as PDF.`, run: () => runPrint("exact") },
+                      { key: "tiled", title: "Directory on letter pages", hint: "Cut and tape end-to-end.", run: () => runPrint("tiled") },
+                    ] },
+                    { key: "io", icon: FileText, title: "Import / Export", children: [
+                      onExportSchedule && { key: "export", icon: Download, title: "Export schedule", run: onExportSchedule },
+                      canEdit && onImportSchedule && { key: "import", icon: Upload, title: "Import schedule…", hint: "Replaces this panel's layout.", run: onImportSchedule },
+                    ].filter(Boolean) },
+                  ].filter(Boolean)
+                    .map(g => (g.children && g.children.length === 1 ? { ...g.children[0], icon: g.children[0].icon || g.icon, hint: undefined } : g))
+                    .filter(g => !g.children || g.children.length);
+                  const rowStyle = (i, indent) => ({
+                    display: "flex", gap: 10, alignItems: "center", width: "100%", textAlign: "left",
+                    padding: indent ? "8px 12px 8px 37px" : "10px 12px", background: indent ? C.bg : "none",
+                    border: "none", borderTop: i > 0 ? `1px solid ${C.border}` : "none",
+                  });
+                  const rows = [];
+                  groups.forEach(g => {
+                    const Icon = g.icon;
+                    const open = panelSubmenu === g.key;
+                    rows.push(
+                      <button
+                        key={g.key} type="button" aria-expanded={g.children ? open : undefined}
+                        onClick={() => {
+                          if (g.children) { setPanelSubmenu(open ? null : g.key); return; }
+                          setPanelMenuOpen(false); g.run();
+                        }}
+                        style={rowStyle(rows.length, false)}
+                      >
+                        <Icon size={15} color={C.muted} style={{ flexShrink: 0 }} />
+                        <span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: C.ink }}>{g.title}</span>
+                        {g.children && (open ? <ChevronDown size={15} color={C.muted} /> : <ChevronRight size={15} color={C.muted} />)}
+                      </button>
+                    );
+                    if (g.children && open) {
+                      g.children.forEach(c => rows.push(
+                        <button key={c.key} type="button" onClick={() => { setPanelMenuOpen(false); c.run(); }} style={rowStyle(rows.length, true)}>
+                          <span>
+                            <span style={{ display: "block", fontSize: 13, color: C.ink }}>{c.title}</span>
+                            {c.hint && <span style={{ display: "block", fontSize: 11, color: C.muted, marginTop: 2 }}>{c.hint}</span>}
+                          </span>
+                        </button>
+                      ));
+                    }
+                  });
+                  return rows;
+                })()}
               </div>
             </>
           )}

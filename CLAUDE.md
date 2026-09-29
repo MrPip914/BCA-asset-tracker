@@ -3048,8 +3048,16 @@ array position can't serve as identity once things move.
     instead of per row, the conflict check never firing, `addBreaker` skipping it, voltage
     always line-to-neutral, the phase not reaching the save).
 - **Every panel action is ONE menu, right of the Breaker/Feeds/Table toggle (2026-09-29).**
-  Configure, Copy link, Print QR sticker, the two door-card prints, and Export/Import
-  schedule. They were four bare icons beside the title, which on a phone wrapped under it.
+  Four top rows with no descriptions — Configure panel, Copy link, **Print**, **Import /
+  Export** — the last two opening their options IN PLACE beneath them (an accordion, one
+  group at a time; a flyout has nowhere to go on a phone). Print holds QR sticker and the
+  two door-card geometries; Import / Export holds the schedule export and import. Only the
+  sub-rows carry hints, and only where they say something (the printed size, that import
+  replaces the layout). A group left with ONE option for this user — a viewer's Import /
+  Export — renders as that option, since a tap that reveals one row is a wasted tap. The
+  first cut listed all seven actions flat, each with a hint, and read as too busy (Eric,
+  same day). They were four bare icons beside the title before that, which on a phone
+  wrapped under it.
   Reads are offered to viewers (someone at the panel is who needs them); Configure and
   Import are `canEdit` only. Opening the menu measures the door card, as the old print
   menu did, so the quoted size is the size that prints.
