@@ -3907,7 +3907,7 @@ const FRONTEND_SCRIPT_VERSION = "v43";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-29.10";
+const APP_VERSION = "2026-09-29.11";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -12076,42 +12076,66 @@ function AssetTracker() {
               <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>
                 Click cells for the breaker you're defining
               </span>
-              {/* One column, each cell half a slot tall: "1a" sits ABOVE "1b", the way
-                  a half-slot breaker sits on the bus. Side by side read as two columns
-                  of a panel, which is not what a/b means. */}
-              <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6, maxWidth: 260 }}>
-                {(() => {
-                  const takenSet = new Set(breakerTypeDraft.members.flatMap(m => m.cells));
-                  return Array.from({ length: breakerTypeDraft.slotSpan }, (_, i) => i + 1).map(slotIdx => (
-                    <div key={slotIdx} style={{ display: "flex", gap: 6, alignItems: "stretch" }}>
-                      <span style={{ fontSize: 11, color: C.muted, width: 44, display: "flex", alignItems: "center" }}>Slot {slotIdx}</span>
-                      <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
-                      {["a", "b"].map(half => {
-                        const cell = `${slotIdx}${half}`;
-                        const taken = takenSet.has(cell);
-                        const selected = currentMemberCells.includes(cell);
-                        return (
-                          <button
-                            key={cell} type="button" disabled={taken}
-                            onClick={() => toggleBreakerTypeCell(cell)}
-                            style={{
-                              height: 30, padding: 0, fontSize: 12, fontWeight: 700,
-                              borderRadius: half === "a" ? "8px 8px 2px 2px" : "2px 2px 8px 8px",
-                              border: `1.5px solid ${selected ? C.brand : C.border}`,
-                              background: taken ? C.bg : selected ? C.brand : "#fff",
-                              color: taken ? C.placeholder : selected ? "#fff" : C.ink,
-                              cursor: taken ? "not-allowed" : "pointer",
-                            }}
-                          >
-                            {cell}{taken ? " ✓" : ""}
-                          </button>
-                        );
-                      })}
-                      </div>
-                    </div>
-                  ));
-                })()}
-              </div>
+              {/* Drawn by the SAME layout the panel diagram uses (panelDiagramLayout),
+                  one column, each cell half a slot tall, so a breaker already added
+                  to the type looks here exactly as it will on the panel — a bar for a
+                  non-contiguous one, the rest in the space left. The cells still
+                  free are the clickable ones; they go in as one-cell stand-ins so
+                  the layout places them too. */}
+              {(() => {
+                const span = breakerTypeDraft.slotSpan;
+                const layoutCells = panelDiagramLayout(breakerTypePreviewBreakers(breakerTypeDraft.members, span), span, 1, 6);
+                const freeCell = (b, place) => {
+                  const cell = b.cells[0];
+                  const selected = currentMemberCells.includes(cell);
+                  return (
+                    <button
+                      key={b.id} type="button" onClick={() => toggleBreakerTypeCell(cell)} aria-pressed={selected}
+                      style={{ ...place, minHeight: 0, border: "none", padding: 0, fontSize: 11, fontWeight: 700, background: selected ? C.brand : "#fff", color: selected ? "#fff" : C.muted, cursor: "pointer" }}
+                    >
+                      {cell}
+                    </button>
+                  );
+                };
+                const memberText = b => `${b.ampRating}A${b.poles > 1 ? ` · ${b.poles}P` : ""}`;
+                const memberBox = (b, place) => (
+                  <div key={b.id} style={{ ...place, minHeight: 0, background: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, color: C.brandDark }}>
+                    {memberText(b)}
+                  </div>
+                );
+                return (
+                  <div style={{ display: "grid", gridTemplateColumns: "44px minmax(0, 1fr)", gridAutoRows: "56px", gap: 6, marginTop: 6, maxWidth: 280 }}>
+                    {Array.from({ length: span }, (_, i) => (
+                      <span key={`slot-${i}`} style={{ gridColumn: 1, gridRow: i + 1, fontSize: 11, color: C.muted, display: "flex", alignItems: "center" }}>Slot {i + 1}</span>
+                    ))}
+                    {layoutCells.map(cell => {
+                      const outer = { gridColumn: 2, gridRow: `${cell.row} / span ${cell.rowSpan}`, border: `1.5px solid ${C.border}`, borderRadius: 8, overflow: "hidden", minWidth: 0 };
+                      if (cell.kind === "breaker") {
+                        const b = cell.breaker;
+                        return <div key={cell.key} style={{ ...outer, display: "grid" }}>{b.free ? freeCell(b, {}) : memberBox(b, {})}</div>;
+                      }
+                      if (cell.kind !== "cluster") return null; // every free cell is a stand-in, so no spare rows
+                      return (
+                        <div key={cell.key} style={{ ...outer, display: "grid", gridTemplateColumns: cell.colTemplate, gridTemplateRows: cell.rowTemplate, gap: 1, background: C.border }}>
+                          {cell.items.map(it => {
+                            const place = { gridColumn: it.gridColumn, gridRow: it.gridRow, minWidth: 0 };
+                            if (it.type === "fill" || it.type === "spare") return <div key={`${it.type}-${it.gridColumn}-${it.from}`} style={{ ...place, background: "#fff" }} />;
+                            if (it.type === "piece") return <div key={`piece-${it.breaker.id}-${it.from}`} style={{ ...place, background: C.bg }} />;
+                            if (it.type === "bar") {
+                              return (
+                                <div key={`bar-${it.breaker.id}`} style={{ ...place, background: C.bg, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+                                  <span style={{ writingMode: "vertical-rl", transform: "rotate(180deg)", whiteSpace: "nowrap", fontSize: 10, fontWeight: 700, color: C.brandDark }}>{memberText(it.breaker)}</span>
+                                </div>
+                              );
+                            }
+                            return it.breaker.free ? freeCell(it.breaker, place) : memberBox(it.breaker, place);
+                          })}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
             </div>
 
             <div style={{ display: "flex", gap: 10, alignItems: "flex-end" }}>
@@ -20858,6 +20882,25 @@ function panelDiagramLayout(breakers, slotCount, columns, rowGapPx) {
   }
   cells.sort(function (a, b) { return a.slot - b.slot; });
   return cells;
+}
+
+// The breaker type editor's picker, drawn with panelDiagramLayout: every member
+// already added to the type, plus one single-cell stand-in (`free: true`) for each
+// cell nobody has claimed yet, so the layout places the clickable cells too and a
+// finished type previews exactly as it will draw on the panel.
+function breakerTypePreviewBreakers(members, slotSpan) {
+  const out = members.map((m, i) => ({
+    id: `member-${i}`, groupId: `member-${i}`, cells: m.cells, ampRating: m.ampRating,
+    poles: new Set(m.cells.map(c => c.slice(0, -1))).size,
+  }));
+  const taken = new Set(members.flatMap(m => m.cells));
+  for (let s = 1; s <= slotSpan; s++) {
+    ["a", "b"].forEach(h => {
+      const cell = `${s}${h}`;
+      if (!taken.has(cell)) out.push({ id: `free-${cell}`, groupId: `free-${cell}`, cells: [cell], free: true });
+    });
+  }
+  return out;
 }
 
 function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAssets, breakerTypes, panelAsset, panelLabel, onReconfigure, onSlotClick, onSpareClick, onExportSchedule, onImportSchedule, onManageBreakerTypes, canEdit }) {

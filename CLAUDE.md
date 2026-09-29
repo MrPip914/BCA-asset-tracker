@@ -3073,6 +3073,10 @@ array position can't serve as identity once things move.
     around its own unit's single-poles, and a 14a+16b bar around ANOTHER unit's breaker
     with 16a left empty (a half-slot spare).
   - The printed door card lists slots sequentially and is unchanged.
+  - **The breaker type editor's cell picker is drawn by the same layout** (2026-09-29), so a
+    member already added previews exactly as it will look on the panel. Each unclaimed
+    cell goes in as a one-cell stand-in (`breakerTypePreviewBreakers`, `free: true`), which
+    is how the layout places the clickable cells alongside the configured ones.
 - **Every panel action is ONE menu, right of the Breaker/Feeds/Table toggle (2026-09-29).**
   Top rows with no descriptions — Configure panel, Manage breaker types (editors; the
   catalog was otherwise reachable only from inside the Add Breaker form), Copy link,

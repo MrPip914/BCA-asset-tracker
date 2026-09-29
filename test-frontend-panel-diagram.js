@@ -117,6 +117,23 @@ const items = (cell, type) => cell.items.filter(i => i.type === type);
     items(cl, 'bar').length === 2);
 }
 
+// --- the breaker type editor previews a type with the same layout ------------------
+{
+  const pv = new Function(slice(src, 'function breakerTypePreviewBreakers(members, slotSpan) {', NL) + '\nreturn breakerTypePreviewBreakers;')();
+  const empty = pv([], 2);
+  check('an empty 2-slot type offers four free one-cell stand-ins, top to bottom',
+    empty.length === 4 && empty.every(b => b.free && b.cells.length === 1) && empty.map(b => b.cells[0]).join() === '1a,1b,2a,2b');
+  const wrap = layout(pv([{ cells: ['1a', '2b'], ampRating: '30' }], 2), 2, 1);
+  check('...and it lays out as ONE cluster over both slots', wrap.length === 1 && wrap[0].kind === 'cluster' && wrap[0].rowSpan === 2);
+  check('a non-contiguous member previews as its bar, with the free cells between it clickable',
+    items(wrap[0], 'bar').length === 1 && items(wrap[0], 'bar')[0].breaker.id === 'member-0'
+    && items(wrap[0], 'main').filter(m => m.breaker.free).map(m => m.breaker.cells[0]).join() === '1b,2a');
+  const single = layout(pv([{ cells: ['1a', '1b'], ampRating: '20' }], 1), 1, 1);
+  check('a whole single-pole type previews as one plain breaker', single.length === 1 && single[0].kind === 'breaker' && !single[0].breaker.free);
+  check('the editor draws with panelDiagramLayout and the stand-ins',
+    /panelDiagramLayout\(breakerTypePreviewBreakers\(breakerTypeDraft\.members, span\), span, 1, 6\)/.test(src));
+}
+
 // --- MOCK_SNAPSHOT exercises it ---------------------------------------------------
 check('MOCK_SNAPSHOT carries a non-contiguous breaker so Sandbox draws a bar',
   /cells: \["13a", "15b"\]/.test(src) && /cells: \["14a", "16b"\]/.test(src));
