@@ -3047,6 +3047,40 @@ array position can't serve as identity once things move.
     legacy blank. Covered by `test-frontend-phases.js`, verified by mutation (phase per slot
     instead of per row, the conflict check never firing, `addBreaker` skipping it, voltage
     always line-to-neutral, the phase not reaching the save).
+- **Every panel action is ONE menu, right of the Breaker/Feeds/Table toggle (2026-09-29).**
+  Configure, Copy link, Print QR sticker, the two door-card prints, and Export/Import
+  schedule. They were four bare icons beside the title, which on a phone wrapped under it.
+  Reads are offered to viewers (someone at the panel is who needs them); Configure and
+  Import are `canEdit` only. Opening the menu measures the door card, as the old print
+  menu did, so the quoted size is the size that prints.
+- **A panel's layout exports and imports as a spreadsheet** (`panelScheduleRows` /
+  `planPanelImport`, 2026-09-29). Frontend only — no backend change. One row per circuit;
+  a circuitless breaker is one row with the circuit columns blank; an unassigned circuit
+  is a row with a blank Slot. Slot is written as `cellsLabel_` writes it ("1/3/5", "9b")
+  and read back by `cellsFromSlotText`.
+  - **IT IS A REPLACE, THE OPPOSITE CALL FROM THE ASSETS IMPORT, AND ON PURPOSE.** That
+    export is filtered, so merge is its only honest reading; a schedule is always exported
+    WHOLE, so the file IS the layout, and leaving a breaker out is the only way a merge
+    could never say "remove it". The review counts what will be removed, in red.
+  - **Ids ride in `Breaker Key`/`Circuit Key`**, so an edit in Excel keeps a breaker's
+    photos, its audit trail and a sub-panel's "fed from" pointing at the same record. A
+    keyless row is new. A unit keeps its `groupId` when all its breakers came from one
+    existing unit; `Unit` is a small number, because a uuid is untypeable and the grouping
+    is the one thing about a tandem its slot does not say.
+  - **`Serves` is FULL room paths joined with "; "**, never a comma — the separator must be
+    something a value cannot contain, the Assets import's User-column lesson. Rooms and
+    the Feeds Panel resolve through the Assets import's tiers (`resolveImportRef`), so
+    "two matches" is ambiguous, never the first one.
+  - Every rule the forms enforce is enforced here: slot range, one column, the phase rule,
+    no two breakers on one cell, serves-or-feeds. **Errors refuse the whole file** and the
+    plan then carries no layout. An empty file is refused rather than emptying the panel.
+  - An import writes ONE `persist()` and ONE `panel_imported` audit row (file name and the
+    before/after counts). Photos on a dropped breaker are left alone, exactly as deleting
+    that breaker by hand leaves them. An untouched re-import says "Nothing to import".
+  - Covered by `test-frontend-panel-schedule.js`, verified by mutation (ids not kept, a
+    unit's groupId not kept, errors not refusing, Serves comma-joined, the phase rule or the
+    overlap check dropped). The menu, export, an untouched re-import, and an edited import
+    that removed a breaker were driven in Chromium against Sandbox.
 - **Swap Breaker** (`openSwapBreaker`/`submitSwapBreaker`) still exists but its trigger button
   was removed from the breaker modal for now (per explicit request) — the functions and the
   swap modal are dead code until it's reconnected. If re-adding it, keep in mind Swap was
