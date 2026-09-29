@@ -50,7 +50,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v42";
+const SCRIPT_VERSION = "v43";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -147,6 +147,14 @@ const ASSET_FIELDS = [
   "brand", "model", "serial", "person", "personIds", "peripherals", "notes",
   "totalQuantity", "purchaseDate", "warrantyUntil", "status",
   "panelSlotCount", "panelLayout",
+  // v43: how the panel's bus is fed. "panelPhases" is "1" or "3" -- blank reads
+  // as single-phase, which is the only thing a panel could be before v43, so no
+  // row needs migrating. "panelVoltage" is display text ("120/208") that the
+  // frontend splits into line-to-neutral / line-to-line for a breaker's
+  // voltage. Flat fields for the same reason as the two above them: they
+  // describe the one panel, not any breaker on it. Which bus phase a slot sits
+  // on is DERIVED from its slot number, never stored.
+  "panelPhases", "panelVoltage",
   // A floor plan is 1:1 with the asset that carries it (which type can carry
   // one at all is a frontend-only setting -- see typeHasFloorPlan in
   // index.html -- this schema doesn't care). Flat fields, not a child tab,
@@ -418,7 +426,9 @@ const PHOTO_FIELDS = [
 // public page and on its sticker, and a panel created after v32 has one where it
 // has no label at all. `label` stays until phase 4 so a page served to a browser
 // mid-rollout still finds something to print.
-const PUBLIC_PANEL_FIELDS = ["tag", "label", "panelSlotCount", "panelLayout"];
+// panelPhases/panelVoltage (v43) are what let the public page print the phase
+// letter beside each slot -- what an electrician at the open door checks first.
+const PUBLIC_PANEL_FIELDS = ["tag", "label", "panelSlotCount", "panelLayout", "panelPhases", "panelVoltage"];
 const PUBLIC_BREAKER_FIELDS = ["id", "cells", "ampRating", "groupId", "breakerTypeId", "notes"];
 const PUBLIC_CIRCUIT_FIELDS = ["id", "breakerId", "label", "roomsServedIds", "feedsPanelLabel", "notes"];
 const PUBLIC_BREAKER_TYPE_FIELDS = ["id", "name", "slotSpan", "members"];

@@ -3010,6 +3010,43 @@ array position can't serve as identity once things move.
   breaker. `deleteBreakerGroup` still requires its `unassignCircuits` argument to be true
   before it will drop a unit that has circuits, so a future call site can't orphan them by
   omission; `attachedCircuitCount()` is what the prompt counts with.
+- **A panel is single-phase or three-phase (backend v43, 2026-09-29).** Two new panel
+  fields, `panelPhases` (`"1"` | `"3"`) and `panelVoltage` (display text, `"120/208"`), set
+  from the same gear form as slot count and layout. Before this every panel was implicitly
+  single-phase, and a 3-slot breaker type was already placeable — nothing knew it could not
+  physically fit a single-phase bus.
+  - **BLANK READS AS SINGLE-PHASE**, because that is all a panel could be before v43. No
+    migration, and an untouched panel renders exactly as before plus A/B letters.
+  - **WHICH PHASE A SLOT IS ON IS DERIVED FROM ITS SLOT NUMBER, NEVER STORED**
+    (`slotPhase`): the bus alternates per ROW of the odd/even numbering — 1+2 share a row —
+    cycling A-B or A-B-C. It ignores the display layout on purpose: placement already
+    stacks a type's slots two apart in both layouts (`resolveTypeSlots`), so the numbering
+    IS the two-column scheme and the phase follows the numbering. A stored per-breaker phase
+    would be a second copy of the slot number, and the one that goes stale on reconfigure.
+  - **The one rule: every pole of ONE breaker on a different phase**
+    (`breakerPhaseConflict`), checked in `addBreaker` per MEMBER, not per group — a quad's
+    tandems may share a phase with each other, a breaker's own poles never may. That is what
+    refuses a 3-pole on a single-phase panel (A-B-A) and a 4-pole run on a three-phase one.
+  - **Reconfiguring a panel back to single-phase is NOT refused** over its 3-pole breakers;
+    the diagram flags them (`phaseWarnings`), the same posture as `parityWarnings`. The
+    panel's phase is a fact about the panel, and the breaker record is what is wrong.
+  - Voltage is display only — no rule reads it. `breakerVoltage` gives line-to-neutral for
+    one pole and line-to-line for more; unset stays blank rather than guessing 240.
+    `breakerElectricalSummary` ("3P · A-B-C · 208V") is the one wording the diagram and the
+    breaker dialog share.
+  - Shown on: the slot numbers (phase letter on the outer edge), multi-pole breaker cells, a
+    Phase column in Table view, the breaker dialog, the Add Breaker form once a start slot is
+    typed, the printed door card, and the public `panel.html` (both fields are in
+    `PUBLIC_PANEL_FIELDS`; its derivation is a copy of `slotPhase` and a test pins the two).
+  - **`Triple-Pole (3-phase)` seeds a BRAND-NEW catalog only.** An existing tenant's
+    BreakerTypes tab is stored data and is not topped up — re-adding a shipped type would
+    resurrect one a school deliberately deleted. There, it is made once in Manage types
+    (a 3-slot span already existed).
+  - `MOCK_SNAPSHOT` gained BCA0098, a three-phase 120/208 kitchen panel with two 3-poles —
+    the only panel carrying `panelPhases` at all, so Sandbox exercises the value and the
+    legacy blank. Covered by `test-frontend-phases.js`, verified by mutation (phase per slot
+    instead of per row, the conflict check never firing, `addBreaker` skipping it, voltage
+    always line-to-neutral, the phase not reaching the save).
 - **Swap Breaker** (`openSwapBreaker`/`submitSwapBreaker`) still exists but its trigger button
   was removed from the breaker modal for now (per explicit request) — the functions and the
   swap modal are dead code until it's reconnected. If re-adding it, keep in mind Swap was

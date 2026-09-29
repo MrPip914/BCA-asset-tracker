@@ -47,7 +47,19 @@ that the forwarded click is swallowed elsewhere by a parent's handler.
 fragment sibling), or make the wrapper a `div` with the heading as a plain element —
 which is what `hideLabel` already does.
 
-**Blocks:** nothing.
+**Update 2026-09-29 — now confirmed GENERAL, and it was blocking Add Breaker.** Driving the
+three-phase work in Chromium: in the Add Breaker form, choosing any Breaker Type set the
+value and re-opened the picker at once — and so did tapping its ×, or its backdrop. That
+field is a `hideLabel` PickerField, but it sat inside an OUTER `<label>` in the form, so the
+same forwarding applies one level up. The likely mechanism is sharper than the above: the
+closing click's target is removed from the DOM by React before the label's default action
+runs, so the browser no longer sees it as inside an interactive element and forwards the
+click to the trigger. So ANY click that closes the modal re-opens it. Worked around in the
+two panel forms only (the Add Breaker type field is now a `div`; the panel config form's
+Layout/Phase/Voltage pickers are `hideLabel` under their own heading). **Every other labelled
+`PickerField` in the app is presumably still affected**; the general fix above stands.
+
+**Blocks:** nothing now that those two are worked around; possibly other pickers.
 
 
 ### `deploy.mjs` lets a DIFFERENT backend with the same version number replace a live one
