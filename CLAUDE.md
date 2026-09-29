@@ -3059,6 +3059,9 @@ array position can't serve as identity once things move.
     The cluster draws its dividers as its background showing through 1px grid gaps, so a
     piece SPANS across to its own bar's track and the bar is emitted after it, painting
     over the overlap in the same colour. The bar track is 52px.
+    - **An inner bar's track is NOT filled where an outer breaker's piece reaches across
+      it** — the filler is white and drawn later, so it painted a box over the outer
+      breaker's own cell (Eric's 37a+41b around 37b+41a, reported the same day).
   - **Units whose ROWS touch are merged into one cluster**, which also fixed a quiet bug:
     two single-half breakers from different units in one slot — only the first was drawn.
   - The inner grid keeps the outer grid's row gap as a row of its own, so half-slot edges

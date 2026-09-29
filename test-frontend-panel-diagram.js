@@ -103,6 +103,20 @@ const items = (cell, type) => cell.items.filter(i => i.type === type);
   check('every bar track is filled where its bar is not', items(cl, 'fill').length >= 1);
 }
 
+// --- two nested bars: nothing white may sit on the outer breaker's cells ----------
+{
+  // Eric's panel: 2P on 37a+41b around a 2P on 37b+41a around a single-pole on 39.
+  const cells = layout([B('outer', ['37a', '41b'], 'g'), B('inner', ['37b', '41a'], 'g'), B('mid', ['39a', '39b'], 'g')], 42, 2);
+  const cl = find(cells, c => c.slot === 37);
+  const colsOf = it => { const [a, b] = String(it.gridColumn).split(' / ').map(Number); return b ? [a, b - 1] : [a, a]; };
+  const covers = (it, track, pos) => { const [a, b] = colsOf(it); return track >= a && track <= b && pos >= it.from && pos <= it.to; };
+  const clash = items(cl, 'fill').filter(f => items(cl, 'piece').some(p => p.breaker.id === 'outer' && covers(p, colsOf(f)[0], f.from)));
+  check('no filler is drawn over an outer bar\'s piece where it reaches across an inner bar\'s track',
+    clash.length === 0, JSON.stringify(clash));
+  check('...but the inner bar\'s track is still filled where nothing reaches it',
+    items(cl, 'bar').length === 2);
+}
+
 // --- MOCK_SNAPSHOT exercises it ---------------------------------------------------
 check('MOCK_SNAPSHOT carries a non-contiguous breaker so Sandbox draws a bar',
   /cells: \["13a", "15b"\]/.test(src) && /cells: \["14a", "16b"\]/.test(src));
