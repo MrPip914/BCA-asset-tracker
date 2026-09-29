@@ -1860,6 +1860,7 @@ function describeAudit(entry) {
   if (entry.action === "circuit_added") {
     return entry.from ? `Added circuit "${entry.field}" at ${entry.from} (${entry.to})` : `Added circuit "${entry.field}" (${entry.to})`;
   }
+  if (entry.action === "panel_imported") return `Replaced the panel layout from ${entry.field || "a spreadsheet"} — ${entry.from} → ${entry.to}`;
   if (entry.action === "circuit_reassigned") return `Moved circuit "${entry.field}" from ${entry.from} to ${entry.to}`;
   if (entry.action === "circuit_removed") {
     return entry.from ? `Removed circuit "${entry.field}" from ${entry.from}` : `Removed circuit "${entry.field}"`;
@@ -3236,6 +3237,300 @@ function planAssetImport(parsed, ctx) {
   return plan;
 }
 
+// ── Panel schedule export/import (2026-09-29) ───────────────────────────────
+// One panel's breakers and circuits as ONE sheet, one row per circuit, in a shape
+// the same panel reads back. A breaker with no circuits is one row with the
+// circuit columns blank; an unassigned circuit is one row with a blank Slot.
+//
+// IT IS A REPLACE, NOT A MERGE, and that is the opposite call from the Assets
+// import on purpose. That export is FILTERED, so a ten-row file describes ten
+// assets rather than an inventory of ten, and a merge is the only honest
+// reading. A panel schedule is always exported WHOLE, so the file IS the panel's
+// layout — and "delete this breaker" has no way to be said in a merge except by
+// leaving the row out. The review says so in as many words.
+//
+// Ids survive the round trip through the two Key columns, which is what keeps a
+// breaker's photos, its audit trail and a sub-panel's "fed from" pointing at the
+// same breaker after an edit in Excel. A row with no key (or one naming nothing
+// on this panel) is a NEW breaker or circuit.
+const PANEL_SCHEDULE_HEADERS = [
+  "Slot", "Unit", "Breaker Type", "Amps", "Serial", "Installed", "Breaker Notes",
+  "Circuit", "Serves", "Feeds Panel", "Circuit Notes", "Breaker Key", "Circuit Key",
+];
+// The columns that describe the BREAKER (repeated on each of its circuit rows)
+// versus the CIRCUIT. Named once so the export and the read cannot disagree.
+const PANEL_BREAKER_COLS = ["Unit", "Breaker Type", "Amps", "Serial", "Installed", "Breaker Notes", "Breaker Key"];
+const PANEL_CIRCUIT_COLS = ["Circuit", "Serves", "Feeds Panel", "Circuit Notes", "Circuit Key"];
+// Several rooms in one cell. Not a comma: room names and full paths can carry
+// one, and a separator a value can contain cannot be split back — the lesson the
+// Assets import's User column learned the hard way.
+const PANEL_SERVES_SEPARATOR = "; ";
+
+// What a sub-panel is called in a cell: its tag, which is what is on the sticker
+// and what the panel diagram prints, else its full path. Resolved back through
+// the same tiers the Assets import uses, so a hand-typed name still lands.
+function panelRefText(panel, assets) {
+  if (!panel) return "";
+  return panel.tag || fullPathOf(panel, assets);
+}
+
+// "1/3/5" → 1a 1b 3a 3b 5a 5b; "9b/11a" → 9b 11a. The inverse of cellsLabel_,
+// which writes a whole slot as its bare number and a half as number+letter.
+// null when any token is not a slot.
+function cellsFromSlotText(text) {
+  const tokens = String(text || "").split("/").map(t => t.trim()).filter(Boolean);
+  if (!tokens.length) return null;
+  const cells = [];
+  for (const t of tokens) {
+    const m = /^(\d+)\s*([ab])?$/i.exec(t);
+    if (!m || parseInt(m[1], 10) < 1) return null;
+    const n = parseInt(m[1], 10);
+    if (m[2]) cells.push(`${n}${m[2].toLowerCase()}`);
+    else cells.push(`${n}a`, `${n}b`);
+  }
+  return [...new Set(cells)];
+}
+
+// The rows of one panel's schedule, in panel order: breakers by their lowest
+// slot, each breaker's circuits beneath it, unassigned circuits last. `Unit`
+// numbers the physical units — every breaker sharing a groupId (a tandem, a
+// quad) gets the same number — because a bare groupId is a uuid nobody could
+// type, and the grouping is the one thing about a tandem the slot does not say.
+function panelScheduleRows(panel, ctx) {
+  const { assets, breakerTypes } = ctx;
+  const breakers = [...(panel.breakers || [])].sort((a, b) => {
+    const sa = Math.min(...slotsFromCells(a.cells).map(Number));
+    const sb = Math.min(...slotsFromCells(b.cells).map(Number));
+    return sa - sb || String((a.cells || [])[0]).localeCompare(String((b.cells || [])[0]));
+  });
+  const unitOf = new Map();
+  let nextUnit = 1;
+  const typeName = id => { const t = (breakerTypes || []).find(x => x.id === id); return t ? t.name : ""; };
+  const circuitCells = c => ({
+    "Circuit": c.label || "",
+    "Serves": (c.roomsServedIds || []).map(id => fullPathOf((assets || []).find(a => a.id === id), assets) || id).join(PANEL_SERVES_SEPARATOR),
+    "Feeds Panel": c.feedsPanelLabel ? (panelRefText((assets || []).find(a => a.id === c.feedsPanelLabel), assets) || c.feedsPanelLabel) : "",
+    "Circuit Notes": c.notes || "",
+    "Circuit Key": c.id || "",
+  });
+  const rows = [];
+  breakers.forEach(b => {
+    const groupKey = b.groupId || `solo-${b.id}`;
+    if (!unitOf.has(groupKey)) unitOf.set(groupKey, nextUnit++);
+    const breakerCells = {
+      "Slot": cellsLabel_(b),
+      "Unit": String(unitOf.get(groupKey)),
+      "Breaker Type": typeName(b.breakerTypeId),
+      "Amps": b.ampRating == null ? "" : String(b.ampRating),
+      "Serial": b.serial || "",
+      "Installed": b.installedDate ? dateOnly(b.installedDate) : "",
+      "Breaker Notes": b.notes || "",
+      "Breaker Key": b.id || "",
+    };
+    const circuits = b.circuits || [];
+    if (!circuits.length) {
+      rows.push({ ...breakerCells, ...Object.fromEntries(PANEL_CIRCUIT_COLS.map(k => [k, ""])) });
+      return;
+    }
+    circuits.forEach(c => rows.push({ ...breakerCells, ...circuitCells(c) }));
+  });
+  (panel.unassignedCircuits || []).forEach(c => {
+    rows.push({ "Slot": "", ...Object.fromEntries(PANEL_BREAKER_COLS.map(k => [k, ""])), ...circuitCells(c) });
+  });
+  return rows.map(r => Object.fromEntries(PANEL_SCHEDULE_HEADERS.map(h => [h, r[h] == null ? "" : r[h]])));
+}
+
+// Works out what importing a schedule into `panel` WOULD do. Writes nothing.
+// Returns { errors, warnings, breakers, unassignedCircuits, counts, removed,
+// unchanged }. ERRORS REFUSE THE WHOLE FILE, the Assets import's rule for the
+// same reason: a panel half-replaced by a file is a layout nobody drew — and it
+// is made structural here too, since a plan with errors carries no layout.
+function planPanelImport(parsed, ctx) {
+  const { panel, assets, breakerTypes } = ctx;
+  const errors = [];
+  const warnings = [];
+  const fail = () => ({ errors, warnings, breakers: [], unassignedCircuits: [], counts: null, removed: null, unchanged: false });
+  const headers = new Set((parsed.headers || []).filter(Boolean));
+  // Said ONCE, rather than as a complaint per row, when the file is plainly not
+  // a panel schedule — an Assets export chosen by mistake is the likely one.
+  if (!headers.has("Slot") || !headers.has("Circuit")) {
+    errors.push("This isn't a panel schedule — it has no Slot and Circuit columns. Export one from a panel's menu to get the right shape.");
+    return fail();
+  }
+  if (!parsed.rows.length) {
+    errors.push("The file has no rows. To empty a panel, delete its breakers instead — an empty file is too easy to import by mistake.");
+    return fail();
+  }
+  const three = panelIsThreePhase(panel);
+  const slotCount = parseInt(panel.panelSlotCount, 10) || 0;
+  const oldBreakers = panel.breakers || [];
+  const oldCircuits = [...oldBreakers.flatMap(b => b.circuits || []), ...(panel.unassignedCircuits || [])];
+  const oldBreakerById = new Map(oldBreakers.map(b => [b.id, b]));
+  const oldCircuitIds = new Set(oldCircuits.map(c => c.id));
+  const rooms = (assets || []).filter(a => a.type === "Room");
+  const roomIdx = buildImportRefIndex(rooms);
+  // Rooms are indexed against the WHOLE inventory's paths, so a room's full path
+  // (the thing the export writes) is built through its real ancestors.
+  roomIdx.path = new Map();
+  rooms.forEach(r => addImportRef(roomIdx.path, fullPathOf(r, assets), r));
+  const otherPanels = (assets || []).filter(a => a.type === "Electrical Panel" && a.id !== panel.id);
+  const panelIdx = buildImportRefIndex(otherPanels);
+  panelIdx.path = new Map();
+  otherPanels.forEach(p => addImportRef(panelIdx.path, fullPathOf(p, assets), p));
+  const resolveType = text => {
+    const key = String(text || "").trim().toLowerCase();
+    if (!key) return "";
+    const named = (breakerTypes || []).filter(t => String(t.name || "").trim().toLowerCase() === key);
+    if (named.length === 1) return named[0].id;
+    const byId = (breakerTypes || []).find(t => String(t.id || "").toLowerCase() === key);
+    return byId ? byId.id : null;
+  };
+
+  const claimedBreakerIds = new Set();
+  const claimedCircuitIds = new Set();
+  const breakersByCells = new Map();   // cells key → breaker being built
+  const breakerOrder = [];
+  const unassigned = [];
+
+  const hasAny = (v, cols) => cols.some(k => (v[k] || "") !== "");
+  // A breaker's details as one comparable string, so a later row for the same
+  // slot that disagrees with the first can be named rather than silently lost.
+  const breakerSig = v => ["Unit", "Breaker Type", "Amps", "Serial", "Installed", "Breaker Notes"]
+    .map(k => String(v[k] || "").trim().toLowerCase()).join("\u0001");
+
+  parsed.rows.forEach(({ row, values: v }) => {
+    const slotText = v["Slot"] || "";
+    let breaker = null;
+    if (slotText) {
+      const cells = cellsFromSlotText(slotText);
+      if (!cells) { errors.push(`Row ${row}: "${slotText}" isn't a slot. Use numbers like 5, 1/3/5, or a half like 9b.`); return; }
+      const key = [...cells].sort().join(",");
+      breaker = breakersByCells.get(key);
+      if (!breaker) {
+        const slots = slotsFromCells(cells).map(Number);
+        const over = slotCount ? slots.find(s => s > slotCount) : undefined;
+        if (over) errors.push(`Row ${row}: slot ${over} is beyond this panel's ${slotCount} slots.`);
+        if (slots.length > 1 && new Set(slots.map(n => n % 2)).size > 1) {
+          errors.push(`Row ${row}: slots ${slots.join("/")} aren't in one column — a breaker spanning several slots sits in one column (e.g. 1/3/5).`);
+        }
+        const shared = breakerPhaseConflict(cells, three);
+        if (shared) {
+          errors.push(`Row ${row}: slots ${slots.join("/")} would put two poles on phase ${shared} (${breakerPhases(cells, three).join("-")})${!three && slots.length >= 3 ? " — this panel is set as single-phase" : ""}.`);
+        }
+        const amps = v["Amps"] || "";
+        if (amps && !/^\d+(\.\d+)?$/.test(amps)) errors.push(`Row ${row}: Amps "${amps}" isn't a number.`);
+        const installed = v["Installed"] || "";
+        if (installed && !/^\d{4}-\d{2}-\d{2}$/.test(installed)) errors.push(`Row ${row}: Installed "${installed}" isn't a date (yyyy-mm-dd).`);
+        let typeId = resolveType(v["Breaker Type"]);
+        if (typeId === null) {
+          warnings.push(`Row ${row}: breaker type "${v["Breaker Type"]}" isn't in this site's catalog, so the breaker will show no type.`);
+          typeId = "";
+        }
+        const wantKey = v["Breaker Key"] || "";
+        const id = wantKey && oldBreakerById.has(wantKey) && !claimedBreakerIds.has(wantKey) ? wantKey : crypto.randomUUID();
+        claimedBreakerIds.add(id);
+        breaker = {
+          id, panelLabel: panel.id, cells,
+          ampRating: amps, serial: v["Serial"] || "", installedDate: installed, notes: v["Breaker Notes"] || "",
+          breakerTypeId: typeId, unit: v["Unit"] || "", groupId: "", circuits: [], firstRow: row, sig: breakerSig(v),
+        };
+        breakersByCells.set(key, breaker);
+        breakerOrder.push(breaker);
+      } else if (hasAny(v, PANEL_BREAKER_COLS.filter(k => k !== "Breaker Key")) && breakerSig(v) !== breaker.sig) {
+        warnings.push(`Row ${row}: its breaker details differ from row ${breaker.firstRow} for the same slot; row ${breaker.firstRow}'s are used.`);
+      }
+    } else if (hasAny(v, PANEL_BREAKER_COLS.filter(k => k !== "Breaker Key"))) {
+      warnings.push(`Row ${row}: has breaker details but no Slot, so it's read as an unassigned circuit and those details are dropped.`);
+    }
+
+    if (!hasAny(v, PANEL_CIRCUIT_COLS)) {
+      if (!breaker) errors.push(`Row ${row}: has neither a slot nor a circuit.`);
+      return;
+    }
+    const label = v["Circuit"] || "";
+    if (!label) { errors.push(`Row ${row}: a circuit needs a name in the Circuit column.`); return; }
+    const roomsServedIds = [];
+    String(v["Serves"] || "").split(";").map(s => s.trim()).filter(Boolean).forEach(text => {
+      const hit = resolveImportRef(text, roomIdx);
+      if (hit.status === "ok") { if (!roomsServedIds.includes(hit.asset.id)) roomsServedIds.push(hit.asset.id); }
+      else if (hit.status === "ambiguous") errors.push(`Row ${row}: "${text}" matches more than one room — use its full path.`);
+      else errors.push(`Row ${row}: "${text}" isn't a room here.`);
+    });
+    let feedsPanelLabel = "";
+    const feedsText = v["Feeds Panel"] || "";
+    if (feedsText) {
+      const hit = resolveImportRef(feedsText, panelIdx);
+      if (hit.status === "ok") feedsPanelLabel = hit.asset.id;
+      else if (hit.status === "ambiguous") errors.push(`Row ${row}: "${feedsText}" matches more than one panel.`);
+      else errors.push(`Row ${row}: "${feedsText}" isn't another panel here.`);
+    }
+    // The one rule a circuit is subject to anywhere (validateCircuitDraft).
+    if (feedsText && v["Serves"]) errors.push(`Row ${row}: a circuit serves rooms OR feeds a sub-panel, not both.`);
+    else if (!feedsText && !v["Serves"]) errors.push(`Row ${row}: circuit "${label}" needs rooms in Serves or a panel in Feeds Panel.`);
+    const wantKey = v["Circuit Key"] || "";
+    const id = wantKey && oldCircuitIds.has(wantKey) && !claimedCircuitIds.has(wantKey) ? wantKey : crypto.randomUUID();
+    claimedCircuitIds.add(id);
+    const circuit = {
+      id, breakerId: breaker ? breaker.id : "", panelLabel: panel.id,
+      label, notes: v["Circuit Notes"] || "", roomsServedIds, feedsPanelLabel,
+    };
+    if (breaker) breaker.circuits.push(circuit);
+    else unassigned.push(circuit);
+  });
+
+  // Two breakers claiming one cell. Caught after the read because a breaker is
+  // keyed by its whole footprint, so "1" and "1a" are different keys that
+  // collide on 1a.
+  const cellOwner = new Map();
+  breakerOrder.forEach(b => b.cells.forEach(c => {
+    if (cellOwner.has(c)) errors.push(`Rows ${cellOwner.get(c).firstRow} and ${b.firstRow}: both use slot ${c.slice(0, -1)}${c.slice(-1)}.`);
+    else cellOwner.set(c, b);
+  }));
+
+  // Units → groupIds. A unit keeps the groupId its breakers already share when
+  // they all came from one existing unit; otherwise it gets a new one. A blank
+  // Unit is a unit of its own, which is what a single-pole placed by hand is.
+  const byUnit = new Map();
+  breakerOrder.forEach(b => {
+    const k = b.unit ? `u:${b.unit}` : `solo:${b.id}`;
+    if (!byUnit.has(k)) byUnit.set(k, []);
+    byUnit.get(k).push(b);
+  });
+  const usedGroups = new Set();
+  byUnit.forEach(members => {
+    const old = members.map(b => oldBreakerById.get(b.id)).filter(Boolean).map(b => b.groupId).filter(Boolean);
+    const candidate = old.length === members.length && new Set(old).size === 1 ? old[0] : "";
+    const groupId = candidate && !usedGroups.has(candidate) ? candidate : crypto.randomUUID();
+    usedGroups.add(groupId);
+    members.forEach(b => { b.groupId = groupId; });
+  });
+
+  if (errors.length) return fail();
+
+  const breakers = breakerOrder.map(({ unit, firstRow, sig, ...b }) => b);
+  const newCircuits = [...breakers.flatMap(b => b.circuits), ...unassigned];
+  const removed = {
+    breakers: oldBreakers.filter(b => !claimedBreakerIds.has(b.id)).length,
+    circuits: oldCircuits.filter(c => !claimedCircuitIds.has(c.id)).length,
+  };
+  // "Nothing would change" is said rather than offered as an import that
+  // writes an identical layout and an audit row describing nothing.
+  const shape = (bs, us) => JSON.stringify({
+    b: [...bs].map(b => ({ ...b, cells: [...(b.cells || [])].sort(), ampRating: String(b.ampRating == null ? "" : b.ampRating),
+      installedDate: b.installedDate ? dateOnly(b.installedDate) : "",
+      circuits: (b.circuits || []).map(c => ({ id: c.id, label: c.label || "", notes: c.notes || "", roomsServedIds: c.roomsServedIds || [], feedsPanelLabel: c.feedsPanelLabel || "" })) }))
+      .map(({ id, cells, ampRating, serial, installedDate, notes, groupId, breakerTypeId, circuits }) => ({ id, cells, ampRating, serial: serial || "", installedDate, notes: notes || "", groupId: groupId || "", breakerTypeId: breakerTypeId || "", circuits }))
+      .sort((x, y) => x.id.localeCompare(y.id)),
+    u: (us || []).map(c => ({ id: c.id, label: c.label || "", notes: c.notes || "", roomsServedIds: c.roomsServedIds || [], feedsPanelLabel: c.feedsPanelLabel || "" })),
+  });
+  const unchanged = shape(breakers, unassigned) === shape(oldBreakers, panel.unassignedCircuits || []);
+  return {
+    errors, warnings, breakers, unassignedCircuits: unassigned,
+    counts: { breakers: breakers.length, circuits: newCircuits.length, unassigned: unassigned.length },
+    removed, unchanged,
+  };
+}
+
 // Buckets the read-only detail view's fields into labeled sections instead of
 // one flat list. Any column not named here (custom user-added columns) falls
 // into a trailing "Custom Fields" group rather than being dropped.
@@ -3612,7 +3907,7 @@ const FRONTEND_SCRIPT_VERSION = "v43";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-29.2";
+const APP_VERSION = "2026-09-29.3";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -5843,6 +6138,11 @@ function AssetTracker() {
   // description of a write that has not happened. Nothing is applied until the
   // review's own button is pressed, so closing this modal is a complete undo.
   const [importReview, setImportReview] = useState(null);
+  // The panel schedule import's review (see planPanelImport). Its own state
+  // rather than importReview's, because the two plans have nothing in common
+  // but the fact that a modal shows them.
+  const [panelImportReview, setPanelImportReview] = useState(null);
+  const panelImportInputRef = useRef(null);
   // Reading and planning the file, which needs `xlsx` fetched first — a second
   // or two on a cold load, in front of a click that otherwise looks ignored.
   const [importBusy, setImportBusy] = useState(false);
@@ -10316,6 +10616,80 @@ function AssetTracker() {
     setNotice(`Imported ${plan.fileName}: ${bits.join(", ")}.`);
   }
 
+  // ONE panel's layout as a sheet the same panel reads back — see
+  // panelScheduleRows. Always the whole panel: no view mode, room filter or
+  // sort reaches it, because the import REPLACES the layout with the file.
+  async function exportPanelSchedule(panel) {
+    if (!panel) return;
+    let XLSX;
+    try {
+      XLSX = await import("xlsx");
+    } catch (e) {
+      setNotice("Couldn't load the spreadsheet export tool. Check your connection and try again.");
+      return;
+    }
+    const rows = panelScheduleRows(panel, { assets, breakerTypes });
+    const ws = rows.length
+      ? XLSX.utils.json_to_sheet(rows, { header: PANEL_SCHEDULE_HEADERS })
+      : XLSX.utils.aoa_to_sheet([PANEL_SCHEDULE_HEADERS]);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Panel");
+    const name = String(panel.tag || nameOf(panel, typesList) || "panel").replace(/[^\w.-]+/g, "-");
+    XLSX.writeFile(wb, `${CLIENT.id}-panel-${name}.xlsx`);
+  }
+
+  // Reads a schedule and works out what importing it into the OPEN panel would
+  // do. Writes nothing — the review modal is what offers to.
+  async function reviewPanelImportFile(file) {
+    if (!file || !selectedAsset) return;
+    let XLSX;
+    try {
+      XLSX = await import("xlsx");
+    } catch (e) {
+      setNotice("Couldn't load the spreadsheet tool. Check your connection and try Import again.");
+      return;
+    }
+    let grid;
+    try {
+      const wb = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
+      const sheetName = wb.SheetNames[0];
+      grid = sheetName
+        ? XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, defval: "", raw: true, blankrows: false })
+        : null;
+    } catch (e) {
+      setNotice("That file couldn't be read as a spreadsheet. Export a panel schedule to get one in the right shape.");
+      return;
+    }
+    if (!grid || !grid.length) { setNotice("That file is empty."); return; }
+    const plan = planPanelImport(importRowsFromGrid(grid), { panel: selectedAsset, assets, breakerTypes });
+    setPanelImportReview({ ...plan, panelId: selectedAsset.id, fileName: file.name || "the file" });
+  }
+
+  // ONE persist() for the whole layout, and ONE audit row: an import replaces
+  // the layout as a unit, and the file it came from is the record of what it
+  // held. Photos on a breaker the file dropped are left alone, exactly as
+  // deleting that breaker by hand leaves them.
+  async function applyPanelImport() {
+    const plan = panelImportReview;
+    if (!plan || plan.errors.length || plan.unchanged) return;
+    if (savingRef.current) return;
+    const panel = (assets || []).find(a => a.id === plan.panelId);
+    if (!panel) { setPanelImportReview(null); return; }
+    const oldBreakers = panel.breakers || [];
+    const oldCircuitCount = oldBreakers.reduce((n, b) => n + (b.circuits || []).length, 0) + (panel.unassignedCircuits || []).length;
+    const entry = {
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: panel.id, assetType: panel.type,
+      action: "panel_imported", field: plan.fileName,
+      from: `${oldBreakers.length} breakers, ${oldCircuitCount} circuits`,
+      to: `${plan.counts.breakers} breakers, ${plan.counts.circuits} circuits`,
+    };
+    const next = assets.map(a => (a.id === panel.id ? { ...a, breakers: plan.breakers, unassignedCircuits: plan.unassignedCircuits } : a));
+    setPanelImportReview(null);
+    setBreakerModal(null);
+    await persist(next, { auditLog: logAudit([entry]) });
+    setNotice(`Imported ${plan.fileName}: ${plan.counts.breakers} breakers, ${plan.counts.circuits} circuits.`);
+  }
+
   // Async ONLY because of the dynamic import below; everything after it is the
   // same synchronous workbook build it always was.
   async function exportToExcel() {
@@ -12969,7 +13343,78 @@ function AssetTracker() {
               saveCircuitEdit={saveCircuitEdit}
               deleteCircuit={deleteCircuit}
               openMoveCircuit={openMoveCircuit}
+              onExportSchedule={() => exportPanelSchedule(selectedAsset)}
+              onImportSchedule={() => { if (panelImportInputRef.current) panelImportInputRef.current.click(); }}
             />
+          )}
+          {/* Permanently mounted (a menu row cannot open a file picker itself),
+              and its value cleared on every pick, or choosing the same file twice
+              fires no change event the second time — the Assets import's rule. */}
+          <input
+            ref={panelImportInputRef}
+            type="file"
+            accept=".xlsx,.xls,.csv"
+            style={{ display: "none" }}
+            onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ""; reviewPanelImportFile(f); }}
+          />
+          {panelImportReview && (
+            <div onClick={() => setPanelImportReview(null)} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
+              <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 520, maxHeight: "85vh", overflowY: "auto" }}>
+                <div style={{ fontWeight: 700, marginBottom: 4, color: panelImportReview.errors.length ? C.danger : C.brandDark }}>
+                  {panelImportReview.errors.length ? "This file can't be imported" : panelImportReview.unchanged ? "Nothing to import" : "Replace this panel's layout?"}
+                </div>
+                <div style={{ fontSize: 12, color: C.muted, marginBottom: 14, wordBreak: "break-all" }}>{panelImportReview.fileName}</div>
+                {panelImportReview.errors.length > 0 ? (
+                  <div style={{ fontSize: 13, color: C.ink }}>
+                    <div style={{ marginBottom: 8 }}>Nothing was changed. Fix these in the file and import it again:</div>
+                    <ul style={{ margin: 0, paddingLeft: 18, color: C.danger }}>
+                      {panelImportReview.errors.slice(0, IMPORT_MESSAGE_LIMIT).map((m, i) => <li key={i}>{m}</li>)}
+                    </ul>
+                    {panelImportReview.errors.length > IMPORT_MESSAGE_LIMIT && (
+                      <div style={{ marginTop: 6, color: C.muted }}>…and {panelImportReview.errors.length - IMPORT_MESSAGE_LIMIT} more.</div>
+                    )}
+                  </div>
+                ) : panelImportReview.unchanged ? (
+                  <div style={{ fontSize: 13, color: C.ink }}>The file matches this panel exactly.</div>
+                ) : (
+                  <div style={{ fontSize: 13, color: C.ink }}>
+                    <div style={{ marginBottom: 10 }}>
+                      The file becomes this panel's whole layout: <b>{panelImportReview.counts.breakers}</b> breaker{panelImportReview.counts.breakers === 1 ? "" : "s"} and <b>{panelImportReview.counts.circuits}</b> circuit{panelImportReview.counts.circuits === 1 ? "" : "s"}
+                      {panelImportReview.counts.unassigned ? ` (${panelImportReview.counts.unassigned} unassigned)` : ""}.
+                    </div>
+                    {(panelImportReview.removed.breakers > 0 || panelImportReview.removed.circuits > 0) && (
+                      <div style={{ marginBottom: 10, color: C.danger }}>
+                        {[
+                          panelImportReview.removed.breakers ? `${panelImportReview.removed.breakers} breaker${panelImportReview.removed.breakers === 1 ? "" : "s"}` : "",
+                          panelImportReview.removed.circuits ? `${panelImportReview.removed.circuits} circuit${panelImportReview.removed.circuits === 1 ? "" : "s"}` : "",
+                        ].filter(Boolean).join(" and ")} on the panel now {panelImportReview.removed.breakers + panelImportReview.removed.circuits === 1 ? "isn't" : "aren't"} in the file and will be removed.
+                      </div>
+                    )}
+                    {panelImportReview.warnings.length > 0 && (
+                      <>
+                        <div style={{ marginBottom: 6, color: C.muted }}>Worth checking first:</div>
+                        <ul style={{ margin: 0, paddingLeft: 18 }}>
+                          {panelImportReview.warnings.slice(0, IMPORT_MESSAGE_LIMIT).map((m, i) => <li key={i}>{m}</li>)}
+                        </ul>
+                        {panelImportReview.warnings.length > IMPORT_MESSAGE_LIMIT && (
+                          <div style={{ marginTop: 6, color: C.muted }}>…and {panelImportReview.warnings.length - IMPORT_MESSAGE_LIMIT} more.</div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 18 }}>
+                  <button onClick={() => setPanelImportReview(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>
+                    {panelImportReview.errors.length || panelImportReview.unchanged ? "Close" : "Cancel"}
+                  </button>
+                  {!panelImportReview.errors.length && !panelImportReview.unchanged && (
+                    <button onClick={applyPanelImport} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>
+                      Replace layout
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
           )}
 
           {/* Sub-tabs. Deliberately styled lighter than the main tab bar --
@@ -19643,6 +20088,7 @@ function BreakersTabContent({
   updatePanelConfig, openBreakerModal, addBreakerDraft, setAddBreakerDraft,
   setShowBreakerTypesManager, addBreaker,
   addCircuit, saveCircuitEdit, deleteCircuit, openMoveCircuit,
+  onExportSchedule, onImportSchedule,
   canEdit,
 }) {
   const feed = assets
@@ -19689,6 +20135,8 @@ function BreakersTabContent({
           panelLabel={selectedAsset.id}
           canEdit={canEdit}
           onReconfigure={() => setShowPanelConfig(true)}
+          onExportSchedule={onExportSchedule}
+          onImportSchedule={onImportSchedule}
           onSlotClick={id => {
             const list = selectedAsset.breakers || [];
             const b = list.find(x => x.id === id);
@@ -20183,7 +20631,7 @@ function PanelLegendCard({ slotCount, breakers, unassignedCircuits, allAssets, p
   );
 }
 
-function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAssets, breakerTypes, panelAsset, panelLabel, onReconfigure, onSlotClick, onSpareClick, canEdit }) {
+function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAssets, breakerTypes, panelAsset, panelLabel, onReconfigure, onSlotClick, onSpareClick, onExportSchedule, onImportSchedule, canEdit }) {
   // Clicking an empty slot is how a breaker gets ADDED, so it's inert for a
   // viewer. Guarded here rather than by not rendering the cells, because the
   // empty slots are meaningful information on a panel diagram — "nothing is in
@@ -20200,7 +20648,7 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
   // rAF doesn't fire while the page isn't compositing, so a user who clicked and
   // immediately switched tabs would get no print dialog at all until they came
   // back. A timer fires either way.
-  const [printMenuOpen, setPrintMenuOpen] = useState(false);
+  const [panelMenuOpen, setPanelMenuOpen] = useState(false);
   const [printMode, setPrintMode] = useState("exact"); // "exact" | "tiled"
   const [printPageHeightIn, setPrintPageHeightIn] = useState(null);
   const [printRequest, setPrintRequest] = useState(0);
@@ -20227,14 +20675,14 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
     el.classList.remove("measuring");
     setPrintPageHeightIn(h);
   }
-  function togglePrintMenu() {
-    setPrintMenuOpen(open => {
+  function togglePanelMenu() {
+    setPanelMenuOpen(open => {
       if (!open) measureCard();
       return !open;
     });
   }
   function runPrint(mode) {
-    setPrintMenuOpen(false);
+    setPanelMenuOpen(false);
     measureCard();
     setPrintMode(mode);
     setPrintRequest(n => n + 1);
@@ -20410,49 +20858,13 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
           <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>
             Panel Layout — {slotCount} slots · {threePhase ? "3-phase" : "1-phase"}{panelAsset && panelAsset.panelVoltage ? ` ${panelAsset.panelVoltage}V` : ""}
           </span>
-          {canEdit && (
-          <button onClick={onReconfigure} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex", alignItems: "center", color: C.muted }} aria-label="Reconfigure panel layout">
-            <Settings size={14} />
-          </button>
+          {linkCopied && (
+            <span style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 600, color: C.success }} role="status">
+              <Check size={13} /> Link copied
+            </span>
           )}
-          {/* Copy link and the QR sticker are reads — a viewer standing at a
-              panel is exactly who needs them. */}
-          <button onClick={copyPanelLink} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex", alignItems: "center", gap: 4, color: linkCopied ? C.success : C.muted }} aria-label="Copy link to this panel">
-            {linkCopied ? <Check size={14} /> : <Copy size={14} />}
-            {linkCopied && <span style={{ fontSize: 11, fontWeight: 600 }}>Copied!</span>}
-          </button>
-          <button onClick={openPanelQrSheet} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex", alignItems: "center", color: C.muted }} aria-label="Print a QR sticker for this panel">
-            <QrCode size={14} />
-          </button>
-          {/* Prints the door card, which is built from the panel's own data —
-              so this sits outside the Breaker/Feeds/Table toggle and is offered
-              in all three modes, not just Table. The two entries are page
-              geometry, not content: both print the identical card. */}
-          <div style={{ position: "relative", display: "flex" }}>
-            <button onClick={togglePrintMenu} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex", alignItems: "center", color: C.muted }} aria-label="Print circuit directory">
-              <Printer size={14} />
-            </button>
-            {printMenuOpen && (
-              <>
-                <div onClick={() => setPrintMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
-                <div style={{ position: "absolute", top: "100%", left: 0, marginTop: 4, zIndex: 41, background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 10, boxShadow: "0 4px 12px rgba(42,52,57,0.15)", minWidth: 240, overflow: "hidden" }}>
-                  {[
-                    ["exact", "Print at panel size", `${LEGEND_WIDTH_IN}" × ${Math.max(slotCount * LEGEND_ROW_IN + LEGEND_BAND_IN * 2, printPageHeightIn || 0).toFixed(1)}" — one page, true scale. Save as PDF.`],
-                    ["tiled", "Tile across letter pages", "Cut and tape end-to-end. For printing at home."],
-                  ].map(([mode, title, hint]) => (
-                    <button
-                      key={mode} type="button" onClick={() => runPrint(mode)}
-                      style={{ display: "block", width: "100%", textAlign: "left", padding: "9px 12px", background: "none", border: "none", borderTop: mode === "tiled" ? `1px solid ${C.border}` : "none" }}
-                    >
-                      <div style={{ fontSize: 13, fontWeight: 600, color: C.ink }}>{title}</div>
-                      <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{hint}</div>
-                    </button>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
         </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
         <div style={{ display: "flex", border: `1.5px solid ${C.border}`, borderRadius: 8, overflow: "hidden" }}>
           {[["breaker", "Breaker"], ["feeds", "Feeds"], ["table", "Table"]].map(([val, label]) => (
             <button
@@ -20462,6 +20874,50 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
               {label}
             </button>
           ))}
+        </div>
+        {/* EVERY panel action lives in this one menu (2026-09-29): configure,
+            copy link, QR sticker, the two door-card prints, and the schedule
+            export/import. They used to be four bare icons beside the title,
+            which on a phone wrapped under it and read as decoration. Reads
+            (link, sticker, print, export) are offered to viewers — someone
+            standing at the panel is exactly who needs them; the two writes are
+            not. The print rows keep their geometry hints, and opening the menu
+            measures the card so the quoted size is the size that prints. */}
+        <div style={{ position: "relative", display: "flex" }}>
+          <button onClick={togglePanelMenu} className="icon-btn" style={{ background: "none", border: "none", padding: 5, borderRadius: 6, display: "flex", alignItems: "center", color: C.ink }} aria-label="Panel actions" aria-expanded={panelMenuOpen}>
+            <Menu size={18} />
+          </button>
+          {panelMenuOpen && (
+            <>
+              <div onClick={() => setPanelMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
+              <div style={{ position: "absolute", top: "100%", right: 0, marginTop: 4, zIndex: 41, background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 10, boxShadow: "0 4px 12px rgba(42,52,57,0.15)", minWidth: 260, overflow: "hidden" }}>
+                {[
+                  canEdit && { key: "configure", icon: Settings, title: "Configure panel", hint: "Slots, layout, phase and voltage.", run: onReconfigure },
+                  { key: "link", icon: Copy, title: "Copy link", run: copyPanelLink },
+                  { key: "qr", icon: QrCode, title: "Print QR sticker", run: openPanelQrSheet },
+                  { key: "exact", icon: Printer, title: "Print directory at panel size", hint: `${LEGEND_WIDTH_IN}" × ${Math.max(slotCount * LEGEND_ROW_IN + LEGEND_BAND_IN * 2, printPageHeightIn || 0).toFixed(1)}" — one page, true scale. Save as PDF.`, run: () => runPrint("exact") },
+                  { key: "tiled", icon: Printer, title: "Print directory on letter pages", hint: "Cut and tape end-to-end. For printing at home.", run: () => runPrint("tiled") },
+                  onExportSchedule && { key: "export", icon: Download, title: "Export schedule", hint: "Breakers and circuits as a spreadsheet.", run: onExportSchedule },
+                  canEdit && onImportSchedule && { key: "import", icon: Upload, title: "Import schedule…", hint: "Replace this panel's layout from a spreadsheet.", run: onImportSchedule },
+                ].filter(Boolean).map((item, i) => {
+                  const Icon = item.icon;
+                  return (
+                    <button
+                      key={item.key} type="button" onClick={() => { setPanelMenuOpen(false); item.run(); }}
+                      style={{ display: "flex", gap: 10, alignItems: "flex-start", width: "100%", textAlign: "left", padding: "9px 12px", background: "none", border: "none", borderTop: i > 0 ? `1px solid ${C.border}` : "none" }}
+                    >
+                      <Icon size={15} color={C.muted} style={{ flexShrink: 0, marginTop: 1 }} />
+                      <span>
+                        <span style={{ display: "block", fontSize: 13, fontWeight: 600, color: C.ink }}>{item.title}</span>
+                        {item.hint && <span style={{ display: "block", fontSize: 11, color: C.muted, marginTop: 2 }}>{item.hint}</span>}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </div>
         </div>
       </div>
       {parityWarnings.length > 0 && (
