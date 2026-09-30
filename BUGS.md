@@ -16,7 +16,7 @@ version that fixed them.
 
 ## Open
 
-### A save the client gives up on keeps the lock, so its retry is refused as "busy"
+### A save ran ~6 minutes holding the lock; everything behind it was refused as "busy"
 **Found:** 2026-09-30, from Eric's dev diagnostics export (app 2026-09-30.9, backend v47):
 `save_failed ... busy ... (43484ms)`, and the Diagnostics window's backend half refused as busy
 about a minute later.
@@ -44,6 +44,18 @@ dev backend was slow generally. The Diagnostics tab in the dev Sheet should hold
 per refusal and a `slow_save` row with the real duration if the save completed; Google's
 Executions page shows it if it ran into the 6-minute limit instead.
 **Blocks:** nothing outright; it turns one slow save into a failed-looking one.
+
+**Update, same evening — the lock was held for about SIX MINUTES.** Eric's phone, opened at
+02:51:05Z, was refused as busy at 02:51:17Z (backend row: `busy op=read ... lock not acquired
+in 10000ms`) and fell back to the saved copy; it loaded normally at 02:52:34Z. The desktop save
+started at ~02:45:41Z, and Apps Script kills an execution at 6 minutes: 02:51:41Z. The lock
+being held right up to that point and free just after fits a save that ran into the limit.
+No `slow_save` or `error` row is expected in that case, since a killed execution runs neither.
+**If that is right, the save may have been killed MID-WRITE**: `writeTable_` clears a tab and
+then writes it, and the revision bump comes last, so a tab could have been left empty or half
+written with the counters unchanged. Confirm on Google's Executions page for the dev script
+(look for a ~360s run ending "Exceeded maximum execution time"), and check the dev Sheet's
+tabs against version history. What made one save take six minutes is still unknown.
 
 ### Choosing a type in the Add asset form also opens "Manage asset types"
 **Found:** 2026-09-28, while adding search to the Type picker.
