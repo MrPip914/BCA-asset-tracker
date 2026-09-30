@@ -50,7 +50,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v46";
+const SCRIPT_VERSION = "v47";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -167,6 +167,11 @@ const ASSET_FIELDS = [
   // v46: quarter turns clockwise the plan is drawn at, "0".."3". Blank reads as 0,
   // which is how every existing plan was drawn, so no row needs migrating.
   "floorPlanRotation",
+  // v47: what tapping this location again does on a map. "mapSelectMode" is
+  // "other" or "choose" (blank = show this location's own plan, which is how
+  // every location behaved before); "mapSelectTargets" is the alternate
+  // locations' ids, comma-joined.
+  "mapSelectMode", "mapSelectTargets",
 ];
 
 // The Assets tab's real column set: the fixed schema above PLUS whatever custom
