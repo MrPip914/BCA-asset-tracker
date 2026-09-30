@@ -198,13 +198,13 @@ const TYPE_REGISTRY = {
   // custom one, can have it switched on from the type editor, the same way
   // requiredFields already works (typeSettings[id].floorPlan overrides this).
   Room: {
-    locked: true, icon: DoorOpen, categoryIds: ["Places"], parentTypes: ["Building", "Room"],
+    locked: true, icon: DoorOpen, categoryIds: ["Places"], parentTypes: ["Building", "Room"], location: true,
     excludedFields: ["tag", "brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
     floorPlan: true,
   },
   // One level up from a Room, with even less in common with a device asset.
   Building: {
-    locked: true, icon: Building2, categoryIds: ["Places"], parentTypes: ["Campus"],
+    locked: true, icon: Building2, categoryIds: ["Places"], parentTypes: ["Campus"], location: true,
     excludedFields: ["tag", "brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
     floorPlan: true,
   },
@@ -215,7 +215,7 @@ const TYPE_REGISTRY = {
   // the parent chain paying for itself: nothing else in the app needed telling
   // that the world got a level deeper.
   Campus: {
-    locked: true, icon: MapPin, categoryIds: ["Places"], parentTypes: [],
+    locked: true, icon: MapPin, categoryIds: ["Places"], parentTypes: [], location: true,
     excludedFields: ["tag", "brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
     floorPlan: true,
   },
@@ -554,11 +554,21 @@ function recomputeDerivedTypeSets() {
   const restricted = new Set();
   const places = new Set();
   const people = new Set();
+  // A type is a LOCATION when its `location` setting says so. A type with NO
+  // setting either way (every type saved before the setting existed) falls back
+  // to the old derivation -- it is one if something is allowed to sit inside it --
+  // so nothing needs migrating; an explicit false beats that fallback.
+  const named = new Set();
   ids.forEach(id => {
     const entry = typeEntryFor(id) || {};
     (entry.onlyFields || []).forEach(k => restricted.add(k));
-    (entry.parentTypes || []).forEach(t => places.add(t));
+    (entry.parentTypes || []).forEach(t => named.add(t));
     if (entry.personType) people.add(id);
+  });
+  new Set([...ids, ...named]).forEach(id => {
+    const entry = typeEntryFor(id) || {};
+    if (typeof entry.location === "boolean") { if (entry.location) places.add(id); }
+    else if (named.has(id)) places.add(id);
   });
   // A per-type field is restricted by a flag on the COLUMN, not by whoever
   // currently claims it in onlyFields. Otherwise unticking it from its last
@@ -722,8 +732,9 @@ function canBeParentOf(parentType, childType) {
 // what's on them. Deriving it is also the cheapest possible version of the
 // "move place-ness into the type settings" work, done here because Campus forced
 // the issue rather than as a refactor pass of its own.
-// Derived from every type's parentTypes, INCLUDING user overrides, so making a
-// type able to hold something turns that something into a place immediately.
+// The type's own `location` setting (Relationships > Location in the type
+// editor), else -- for a type that never had one -- derived from every type's
+// parentTypes, INCLUDING user overrides. See recomputeDerivedTypeSets.
 function isPlaceType(type) {
   return DERIVED_TYPE_SETS.placeTypes.has(type);
 }
@@ -2317,8 +2328,10 @@ function contentsOf(place, assets) {
     return { contentRooms: [], contentDevices: [], contentAllocations: [], contentsCount: 0 };
   }
   const below = descendantsOf(place, assets);
-  const contentRooms = below.filter(a => a.type === "Room");
-  const contentDevices = below.filter(a => a.type !== "Room");
+  // "Rooms" here means LOCATIONS: anything whose type is marked a location.
+  // This used to be `type === "Room"`, which listed Floors and Buildings as devices.
+  const contentRooms = below.filter(a => isPlaceType(a.type));
+  const contentDevices = below.filter(a => !isPlaceType(a.type));
   // A bulk allocation names a Room directly and is not a parent link, so it
   // stays an exact match on this place rather than anything below it.
   const contentAllocations = (assets || [])
@@ -2346,7 +2359,7 @@ function ContentsList({ place, assets, typesList, onOpen, emptyLabel }) {
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       {contentRooms.length > 0 && (
         <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginBottom: 2 }}>
-          Rooms ({contentRooms.length})
+          Locations ({contentRooms.length})
         </div>
       )}
       {contentRooms.map(r => {
@@ -3982,7 +3995,7 @@ const FRONTEND_SCRIPT_VERSION = "v49";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-30.21";
+const APP_VERSION = "2026-09-30.22";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -10564,7 +10577,10 @@ function AssetTracker() {
       ...typeSettings,
       [id]: {
         iconName: draft.iconName || undefined,
-        parentTypes: draft.parentTypes,
+        // Only LOCATION types can be parents. The type being edited counts as one
+        // if this save makes it one (Room inside Room).
+        parentTypes: (draft.parentTypes || []).filter(pt => (pt === id ? !!draft.location : isPlaceType(pt))),
+        location: !!draft.location,
         // Unchecked fields become exclusions; checked ones enter onlyFields only
         // when they're restricted — shipped that way, or created as a per-type
         // field just above.
@@ -17252,6 +17268,7 @@ function TypeManagerModal({
       name: t.name,
       iconName: entry.iconName || "",
       parentTypes: entry.parentTypes || (TYPE_REGISTRY[t.id] ? [] : DEFAULT_PARENT_TYPES),
+      location: isPlaceType(t.id),
       fields: fieldOptions.filter(f => fieldAppliesTo(f.key, t.id)).map(f => f.key),
       requiredFields: requiredFieldsFor(t.id).slice(),
       // Type-level, not per-field -- whether THIS type can carry a floor plan
@@ -17735,16 +17752,52 @@ function TypeManagerModal({
               </div>
             </div>
 
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Can sit inside</span>
-              <div style={{ fontSize: 12, color: C.empty }}>
-                Nothing ticked means this type has no Parent field at all — right for a Campus, or for something pooled across rooms.
-              </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                {types.map(t => chip(
-                  draft.parentTypes.includes(t.id), t.name, t.id,
-                  () => setDraft({ ...draft, parentTypes: toggle(draft.parentTypes, t.id) })
-                ))}
+            {/* RELATIONSHIPS. Location is the only one so far; it is named as such
+                because other kinds of relationship are coming and must not leak into
+                the location navigator, the Contents tab or the Map. */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Relationships</span>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingLeft: 10, borderLeft: `2px solid ${C.border}` }}>
+                <span style={{ fontSize: 13, fontWeight: 700, color: C.ink }}>Location</span>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                  <button
+                    type="button"
+                    role="checkbox"
+                    aria-checked={!!draft.location}
+                    aria-label="Treat this type as a location"
+                    onClick={() => setDraft({ ...draft, location: !draft.location })}
+                    style={{
+                      width: 16, height: 16, flexShrink: 0, borderRadius: 4, padding: 0,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      border: `1.5px solid ${draft.location ? C.brand : C.border}`,
+                      background: draft.location ? C.brand : "transparent",
+                    }}
+                  >
+                    {draft.location && <Check size={11} color="#fff" />}
+                  </button>
+                  <span style={{ fontSize: 13, color: C.ink }}>Treat this type as a location</span>
+                </label>
+                <div style={{ fontSize: 12, color: C.empty }}>
+                  Locations show in the location navigator, on the Contents tab and on the Map, and can hold other assets.
+                </div>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, marginTop: 4 }}>Can sit inside</span>
+                <div style={{ fontSize: 12, color: C.empty }}>
+                  Pick one or more locations. Nothing ticked means this type has no Parent field at all — right for a Campus, or for something pooled across rooms.
+                </div>
+                {(() => {
+                  // Location types only; this type counts as one while its own box is ticked.
+                  const locationTypes = types.filter(t => (t.id === draft.id ? !!draft.location : isPlaceType(t.id)));
+                  return (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {locationTypes.length === 0
+                        ? <span style={{ fontSize: 12, color: C.empty }}>No location types yet — tick "Treat this type as a location" on one.</span>
+                        : locationTypes.map(t => chip(
+                            draft.parentTypes.includes(t.id), t.name, t.id,
+                            () => setDraft({ ...draft, parentTypes: toggle(draft.parentTypes, t.id) })
+                          ))}
+                    </div>
+                  );
+                })()}
               </div>
             </div>
 
