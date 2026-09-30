@@ -3194,9 +3194,13 @@ array position can't serve as identity once things move.
   - **ChildEntityTable's `select` is a `div`, not a `<label>`** — the wire colour was the
     first select any caller used and hit the picker-reopen bug (`BUGS.md`).
 - **Circuits can share a neutral, and sharing one on the SAME LEG is flagged** (backend v45,
-  2026-09-30). A "Shares a neutral with another circuit" checkbox, then chips of every other
-  circuit on the panel (several allowed — a 3-phase multi-wire branch shares one neutral
-  three ways). Ticked with none chosen is refused.
+  2026-09-30). A "Shares a neutral with another circuit" checkbox, then a MULTI-SELECT
+  DROPDOWN of every other circuit on the panel (several allowed — a 3-phase multi-wire
+  branch shares one neutral three ways). Ticked with none chosen is refused.
+  - **The dropdown is `SelectionModal` with `multi`** (same day; it was a wrap of chips,
+    which on a big panel is a wall). `multi` makes `value` an array, a tap toggle without
+    closing, and adds a Done button; every other caller is unchanged. The trigger sits
+    OUTSIDE the checkbox's `<label>` — a picker inside one re-opens after a choice.
   - **Stored on BOTH circuits** (`sharedNeutralWithIds`, sheet column `sharedNeutralWith`,
     comma-joined like `roomsServed`), kept symmetric by `syncSharedNeutral` on every add,
     edit and delete (a deleted circuit is dropped from its partners). The deliberate
