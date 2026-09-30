@@ -19434,31 +19434,39 @@ function FloorPlanTabContent({
   // no flicker, the focus destination just wins over the whole-plan fit.
   // A shapeId that matches nothing (a stale focus from a different plan)
   // clears itself rather than pulsing nothing.
-  const [pulsingShapeId, setPulsingShapeId] = useState(null);
-  const pulseTimerRef = useRef(null);
-  useEffect(() => {
-    if (plan.status !== "ready" || !focusShapeId) return;
-    const shape = plan.spaces.find(s => s.gid === focusShapeId);
-    if (!shape) { onFocusHandled(); return; }
-    zoomToBbox(floorPlanBbox(shape.pts), 0.5, true);
-    setPulsingShapeId(focusShapeId);
-    clearTimeout(pulseTimerRef.current);
-    pulseTimerRef.current = setTimeout(() => setPulsingShapeId(null), 3600);
-    onFocusHandled();
-  }, [plan.status, plan.spaces, selectedAsset.id, focusShapeId]);
-
   // Selection and group-open state must not carry across a SCOPE change --
   // two different plans can reuse the same shape id (each SVG's own gid
   // numbering is local to its own file), so a shape selected on the plan
   // just left could otherwise read as "already selected" on the very
   // first tap of a DIFFERENT plan, turning what should be a first tap
   // into an accidental navigate (see onShapeClick's double-tap gate).
+  // Declared BEFORE the focus effect below on purpose: effects run in
+  // declaration order, so on a scope change this clears first and the focus
+  // effect's group-open is the last write.
   // FloorPlanTabContent isn't remounted on a scope change -- same tree
   // position, just a new selectedAsset prop -- so nothing else clears this.
   useEffect(() => {
     setSelectedShapeId(null);
     setOpenGroupId(null);
   }, [selectedAsset.id]);
+
+  const [pulsingShapeId, setPulsingShapeId] = useState(null);
+  const pulseTimerRef = useRef(null);
+  useEffect(() => {
+    if (plan.status !== "ready" || !focusShapeId) return;
+    const shape = plan.spaces.find(s => s.gid === focusShapeId);
+    if (!shape) { onFocusHandled(); return; }
+    // A shape inside a COLLAPSED group has no tile of its own, so the pulse
+    // would flash the whole group. Open the group first: its members then
+    // draw individually and only this one pulses.
+    const grp = groupOfShape(focusShapeId);
+    if (grp) { setOpenGroupId(grp.id); setSelectedShapeId(null); }
+    zoomToBbox(floorPlanBbox(shape.pts), 0.5, true);
+    setPulsingShapeId(focusShapeId);
+    clearTimeout(pulseTimerRef.current);
+    pulseTimerRef.current = setTimeout(() => setPulsingShapeId(null), 3600);
+    onFocusHandled();
+  }, [plan.status, plan.spaces, selectedAsset.id, focusShapeId]);
 
   // ---- Free Zoom gestures: wheel-to-zoom-at-cursor, drag-to-pan. Off by
   // default -- most of the time tapping a shape (which auto-frames it) is
