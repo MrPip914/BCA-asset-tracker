@@ -3058,7 +3058,9 @@ array position can't serve as identity once things move.
   - **The pieces and the bar are ONE shape, with no line between them** (Eric, same day).
     The cluster draws its dividers as its background showing through 1px grid gaps, so a
     piece SPANS across to its own bar's track and the bar is emitted after it, painting
-    over the overlap in the same colour. The bar track is 52px.
+    over the overlap in the same colour. A bar track is `clamp(18px, N%, 52px)` — 52px on a
+    desktop, narrowing on a phone — with N shrinking as bars nest so all of them together
+    stay within ~40% of the column and the wrapped breakers keep room for a label.
     - **An inner bar's track is NOT filled where an outer breaker's piece reaches across
       it** — the filler is white and drawn later, so it painted a box over the outer
       breaker's own cell (Eric's 37a+41b around 37b+41a, reported the same day).
