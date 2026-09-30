@@ -3982,7 +3982,7 @@ const FRONTEND_SCRIPT_VERSION = "v49";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-30.17";
+const APP_VERSION = "2026-09-30.18";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -6191,6 +6191,10 @@ function AssetTracker() {
   // it survive the scope change: setScopeId often remounts the component
   // that would otherwise have to carry it.
   const [mapFocusShapeId, setMapFocusShapeId] = useState(null);
+  // One-shot: a shape to SELECT and frame (no pulse) once the plan loads. Armed by the
+  // Map breadcrumb when it jumps up to a parent's plan, so the place you clicked is
+  // the one highlighted there.
+  const [mapSelectShapeId, setMapSelectShapeId] = useState(null);
   // Same one-shot idea for a PINNED asset: zoom to it and pulse it. Kept apart
   // from the shape focus because a pin is not a shape and needs no group logic.
   const [mapFocusPinId, setMapFocusPinId] = useState(null);
@@ -15763,6 +15767,19 @@ function AssetTracker() {
             const target = assets.find(a => a.id === id);
             const withPlan = target && (target.floorPlanUrl ? target : ancestorsOf(target, assets).find(x => x.floorPlanUrl));
             setScopeId(withPlan ? withPlan.id : id);
+            setMapQuery("");
+            setMapFocusShapeId(null);
+            setMapSelectShapeId(null);
+            // Jumped up: select the closest place (the crumb, else the nearest
+            // ancestor of it) that is drawn on that plan.
+            if (target && withPlan && withPlan.id !== target.id) {
+              const chain = [target, ...ancestorsOf(target, assets)];
+              const cut = chain.findIndex(x => x.id === withPlan.id);
+              for (const place of chain.slice(0, cut)) {
+                const link = (withPlan.floorPlanLinks || []).find(l => l.roomId === place.id);
+                if (link) { setMapSelectShapeId(link.shapeId); break; }
+              }
+            }
           }} />
         {mapPlacing && (() => {
           const placingAsset = assets.find(a => a.id === mapPlacing.assetId);
@@ -15792,6 +15809,8 @@ function AssetTracker() {
           onRotate={() => rotateFloorPlan(scopeId)}
           onSaveMapOptions={(mode, ids) => saveMapSelectOptions(scopeId, mode, ids)}
           focusShapeId={mapFocusShapeId}
+          selectShapeId={mapSelectShapeId}
+          onSelectHandled={() => setMapSelectShapeId(null)}
           focusPinId={mapFocusPinId}
           placing={mapPlacing}
           onPlace={(x, y) => mapPlacing && placeOnMap(mapPlacing.assetId, scopeId, x, y)}
@@ -19584,7 +19603,7 @@ function MapOptionsOnlyMenu({ canEdit, asset, assets, menuSlot, onSaveMapOptions
 function MapTabContent({
   canEdit, assets, typesList, scopeAsset,
   uploadBusy, uploadError, onUploadPlan, onSaveLink, onSaveGroup, onDeleteGroup, onRotate, onSaveMapOptions,
-  focusShapeId, focusPinId, placing, onPlace, onClearPin, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot,
+  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot,
 }) {
   if (!scopeAsset) {
     return (
@@ -19624,6 +19643,8 @@ function MapTabContent({
       onPlace={onPlace}
       onClearPin={onClearPin}
       focusShapeId={focusShapeId}
+      selectShapeId={selectShapeId}
+      onSelectHandled={onSelectHandled}
       onFocusHandled={onFocusHandled}
       onOpenAsset={onOpenAsset}
       onNavigateToPlan={onNavigateToPlan}
@@ -19652,7 +19673,7 @@ function FloorPlanTabContent({
   canEdit, selectedAsset, assets, typesList,
   uploadBusy, uploadError, onUploadPlan,
   onSaveLink, onSaveGroup, onDeleteGroup, onRotate, onSaveMapOptions,
-  focusShapeId, focusPinId, placing, onPlace, onClearPin, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot,
+  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot,
 }) {
   const rawPlan = useFloorPlanSvg(selectedAsset.floorPlanUrl);
   // Rotation is stored on the asset (floorPlanRotation, quarter turns, blank = 0)
@@ -19859,6 +19880,20 @@ function FloorPlanTabContent({
     pulseTimerRef.current = setTimeout(() => setPulsingShapeId(null), 3600);
     onFocusHandled();
   }, [plan.status, plan.spaces, selectedAsset.id, focusShapeId]);
+
+  // Select-and-frame, without the pulse: the same state a first tap on the shape
+  // leaves behind, so a second tap continues exactly as it would have.
+  useEffect(() => {
+    if (plan.status !== "ready" || !selectShapeId || !onSelectHandled) return;
+    const shape = plan.spaces.find(s => s.gid === selectShapeId);
+    if (shape) {
+      const grp = groupOfShape(selectShapeId);
+      setOpenGroupId(grp ? grp.id : null);
+      setSelectedShapeId(selectShapeId);
+      zoomToBbox(floorPlanBbox(shape.pts), 0.5, true);
+    }
+    onSelectHandled();
+  }, [plan.status, plan.spaces, selectedAsset.id, selectShapeId]);
 
   // ---- Free Zoom gestures: wheel-to-zoom-at-cursor, drag-to-pan. Off by
   // default -- most of the time tapping a shape (which auto-frames it) is
