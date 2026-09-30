@@ -3961,7 +3961,7 @@ const FRONTEND_SCRIPT_VERSION = "v45";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-30.3";
+const APP_VERSION = "2026-09-30.4";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -18022,7 +18022,10 @@ function useLabelFilter(options, labelOptions, labelsForOption) {
 // Generic modal picker mirroring the column-filter popup's look: centered card,
 // scrollable list of option buttons, checkmark on the selected one. Used for any
 // single-select field (Type/Room/Building) that shouldn't use a native <select>.
-function SelectionModal({ title, options, value, onChange, onClose, labelForOption, emptyLabel, onManage, manageLabel, labelOptions, labelsForOption, searchable }) {
+// OPTIONAL `multi`: `value` is an array, a tap toggles an option and the modal
+// stays open, and Done closes it. The same list, rows and search as a single
+// pick, so a multi-select dropdown is not a second picker look-alike.
+function SelectionModal({ title, options, value, onChange, onClose, labelForOption, emptyLabel, onManage, manageLabel, labelOptions, labelsForOption, searchable, multi }) {
   const getLabel = labelForOption || (o => o);
   const [searchQuery, setSearchQuery] = useState("");
   // OPTIONAL label filter, absent for every caller but the Type picker — see
@@ -18074,11 +18077,15 @@ function SelectionModal({ title, options, value, onChange, onClose, labelForOpti
         )}
         <div style={{ display: "flex", flexDirection: "column", gap: 2, overflowY: "auto", minHeight: 0, flex: 1 }}>
           {shown.map(opt => {
-            const isSelected = opt === (value || "");
+            const isSelected = multi ? (value || []).includes(opt) : opt === (value || "");
             return (
               <button
                 key={opt || "__none__"}
-                onClick={() => { onChange(opt); onClose(); }}
+                aria-pressed={multi ? isSelected : undefined}
+                onClick={() => {
+                  if (multi) onChange(isSelected ? (value || []).filter(v => v !== opt) : [...(value || []), opt]);
+                  else { onChange(opt); onClose(); }
+                }}
                 style={{
                   display: "flex", alignItems: "center", justifyContent: "space-between",
                   padding: "9px 10px", background: isSelected ? C.hover : "transparent", border: "none",
@@ -18098,6 +18105,11 @@ function SelectionModal({ title, options, value, onChange, onClose, labelForOpti
             </div>
           )}
         </div>
+        {multi && (
+          <button type="button" onClick={onClose} style={{ marginTop: 12, flexShrink: 0, padding: "9px 14px", borderRadius: 10, border: "none", background: C.brand, color: "#fff", fontSize: 14, fontWeight: 600 }}>
+            Done{(value || []).length ? ` (${value.length})` : ""}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -21638,13 +21650,16 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
 // (sharedNeutralPartnerIds), so a link recorded only on the other circuit still
 // shows here and is kept on save rather than silently dropped.
 function SharedNeutralField({ values, setValues, panel }) {
+  const [open, setOpen] = useState(false);
   const all = panelCircuitsWithBreakers(panel).filter(x => x.circuit.id !== values.id);
+  const byId = new Map(all.map(x => [x.circuit.id, x]));
   // Untouched (no `sharesNeutral` yet): an existing circuit shows its partners
-  // from both sides. Once the box or a chip is touched, the draft is the truth.
+  // from both sides. Once the box or the list is touched, the draft is the truth.
   const touched = values.sharesNeutral !== undefined;
   const ids = touched || !values.id ? (values.sharedNeutralWithIds || []) : sharedNeutralPartnerIds(panel, values.id);
   const ticked = touched ? !!values.sharesNeutral : ids.length > 0;
-  const toggle = id => setValues({ ...values, sharesNeutral: true, sharedNeutralWithIds: ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id] });
+  const nameOfId = id => { const x = byId.get(id); return x ? circuitRefName(x.circuit, x.breaker) : "(deleted circuit)"; };
+  const summary = ids.map(nameOfId).join(", ");
   return (
     <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 6 }}>
       <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: C.ink, cursor: "pointer" }}>
@@ -21654,26 +21669,25 @@ function SharedNeutralField({ values, setValues, panel }) {
         />
         Shares a neutral with another circuit
       </label>
+      {/* A multi-select dropdown, and deliberately NOT inside the <label> above:
+          a picker inside a label re-opens after a choice (BUGS.md). */}
       {ticked && (all.length === 0 ? (
         <div style={{ fontSize: 13, color: C.empty }}>There are no other circuits on this panel yet.</div>
       ) : (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-          {all.map(({ circuit, breaker }) => {
-            const active = ids.includes(circuit.id);
-            return (
-              <button
-                key={circuit.id} type="button" onClick={() => toggle(circuit.id)} aria-pressed={active}
-                style={{
-                  padding: "6px 10px", borderRadius: 14, fontSize: 12, fontWeight: active ? 600 : 500,
-                  border: `1.5px solid ${active ? C.brand : C.border}`, background: active ? C.brand : "#fff", color: active ? "#fff" : C.ink,
-                }}
-              >
-                {circuitRefName(circuit, breaker)}
-              </button>
-            );
-          })}
-        </div>
+        <PickerTrigger
+          value={ids.length ? summary : ""} placeholder="Choose circuits…"
+          onClick={() => setOpen(true)} ariaLabel="Circuits sharing this neutral"
+        />
       ))}
+      {open && (
+        <SelectionModal
+          multi title="Shares neutral with"
+          options={all.map(x => x.circuit.id)} value={ids}
+          labelForOption={nameOfId} searchable={all.length > 8}
+          onChange={next => setValues({ ...values, sharesNeutral: true, sharedNeutralWithIds: next })}
+          onClose={() => setOpen(false)}
+        />
+      )}
     </div>
   );
 }
