@@ -56,6 +56,10 @@ then writes it, and the revision bump comes last, so a tab could have been left 
 written with the counters unchanged. Confirm on Google's Executions page for the dev script
 (look for a ~360s run ending "Exceeded maximum execution time"), and check the dev Sheet's
 tabs against version history. What made one save take six minutes is still unknown.
+**CONFIRMED** by Eric from the Executions page: `doPost`, started Sep 29 7:45:41 PM PT,
+361.034 s, "Timed Out". The page records nothing about where it stopped, since `doPost` logs
+no stages; per-stage timing (to the Executions log, which survives a kill where the
+Diagnostics tab row would not) is what would say which write hung next time.
 
 ### Choosing a type in the Add asset form also opens "Manage asset types"
 **Found:** 2026-09-28, while adding search to the Type picker.
