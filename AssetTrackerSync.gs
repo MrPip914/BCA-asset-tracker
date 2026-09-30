@@ -50,7 +50,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v44";
+const SCRIPT_VERSION = "v45";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -250,7 +250,10 @@ const BREAKER_FIELDS = ["id", "panelLabel", "cells", "ampRating", "status", "ser
 // record's id -- and the colour of its hot conductor(s). `label` is still the
 // stored key for what the app now calls the circuit's Description; renaming the
 // key would drop every existing value on the next write for nothing.
-const CIRCUIT_FIELDS = ["id", "breakerId", "panelLabel", "label", "roomsServed", "feedsPanelLabel", "notes", "tag", "wireColor"];
+// sharedNeutralWith (v45): the ids of the other circuits on this panel that share
+// this circuit's neutral conductor, comma-joined like roomsServed. Kept on BOTH
+// sides by the frontend, so either circuit can say who it shares with.
+const CIRCUIT_FIELDS = ["id", "breakerId", "panelLabel", "label", "roomsServed", "feedsPanelLabel", "notes", "tag", "wireColor", "sharedNeutralWith"];
 
 // A Space-Link ties one shape drawn on a floor plan to a Room (or any other
 // place-type asset) -- scoped to the PLAN-OWNING asset (assetLabel), keyed by
@@ -1576,6 +1579,7 @@ function handleAuthenticatedRead_(body, e) {
             roomsServedIds: c.roomsServed ? String(c.roomsServed).split(",").map(s => s.trim()) : [],
             feedsPanelLabel: c.feedsPanelLabel, notes: c.notes,
             tag: c.tag || "", wireColor: c.wireColor || "",
+            sharedNeutralWithIds: c.sharedNeutralWith ? String(c.sharedNeutralWith).split(",").map(s => s.trim()).filter(Boolean) : [],
           })),
         })),
         // Circuits that belong to this panel but aren't wired to any breaker yet.
@@ -1591,6 +1595,7 @@ function handleAuthenticatedRead_(body, e) {
             roomsServedIds: c.roomsServed ? String(c.roomsServed).split(",").map(s => s.trim()) : [],
             feedsPanelLabel: c.feedsPanelLabel, notes: c.notes,
             tag: c.tag || "", wireColor: c.wireColor || "",
+            sharedNeutralWithIds: c.sharedNeutralWith ? String(c.sharedNeutralWith).split(",").map(s => s.trim()).filter(Boolean) : [],
           })),
         // Only meaningful for an asset whose TYPE currently allows a floor plan
         // (typeHasFloorPlan, frontend-only) -- attached unconditionally here like
@@ -2269,6 +2274,7 @@ function doPost(e) {
             id: c.id, breakerId: b.id, panelLabel: key, label: c.label,
             roomsServed: (c.roomsServedIds || []).join(","), feedsPanelLabel: c.feedsPanelLabel || "",
             notes: c.notes || "", tag: c.tag || "", wireColor: c.wireColor || "",
+            sharedNeutralWith: (c.sharedNeutralWithIds || []).join(","),
           }));
         });
         // Same tab, same shape — just with no breaker to point at, so panelLabel is
@@ -2278,6 +2284,7 @@ function doPost(e) {
           id: c.id, breakerId: "", panelLabel: key, label: c.label,
           roomsServed: (c.roomsServedIds || []).join(","), feedsPanelLabel: c.feedsPanelLabel || "",
           notes: c.notes || "", tag: c.tag || "", wireColor: c.wireColor || "",
+            sharedNeutralWith: (c.sharedNeutralWithIds || []).join(","),
         }));
         // Same "derive the owner from the asset being iterated, never trust the
         // payload" rule as panelLabel above.

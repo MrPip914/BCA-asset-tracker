@@ -141,7 +141,11 @@ check('panel.html derives phase by row the same way (ceil(n/2), A-B / A-B-C)',
   check('doPost writes both, for breaker circuits AND unassigned ones',
     (gs.match(/notes: c\.notes \|\| "", tag: c\.tag \|\| "", wireColor: c\.wireColor \|\| ""/g) || []).length === 2);
   check('doGet reads both back, for breaker circuits AND unassigned ones',
-    (gs.match(/tag: c\.tag \|\| "", wireColor: c\.wireColor \|\| "",\n\s*\}\)\),/g) || []).length === 2);
+    (gs.match(/tag: c\.tag \|\| "", wireColor: c\.wireColor \|\| "",\n\s*sharedNeutralWithIds:[^\n]*\n\s*\}\)\),/g) || []).length === 2);
+  check('the shared-neutral links are written and read back as a list, for both kinds of circuit (v45)',
+    /"sharedNeutralWith"/.test(circuitFields)
+    && (gs.match(/sharedNeutralWith: \(c\.sharedNeutralWithIds \|\| \[\]\)\.join\(","\)/g) || []).length === 2
+    && (gs.match(/sharedNeutralWithIds: c\.sharedNeutralWith \? String\(c\.sharedNeutralWith\)\.split\(","\)/g) || []).length === 2);
   const pub = gs.slice(gs.indexOf('const PUBLIC_CIRCUIT_FIELDS = ['), gs.indexOf('];', gs.indexOf('const PUBLIC_CIRCUIT_FIELDS = [')));
   check('the public panel page is sent them too', /"tag"/.test(pub) && /"wireColor"/.test(pub) && /tag: c\.tag, wireColor: c\.wireColor/.test(gs));
 }
