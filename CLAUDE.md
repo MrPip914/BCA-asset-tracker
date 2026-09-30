@@ -3193,6 +3193,31 @@ array position can't serve as identity once things move.
     AND unassigned circuits; `test-frontend-phases.js` pins all four sites.
   - **ChildEntityTable's `select` is a `div`, not a `<label>`** — the wire colour was the
     first select any caller used and hit the picker-reopen bug (`BUGS.md`).
+- **Circuits can share a neutral, and sharing one on the SAME LEG is flagged** (backend v45,
+  2026-09-30). A "Shares a neutral with another circuit" checkbox, then chips of every other
+  circuit on the panel (several allowed — a 3-phase multi-wire branch shares one neutral
+  three ways). Ticked with none chosen is refused.
+  - **Stored on BOTH circuits** (`sharedNeutralWithIds`, sheet column `sharedNeutralWith`,
+    comma-joined like `roomsServed`), kept symmetric by `syncSharedNeutral` on every add,
+    edit and delete (a deleted circuit is dropped from its partners). The deliberate
+    exception to "the reference lives on one side": the relation has no direction, and
+    either circuit's form must be able to show and edit it. **Every reader still takes the
+    UNION** (`sharedNeutralPartnerIds`), so a one-sided link from a hand edit or an import
+    is honoured, and an untouched edit form saves what it SHOWED (the union), not only its
+    own record.
+  - **The hazard is two partners on one leg** (`sharedNeutralConflicts`): their currents add
+    on the neutral instead of cancelling, and no breaker sees it. Phases come from
+    `breakerPhases`, so a multi-pole circuit conflicts with a partner on ANY of its legs; an
+    unassigned circuit is on no leg and never conflicts. Shown as a banner naming each pair,
+    a red-bordered breaker with a warning icon in the diagram (plain cells, cluster cells and
+    bars), a warning in the circuit's summary, and an icon in the Table view's Description.
+  - Also in the schedule export/import (`Shared Neutral With`, partners by Circuit ID or else
+    Description, "; "-joined, resolved against the FILE's rows; unknown, ambiguous or self is
+    refused; one-sided rows are made symmetric), the workbook's Circuits sheet, and the door
+    card's Notes. **Not on the public page** — not asked for.
+  - `MOCK_SNAPSHOT`'s BCA0098: 6 (C) with 8 (A) is correct; 8 with 13 (13b, A) is the
+    flagged case. Covered in `test-frontend-panel-schedule.js` (the pure helpers run for
+    real) and `test-frontend-phases.js` (both backend write/read sites).
 - **A circuit can belong to a panel without belonging to a breaker** (backend v13). Panel assets
   carry an `unassignedCircuits` array alongside `breakers`, holding circuits that exist but
   aren't wired to a slot yet — a run that's been pulled and labelled but not landed, or one

@@ -126,7 +126,8 @@ const code = [
   grabConst("const PANEL_SCHEDULE_HEADERS = [", "];"), grabConst("const PANEL_BREAKER_COLS", ";"),
   grabConst("const PANEL_CIRCUIT_COLS", ";"), grabConst("const PANEL_SERVES_SEPARATOR", "\"; \";"),
   grabConst("const PANEL_LEGACY_DESCRIPTION_HEADER", ";"), grabConst("const CIRCUIT_WIRE_COLORS = [", "];"),
-  grabFn("circuitTagConflict"),
+  grabFn("circuitTagConflict"), grabFn("panelCircuitsWithBreakers"), grabFn("sharedNeutralPartnerIds"),
+  grabFn("circuitRefName"), grabFn("syncSharedNeutral"), grabFn("sharedNeutralConflicts"),
   grabFn("panelRefText"), grabFn("cellsFromSlotText"), grabFn("panelScheduleRows"), grabFn("planPanelImport"),
   `module.exports = {
      PERSON_NAME_ORDERS, setNameOrder: v => { PERSON_NAME_ORDER = v; },
@@ -134,6 +135,7 @@ const code = [
      resolveImportRef, buildImportRefIndex, resolveImportType, importCellText,
      fullPathOf, nameOf, pathOf, DEFAULT_COLUMNS, IMPORT_KEY_HEADER, splitImportList,
      splitImportPeople, panelScheduleRows, planPanelImport, cellsFromSlotText, PANEL_SCHEDULE_HEADERS, circuitTagConflict,
+     sharedNeutralPartnerIds, syncSharedNeutral, sharedNeutralConflicts,
    };`,
 ].join('\n');
 
@@ -145,7 +147,7 @@ try {
   console.error('Could not evaluate the extracted helpers:\n  ' + e.message);
   process.exit(1);
 }
-const { panelScheduleRows, planPanelImport, cellsFromSlotText, importRowsFromGrid, PANEL_SCHEDULE_HEADERS, circuitTagConflict } = mod.exports;
+const { panelScheduleRows, planPanelImport, cellsFromSlotText, importRowsFromGrid, PANEL_SCHEDULE_HEADERS, circuitTagConflict, sharedNeutralPartnerIds, syncSharedNeutral, sharedNeutralConflicts } = mod.exports;
 
 // --- fixture -------------------------------------------------------------------
 // Two rooms share a NAME in different buildings, so Serves must round-trip by
@@ -311,6 +313,61 @@ check('import is an editor-only row; export is not',
   const sel = cet.slice(cet.indexOf('if (f.type === "select") {'), cet.indexOf('if (f.type === "textarea") {'));
   check('ChildEntityTable\'s select is NOT wrapped in a <label> (it would re-open the picker on every choice)',
     /<div key=\{f\.key\}/.test(sel) && !/<label key=/.test(sel));
+}
+
+// --- shared neutrals (v45) ------------------------------------------------------------
+{
+  // P1 is three-phase: slot 2 is phase A (row 1), slot 4 phase B, slots 1/3/5 A-B-C.
+  // Lights (2a, A) and Fan (2a, A) share a breaker, so the SAME leg.
+  const shareSame = JSON.parse(JSON.stringify(panel));
+  const c2 = shareSame.breakers[1].circuits[0], c3 = shareSame.breakers[1].circuits[1];
+  c2.sharedNeutralWithIds = ['c3'];               // recorded on ONE side only
+  check('a link recorded on one side is read from both', sharedNeutralPartnerIds(shareSame, 'c3').join() === 'c2' && sharedNeutralPartnerIds(shareSame, 'c2').join() === 'c3');
+  const conf = sharedNeutralConflicts(shareSame, true);
+  check('two circuits sharing a neutral on the same leg are flagged, once', conf.length === 1 && conf[0].phases.join() === 'A', JSON.stringify(conf.map(x => x.phases)));
+  // Lights (2a -> A) with Sub feed (4/6 -> B-C): different legs, no conflict.
+  const shareDiff = JSON.parse(JSON.stringify(panel));
+  shareDiff.breakers[1].circuits[0].sharedNeutralWithIds = ['c4'];
+  check('circuits sharing a neutral on DIFFERENT legs are not flagged', sharedNeutralConflicts(shareDiff, true).length === 0);
+  // The RTU is A-B-C: anything on A, B or C overlaps it.
+  const shareMulti = JSON.parse(JSON.stringify(panel));
+  shareMulti.breakers[0].circuits[0].sharedNeutralWithIds = ['c2'];
+  check('a multi-pole circuit conflicts with one on any of its legs', sharedNeutralConflicts(shareMulti, true).length === 1);
+  const shareUnassigned = JSON.parse(JSON.stringify(panel));
+  shareUnassigned.unassignedCircuits[0].sharedNeutralWithIds = ['c2'];
+  check('an unassigned circuit is on no leg, so never conflicts', sharedNeutralConflicts(shareUnassigned, true).length === 0);
+  // Sync: saving c2 with [c4] adds c2 to c4 and removes it from a former partner.
+  const before = JSON.parse(JSON.stringify(panel));
+  before.breakers[1].circuits[1].sharedNeutralWithIds = ['c2'];   // c3 used to share with c2
+  const synced = syncSharedNeutral(before.breakers, before.unassignedCircuits, 'c2', ['c4']);
+  const find = id => [...synced.breakers.flatMap(b => b.circuits), ...synced.unassigned].find(c => c.id === id);
+  check('saving a circuit\'s partners makes the link symmetric', find('c2').sharedNeutralWithIds.join() === 'c4' && find('c4').sharedNeutralWithIds.join() === 'c2');
+  check('...and removes it from a former partner', find('c3').sharedNeutralWithIds.length === 0);
+  // Schedule round trip.
+  const withLink = JSON.parse(JSON.stringify(panel));
+  withLink.breakers[1].circuits[0].sharedNeutralWithIds = ['c1'];
+  withLink.breakers[0].circuits[0].sharedNeutralWithIds = ['c2'];
+  const lrows = panelScheduleRows(withLink, { assets: allAssets, breakerTypes });
+  check('the export names a partner by its Circuit ID', lrows.find(r => r.Description === 'Lights')['Shared Neutral With'] === '1');
+  const lctx = { panel: withLink, assets: allAssets, breakerTypes };
+  check('...and an untouched re-import is unchanged', planPanelImport(importRowsFromGrid(toGrid(lrows)), lctx).unchanged === true);
+  const oneSided = lrows.map(r => (r.Description === 'RTU' ? { ...r, 'Shared Neutral With': '' } : r));
+  const osPlan = planPanelImport(importRowsFromGrid(toGrid(oneSided)), lctx);
+  const rtu = osPlan.breakers.flatMap(b => b.circuits).find(c => c.label === 'RTU');
+  check('a link written on only one row is imported on both circuits', osPlan.errors.length === 0 && rtu.sharedNeutralWithIds.length === 1);
+  const byDesc = planOf(rows.map(r => (r.Description === 'Fan' ? { ...r, 'Shared Neutral With': 'Sub feed' } : r)));
+  check('a partner can be named by its Description', byDesc.errors.length === 0 && byDesc.breakers.flatMap(b => b.circuits).find(c => c.label === 'Fan').sharedNeutralWithIds.length === 1);
+  check('an unknown partner refuses the file', planOf(rows.map(r => (r.Description === 'Fan' ? { ...r, 'Shared Neutral With': 'Nope' } : r))).errors.some(m => /shared neutral "Nope"/.test(m)));
+  check('a circuit naming itself is refused', planOf(rows.map(r => (r.Description === 'Fan' ? { ...r, 'Shared Neutral With': 'Fan' } : r))).errors.some(m => /itself/.test(m)));
+}
+{
+  const addSrc = src.slice(src.indexOf('  function addCircuit(breakerId, draft) {'), src.indexOf('  function saveCircuitEdit('));
+  const editSrc = src.slice(src.indexOf('  function saveCircuitEdit('), src.indexOf('  function deleteCircuit('));
+  const delSrc = src.slice(src.indexOf('  function deleteCircuit('), src.indexOf('  function deleteCircuit(') + 2500);
+  check('add, edit and delete all keep the shared-neutral links symmetric',
+    /withNeutralSync\(/.test(addSrc) && /withNeutralSync\(/.test(editSrc) && /syncSharedNeutral\(/.test(delSrc));
+  check('the panel diagram flags shared-neutral conflicts on the breakers involved',
+    /const neutralConflicts = sharedNeutralConflicts\(\{ breakers \}, threePhase\)/.test(src) && (src.match(/neutralWarnBreakerIds\.has\(/g) || []).length >= 3);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

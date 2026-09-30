@@ -3255,7 +3255,7 @@ function planAssetImport(parsed, ctx) {
 // on this panel) is a NEW breaker or circuit.
 const PANEL_SCHEDULE_HEADERS = [
   "Slot", "Unit", "Breaker Type", "Amps", "Serial", "Installed", "Breaker Notes",
-  "Circuit ID", "Description", "Wire Color", "Serves", "Feeds Panel", "Circuit Notes", "Breaker Key", "Circuit Key",
+  "Circuit ID", "Description", "Wire Color", "Shared Neutral With", "Serves", "Feeds Panel", "Circuit Notes", "Breaker Key", "Circuit Key",
 ];
 // The Description column was headed "Circuit" until 2026-09-30, when the circuit's
 // Label became its Description. A file outlives the header that produced it, so
@@ -3264,7 +3264,7 @@ const PANEL_LEGACY_DESCRIPTION_HEADER = "Circuit";
 // The columns that describe the BREAKER (repeated on each of its circuit rows)
 // versus the CIRCUIT. Named once so the export and the read cannot disagree.
 const PANEL_BREAKER_COLS = ["Unit", "Breaker Type", "Amps", "Serial", "Installed", "Breaker Notes", "Breaker Key"];
-const PANEL_CIRCUIT_COLS = ["Circuit ID", "Description", "Wire Color", "Serves", "Feeds Panel", "Circuit Notes", "Circuit Key"];
+const PANEL_CIRCUIT_COLS = ["Circuit ID", "Description", "Wire Color", "Shared Neutral With", "Serves", "Feeds Panel", "Circuit Notes", "Circuit Key"];
 // Several rooms in one cell. Not a comma: room names and full paths can carry
 // one, and a separator a value can contain cannot be split back — the lesson the
 // Assets import's User column learned the hard way.
@@ -3314,6 +3314,11 @@ function panelScheduleRows(panel, ctx) {
     "Circuit ID": c.tag || "",
     "Description": c.label || "",
     "Wire Color": c.wireColor || "",
+    // Partners by their Circuit ID when they have one, else their Description --
+    // the two things a person editing the sheet can see on the other row.
+    "Shared Neutral With": sharedNeutralPartnerIds(panel, c.id)
+      .map(id => { const o = panelCircuitsWithBreakers(panel).find(x => x.circuit.id === id); return o ? (o.circuit.tag || o.circuit.label || "") : ""; })
+      .filter(Boolean).join(PANEL_SERVES_SEPARATOR),
     "Serves": (c.roomsServedIds || []).map(id => fullPathOf((assets || []).find(a => a.id === id), assets) || id).join(PANEL_SERVES_SEPARATOR),
     "Feeds Panel": c.feedsPanelLabel ? (panelRefText((assets || []).find(a => a.id === c.feedsPanelLabel), assets) || c.feedsPanelLabel) : "",
     "Circuit Notes": c.notes || "",
@@ -3498,10 +3503,34 @@ function planPanelImport(parsed, ctx) {
     const circuit = {
       id, breakerId: breaker ? breaker.id : "", panelLabel: panel.id,
       tag, wireColor, label, notes: v["Circuit Notes"] || "", roomsServedIds, feedsPanelLabel,
+      sharedNeutralWithIds: [], _neutralText: String(v["Shared Neutral With"] || ""), _row: row,
     };
     if (breaker) breaker.circuits.push(circuit);
     else unassigned.push(circuit);
   });
+
+  // Shared neutrals name OTHER ROWS of this file, by Circuit ID or else by
+  // Description, so they resolve only once every row is read. An ID wins over a
+  // description; a name matching two circuits is refused rather than guessed.
+  // The result is made symmetric, whichever row recorded the link.
+  {
+    const fileCircuits = [...breakerOrder.flatMap(b => b.circuits), ...unassigned];
+    const byTag = new Map(), byLabel = new Map();
+    const push = (m, k, c) => { if (!k) return; const key = k.toLowerCase(); if (!m.has(key)) m.set(key, []); m.get(key).push(c); };
+    fileCircuits.forEach(c => { push(byTag, c.tag, c); push(byLabel, c.label, c); });
+    const partners = new Map(fileCircuits.map(c => [c.id, new Set()]));
+    fileCircuits.forEach(c => {
+      String(c._neutralText || "").split(";").map(x => x.trim()).filter(Boolean).forEach(text => {
+        const k = text.toLowerCase();
+        const hits = byTag.get(k) || byLabel.get(k) || [];
+        if (hits.length === 0) errors.push(`Row ${c._row}: shared neutral "${text}" isn't a circuit ID or description in this file.`);
+        else if (hits.length > 1) errors.push(`Row ${c._row}: shared neutral "${text}" matches more than one circuit — give them Circuit IDs.`);
+        else if (hits[0] === c) errors.push(`Row ${c._row}: a circuit can't share a neutral with itself.`);
+        else { partners.get(c.id).add(hits[0].id); partners.get(hits[0].id).add(c.id); }
+      });
+    });
+    fileCircuits.forEach(c => { c.sharedNeutralWithIds = [...partners.get(c.id)]; delete c._neutralText; delete c._row; });
+  }
 
   // Two breakers claiming one cell. Caught after the read because a breaker is
   // keyed by its whole footprint, so "1" and "1a" are different keys that
@@ -3543,10 +3572,10 @@ function planPanelImport(parsed, ctx) {
   const shape = (bs, us) => JSON.stringify({
     b: [...bs].map(b => ({ ...b, cells: [...(b.cells || [])].sort(), ampRating: String(b.ampRating == null ? "" : b.ampRating),
       installedDate: b.installedDate ? dateOnly(b.installedDate) : "",
-      circuits: (b.circuits || []).map(c => ({ id: c.id, tag: c.tag || "", wireColor: c.wireColor || "", label: c.label || "", notes: c.notes || "", roomsServedIds: c.roomsServedIds || [], feedsPanelLabel: c.feedsPanelLabel || "" })) }))
+      circuits: (b.circuits || []).map(c => ({ id: c.id, tag: c.tag || "", wireColor: c.wireColor || "", neutral: [...(c.sharedNeutralWithIds || [])].sort(), label: c.label || "", notes: c.notes || "", roomsServedIds: c.roomsServedIds || [], feedsPanelLabel: c.feedsPanelLabel || "" })) }))
       .map(({ id, cells, ampRating, serial, installedDate, notes, groupId, breakerTypeId, circuits }) => ({ id, cells, ampRating, serial: serial || "", installedDate, notes: notes || "", groupId: groupId || "", breakerTypeId: breakerTypeId || "", circuits }))
       .sort((x, y) => x.id.localeCompare(y.id)),
-    u: (us || []).map(c => ({ id: c.id, tag: c.tag || "", wireColor: c.wireColor || "", label: c.label || "", notes: c.notes || "", roomsServedIds: c.roomsServedIds || [], feedsPanelLabel: c.feedsPanelLabel || "" })),
+    u: (us || []).map(c => ({ id: c.id, tag: c.tag || "", wireColor: c.wireColor || "", neutral: [...(c.sharedNeutralWithIds || [])].sort(), label: c.label || "", notes: c.notes || "", roomsServedIds: c.roomsServedIds || [], feedsPanelLabel: c.feedsPanelLabel || "" })),
   });
   const unchanged = shape(breakers, unassigned) === shape(oldBreakers, panel.unassignedCircuits || []);
   return {
@@ -3914,7 +3943,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v44";
+const FRONTEND_SCRIPT_VERSION = "v45";
 // The version of THIS file — shown in About (the account menu), so "is my browser
 // actually running the build I just deployed, or a cached one?" is answerable in
 // two clicks instead of by reading view-source.
@@ -3932,7 +3961,7 @@ const FRONTEND_SCRIPT_VERSION = "v44";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-30.2";
+const APP_VERSION = "2026-09-30.3";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -5650,13 +5679,13 @@ const MOCK_SNAPSHOT = {
           { id: "c98-2", tag: "2", wireColor: "Black/Red", breakerId: "b98-2-4", label: "Dishwasher booster heater", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "" },
         ] },
         { id: "b98-6", panelLabel: "BCA0098", cells: ["6a", "6b"], breakerTypeId: "type-single-pole", ampRating: "20", serial: "", installedDate: "", notes: "", groupId: "grp98-6", circuits: [
-          { id: "c98-6", tag: "6", wireColor: "Black", breakerId: "b98-6", label: "Counter outlets", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "- North counter" },
+          { id: "c98-6", tag: "6", wireColor: "Black", sharedNeutralWithIds: ["c98-8"], breakerId: "b98-6", label: "Counter outlets", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "- North counter" },
         ] },
         { id: "b98-7-9-11", panelLabel: "BCA0098", cells: ["7a", "7b", "9a", "9b", "11a", "11b"], breakerTypeId: "type-triple-pole", ampRating: "30", serial: "", installedDate: "", notes: "", groupId: "grp98-7", circuits: [
           { id: "c98-7", tag: "7", breakerId: "b98-7-9-11", label: "Walk-in cooler condenser", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "" },
         ] },
         { id: "b98-8", panelLabel: "BCA0098", cells: ["8a", "8b"], breakerTypeId: "type-single-pole", ampRating: "15", serial: "", installedDate: "", notes: "", groupId: "grp98-8", circuits: [
-          { id: "c98-8", tag: "8", wireColor: "Red", breakerId: "b98-8", label: "Kitchen lights", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "" },
+          { id: "c98-8", tag: "8", wireColor: "Red", sharedNeutralWithIds: ["c98-6", "c98-13b"], breakerId: "b98-8", label: "Kitchen lights", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "" },
         ] },
         { id: "b98-10", panelLabel: "BCA0098", cells: ["10a", "10b"], breakerTypeId: "type-single-pole", ampRating: "20", serial: "", installedDate: "", notes: "", groupId: "grp98-10", circuits: [] },
         // NON-CONTIGUOUS breakers, so Sandbox draws the bar (panelDiagramLayout).
@@ -5664,7 +5693,11 @@ const MOCK_SNAPSHOT = {
         // 13b and 15a. Even side: a 2-pole on 14a+16b around a single-pole from a
         // DIFFERENT unit in 14b, with 16a left empty — the half-slot spare case.
         { id: "b98-13-15", panelLabel: "BCA0098", cells: ["13a", "15b"], breakerTypeId: "", ampRating: "30", serial: "", installedDate: "", notes: "", groupId: "grp98-13", circuits: [] },
-        { id: "b98-13b", panelLabel: "BCA0098", cells: ["13b"], breakerTypeId: "", ampRating: "15", serial: "", installedDate: "", notes: "", groupId: "grp98-13", circuits: [] },
+        // Shared neutrals: 6 (phase C) with 8 (phase A) is correct -- different legs.
+        // 8 with 13 is the hazard: 13b is also phase A, so the diagram flags both.
+        { id: "b98-13b", panelLabel: "BCA0098", cells: ["13b"], breakerTypeId: "", ampRating: "15", serial: "", installedDate: "", notes: "", groupId: "grp98-13", circuits: [
+          { id: "c98-13b", tag: "13", breakerId: "b98-13b", label: "Hallway lights", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "", sharedNeutralWithIds: ["c98-8"] },
+        ] },
         { id: "b98-15a", panelLabel: "BCA0098", cells: ["15a"], breakerTypeId: "", ampRating: "20", serial: "", installedDate: "", notes: "", groupId: "grp98-13", circuits: [] },
         { id: "b98-14-16", panelLabel: "BCA0098", cells: ["14a", "16b"], breakerTypeId: "", ampRating: "25", serial: "", installedDate: "", notes: "", groupId: "grp98-14", circuits: [] },
         { id: "b98-14b", panelLabel: "BCA0098", cells: ["14b"], breakerTypeId: "", ampRating: "15", serial: "", installedDate: "", notes: "", groupId: "grp98-14b", circuits: [] },
@@ -9892,7 +9925,30 @@ function AssetTracker() {
     const feedsPanelLabel = draft.feedsPanelLabel || "";
     if (roomsServedIds.length === 0 && !feedsPanelLabel) return "Pick either rooms served or a sub-panel this circuit feeds.";
     if (roomsServedIds.length > 0 && feedsPanelLabel) return "A circuit can serve rooms or feed a sub-panel, not both.";
+    if (neutralIdsOf(draft) === null) return "Choose the circuit(s) this one shares its neutral with, or untick Shares a neutral.";
     return null;
+  }
+
+  // The shared-neutral partners a circuit form is asking for: [] when the box is
+  // unticked, null when it is ticked with nothing chosen (refused above). A draft
+  // seeded from a stored circuit has no `sharesNeutral` yet, so a stored list
+  // stands in for the tick.
+  function neutralIdsOf(draft) {
+    const ids = (draft.sharedNeutralWithIds || []).filter(Boolean);
+    const ticked = draft.sharesNeutral === undefined ? ids.length > 0 : !!draft.sharesNeutral;
+    if (!ticked) return [];
+    return ids.length ? [...new Set(ids)] : null;
+  }
+
+  // The panel's two circuit containers after a circuit has been written, with the
+  // shared-neutral links made symmetric around it.
+  function withNeutralSync(nextBreakers, nextUnassigned, circuitId, ids) {
+    const synced = syncSharedNeutral(
+      nextBreakers || selectedAsset.breakers || [],
+      nextUnassigned || selectedAsset.unassignedCircuits || [],
+      circuitId, ids,
+    );
+    return updatePanelCircuits(synced.breakers, synced.unassigned);
   }
 
   function addCircuit(breakerId, draft) {
@@ -9909,11 +9965,12 @@ function AssetTracker() {
     const tag = String(draft.tag || "").trim();
     const clash = circuitTagConflict(selectedAsset, tag, null);
     if (clash) return `Circuit ID "${tag}" is already used on this panel, by "${clash.label}".`;
+    const sharedNeutralWithIds = neutralIdsOf(draft) || [];
     const circuit = {
       id: crypto.randomUUID(), breakerId: breakerId || "", panelLabel: selectedId,
       tag, wireColor: draft.wireColor || "",
       label: draft.label.trim(), notes: (draft.notes || "").trim(),
-      roomsServedIds, feedsPanelLabel,
+      roomsServedIds, feedsPanelLabel, sharedNeutralWithIds,
     };
     const nextBreakers = breakerId
       ? existing.map(b => (b.id === breakerId ? { ...b, circuits: [...(b.circuits || []), circuit] } : b))
@@ -9925,7 +9982,19 @@ function AssetTracker() {
       related: relate({ serves: roomsServedIds, feeds: feedsPanelLabel }),
       to: feedsPanelLabel ? `Feeds ${feedsPanelLabel}` : `Serves ${roomsServedIds.map(id => roomNameFor(id, assets)).join(", ")}`,
     };
-    persist(updatePanelCircuits(nextBreakers, nextUnassigned), { auditLog: logAudit([entry]) });
+    const entries = [entry];
+    if (sharedNeutralWithIds.length) entries.push({
+      ...entry, action: "circuit_edited", field: `${circuit.label} — Shared neutral`, from: "—",
+      to: neutralNamesFor(sharedNeutralWithIds), related: "",
+    });
+    persist(withNeutralSync(nextBreakers, nextUnassigned, circuit.id, sharedNeutralWithIds), { auditLog: logAudit(entries) });
+  }
+
+  // "8 · Kitchen lights (slot 8), 13 · Hallway (slot 13a)" -- the partners as a
+  // person reads them, for an audit row.
+  function neutralNamesFor(ids) {
+    const all = panelCircuitsWithBreakers(selectedAsset);
+    return ids.map(id => { const hit = all.find(x => x.circuit.id === id); return hit ? circuitRefName(hit.circuit, hit.breaker) : "(deleted circuit)"; }).join(", ") || "—";
   }
 
   function saveCircuitEdit(breakerId, id, draft) {
@@ -9942,7 +10011,12 @@ function AssetTracker() {
     const tag = String(draft.tag || "").trim();
     const clash = circuitTagConflict(selectedAsset, tag, id);
     if (clash) return `Circuit ID "${tag}" is already used on this panel, by "${clash.label}".`;
-    const updated = { ...original, tag, wireColor: draft.wireColor || "", label: draft.label.trim(), notes: (draft.notes || "").trim(), roomsServedIds, feedsPanelLabel };
+    const oldNeutral = sharedNeutralPartnerIds(selectedAsset, id);
+    // An untouched form keeps what the panel already records, from BOTH sides --
+    // which is what the form showed.
+    const sharedNeutralWithIds = draft.sharesNeutral === undefined ? oldNeutral : (neutralIdsOf(draft) || []);
+    const { sharesNeutral, ...originalFields } = original;
+    const updated = { ...originalFields, tag, wireColor: draft.wireColor || "", label: draft.label.trim(), notes: (draft.notes || "").trim(), roomsServedIds, feedsPanelLabel, sharedNeutralWithIds };
     // `related` defaults to none: of the four things editable here, only the two
     // that name other assets pass one.
     const mk = (field, from, to, related = "") => ({
@@ -9953,6 +10027,9 @@ function AssetTracker() {
     if (original.label !== updated.label) entries.push(mk("Description", original.label, updated.label));
     if ((original.tag || "") !== updated.tag) entries.push(mk("ID", original.tag || "—", updated.tag || "—"));
     if ((original.wireColor || "") !== updated.wireColor) entries.push(mk("Hot wire color", original.wireColor || "—", updated.wireColor || "—"));
+    if ([...oldNeutral].sort().join(",") !== [...sharedNeutralWithIds].sort().join(",")) {
+      entries.push(mk("Shared neutral", neutralNamesFor(oldNeutral), neutralNamesFor(sharedNeutralWithIds)));
+    }
     if ((original.notes || "") !== updated.notes) entries.push(mk("Notes", original.notes || "—", updated.notes || "—"));
     if ((original.roomsServedIds || []).join(",") !== roomsServedIds.join(",")) {
       const fromNames = (original.roomsServedIds || []).map(rid => roomNameFor(rid, assets)).join(", ");
@@ -9970,7 +10047,7 @@ function AssetTracker() {
       ? existing.map(b => (b.id === breakerId ? { ...b, circuits: (b.circuits || []).map(c => (c.id === id ? updated : c)) } : b))
       : null;
     const nextUnassigned = breakerId ? null : (selectedAsset.unassignedCircuits || []).map(c => (c.id === id ? updated : c));
-    persist(updatePanelCircuits(nextBreakers, nextUnassigned), { auditLog: entries.length ? logAudit(entries) : auditLog });
+    persist(withNeutralSync(nextBreakers, nextUnassigned, id, sharedNeutralWithIds), { auditLog: entries.length ? logAudit(entries) : auditLog });
   }
 
   function deleteCircuit(breakerId, id) {
@@ -9988,7 +10065,10 @@ function AssetTracker() {
       action: "circuit_removed", field: circuit.label, from: circuitLocationLabel(breakerId),
       related: relate({ serves: circuit.roomsServedIds || [], feeds: circuit.feedsPanelLabel || "" }),
     };
-    persist(updatePanelCircuits(nextBreakers, nextUnassigned), { auditLog: logAudit([entry]) });
+    // Its shared-neutral partners stop naming it, so no circuit is left pointing
+    // at one that is gone.
+    const synced = syncSharedNeutral(nextBreakers || existing, nextUnassigned || selectedAsset.unassignedCircuits || [], id, []);
+    persist(updatePanelCircuits(synced.breakers, synced.unassigned), { auditLog: logAudit([entry]) });
   }
 
   // Same-panel only for this pass — moving a circuit to a different Panel
@@ -10871,6 +10951,7 @@ function AssetTracker() {
         (b.circuits || []).forEach(c => {
           circuitRows.push({
             Panel: a.label, "Slot(s)": slotsFromCells(b.cells).join("/"), "Circuit ID": c.tag || "", Description: c.label, "Wire Color": c.wireColor || "",
+            "Shares Neutral With": sharedNeutralPartnerIds(a, c.id).map(id => { const o = panelCircuitsWithBreakers(a).find(x => x.circuit.id === id); return o ? circuitRefName(o.circuit, o.breaker) : ""; }).filter(Boolean).join("; "),
             Serves: c.feedsPanelLabel ? `Feeds → ${c.feedsPanelLabel}` : (c.roomsServedIds || []).map(id => roomNameFor(id, assets)).join(", "),
             Notes: c.notes || "",
           });
@@ -10882,6 +10963,7 @@ function AssetTracker() {
       (a.unassignedCircuits || []).forEach(c => {
         circuitRows.push({
           Panel: a.label, "Slot(s)": "Unassigned", "Circuit ID": c.tag || "", Description: c.label, "Wire Color": c.wireColor || "",
+            "Shares Neutral With": sharedNeutralPartnerIds(a, c.id).map(id => { const o = panelCircuitsWithBreakers(a).find(x => x.circuit.id === id); return o ? circuitRefName(o.circuit, o.breaker) : ""; }).filter(Boolean).join("; "),
           Serves: c.feedsPanelLabel ? `Feeds → ${c.feedsPanelLabel}` : (c.roomsServedIds || []).map(id => roomNameFor(id, assets)).join(", "),
           Notes: c.notes || "",
         });
@@ -14071,7 +14153,12 @@ function AssetTracker() {
           function renderCircuitTargetFields(values, setValues) {
             // Body lives in the top-level CircuitTargetFields component — the panel's
             // unassigned-circuit list needs the identical control, outside this modal.
-            return <CircuitTargetFields values={values} setValues={setValues} assets={assets} otherPanels={otherPanels} />;
+            return (
+              <>
+                <CircuitTargetFields values={values} setValues={setValues} assets={assets} otherPanels={otherPanels} />
+                <SharedNeutralField values={values} setValues={setValues} panel={selectedAsset} />
+              </>
+            );
           }
           return (
             <div onClick={closeModal} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
@@ -14238,7 +14325,7 @@ function AssetTracker() {
                             emptyMessage="No circuits on this breaker yet."
                             renderCustomFields={renderCircuitTargetFields}
                             deleteConfirmMessage={circuit => `Delete circuit "${circuit.label}"?`}
-                            renderSummary={circuit => circuitSummary(circuit, assets)}
+                            renderSummary={circuit => circuitSummary(circuit, assets, selectedAsset)}
                             customRowActions={circuit => (
                               <button onClick={() => openMoveCircuit(member.id, circuit)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Move circuit ${circuit.label}`}>
                                 <ArrowLeftRight size={14} color={C.muted} />
@@ -14255,7 +14342,7 @@ function AssetTracker() {
                                 actions — both go through circuitSummary() now, so a future
                                 circuit-summary field only has to be added in one place. */}
                             {(member.circuits || []).map(circuit => (
-                              <div key={circuit.id}>{circuitSummary(circuit, assets)}</div>
+                              <div key={circuit.id}>{circuitSummary(circuit, assets, selectedAsset)}</div>
                             ))}
                           </div>
                         </div>
@@ -20272,10 +20359,13 @@ function BreakersTabContent({
           addLabel="Add Circuit"
           emptyMessage="No unassigned circuits on this panel."
           renderCustomFields={(values, setValues) => (
-            <CircuitTargetFields values={values} setValues={setValues} assets={assets} otherPanels={otherPanels} />
+            <>
+              <CircuitTargetFields values={values} setValues={setValues} assets={assets} otherPanels={otherPanels} />
+              <SharedNeutralField values={values} setValues={setValues} panel={selectedAsset} />
+            </>
           )}
           deleteConfirmMessage={circuit => `Delete circuit "${circuit.label}"?`}
-          renderSummary={circuit => circuitSummary(circuit, assets)}
+          renderSummary={circuit => circuitSummary(circuit, assets, selectedAsset)}
           customRowActions={circuit => (
             <button onClick={() => openMoveCircuit(null, circuit)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Move circuit ${circuit.label} onto a breaker`}>
               <ArrowLeftRight size={14} color={C.muted} />
@@ -20564,9 +20654,13 @@ function legendCircuitText(circuit, allAssets) {
   const serves = legendServes(circuit, allAssets) || circuit.label || "";
   return circuit.tag ? `${circuit.tag} · ${serves}` : serves;
 }
-function legendNotes(circuit) {
+function legendNotes(circuit, panel) {
   const wire = circuit.wireColor ? `Wire: ${circuit.wireColor}` : "";
-  return [wire, circuit.notes || ""].filter(Boolean).join("\n");
+  const partners = panel ? sharedNeutralPartnerIds(panel, circuit.id)
+    .map(id => { const o = panelCircuitsWithBreakers(panel).find(x => x.circuit.id === id); return o ? (o.circuit.tag || o.circuit.label) : ""; })
+    .filter(Boolean) : [];
+  const neutral = partners.length ? `Shared neutral: ${partners.join(", ")}` : "";
+  return [wire, neutral, circuit.notes || ""].filter(Boolean).join("\n");
 }
 
 function PanelLegendCard({ slotCount, breakers, unassignedCircuits, allAssets, panelAsset, mode, pageHeightIn }) {
@@ -20613,7 +20707,7 @@ function PanelLegendCard({ slotCount, breakers, unassignedCircuits, allAssets, p
       if (anchorSlot(b) !== s) { lines.push({ kind: "cont", badge, span }); return; }
       const circuits = b.circuits || [];
       if (circuits.length === 0) { lines.push({ kind: "empty", badge }); return; }
-      circuits.forEach(c => lines.push({ kind: "circuit", badge, serves: legendCircuitText(c, allAssets), notes: legendNotes(c) }));
+      circuits.forEach(c => lines.push({ kind: "circuit", badge, serves: legendCircuitText(c, allAssets), notes: legendNotes(c, { breakers, unassignedCircuits }) }));
     });
     if (lines.length === 0) lines.push({ kind: "spare" });
     slots.push({ slot: s, lines });
@@ -20735,7 +20829,7 @@ function PanelLegendCard({ slotCount, breakers, unassignedCircuits, allAssets, p
                 {unassignedCircuits.map(c => (
                   <tr key={c.id}>
                     <td style={servesCell}>{legendCircuitText(c, allAssets) || "—"}</td>
-                    <td style={notesCell}>{legendNotes(c)}</td>
+                    <td style={notesCell}>{legendNotes(c, { breakers, unassignedCircuits })}</td>
                   </tr>
                 ))}
               </tbody>
@@ -21105,6 +21199,13 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
   // imported or scripted write. Reconfiguring is not refused over it — the
   // panel's phase is a fact about the panel, and a wrong breaker record is the
   // thing to fix — so it is flagged here instead.
+  // Circuits sharing a neutral on ONE leg: the currents add on the neutral
+  // instead of cancelling. Flagged on each breaker involved and named in a banner.
+  const neutralConflicts = sharedNeutralConflicts({ breakers }, threePhase);
+  const neutralWarnBreakerIds = new Set(neutralConflicts.flatMap(x => [x.aBreaker.id, x.bBreaker.id]));
+  const neutralWarnCircuitIds = new Set(neutralConflicts.flatMap(x => [x.a.id, x.b.id]));
+  const neutralWarnTitle = "Shares a neutral with a circuit on the same leg";
+  const neutralIcon = size => <AlertTriangle size={size} color={C.danger} aria-label={neutralWarnTitle} style={{ flexShrink: 0 }} />;
   const phaseWarnings = breakers
     .filter(b => breakerPhaseConflict(b.cells, threePhase))
     .map(b => `${slotsFromCells(b.cells).join("/")} (${breakerPhases(b.cells, threePhase).join("-")})`);
@@ -21262,6 +21363,18 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
           </div>
         </div>
       )}
+      {neutralConflicts.length > 0 && (
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "10px 12px", marginBottom: 12, border: `1.5px solid ${C.danger}`, borderRadius: 8, background: "#fff" }}>
+          <AlertTriangle size={16} style={{ color: C.danger, flexShrink: 0, marginTop: 1 }} />
+          <div style={{ fontSize: 13, color: C.ink }}>
+            <b>Shared neutral on one leg:</b>{" "}
+            {neutralConflicts.map((x, i) => (
+              <span key={i}>{i > 0 ? "; " : ""}{circuitRefName(x.a, x.aBreaker)} and {circuitRefName(x.b, x.bBreaker)} — both on phase {x.phases.join("/")}</span>
+            ))}.{" "}
+            Circuits sharing a neutral must be on different legs, or the neutral carries their combined current.
+          </div>
+        </div>
+      )}
       {infoMode === "table" ? (() => {
         // One row per circuit (a breaker with no circuits yet still gets a single
         // row, circuit fields blank) — flat rows are what makes per-column sort
@@ -21290,6 +21403,7 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
                 phase: breakerPhases(b.cells, threePhase).join("-"),
                 typeName: type ? type.name : "—", ampRating: b.ampRating || "",
                 circuitTag: c ? (c.tag || "") : "", description: c ? (c.label || "") : "", wireColor: c ? (c.wireColor || "") : "",
+                neutralWarn: !!c && neutralWarnCircuitIds.has(c.id),
                 roomIds, roomText, notes: c ? (c.notes || "") : "",
               });
             });
@@ -21381,7 +21495,7 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
                           </div>
                         )}
                         <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(3, 0, top), fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", color: C.ink }}>{r.circuitTag || "—"}</div>
-                        <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(4, 0, top), fontSize: 13, color: C.ink }}>{r.description || "—"}</div>
+                        <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(4, 0, top), gap: 5, fontSize: 13, color: C.ink }} title={r.neutralWarn ? neutralWarnTitle : undefined}>{r.neutralWarn && neutralIcon(13)}{r.description || "—"}</div>
                         <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(5, 0, top) }}>{r.wireColor ? <WireColorChip color={r.wireColor} /> : <span style={{ fontSize: 12, color: C.muted }}>—</span>}</div>
                         <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(6, 0, top), fontSize: 13, color: C.ink }}>{r.roomText}</div>
                         <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(7, 0, top), fontSize: 12, color: C.muted, whiteSpace: "pre-line" }}>{r.notes || "—"}</div>
@@ -21461,8 +21575,9 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
                       <button
                         key={`bar-${it.breaker.id}`} type="button" onClick={() => onSlotClick(it.breaker.id)}
                         title={[info.primary, info.secondary].filter(Boolean).join(" · ")}
-                        style={{ ...place, border: "none", background: C.bg, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}
+                        style={{ ...place, position: "relative", border: "none", background: C.bg, cursor: "pointer", padding: 0, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}
                       >
+                        {neutralWarnBreakerIds.has(it.breaker.id) && <span style={{ position: "absolute", top: 3, display: "flex" }}>{neutralIcon(10)}</span>}
                         <span style={{ writingMode: "vertical-rl", transform: "rotate(180deg)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxHeight: "100%", fontSize: 9, color: C.muted }}>
                           <b style={{ color: C.brandDark }}>{info.primary}</b>{info.secondary ? ` · ${info.secondary}` : ""}
                         </span>
@@ -21474,7 +21589,9 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
                       key={`main-${it.breaker.id}`} onClick={() => onSlotClick(it.breaker.id)} type="button"
                       style={{ ...place, border: "none", background: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", cursor: "pointer", padding: "1px 4px", overflow: "hidden" }}
                     >
-                      <span style={{ fontSize: 9, fontWeight: 700, color: C.brandDark, lineHeight: 1.1 }}>{info.primary}</span>
+                      <span style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 9, fontWeight: 700, color: C.brandDark, lineHeight: 1.1 }}>
+                        {neutralWarnBreakerIds.has(it.breaker.id) && neutralIcon(10)}{info.primary}
+                      </span>
                       {info.secondary && <span style={{ fontSize: 8, color: C.muted, whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden", maxWidth: "100%", lineHeight: 1.1 }}>{info.secondary}</span>}
                     </button>
                   );
@@ -21487,8 +21604,10 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
           return (
             <button
               key={cell.key} onClick={() => onSlotClick(b.id)} type="button"
-              style={{ ...cellBase, gridColumn: breakerTrack(cell.col), gridRow: `${cell.row} / span ${cell.rowSpan}`, border: `1.5px solid ${C.border}` }}
+              style={{ ...cellBase, position: "relative", gridColumn: breakerTrack(cell.col), gridRow: `${cell.row} / span ${cell.rowSpan}`, border: `1.5px solid ${neutralWarnBreakerIds.has(b.id) ? C.danger : C.border}` }}
+              title={neutralWarnBreakerIds.has(b.id) ? neutralWarnTitle : undefined}
             >
+              {neutralWarnBreakerIds.has(b.id) && <span style={{ position: "absolute", top: 3, right: 4, display: "flex" }}>{neutralIcon(12)}</span>}
               <span style={{ fontSize: 11, fontWeight: 700, color: C.brandDark }}>{info.primary}</span>
               <span style={{ fontSize: 9, color: C.muted, whiteSpace: "nowrap", textOverflow: "ellipsis", overflow: "hidden", maxWidth: "100%" }}>{info.secondary}</span>
             </button>
@@ -21508,6 +21627,53 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
         mode={printMode}
         pageHeightIn={printPageHeightIn}
       />
+    </div>
+  );
+}
+
+// "Shares a neutral" -- a checkbox, and once ticked, the other circuits on this
+// panel to pick from as chips (several: a 3-phase multi-wire branch shares one
+// neutral three ways). The circuit being edited is left out of its own list.
+// The partners shown on an EXISTING circuit are read from both sides
+// (sharedNeutralPartnerIds), so a link recorded only on the other circuit still
+// shows here and is kept on save rather than silently dropped.
+function SharedNeutralField({ values, setValues, panel }) {
+  const all = panelCircuitsWithBreakers(panel).filter(x => x.circuit.id !== values.id);
+  // Untouched (no `sharesNeutral` yet): an existing circuit shows its partners
+  // from both sides. Once the box or a chip is touched, the draft is the truth.
+  const touched = values.sharesNeutral !== undefined;
+  const ids = touched || !values.id ? (values.sharedNeutralWithIds || []) : sharedNeutralPartnerIds(panel, values.id);
+  const ticked = touched ? !!values.sharesNeutral : ids.length > 0;
+  const toggle = id => setValues({ ...values, sharesNeutral: true, sharedNeutralWithIds: ids.includes(id) ? ids.filter(x => x !== id) : [...ids, id] });
+  return (
+    <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 6 }}>
+      <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: C.ink, cursor: "pointer" }}>
+        <input
+          type="checkbox" checked={ticked}
+          onChange={e => setValues({ ...values, sharesNeutral: e.target.checked, sharedNeutralWithIds: e.target.checked ? ids : [] })}
+        />
+        Shares a neutral with another circuit
+      </label>
+      {ticked && (all.length === 0 ? (
+        <div style={{ fontSize: 13, color: C.empty }}>There are no other circuits on this panel yet.</div>
+      ) : (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {all.map(({ circuit, breaker }) => {
+            const active = ids.includes(circuit.id);
+            return (
+              <button
+                key={circuit.id} type="button" onClick={() => toggle(circuit.id)} aria-pressed={active}
+                style={{
+                  padding: "6px 10px", borderRadius: 14, fontSize: 12, fontWeight: active ? 600 : 500,
+                  border: `1.5px solid ${active ? C.brand : C.border}`, background: active ? C.brand : "#fff", color: active ? "#fff" : C.ink,
+                }}
+              >
+                {circuitRefName(circuit, breaker)}
+              </button>
+            );
+          })}
+        </div>
+      ))}
     </div>
   );
 }
@@ -21672,6 +21838,90 @@ function circuitTagConflict(panel, tag, excludeId) {
   return all.find(c => c.id !== excludeId && String(c.tag || "").trim().toLowerCase() === want) || null;
 }
 
+// ── Shared neutrals (backend v45, 2026-09-30) ─────────────────────────────────
+// A circuit may share its neutral conductor with others on the same panel (a
+// multi-wire branch circuit). The link is stored on BOTH circuits
+// (`sharedNeutralWithIds`), kept that way by syncSharedNeutral on every save, so
+// either circuit's form and summary can say who it shares with. Every reader
+// still takes the UNION of both directions, so a one-sided link written by hand
+// or by an older build is honoured rather than half-shown.
+//
+// The hazard it exists to flag: two circuits sharing a neutral must sit on
+// DIFFERENT legs, so their currents cancel on the neutral. On the same leg they
+// ADD, and the shared neutral can carry twice its rating with no breaker able to
+// see it. sharedNeutralConflicts finds those pairs.
+
+// Every circuit on a panel with where it sits: { circuit, breaker } (breaker is
+// null for an unassigned one).
+function panelCircuitsWithBreakers(panel) {
+  return [
+    ...(panel && panel.breakers || []).flatMap(b => (b.circuits || []).map(c => ({ circuit: c, breaker: b }))),
+    ...(panel && panel.unassignedCircuits || []).map(c => ({ circuit: c, breaker: null })),
+  ];
+}
+
+// The circuits `circuitId` shares a neutral with, from either side's record.
+function sharedNeutralPartnerIds(panel, circuitId) {
+  const all = panelCircuitsWithBreakers(panel);
+  const ids = new Set();
+  all.forEach(({ circuit }) => {
+    if (circuit.id === circuitId) (circuit.sharedNeutralWithIds || []).forEach(id => ids.add(id));
+    else if ((circuit.sharedNeutralWithIds || []).includes(circuitId)) ids.add(circuit.id);
+  });
+  ids.delete(circuitId);
+  return [...ids].filter(id => all.some(x => x.circuit.id === id));
+}
+
+// How a circuit is named when another one points at it: its ID and description,
+// and where it sits, since two circuits can share a description.
+function circuitRefName(circuit, breaker) {
+  const where = breaker ? `slot ${cellsLabel_(breaker)}` : "unassigned";
+  const name = [circuit.tag, circuit.label].filter(Boolean).join(" · ") || "(unnamed circuit)";
+  return `${name} (${where})`;
+}
+
+// Makes the shared-neutral links symmetric after circuit `circuitId` was saved
+// with partner list `ids`: every partner gains it, every former partner loses
+// it. Pure -- takes and returns the panel's two circuit containers.
+function syncSharedNeutral(breakers, unassigned, circuitId, ids) {
+  const want = new Set(ids || []);
+  const fix = c => {
+    if (c.id === circuitId) return { ...c, sharedNeutralWithIds: [...want] };
+    const has = (c.sharedNeutralWithIds || []).includes(circuitId);
+    if (want.has(c.id) && !has) return { ...c, sharedNeutralWithIds: [...(c.sharedNeutralWithIds || []), circuitId] };
+    if (!want.has(c.id) && has) return { ...c, sharedNeutralWithIds: (c.sharedNeutralWithIds || []).filter(x => x !== circuitId) };
+    return c;
+  };
+  return {
+    breakers: (breakers || []).map(b => ({ ...b, circuits: (b.circuits || []).map(fix) })),
+    unassigned: (unassigned || []).map(fix),
+  };
+}
+
+// Pairs of circuits that share a neutral AND sit on a common leg. Each pair once,
+// whichever side recorded the link. Unassigned circuits are on no leg, so never
+// conflict. Returns [{ a, b, aBreaker, bBreaker, phases }].
+function sharedNeutralConflicts(panel, threePhase) {
+  const placed = new Map();
+  (panel && panel.breakers || []).forEach(b => (b.circuits || []).forEach(c => placed.set(c.id, { circuit: c, breaker: b })));
+  const seen = new Set();
+  const out = [];
+  placed.forEach(({ circuit, breaker }) => {
+    (circuit.sharedNeutralWithIds || []).forEach(otherId => {
+      const other = placed.get(otherId);
+      if (!other || otherId === circuit.id) return;
+      const key = [circuit.id, otherId].sort().join("|");
+      if (seen.has(key)) return;
+      seen.add(key);
+      const pa = breakerPhases(breaker.cells, threePhase);
+      const pb = breakerPhases(other.breaker.cells, threePhase);
+      const phases = [...new Set(pa.filter(x => pb.includes(x)))];
+      if (phases.length) out.push({ a: circuit, b: other.circuit, aBreaker: breaker, bBreaker: other.breaker, phases });
+    });
+  });
+  return out;
+}
+
 // The shared field config for a Circuit row in ChildEntityTable — used by the
 // circuits under a breaker and by the panel's unassigned list, so the two can't
 // drift into showing different fields for the same entity.
@@ -21686,11 +21936,18 @@ const CIRCUIT_TABLE_FIELDS = [
   { key: "label", label: "Description", placeholder: "e.g. Outlets, Water Heater", wide: true },
   { key: "notes", label: "Notes", type: "textarea", wide: true, placeholder: "One callout per line, e.g.\n- North wall outlets\n- Closet outlets" },
 ];
-const CIRCUIT_TABLE_INITIAL_DRAFT = { tag: "", wireColor: "", label: "", notes: "", roomsServedIds: [], feedsPanelLabel: "" };
+const CIRCUIT_TABLE_INITIAL_DRAFT = { tag: "", wireColor: "", label: "", notes: "", roomsServedIds: [], feedsPanelLabel: "", sharesNeutral: false, sharedNeutralWithIds: [] };
 
 // What a circuit row shows when collapsed: what it actually serves, then its
 // per-callout notes. Shared for the same reason the field config above is.
-function circuitSummary(circuit, assets) {
+function circuitSummary(circuit, assets, panel) {
+  // Who it shares a neutral with, read from both sides, and whether any of them
+  // is on the same leg -- the one thing on this line worth a warning colour.
+  const partners = panel ? sharedNeutralPartnerIds(panel, circuit.id) : [];
+  const placed = panel ? panelCircuitsWithBreakers(panel) : [];
+  const onOneLeg = panel && partners.length
+    ? sharedNeutralConflicts(panel, panelIsThreePhase(panel)).some(x => x.a.id === circuit.id || x.b.id === circuit.id)
+    : false;
   const serves = circuit.feedsPanelLabel
     ? `Feeds → ${circuit.feedsPanelLabel}`
     : (circuit.roomsServedIds || []).map(id => roomNameFor(id, assets)).join(", ");
@@ -21702,6 +21959,13 @@ function circuitSummary(circuit, assets) {
         {circuit.wireColor && <WireColorChip color={circuit.wireColor} />}
       </div>
       {serves && <div style={{ fontSize: 12, color: C.ink, marginTop: 2 }}>{serves}</div>}
+      {partners.length > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: onOneLeg ? C.danger : C.muted, marginTop: 2 }}>
+          {onOneLeg && <AlertTriangle size={12} style={{ flexShrink: 0 }} />}
+          Shares neutral with {partners.map(id => { const hit = placed.find(x => x.circuit.id === id); return hit ? circuitRefName(hit.circuit, hit.breaker) : id; }).join(", ")}
+          {onOneLeg ? " — on the same leg" : ""}
+        </div>
+      )}
       {circuit.notes && (
         <div style={{ fontSize: 12, color: C.muted, whiteSpace: "pre-line", marginTop: 2 }}>{circuit.notes}</div>
       )}
