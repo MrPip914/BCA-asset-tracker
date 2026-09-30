@@ -50,7 +50,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v45";
+const SCRIPT_VERSION = "v46";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -164,6 +164,9 @@ const ASSET_FIELDS = [
   // it isn't recoverable from a delivery URL, and it's what a future
   // replace or delete needs.
   "floorPlanUrl", "floorPlanStorageKey", "floorPlanFileName",
+  // v46: quarter turns clockwise the plan is drawn at, "0".."3". Blank reads as 0,
+  // which is how every existing plan was drawn, so no row needs migrating.
+  "floorPlanRotation",
 ];
 
 // The Assets tab's real column set: the fixed schema above PLUS whatever custom

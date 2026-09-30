@@ -3662,7 +3662,6 @@ const NAME_ORDER_STORAGE_KEY = CLIENT.storageKey("asset-tracker-name-order");
 // The trade, stated plainly: two people editing types on two devices curate two
 // different rows. That is the same trade column visibility takes, and the thing
 // they are curating is a shortcut rather than a fact about the school.
-const FLOOR_PLAN_ROTATION_STORAGE_KEY = CLIENT.storageKey("asset-tracker-floorplan-rotation"); // localStorage — { [assetId]: quarter turns }, per device
 const ICON_FAVORITES_STORAGE_KEY = CLIENT.storageKey("asset-tracker-icon-favorites");
 // This tenant's deployed Apps Script Web App URL, from clients.js. Redeploy with
 // `node deploy.mjs` any time you change AssetTrackerSync.gs — and note that each
@@ -3943,7 +3942,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v45";
+const FRONTEND_SCRIPT_VERSION = "v46";
 // The version of THIS file — shown in About (the account menu), so "is my browser
 // actually running the build I just deployed, or a cached one?" is answerable in
 // two clicks instead of by reading view-source.
@@ -3961,7 +3960,7 @@ const FRONTEND_SCRIPT_VERSION = "v45";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-30.4";
+const APP_VERSION = "2026-09-30.5";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -8968,6 +8967,16 @@ function AssetTracker() {
   // All three of these take an explicit `assetId`, for the same reason
   // uploadFloorPlanSvg does: the Map tab is the only caller, and it names
   // whichever place is currently scoped, not "the open asset".
+  // A quarter turn clockwise, stored on the asset so it is the same for every
+  // user. Not audited: it is how the drawing is shown, not a fact about the
+  // inventory. Editors only, like every other write.
+  function rotateFloorPlan(assetId) {
+    if (savingRef.current) return;
+    const targetAsset = assets.find(a => a.id === assetId);
+    if (!targetAsset) return;
+    const next = String(((parseInt(targetAsset.floorPlanRotation, 10) || 0) + 1) % 4);
+    persist(assets.map(a => (a.id === assetId ? { ...a, floorPlanRotation: next } : a)));
+  }
   function saveSpaceLink(assetId, shapeId, roomId) {
     if (savingRef.current) return; // double-submit guard, see savingRef
     const targetAsset = assets.find(a => a.id === assetId);
@@ -15593,6 +15602,7 @@ function AssetTracker() {
           onSaveLink={(shapeId, roomId) => saveSpaceLink(scopeId, shapeId, roomId)}
           onSaveGroup={draft => saveSpaceGroup(scopeId, draft)}
           onDeleteGroup={groupId => deleteSpaceGroup(scopeId, groupId)}
+          onRotate={() => rotateFloorPlan(scopeId)}
           focusShapeId={mapFocusShapeId}
           onFocusHandled={() => setMapFocusShapeId(null)}
           onOpenAsset={openDetail}
@@ -19193,7 +19203,7 @@ function fetchFloorPlanSvgText(url) {
 // (see its own comment: "a Room's floor plan alongside a Building's").
 function MapTabContent({
   canEdit, assets, typesList, scopeAsset,
-  uploadBusy, uploadError, onUploadPlan, onSaveLink, onSaveGroup, onDeleteGroup,
+  uploadBusy, uploadError, onUploadPlan, onSaveLink, onSaveGroup, onDeleteGroup, onRotate,
   focusShapeId, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot,
 }) {
   if (!scopeAsset) {
@@ -19226,6 +19236,7 @@ function MapTabContent({
       onSaveLink={onSaveLink}
       onSaveGroup={onSaveGroup}
       onDeleteGroup={onDeleteGroup}
+      onRotate={onRotate}
       focusShapeId={focusShapeId}
       onFocusHandled={onFocusHandled}
       onOpenAsset={onOpenAsset}
@@ -19254,20 +19265,13 @@ function MapTabContent({
 function FloorPlanTabContent({
   canEdit, selectedAsset, assets, typesList,
   uploadBusy, uploadError, onUploadPlan,
-  onSaveLink, onSaveGroup, onDeleteGroup,
+  onSaveLink, onSaveGroup, onDeleteGroup, onRotate,
   focusShapeId, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot,
 }) {
   const rawPlan = useFloorPlanSvg(selectedAsset.floorPlanUrl);
-  // Rotation is a per-device reading preference (like column visibility), so it
-  // stores nothing on the asset and needs no backend change.
-  const readRotations = () => { try { return JSON.parse(localStorage.getItem(FLOOR_PLAN_ROTATION_STORAGE_KEY) || "{}") || {}; } catch (e) { return {}; } };
-  const [rotation, setRotation] = useState(() => (readRotations()[selectedAsset.id] || 0) % 4);
-  useEffect(() => { setRotation((readRotations()[selectedAsset.id] || 0) % 4); }, [selectedAsset.id]);
-  const rotatePlan = () => {
-    const next = (rotation + 1) % 4;
-    setRotation(next);
-    try { localStorage.setItem(FLOOR_PLAN_ROTATION_STORAGE_KEY, JSON.stringify({ ...readRotations(), [selectedAsset.id]: next })); } catch (e) {}
-  };
+  // Rotation is stored on the asset (floorPlanRotation, quarter turns, blank = 0)
+  // so everyone sees the plan the way the last editor left it.
+  const rotation = (parseInt(selectedAsset.floorPlanRotation, 10) || 0) % 4;
   const plan = useMemo(
     () => rawPlan.status === "ready" ? { ...rawPlan, spaces: floorPlanRotateSpaces(rawPlan.spaces, rotation) } : rawPlan,
     [rawPlan, rotation]
@@ -20010,14 +20014,16 @@ function FloorPlanTabContent({
               >
                 <Repeat size={15} /> Free zoom ({freeZoom ? "on" : "off"})
               </button>
+              {canEdit && onRotate && (
               <button
                 type="button"
-                onClick={() => { setMenuOpen(false); rotatePlan(); }}
+                onClick={() => { setMenuOpen(false); onRotate(); }}
                 className="icon-btn"
                 style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
               >
                 <RotateCw size={15} /> Rotate 90°
               </button>
+              )}
               {canEdit && (
                 <button
                   type="button"
