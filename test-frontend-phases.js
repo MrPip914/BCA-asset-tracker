@@ -133,6 +133,19 @@ check('SCRIPT_VERSION and FRONTEND_SCRIPT_VERSION match', sv === fv, `${sv} vs $
 check('panel.html derives phase by row the same way (ceil(n/2), A-B / A-B-C)',
   /Math\.ceil\(n \/ 2\) - 1\) % letters\.length/.test(panelHtml) && /three \? "ABC" : "AB"/.test(panelHtml));
 
+// --- circuit ID and hot wire colour (v44) ---------------------------------------------
+{
+  const circuitFields = gs.slice(gs.indexOf('const CIRCUIT_FIELDS = ['), gs.indexOf('];', gs.indexOf('const CIRCUIT_FIELDS = [')));
+  check('backend CIRCUIT_FIELDS carries tag and wireColor (else a save drops them)',
+    /"tag"/.test(circuitFields) && /"wireColor"/.test(circuitFields));
+  check('doPost writes both, for breaker circuits AND unassigned ones',
+    (gs.match(/notes: c\.notes \|\| "", tag: c\.tag \|\| "", wireColor: c\.wireColor \|\| ""/g) || []).length === 2);
+  check('doGet reads both back, for breaker circuits AND unassigned ones',
+    (gs.match(/tag: c\.tag \|\| "", wireColor: c\.wireColor \|\| "",\n\s*\}\)\),/g) || []).length === 2);
+  const pub = gs.slice(gs.indexOf('const PUBLIC_CIRCUIT_FIELDS = ['), gs.indexOf('];', gs.indexOf('const PUBLIC_CIRCUIT_FIELDS = [')));
+  check('the public panel page is sent them too', /"tag"/.test(pub) && /"wireColor"/.test(pub) && /tag: c\.tag, wireColor: c\.wireColor/.test(gs));
+}
+
 // --- fixture ---------------------------------------------------------------------
 check('MOCK_SNAPSHOT carries a three-phase panel so Sandbox can exercise it',
   /panelPhases: "3"/.test(src.slice(src.indexOf('const MOCK_SNAPSHOT'))));

@@ -3255,12 +3255,16 @@ function planAssetImport(parsed, ctx) {
 // on this panel) is a NEW breaker or circuit.
 const PANEL_SCHEDULE_HEADERS = [
   "Slot", "Unit", "Breaker Type", "Amps", "Serial", "Installed", "Breaker Notes",
-  "Circuit", "Serves", "Feeds Panel", "Circuit Notes", "Breaker Key", "Circuit Key",
+  "Circuit ID", "Description", "Wire Color", "Serves", "Feeds Panel", "Circuit Notes", "Breaker Key", "Circuit Key",
 ];
+// The Description column was headed "Circuit" until 2026-09-30, when the circuit's
+// Label became its Description. A file outlives the header that produced it, so
+// the old heading is still read -- the rule `?tab=changes` follows.
+const PANEL_LEGACY_DESCRIPTION_HEADER = "Circuit";
 // The columns that describe the BREAKER (repeated on each of its circuit rows)
 // versus the CIRCUIT. Named once so the export and the read cannot disagree.
 const PANEL_BREAKER_COLS = ["Unit", "Breaker Type", "Amps", "Serial", "Installed", "Breaker Notes", "Breaker Key"];
-const PANEL_CIRCUIT_COLS = ["Circuit", "Serves", "Feeds Panel", "Circuit Notes", "Circuit Key"];
+const PANEL_CIRCUIT_COLS = ["Circuit ID", "Description", "Wire Color", "Serves", "Feeds Panel", "Circuit Notes", "Circuit Key"];
 // Several rooms in one cell. Not a comma: room names and full paths can carry
 // one, and a separator a value can contain cannot be split back — the lesson the
 // Assets import's User column learned the hard way.
@@ -3307,7 +3311,9 @@ function panelScheduleRows(panel, ctx) {
   let nextUnit = 1;
   const typeName = id => { const t = (breakerTypes || []).find(x => x.id === id); return t ? t.name : ""; };
   const circuitCells = c => ({
-    "Circuit": c.label || "",
+    "Circuit ID": c.tag || "",
+    "Description": c.label || "",
+    "Wire Color": c.wireColor || "",
     "Serves": (c.roomsServedIds || []).map(id => fullPathOf((assets || []).find(a => a.id === id), assets) || id).join(PANEL_SERVES_SEPARATOR),
     "Feeds Panel": c.feedsPanelLabel ? (panelRefText((assets || []).find(a => a.id === c.feedsPanelLabel), assets) || c.feedsPanelLabel) : "",
     "Circuit Notes": c.notes || "",
@@ -3353,8 +3359,8 @@ function planPanelImport(parsed, ctx) {
   const headers = new Set((parsed.headers || []).filter(Boolean));
   // Said ONCE, rather than as a complaint per row, when the file is plainly not
   // a panel schedule — an Assets export chosen by mistake is the likely one.
-  if (!headers.has("Slot") || !headers.has("Circuit")) {
-    errors.push("This isn't a panel schedule — it has no Slot and Circuit columns. Export one from a panel's menu to get the right shape.");
+  if (!headers.has("Slot") || !(headers.has("Description") || headers.has(PANEL_LEGACY_DESCRIPTION_HEADER))) {
+    errors.push("This isn't a panel schedule — it has no Slot and Description columns. Export one from a panel's menu to get the right shape.");
     return fail();
   }
   if (!parsed.rows.length) {
@@ -3398,7 +3404,11 @@ function planPanelImport(parsed, ctx) {
   const breakerSig = v => ["Unit", "Breaker Type", "Amps", "Serial", "Installed", "Breaker Notes"]
     .map(k => String(v[k] || "").trim().toLowerCase()).join("\u0001");
 
-  parsed.rows.forEach(({ row, values: v }) => {
+  const seenTags = new Map(); // lower-cased Circuit ID -> the row that first used it
+  parsed.rows.forEach(({ row, values }) => {
+    const v = values["Description"] == null && values[PANEL_LEGACY_DESCRIPTION_HEADER] != null
+      ? { ...values, Description: values[PANEL_LEGACY_DESCRIPTION_HEADER] }
+      : values;
     const slotText = v["Slot"] || "";
     let breaker = null;
     if (slotText) {
@@ -3447,8 +3457,23 @@ function planPanelImport(parsed, ctx) {
       if (!breaker) errors.push(`Row ${row}: has neither a slot nor a circuit.`);
       return;
     }
-    const label = v["Circuit"] || "";
-    if (!label) { errors.push(`Row ${row}: a circuit needs a name in the Circuit column.`); return; }
+    const label = v["Description"] || "";
+    if (!label) { errors.push(`Row ${row}: a circuit needs a Description.`); return; }
+    // The circuit ID is unique per panel (circuitTagConflict) -- and since the
+    // import REPLACES the panel, the file is the whole panel, so the check is
+    // across the file's own rows.
+    const tag = String(v["Circuit ID"] || "").trim();
+    if (tag) {
+      const k = tag.toLowerCase();
+      if (seenTags.has(k)) errors.push(`Row ${row}: circuit ID "${tag}" is already used on row ${seenTags.get(k)} — each circuit on a panel needs its own ID.`);
+      else seenTags.set(k, row);
+    }
+    let wireColor = "";
+    const colorText = String(v["Wire Color"] || "").trim();
+    if (colorText) {
+      wireColor = CIRCUIT_WIRE_COLORS.find(c => c.toLowerCase() === colorText.replace(/\s*\/\s*/g, "/").toLowerCase()) || "";
+      if (!wireColor) errors.push(`Row ${row}: wire color "${colorText}" isn't one of ${CIRCUIT_WIRE_COLORS.join(", ")}.`);
+    }
     const roomsServedIds = [];
     String(v["Serves"] || "").split(";").map(s => s.trim()).filter(Boolean).forEach(text => {
       const hit = resolveImportRef(text, roomIdx);
@@ -3472,7 +3497,7 @@ function planPanelImport(parsed, ctx) {
     claimedCircuitIds.add(id);
     const circuit = {
       id, breakerId: breaker ? breaker.id : "", panelLabel: panel.id,
-      label, notes: v["Circuit Notes"] || "", roomsServedIds, feedsPanelLabel,
+      tag, wireColor, label, notes: v["Circuit Notes"] || "", roomsServedIds, feedsPanelLabel,
     };
     if (breaker) breaker.circuits.push(circuit);
     else unassigned.push(circuit);
@@ -3518,10 +3543,10 @@ function planPanelImport(parsed, ctx) {
   const shape = (bs, us) => JSON.stringify({
     b: [...bs].map(b => ({ ...b, cells: [...(b.cells || [])].sort(), ampRating: String(b.ampRating == null ? "" : b.ampRating),
       installedDate: b.installedDate ? dateOnly(b.installedDate) : "",
-      circuits: (b.circuits || []).map(c => ({ id: c.id, label: c.label || "", notes: c.notes || "", roomsServedIds: c.roomsServedIds || [], feedsPanelLabel: c.feedsPanelLabel || "" })) }))
+      circuits: (b.circuits || []).map(c => ({ id: c.id, tag: c.tag || "", wireColor: c.wireColor || "", label: c.label || "", notes: c.notes || "", roomsServedIds: c.roomsServedIds || [], feedsPanelLabel: c.feedsPanelLabel || "" })) }))
       .map(({ id, cells, ampRating, serial, installedDate, notes, groupId, breakerTypeId, circuits }) => ({ id, cells, ampRating, serial: serial || "", installedDate, notes: notes || "", groupId: groupId || "", breakerTypeId: breakerTypeId || "", circuits }))
       .sort((x, y) => x.id.localeCompare(y.id)),
-    u: (us || []).map(c => ({ id: c.id, label: c.label || "", notes: c.notes || "", roomsServedIds: c.roomsServedIds || [], feedsPanelLabel: c.feedsPanelLabel || "" })),
+    u: (us || []).map(c => ({ id: c.id, tag: c.tag || "", wireColor: c.wireColor || "", label: c.label || "", notes: c.notes || "", roomsServedIds: c.roomsServedIds || [], feedsPanelLabel: c.feedsPanelLabel || "" })),
   });
   const unchanged = shape(breakers, unassigned) === shape(oldBreakers, panel.unassignedCircuits || []);
   return {
@@ -3889,7 +3914,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v43";
+const FRONTEND_SCRIPT_VERSION = "v44";
 // The version of THIS file — shown in About (the account menu), so "is my browser
 // actually running the build I just deployed, or a cached one?" is answerable in
 // two clicks instead of by reading view-source.
@@ -5619,19 +5644,19 @@ const MOCK_SNAPSHOT = {
       panelSlotCount: 18, panelLayout: "two-column", panelPhases: "3", panelVoltage: "120/208",
       breakers: [
         { id: "b98-1-3-5", panelLabel: "BCA0098", cells: ["1a", "1b", "3a", "3b", "5a", "5b"], breakerTypeId: "type-triple-pole", ampRating: "40", serial: "", installedDate: "", notes: "", groupId: "grp98-1", circuits: [
-          { id: "c98-1", breakerId: "b98-1-3-5", label: "Rooftop HVAC unit", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "- RTU-1 above kitchen" },
+          { id: "c98-1", tag: "1", wireColor: "Black/Red/Blue", breakerId: "b98-1-3-5", label: "Rooftop HVAC unit", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "- RTU-1 above kitchen" },
         ] },
         { id: "b98-2-4", panelLabel: "BCA0098", cells: ["2a", "2b", "4a", "4b"], breakerTypeId: "type-double-pole", ampRating: "30", serial: "", installedDate: "", notes: "", groupId: "grp98-2", circuits: [
-          { id: "c98-2", breakerId: "b98-2-4", label: "Dishwasher booster heater", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "" },
+          { id: "c98-2", tag: "2", wireColor: "Black/Red", breakerId: "b98-2-4", label: "Dishwasher booster heater", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "" },
         ] },
         { id: "b98-6", panelLabel: "BCA0098", cells: ["6a", "6b"], breakerTypeId: "type-single-pole", ampRating: "20", serial: "", installedDate: "", notes: "", groupId: "grp98-6", circuits: [
-          { id: "c98-6", breakerId: "b98-6", label: "Counter outlets", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "- North counter" },
+          { id: "c98-6", tag: "6", wireColor: "Black", breakerId: "b98-6", label: "Counter outlets", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "- North counter" },
         ] },
         { id: "b98-7-9-11", panelLabel: "BCA0098", cells: ["7a", "7b", "9a", "9b", "11a", "11b"], breakerTypeId: "type-triple-pole", ampRating: "30", serial: "", installedDate: "", notes: "", groupId: "grp98-7", circuits: [
-          { id: "c98-7", breakerId: "b98-7-9-11", label: "Walk-in cooler condenser", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "" },
+          { id: "c98-7", tag: "7", breakerId: "b98-7-9-11", label: "Walk-in cooler condenser", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "" },
         ] },
         { id: "b98-8", panelLabel: "BCA0098", cells: ["8a", "8b"], breakerTypeId: "type-single-pole", ampRating: "15", serial: "", installedDate: "", notes: "", groupId: "grp98-8", circuits: [
-          { id: "c98-8", breakerId: "b98-8", label: "Kitchen lights", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "" },
+          { id: "c98-8", tag: "8", wireColor: "Red", breakerId: "b98-8", label: "Kitchen lights", roomsServedIds: ["BCR0002"], feedsPanelLabel: "", notes: "" },
         ] },
         { id: "b98-10", panelLabel: "BCA0098", cells: ["10a", "10b"], breakerTypeId: "type-single-pole", ampRating: "20", serial: "", installedDate: "", notes: "", groupId: "grp98-10", circuits: [] },
         // NON-CONTIGUOUS breakers, so Sandbox draws the bar (panelDiagramLayout).
@@ -9862,7 +9887,7 @@ function AssetTracker() {
   // rooms or feeds a downstream sub-panel, never both and never neither. Shared
   // by add and edit so an unassigned circuit can't sidestep it.
   function validateCircuitDraft(draft) {
-    if (!draft.label || !draft.label.trim()) return "Enter a circuit label.";
+    if (!draft.label || !draft.label.trim()) return "Enter a circuit description.";
     const roomsServedIds = draft.roomsServedIds || [];
     const feedsPanelLabel = draft.feedsPanelLabel || "";
     if (roomsServedIds.length === 0 && !feedsPanelLabel) return "Pick either rooms served or a sub-panel this circuit feeds.";
@@ -9881,8 +9906,12 @@ function AssetTracker() {
     const feedsPanelLabel = draft.feedsPanelLabel || "";
     const existing = selectedAsset.breakers || [];
     if (breakerId && !existing.some(b => b.id === breakerId)) return "Breaker not found.";
+    const tag = String(draft.tag || "").trim();
+    const clash = circuitTagConflict(selectedAsset, tag, null);
+    if (clash) return `Circuit ID "${tag}" is already used on this panel, by "${clash.label}".`;
     const circuit = {
       id: crypto.randomUUID(), breakerId: breakerId || "", panelLabel: selectedId,
+      tag, wireColor: draft.wireColor || "",
       label: draft.label.trim(), notes: (draft.notes || "").trim(),
       roomsServedIds, feedsPanelLabel,
     };
@@ -9910,7 +9939,10 @@ function AssetTracker() {
     if (breakerId && !existing.some(b => b.id === breakerId)) return "Breaker not found.";
     const original = circuitsIn(breakerId).find(c => c.id === id);
     if (!original) return "Circuit not found.";
-    const updated = { ...original, label: draft.label.trim(), notes: (draft.notes || "").trim(), roomsServedIds, feedsPanelLabel };
+    const tag = String(draft.tag || "").trim();
+    const clash = circuitTagConflict(selectedAsset, tag, id);
+    if (clash) return `Circuit ID "${tag}" is already used on this panel, by "${clash.label}".`;
+    const updated = { ...original, tag, wireColor: draft.wireColor || "", label: draft.label.trim(), notes: (draft.notes || "").trim(), roomsServedIds, feedsPanelLabel };
     // `related` defaults to none: of the four things editable here, only the two
     // that name other assets pass one.
     const mk = (field, from, to, related = "") => ({
@@ -9918,7 +9950,9 @@ function AssetTracker() {
       action: "circuit_edited", field: `${original.label} — ${field}`, from, to, related,
     });
     const entries = [];
-    if (original.label !== updated.label) entries.push(mk("Label", original.label, updated.label));
+    if (original.label !== updated.label) entries.push(mk("Description", original.label, updated.label));
+    if ((original.tag || "") !== updated.tag) entries.push(mk("ID", original.tag || "—", updated.tag || "—"));
+    if ((original.wireColor || "") !== updated.wireColor) entries.push(mk("Hot wire color", original.wireColor || "—", updated.wireColor || "—"));
     if ((original.notes || "") !== updated.notes) entries.push(mk("Notes", original.notes || "—", updated.notes || "—"));
     if ((original.roomsServedIds || []).join(",") !== roomsServedIds.join(",")) {
       const fromNames = (original.roomsServedIds || []).map(rid => roomNameFor(rid, assets)).join(", ");
@@ -10836,7 +10870,7 @@ function AssetTracker() {
         });
         (b.circuits || []).forEach(c => {
           circuitRows.push({
-            Panel: a.label, "Slot(s)": slotsFromCells(b.cells).join("/"), Circuit: c.label,
+            Panel: a.label, "Slot(s)": slotsFromCells(b.cells).join("/"), "Circuit ID": c.tag || "", Description: c.label, "Wire Color": c.wireColor || "",
             Serves: c.feedsPanelLabel ? `Feeds → ${c.feedsPanelLabel}` : (c.roomsServedIds || []).map(id => roomNameFor(id, assets)).join(", "),
             Notes: c.notes || "",
           });
@@ -10847,7 +10881,7 @@ function AssetTracker() {
       // make the export quietly disagree with what the Layout tab shows.
       (a.unassignedCircuits || []).forEach(c => {
         circuitRows.push({
-          Panel: a.label, "Slot(s)": "Unassigned", Circuit: c.label,
+          Panel: a.label, "Slot(s)": "Unassigned", "Circuit ID": c.tag || "", Description: c.label, "Wire Color": c.wireColor || "",
           Serves: c.feedsPanelLabel ? `Feeds → ${c.feedsPanelLabel}` : (c.roomsServedIds || []).map(id => roomNameFor(id, assets)).join(", "),
           Notes: c.notes || "",
         });
@@ -20522,6 +20556,19 @@ function legendServes(circuit, allAssets) {
   return (circuit.roomsServedIds || []).map(id => roomNameFor(id, allAssets)).filter(Boolean).join(", ");
 }
 
+// The door card's Serves cell leads with the circuit's own ID, which is what the
+// card on the door and the schedule in the office are matched by, and falls back
+// to its Description when it serves nothing namable. The hot wire colour rides
+// at the head of Notes, where an electrician tracing a conductor looks.
+function legendCircuitText(circuit, allAssets) {
+  const serves = legendServes(circuit, allAssets) || circuit.label || "";
+  return circuit.tag ? `${circuit.tag} · ${serves}` : serves;
+}
+function legendNotes(circuit) {
+  const wire = circuit.wireColor ? `Wire: ${circuit.wireColor}` : "";
+  return [wire, circuit.notes || ""].filter(Boolean).join("\n");
+}
+
 function PanelLegendCard({ slotCount, breakers, unassignedCircuits, allAssets, panelAsset, mode, pageHeightIn }) {
   const tiled = mode === "tiled";
   // The panel's own height is the FLOOR, not the answer. Rows grow past their
@@ -20566,7 +20613,7 @@ function PanelLegendCard({ slotCount, breakers, unassignedCircuits, allAssets, p
       if (anchorSlot(b) !== s) { lines.push({ kind: "cont", badge, span }); return; }
       const circuits = b.circuits || [];
       if (circuits.length === 0) { lines.push({ kind: "empty", badge }); return; }
-      circuits.forEach(c => lines.push({ kind: "circuit", badge, serves: legendServes(c, allAssets), notes: c.notes || "" }));
+      circuits.forEach(c => lines.push({ kind: "circuit", badge, serves: legendCircuitText(c, allAssets), notes: legendNotes(c) }));
     });
     if (lines.length === 0) lines.push({ kind: "spare" });
     slots.push({ slot: s, lines });
@@ -20687,8 +20734,8 @@ function PanelLegendCard({ slotCount, breakers, unassignedCircuits, allAssets, p
               <tbody>
                 {unassignedCircuits.map(c => (
                   <tr key={c.id}>
-                    <td style={servesCell}>{legendServes(c, allAssets) || c.label || "—"}</td>
-                    <td style={notesCell}>{c.notes || ""}</td>
+                    <td style={servesCell}>{legendCircuitText(c, allAssets) || "—"}</td>
+                    <td style={notesCell}>{legendNotes(c)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -21225,7 +21272,7 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
         const tableRows = [];
         [...cells].sort((a, b2) => a.slot - b2.slot).forEach(cell => {
           if (cell.kind === "spare") {
-            tableRows.push({ key: cell.key, breakerId: null, spareSlot: cell.slot, slotSort: cell.slot, slotLabel: String(cell.slot), phase: slotPhase(cell.slot, threePhase), typeName: "Spare", ampRating: "", roomIds: [], roomText: "—", notes: "" });
+            tableRows.push({ key: cell.key, breakerId: null, spareSlot: cell.slot, slotSort: cell.slot, slotLabel: String(cell.slot), phase: slotPhase(cell.slot, threePhase), typeName: "Spare", ampRating: "", circuitTag: "", description: "", wireColor: "", roomIds: [], roomText: "—", notes: "" });
             return;
           }
           // A cluster can hold several units, so the type is looked up per breaker.
@@ -21242,6 +21289,7 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
                 slotSort: Math.min(...slotsFromCells(b.cells).map(Number)), slotLabel: cellsLabel_(b),
                 phase: breakerPhases(b.cells, threePhase).join("-"),
                 typeName: type ? type.name : "—", ampRating: b.ampRating || "",
+                circuitTag: c ? (c.tag || "") : "", description: c ? (c.label || "") : "", wireColor: c ? (c.wireColor || "") : "",
                 roomIds, roomText, notes: c ? (c.notes || "") : "",
               });
             });
@@ -21263,7 +21311,7 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
           const sortValue = r => {
             if (tableSortConfig.key === "slot") return r.slotSort;
             if (tableSortConfig.key === "amp") return parseFloat(r.ampRating) || 0;
-            return { phase: r.phase, type: r.typeName, room: r.roomText, notes: r.notes }[tableSortConfig.key] || "";
+            return { phase: r.phase, circuitId: r.circuitTag, description: r.description, wire: r.wireColor, type: r.typeName, room: r.roomText, notes: r.notes }[tableSortConfig.key] || "";
           };
           displayRows = [...displayRows].sort((a2, b2) => {
             const av = sortValue(a2), bv = sortValue(b2);
@@ -21294,7 +21342,7 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
         // now all share ONE grid container (needed for the Slot/Type/Amp row-span
         // above), so that particular failure mode can't recur here anymore, but the
         // header is still a separate grid and needs to land on the same boundaries.
-        const tableCols = "70px 70px 190px 220px 210px 90px";
+        const tableCols = "70px 70px 80px 190px 130px 190px 220px 210px 90px";
         const cellStyle = (col, span, borderTop) => ({
           gridColumn: col, gridRow: span ? `span ${span}` : undefined,
           padding: "10px 12px", borderTop: borderTop ? `1px solid ${C.border}` : "none",
@@ -21307,7 +21355,7 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
               style={{ border: `1px solid ${C.border}` }}
               header={(
               <div style={{ display: "grid", gridTemplateColumns: tableCols, background: C.brandDark, color: C.onBrand, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", minWidth: "max-content" }}>
-                {[["slot", "Slot"], ["phase", "Phase"], ["room", "Room"], ["notes", "Notes"], ["type", "Type"], ["amp", "Amp"]].map(([key, label]) => (
+                {[["slot", "Slot"], ["phase", "Phase"], ["circuitId", "ID"], ["description", "Description"], ["wire", "Wire"], ["room", "Room"], ["notes", "Notes"], ["type", "Type"], ["amp", "Amp"]].map(([key, label]) => (
                   <ColumnHeaderCell key={key} label={label} colKey={key} filterConfigs={tableFilterConfigs} sortConfig={tableSortConfig} setSortConfig={setTableSortConfig} onOpenFilter={setTableActiveFilterCol} />
                 ))}
               </div>
@@ -21332,15 +21380,18 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
                             {r.phase || "—"}
                           </div>
                         )}
-                        <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(3, 0, top), fontSize: 13, color: C.ink }}>{r.roomText}</div>
-                        <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(4, 0, top), fontSize: 12, color: C.muted, whiteSpace: "pre-line" }}>{r.notes || "—"}</div>
+                        <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(3, 0, top), fontSize: 13, fontFamily: "'IBM Plex Mono', monospace", color: C.ink }}>{r.circuitTag || "—"}</div>
+                        <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(4, 0, top), fontSize: 13, color: C.ink }}>{r.description || "—"}</div>
+                        <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(5, 0, top) }}>{r.wireColor ? <WireColorChip color={r.wireColor} /> : <span style={{ fontSize: 12, color: C.muted }}>—</span>}</div>
+                        <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(6, 0, top), fontSize: 13, color: C.ink }}>{r.roomText}</div>
+                        <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(7, 0, top), fontSize: 12, color: C.muted, whiteSpace: "pre-line" }}>{r.notes || "—"}</div>
                         {r.mergeSpan !== 0 && (
-                          <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(5, r.mergeSpan, top), fontSize: 13, color: C.ink }}>
+                          <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(8, r.mergeSpan, top), fontSize: 13, color: C.ink }}>
                             {r.typeName}
                           </div>
                         )}
                         {r.mergeSpan !== 0 && (
-                          <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(6, r.mergeSpan, top), fontSize: 13, color: C.ink }}>
+                          <div onClick={onRowClick} className="row-body" style={{ ...cellStyle(9, r.mergeSpan, top), fontSize: 13, color: C.ink }}>
                             {r.ampRating ? `${r.ampRating}A` : "—"}
                           </div>
                         )}
@@ -21593,31 +21644,80 @@ function CircuitTargetFields({ values, setValues, assets, otherPanels }) {
   );
 }
 
+// The hot-conductor colours an electrician would write on a schedule: the US
+// 120/208-240V convention (black/red/blue), the 277/480V one (brown/orange/
+// yellow), and the combinations a multi-pole circuit carries. A picker rather
+// than free text so a filter or an export groups them; "Other" covers a
+// re-marked conductor, whose real colour belongs in Notes.
+const CIRCUIT_WIRE_COLORS = [
+  "Black", "Red", "Blue", "Black/Red", "Black/Red/Blue",
+  "Brown", "Orange", "Yellow", "Brown/Orange", "Brown/Orange/Yellow", "Other",
+];
+// The swatch drawn beside a colour name; a combination draws one per colour.
+const WIRE_COLOR_SWATCH = { Black: "#1f2328", Red: "#c62828", Blue: "#1565c0", Brown: "#6d4c41", Orange: "#ef6c00", Yellow: "#f9a825" };
+
+// A circuit's ID must be unique within its PANEL -- across every breaker's
+// circuits and the panel's unassigned ones -- because it is how the schedule on
+// the door and the people reading it tell circuits apart. Case- and
+// space-insensitive, and a blank ID is never a clash (most circuits will have
+// none until someone schedules the panel). Returns the circuit already holding
+// it, or null.
+function circuitTagConflict(panel, tag, excludeId) {
+  const want = String(tag || "").trim().toLowerCase();
+  if (!want || !panel) return null;
+  const all = [
+    ...(panel.breakers || []).flatMap(b => b.circuits || []),
+    ...(panel.unassignedCircuits || []),
+  ];
+  return all.find(c => c.id !== excludeId && String(c.tag || "").trim().toLowerCase() === want) || null;
+}
+
 // The shared field config for a Circuit row in ChildEntityTable — used by the
 // circuits under a breaker and by the panel's unassigned list, so the two can't
 // drift into showing different fields for the same entity.
+// `label` is the stored key for what reads as "Description" (2026-09-30) -- labels
+// only, the changeType/"Work type" trade: renaming the key would drop every value
+// already on the sheet. `tag` is the circuit's own ID from the panel schedule,
+// unique within its PANEL (circuitTagConflict), and `wireColor` its hot
+// conductor(s), both backend v44.
 const CIRCUIT_TABLE_FIELDS = [
-  { key: "label", label: "Label", placeholder: "e.g. Outlets, Water Heater", wide: true },
+  { key: "tag", label: "ID", placeholder: "e.g. 12, L1-3" },
+  { key: "wireColor", label: "Hot wire color", type: "select", options: CIRCUIT_WIRE_COLORS },
+  { key: "label", label: "Description", placeholder: "e.g. Outlets, Water Heater", wide: true },
   { key: "notes", label: "Notes", type: "textarea", wide: true, placeholder: "One callout per line, e.g.\n- North wall outlets\n- Closet outlets" },
 ];
-const CIRCUIT_TABLE_INITIAL_DRAFT = { label: "", notes: "", roomsServedIds: [], feedsPanelLabel: "" };
+const CIRCUIT_TABLE_INITIAL_DRAFT = { tag: "", wireColor: "", label: "", notes: "", roomsServedIds: [], feedsPanelLabel: "" };
 
 // What a circuit row shows when collapsed: what it actually serves, then its
 // per-callout notes. Shared for the same reason the field config above is.
 function circuitSummary(circuit, assets) {
+  const serves = circuit.feedsPanelLabel
+    ? `Feeds → ${circuit.feedsPanelLabel}`
+    : (circuit.roomsServedIds || []).map(id => roomNameFor(id, assets)).join(", ");
   return (
     <div>
-      <div style={{ fontWeight: 600, fontSize: 13, color: C.ink }}>
-        {circuit.feedsPanelLabel
-          ? `Feeds → ${circuit.feedsPanelLabel}`
-          : (circuit.roomsServedIds || []).length
-          ? circuit.roomsServedIds.map(id => roomNameFor(id, assets)).join(", ")
-          : circuit.label}
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", fontWeight: 600, fontSize: 13, color: C.ink }}>
+        {circuit.tag && <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, padding: "1px 6px", borderRadius: 6, background: C.bg, color: C.brandDark }}>{circuit.tag}</span>}
+        <span>{circuit.label}</span>
+        {circuit.wireColor && <WireColorChip color={circuit.wireColor} />}
       </div>
+      {serves && <div style={{ fontSize: 12, color: C.ink, marginTop: 2 }}>{serves}</div>}
       {circuit.notes && (
         <div style={{ fontSize: 12, color: C.muted, whiteSpace: "pre-line", marginTop: 2 }}>{circuit.notes}</div>
       )}
     </div>
+  );
+}
+
+// A circuit's hot wire colour as small swatches plus the name, so "Black/Red" is
+// readable at a glance from the panel door as well as from its words.
+function WireColorChip({ color }) {
+  const parts = String(color || "").split("/").map(p => p.trim()).filter(Boolean);
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 500, color: C.muted }}>
+      {parts.map(p => WIRE_COLOR_SWATCH[p] ? <span key={p} style={{ width: 9, height: 9, borderRadius: 5, background: WIRE_COLOR_SWATCH[p], border: "1px solid rgba(0,0,0,0.2)" }} /> : null)}
+      {color}
+    </span>
   );
 }
 
@@ -22012,8 +22112,11 @@ function ChildEntityTable({
       </span>
     );
     if (f.type === "select") {
+      // A DIV, not a <label>: a click on an option inside a label's subtree is
+      // forwarded to the label's trigger and re-opens the picker it just closed
+      // (BUGS.md). Met here when the circuit form gained its hot wire colour.
       return (
-        <label key={f.key} style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: f.wide ? "1 / -1" : undefined }}>
+        <div key={f.key} style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: f.wide ? "1 / -1" : undefined }}>
           {commonLabel}
           <PickerField
             label={f.label}
@@ -22024,7 +22127,7 @@ function ChildEntityTable({
             labelForOption={o => o || "Select…"}
             title={`Select ${f.label}`}
           />
-        </label>
+        </div>
       );
     }
     if (f.type === "textarea") {
