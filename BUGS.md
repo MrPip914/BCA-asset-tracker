@@ -16,6 +16,35 @@ version that fixed them.
 
 ## Open
 
+### A save the client gives up on keeps the lock, so its retry is refused as "busy"
+**Found:** 2026-09-30, from Eric's dev diagnostics export (app 2026-09-30.9, backend v47):
+`save_failed ... busy ... (43484ms)`, and the Diagnostics window's backend half refused as busy
+about a minute later.
+**Needs a deploy:** the second half does (backend); the first is frontend only.
+**Confirmed:** from the timings and the code, not reproduced. 43.5s is exactly
+`BACKEND_ATTEMPT_TIMEOUT_MS` (30s) + the first retry delay (1s) + a full `acquireLock_(10000)`
+wait (~10s) + round trips. So attempt 1 got no answer within 30s and was aborted in the
+browser, but **an aborted fetch does not stop the Apps Script execution** — it kept running
+and kept the script lock, and attempt 2 queued behind it and was answered busy.
+
+Two consequences worth knowing:
+- **The "wasn't saved" modal can be wrong.** If attempt 1 eventually finished, the change WAS
+  written. The modal says "Nothing you just did was stored". The revision counters keep this
+  safe (a restored draft saved on top would conflict, not duplicate), but the message is a
+  guess, not a fact, whenever the first attempt timed out rather than failed.
+- **`handleDiagnostics_` takes the lock**, only to read Config for the auth check — so the
+  backend log cannot be read while the lock is stuck, which is exactly when it is wanted.
+  The log tab itself is already read outside the lock. Doing the auth read without the lock
+  (and treating an empty/mid-rewrite Config as "try again" rather than "not allowed") would
+  fix it.
+
+**Not established:** WHY the server held the lock for 30s+ — possibly well over a minute,
+given the diagnostics request was also refused. Reads on the same session took 6–11s, so the
+dev backend was slow generally. The Diagnostics tab in the dev Sheet should hold a `busy` row
+per refusal and a `slow_save` row with the real duration if the save completed; Google's
+Executions page shows it if it ran into the 6-minute limit instead.
+**Blocks:** nothing outright; it turns one slow save into a failed-looking one.
+
 ### Choosing a type in the Add asset form also opens "Manage asset types"
 **Found:** 2026-09-28, while adding search to the Type picker.
 **Needs a deploy:** no — frontend only.
