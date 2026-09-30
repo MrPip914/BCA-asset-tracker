@@ -50,7 +50,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v47";
+const SCRIPT_VERSION = "v48";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -172,6 +172,10 @@ const ASSET_FIELDS = [
   // every location behaved before); "mapSelectTargets" is the alternate
   // locations' ids, comma-joined.
   "mapSelectMode", "mapSelectTargets",
+  // v48: an asset pinned at a point on a plan. "mapPlanId" is the plan OWNER's
+  // asset id; "mapX"/"mapY" are a point in that plan's own (unrotated)
+  // coordinates. Blank = not pinned, which every asset was before.
+  "mapPlanId", "mapX", "mapY",
 ];
 
 // The Assets tab's real column set: the fixed schema above PLUS whatever custom

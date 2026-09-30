@@ -746,6 +746,24 @@ function typeHasFloorPlan(type) {
   const entry = typeEntryFor(type);
   return !!(entry && entry.floorPlan);
 }
+// Whether assets of this type may be pinned at a point on a map. A per-type
+// setting like floorPlan (typeSettings[id].mapPin), off unless someone ticks it.
+// It gates the PLACING controls only: a pin already stored keeps drawing even if
+// the type is switched off later, since it is data and not a permission.
+function typeCanBePinned(type) {
+  const entry = typeEntryFor(type);
+  return !!(entry && entry.mapPin);
+}
+// Where an asset is pinned: the plan owner's id and a point in that plan's OWN
+// (unrotated) coordinate space, or null. Stored on the asset as mapPlanId/mapX/
+// mapY (strings, like every flat asset field). A plan's rotation is applied when
+// drawing, never stored in the point -- so rotating a plan moves its pins with it.
+function mapPinOf(asset) {
+  if (!asset || !asset.mapPlanId) return null;
+  const x = parseFloat(asset.mapX), y = parseFloat(asset.mapY);
+  if (!isFinite(x) || !isFinite(y)) return null;
+  return { planId: asset.mapPlanId, x, y };
+}
 
 // What each sub-item module IS — its tab label and how to count what's in it.
 // The registry's `modules` says which types OWN a module; this says what the
@@ -3942,7 +3960,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v47";
+const FRONTEND_SCRIPT_VERSION = "v48";
 // The version of THIS file — shown in About (the account menu), so "is my browser
 // actually running the build I just deployed, or a cached one?" is answerable in
 // two clicks instead of by reading view-source.
@@ -3960,7 +3978,7 @@ const FRONTEND_SCRIPT_VERSION = "v47";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-30.9";
+const APP_VERSION = "2026-09-30.10";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -5040,7 +5058,7 @@ const MOCK_SNAPSHOT = {
     // no iconName at all and so resolves through its shipped registry icon.
     // (Both were question marks before the catalog existed: neither Facilities
     // type had an icon to name.)
-    "Mini Split": { categoryId: "Equipment", iconName: "AirVent" },
+    "Mini Split": { categoryId: "Equipment", iconName: "AirVent", mapPin: true },
     "Condenser": { iconName: "Fan" },
     "Electrical Panel": { categoryIds: ["Facilities", "Equipment"] },
     "Stream Deck": { categoryIds: [] },
@@ -5536,7 +5554,7 @@ const MOCK_SNAPSHOT = {
       { task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "", owner: "", at: "", by: "" },
       { task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
     ] },
-    { label: "BCA0090", type: "Mini Split", parentId: "BCR0002", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
+    { label: "BCA0090", type: "Mini Split", parentId: "BCR0002", mapPlanId: "BCB0001", mapX: "340", mapY: "70", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
       { task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "", owner: "", at: "", by: "" },
       { task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
     ] },
@@ -6133,6 +6151,12 @@ function AssetTracker() {
   // it survive the scope change: setScopeId often remounts the component
   // that would otherwise have to carry it.
   const [mapFocusShapeId, setMapFocusShapeId] = useState(null);
+  // Same one-shot idea for a PINNED asset: zoom to it and pulse it. Kept apart
+  // from the shape focus because a pin is not a shape and needs no group logic.
+  const [mapFocusPinId, setMapFocusPinId] = useState(null);
+  // { assetId } while the user is choosing a point for that asset on the Map
+  // tab. Null the rest of the time; cleared on leaving the tab (below).
+  const [mapPlacing, setMapPlacing] = useState(null);
   const [typeFilter, setTypeFilter] = useState("All types");
   const [userFilter, setUserFilter] = useState("All users");
   const [statusFilter, setStatusFilter] = useState("Active");
@@ -7990,8 +8014,46 @@ function AssetTracker() {
     closeDetail();
     setMainTab("map");
     setScopeId(drawn.ownerId);
-    setMapFocusShapeId(drawn.shapeId);
+    setMapFocusShapeId(drawn.shapeId || null);
+    setMapFocusPinId(drawn.pinAssetId || null);
   }
+
+  // ---- pinning an asset at a point on a plan ----
+  // Starts on the plan the asset is already pinned to, else the nearest place
+  // above it that has a plan uploaded; the user can still navigate elsewhere
+  // with the breadcrumb, and the pin lands on whichever plan is showing.
+  function startPlaceOnMap(assetId) {
+    const a = assets.find(x => x.id === assetId);
+    if (!a) return;
+    const pin = mapPinOf(a);
+    let planId = pin ? pin.planId : "";
+    if (!planId) {
+      const up = ancestorsOf(a, assets).find(x => x.floorPlanUrl);
+      planId = up ? up.id : "";
+    }
+    closeDetail();
+    setMainTab("map");
+    if (planId) setScopeId(planId);
+    setMapFocusShapeId(null); setMapFocusPinId(null);
+    setMapPlacing({ assetId });
+  }
+  // (x, y) is in the plan's own coordinates -- the caller has already undone the
+  // plan's rotation. Configuration of where a thing is, so not audited (like
+  // rotation); it does travel with the asset's own save.
+  function placeOnMap(assetId, planId, x, y) {
+    if (savingRef.current) return;
+    if (!assets.some(a => a.id === assetId)) { setMapPlacing(null); return; }
+    persist(assets.map(a => (a.id === assetId
+      ? { ...a, mapPlanId: planId, mapX: String(Math.round(x * 10) / 10), mapY: String(Math.round(y * 10) / 10) }
+      : a)));
+    setMapPlacing(null);
+    setMapFocusPinId(assetId);
+  }
+  function clearMapPlacement(assetId) {
+    if (savingRef.current) return;
+    persist(assets.map(a => (a.id === assetId ? { ...a, mapPlanId: "", mapX: "", mapY: "" } : a)));
+  }
+  useEffect(() => { if (mainTab !== "map") setMapPlacing(null); }, [mainTab]);
 
   // Tapping a shape on the Map tab that's linked to something with its OWN
   // floor plan (a Building drawn on a Campus's site plan, say) drills into
@@ -8498,6 +8560,9 @@ function AssetTracker() {
       comments: [],
       changes: [],
       allocations: [],
+      // A pin is where ONE unit physically is -- a copy sitting on the same
+      // spot would read as the source drawn twice.
+      mapPlanId: "", mapX: "", mapY: "",
     };
     // A name someone actually typed is worth copying; a default one isn't, since
     // it names the source ("Computer BCA0001") and would be wrong on the copy the
@@ -10471,6 +10536,7 @@ function AssetTracker() {
         // appearing from a decision made in a different session.
         requiredFields: (draft.requiredFields || []).filter(k => wanted.has(k)),
         floorPlan: !!draft.floorPlan,
+        mapPin: !!draft.mapPin,
       },
     };
     persist(assets, { columns: nextColumns, typesList: nextTypesList, typeSettings: nextTypeSettings });
@@ -13409,7 +13475,12 @@ function AssetTracker() {
             // check and correctly finds nothing.
             const roomId = isPlaceType(selectedAsset.type) ? selectedAsset.id : selectedAsset.parentId;
             const drawn = drawnOnMapFor(roomId, assets);
-            if (!drawn) return null;
+            // A pinned asset shows at its own point, which beats the room it sits in.
+            const pin = mapPinOf(selectedAsset);
+            const pinPlan = pin ? assets.find(a => a.id === pin.planId && a.floorPlanUrl) : null;
+            const canPin = typeCanBePinned(selectedAsset.type) && canEdit;
+            if (!drawn && !pinPlan && !canPin) return null;
+            const btn = { display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", background: "transparent", color: C.brandDark, border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 13, borderRadius: 10, flexShrink: 0 };
             return (
               <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 18, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)", marginBottom: 20 }}>
                 <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginBottom: 10, paddingBottom: 6, borderBottom: `1px solid ${C.border}` }}>
@@ -13417,14 +13488,32 @@ function AssetTracker() {
                 </div>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
                   <span style={{ fontSize: 13, color: C.ink }}>
-                    {isPlaceType(selectedAsset.type) ? "Shown on the floor plan." : `Shown in ${parentNameFor(drawn.roomId, assets)} on the floor plan.`}
+                    {pinPlan
+                      ? `Placed on ${nameOf(pinPlan, typesList)}'s plan.`
+                      : drawn
+                        ? (isPlaceType(selectedAsset.type) ? "Shown on the floor plan." : `Shown in ${parentNameFor(drawn.roomId, assets)} on the floor plan.`)
+                        : "Not placed on a map yet."}
                   </span>
-                  <button
-                    onClick={() => showOnMap(drawn)}
-                    style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", background: "transparent", color: C.brandDark, border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 13, borderRadius: 10, flexShrink: 0 }}
-                  >
-                    <MapPin size={14} /> Show on map
-                  </button>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {(pinPlan || drawn) && (
+                      <button
+                        onClick={() => showOnMap(pinPlan ? { ownerId: pinPlan.id, pinAssetId: selectedAsset.id } : drawn)}
+                        style={btn}
+                      >
+                        <MapPin size={14} /> Show on map
+                      </button>
+                    )}
+                    {canPin && (
+                      <button onClick={() => startPlaceOnMap(selectedAsset.id)} style={btn}>
+                        {pinPlan ? "Move pin…" : "Place on map…"}
+                      </button>
+                    )}
+                    {canPin && pin && (
+                      <button onClick={() => clearMapPlacement(selectedAsset.id)} style={{ ...btn, color: C.muted, border: `1.5px solid ${C.border}` }}>
+                        Remove pin
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
             );
@@ -15600,6 +15689,20 @@ function AssetTracker() {
             nothing else on this tab lets you go further when there's no
             plan to click through. */}
         <HierarchyNav assets={assets} scopeId={scopeId} setScopeId={setScopeId} showChildren={!mapScopeAsset || !mapScopeAsset.floorPlanUrl} />
+        {mapPlacing && (() => {
+          const placingAsset = assets.find(a => a.id === mapPlacing.assetId);
+          const hasPlan = !!(mapScopeAsset && mapScopeAsset.floorPlanUrl);
+          return (
+            <div role="status" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", margin: "8px 0", padding: "8px 12px", border: `1.5px solid ${C.brand}`, borderRadius: 10, background: C.surface }}>
+              <span style={{ fontSize: 13, color: C.ink }}>
+                {hasPlan
+                  ? <>Tap the map to place <b>{placingAsset ? nameOf(placingAsset, typesList) : "the asset"}</b>.</>
+                  : <>Choose a location that has a floor plan, then tap the map to place <b>{placingAsset ? nameOf(placingAsset, typesList) : "the asset"}</b>.</>}
+              </span>
+              <button onClick={() => setMapPlacing(null)} style={{ padding: "4px 10px", borderRadius: 8, border: `1.5px solid ${C.border}`, background: "none", color: C.ink, fontSize: 12, fontWeight: 600 }}>Cancel</button>
+            </div>
+          );
+        })()}
         <MapTabContent
           canEdit={canEdit}
           assets={assets}
@@ -15614,7 +15717,11 @@ function AssetTracker() {
           onRotate={() => rotateFloorPlan(scopeId)}
           onSaveMapOptions={(mode, ids) => saveMapSelectOptions(scopeId, mode, ids)}
           focusShapeId={mapFocusShapeId}
-          onFocusHandled={() => setMapFocusShapeId(null)}
+          focusPinId={mapFocusPinId}
+          placing={mapPlacing}
+          onPlace={(x, y) => mapPlacing && placeOnMap(mapPlacing.assetId, scopeId, x, y)}
+          onClearPin={clearMapPlacement}
+          onFocusHandled={() => { setMapFocusShapeId(null); setMapFocusPinId(null); }}
           onOpenAsset={openDetail}
           onNavigateToPlan={navigateFloorPlanTo}
           query={mapQuery}
@@ -17052,6 +17159,7 @@ function TypeManagerModal({
       // Type-level, not per-field -- whether THIS type can carry a floor plan
       // at all, seeded from the same merged entry every other override reads.
       floorPlan: !!entry.floorPlan,
+      mapPin: !!entry.mapPin,
       // Whether new assets start as this type -- resolved, not read off the
       // flag, so Computer shows as the default on a list nobody has flagged.
       isDefault: defaultNewAssetType(types) === t.id,
@@ -17569,6 +17677,34 @@ function TypeManagerModal({
               </label>
               <div style={{ fontSize: 12, color: C.empty }}>
                 Room and Building have this on by default. Turn it on for another type to upload a drawing and link its shapes to rooms.
+              </div>
+            </div>
+
+            {/* Type-level: whether assets of this type can be pinned at a point on
+                a map (a projector on a ceiling, a wall outlet). Off for every
+                type until ticked. Gates the placing controls only. */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Map position</span>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                <button
+                  type="button"
+                  role="checkbox"
+                  aria-checked={!!draft.mapPin}
+                  aria-label="Assets of this type can be placed at a point on a map"
+                  onClick={() => setDraft({ ...draft, mapPin: !draft.mapPin })}
+                  style={{
+                    width: 16, height: 16, flexShrink: 0, borderRadius: 4, padding: 0,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    border: `1.5px solid ${draft.mapPin ? C.brand : C.border}`,
+                    background: draft.mapPin ? C.brand : "transparent",
+                  }}
+                >
+                  {draft.mapPin && <Check size={11} color="#fff" />}
+                </button>
+                <span style={{ fontSize: 13, color: C.ink }}>Can be placed at a point on a map</span>
+              </label>
+              <div style={{ fontSize: 12, color: C.empty }}>
+                Adds a Place on map action to these assets. Their pin then shows on the plan of the location they were placed on.
               </div>
             </div>
 
@@ -18508,10 +18644,14 @@ function floorPlanPole(poly) {
 // the DATA rather than by rotating the <g>, so labels stay upright and every
 // consumer downstream (bbox, zoom, group borders, pole) sees one coordinate
 // system. Shape ids are untouched, so links and groups are unaffected.
+function floorPlanRotatePoint(x, y, turns) {
+  const t = ((turns % 4) + 4) % 4;
+  return t === 1 ? [-y, x] : t === 2 ? [-x, -y] : t === 3 ? [y, -x] : [x, y];
+}
 function floorPlanRotateSpaces(spaces, turns) {
   const t = ((turns % 4) + 4) % 4;
   if (!t) return spaces;
-  const rot = (x, y) => t === 1 ? [-y, x] : t === 2 ? [-x, -y] : [y, -x];
+  const rot = (x, y) => floorPlanRotatePoint(x, y, t);
   return spaces.map(sp => {
     const pts = sp.pts.map(p => rot(p[0], p[1]));
     const [px, py] = rot(sp.pole.x, sp.pole.y);
@@ -19365,7 +19505,7 @@ function MapOptionsOnlyMenu({ canEdit, asset, assets, menuSlot, onSaveMapOptions
 function MapTabContent({
   canEdit, assets, typesList, scopeAsset,
   uploadBusy, uploadError, onUploadPlan, onSaveLink, onSaveGroup, onDeleteGroup, onRotate, onSaveMapOptions,
-  focusShapeId, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot,
+  focusShapeId, focusPinId, placing, onPlace, onClearPin, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot,
 }) {
   if (!scopeAsset) {
     return (
@@ -19400,6 +19540,10 @@ function MapTabContent({
       onDeleteGroup={onDeleteGroup}
       onRotate={onRotate}
       onSaveMapOptions={onSaveMapOptions}
+      focusPinId={focusPinId}
+      placing={placing}
+      onPlace={onPlace}
+      onClearPin={onClearPin}
       focusShapeId={focusShapeId}
       onFocusHandled={onFocusHandled}
       onOpenAsset={onOpenAsset}
@@ -19429,7 +19573,7 @@ function FloorPlanTabContent({
   canEdit, selectedAsset, assets, typesList,
   uploadBusy, uploadError, onUploadPlan,
   onSaveLink, onSaveGroup, onDeleteGroup, onRotate, onSaveMapOptions,
-  focusShapeId, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot,
+  focusShapeId, focusPinId, placing, onPlace, onClearPin, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot,
 }) {
   const rawPlan = useFloorPlanSvg(selectedAsset.floorPlanUrl);
   // Rotation is stored on the asset (floorPlanRotation, quarter turns, blank = 0)
@@ -19484,6 +19628,7 @@ function FloorPlanTabContent({
   const [configOpen, setConfigOpen] = useState(false);   // Configure accordion in the menu
   const [optionsOpen, setOptionsOpen] = useState(false); // Options dialog
   const [mapChooser, setMapChooser] = useState(null);    // asset id whose location chooser is showing
+  const [selectedPinId, setSelectedPinId] = useState(null); // a pinned asset's info card
 
   const applyVB = () => {
     if (svgElRef.current) {
@@ -19581,6 +19726,26 @@ function FloorPlanTabContent({
   // no flicker, the focus destination just wins over the whole-plan fit.
   // A shapeId that matches nothing (a stale focus from a different plan)
   // clears itself rather than pulsing nothing.
+  // One-shot "zoom to and pulse this pinned asset" from Show on map. The pin is
+  // in the plan's own coordinates, so it goes through the same rotation the
+  // spaces do before framing.
+  useEffect(() => {
+    if (plan.status !== "ready" || !focusPinId) return;
+    const a = assets.find(x => x.id === focusPinId);
+    const pin = mapPinOf(a);
+    if (!pin || pin.planId !== selectedAsset.id) { onFocusHandled(); return; }
+    const [px, py] = floorPlanRotatePoint(pin.x, pin.y, rotation);
+    const allPts = plan.spaces.flatMap(sp => sp.pts);
+    const bb = allPts.length ? floorPlanBbox(allPts) : { w: 400, h: 400 };
+    const side = Math.max(bb.w, bb.h) * 0.16;
+    zoomToBbox({ x: px - side / 2, y: py - side / 2, w: side, h: side }, 0, true, true);
+    setSelectedPinId(focusPinId);
+    setPulsingShapeId("pin:" + focusPinId);
+    clearTimeout(pulseTimerRef.current);
+    pulseTimerRef.current = setTimeout(() => setPulsingShapeId(null), 3600);
+    onFocusHandled();
+  }, [plan.status, plan.spaces, selectedAsset.id, focusPinId]);
+
   // Selection and group-open state must not carry across a SCOPE change --
   // two different plans can reuse the same shape id (each SVG's own gid
   // numbering is local to its own file), so a shape selected on the plan
@@ -19595,6 +19760,7 @@ function FloorPlanTabContent({
   useEffect(() => {
     setSelectedShapeId(null);
     setOpenGroupId(null);
+    setSelectedPinId(null);
   }, [selectedAsset.id]);
 
   const [pulsingShapeId, setPulsingShapeId] = useState(null);
@@ -19989,6 +20155,22 @@ function FloorPlanTabContent({
         <svg
           ref={svgElRef}
           width="100%" height="100%"
+          style={placing ? { cursor: "crosshair" } : undefined}
+          onClickCapture={e => {
+            // While placing, ANY tap on the plan -- on a space or between them --
+            // is the point being chosen, so it must not also select a space.
+            if (!placing || !onPlace) return;
+            e.stopPropagation();
+            const svg = svgElRef.current;
+            const m = svg && svg.getScreenCTM();
+            if (!m) return;
+            const pt = svg.createSVGPoint();
+            pt.x = e.clientX; pt.y = e.clientY;
+            const q = pt.matrixTransform(m.inverse());
+            // Undo the plan's rotation: the stored point is in the drawing's own space.
+            const [rx, ry] = floorPlanRotatePoint(q.x, q.y, 4 - rotation);
+            onPlace(rx, ry);
+          }}
           onClick={e => { if (e.target === svgElRef.current) zoomToFit(); }}
         >
           {plan.spaces.map(s => {
@@ -20203,6 +20385,24 @@ function FloorPlanTabContent({
               );
             });
           })()}
+          {!setupTab && assets.filter(a => !placing || a.id !== placing.assetId).map(a => {
+            const pin = mapPinOf(a);
+            if (!pin || pin.planId !== selectedAsset.id || (a.status || "Active") === "Archived") return null;
+            const [px, py] = floorPlanRotatePoint(pin.x, pin.y, rotation);
+            const sel = selectedPinId === a.id;
+            const r = (sel ? 10 : 8) * k;
+            return (
+              <g key={"pin-" + a.id} className="fp-pin" style={{ cursor: "pointer" }}
+                onClick={e => { e.stopPropagation(); setSelectedPinId(sel ? null : a.id); }}>
+                {pulsingShapeId === "pin:" + a.id && (
+                  <circle className="fp-pulse" cx={px} cy={py} r={r * 2.2} fill={C.accent} fillOpacity={0.45} />
+                )}
+                <circle cx={px} cy={py} r={r} fill={sel ? C.accent : C.brandDark} stroke="#fff" strokeWidth={2 * k} />
+                <circle cx={px} cy={py} r={r * 0.35} fill="#fff" />
+                <title>{nameOf(a, typesList)}</title>
+              </g>
+            );
+          })}
         </svg>
       </div>
 
@@ -20437,6 +20637,33 @@ function FloorPlanTabContent({
           ContentsList's own Rooms section never lists a non-room). Yields to
           the single-room panel above the moment a specific member is picked
           -- a more specific selection should win over the group-wide one. */}
+      {selectedPinId && !setupTab && (() => {
+        const a = assets.find(x => x.id === selectedPinId);
+        const pin = mapPinOf(a);
+        if (!a || !pin || pin.planId !== selectedAsset.id) return null;
+        return (
+          <div style={{ marginTop: 8, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>
+              {nameOf(a, typesList)}
+              <span style={{ fontWeight: 400, color: C.empty }}> · {typeNameOf(a.type, typesList)}</span>
+            </span>
+            <span style={{ display: "flex", gap: 8 }}>
+              {onOpenAsset && (
+                <button type="button" onClick={() => onOpenAsset(a)}
+                  style={{ padding: "3px 9px", borderRadius: 8, border: `1.5px solid ${C.border}`, background: "none", color: C.brandDark, fontSize: 12, fontWeight: 600 }}>
+                  Open asset
+                </button>
+              )}
+              {canEdit && onClearPin && (
+                <button type="button" onClick={() => { setSelectedPinId(null); onClearPin(a.id); }}
+                  style={{ padding: "3px 9px", borderRadius: 8, border: `1.5px solid ${C.border}`, background: "none", color: C.muted, fontSize: 12, fontWeight: 600 }}>
+                  Remove pin
+                </button>
+              )}
+            </span>
+          </div>
+        );
+      })()}
       {openGroupId && !selectedShapeId && !setupTab && (() => {
         const grp = groups.find(g => g.id === openGroupId);
         if (!grp) return null;
