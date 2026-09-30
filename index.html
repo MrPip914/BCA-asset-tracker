@@ -3982,7 +3982,7 @@ const FRONTEND_SCRIPT_VERSION = "v49";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-30.15";
+const APP_VERSION = "2026-09-30.16";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -4191,6 +4191,41 @@ function persistScope(scopeId, scopeExact) {
   try {
     if (scopeId) window.localStorage.setItem(SCOPE_STORAGE_KEY, JSON.stringify({ scopeId, scopeExact: !!scopeExact }));
     else window.localStorage.removeItem(SCOPE_STORAGE_KEY);
+  } catch (e) { /* storage blocked — the URL half still works */ }
+}
+
+// The top-level tab (Assets / Tasks / Map / Audit) survives a refresh the same way the
+// scope does: `?main=<tab>` in the address bar (replace, never push) with per-device
+// localStorage as the fallback. Assets is the default and is never written, so an
+// ordinary URL stays clean. An unknown value is ignored rather than trusted.
+const MAIN_TAB_STORAGE_KEY = CLIENT.storageKey("asset-tracker-main-tab");
+const MAIN_TABS = ["assets", "maintenance", "map", "audit"];
+
+function readInitialMainTab() {
+  try {
+    const fromUrl = new URLSearchParams(window.location.search).get("main");
+    if (MAIN_TABS.includes(fromUrl)) return fromUrl;
+  } catch (e) { /* no window — a Node test harness */ }
+  try {
+    const stored = window.localStorage.getItem(MAIN_TAB_STORAGE_KEY);
+    if (MAIN_TABS.includes(stored)) return stored;
+  } catch (e) { /* storage blocked — start on Assets, as before */ }
+  return "assets";
+}
+
+function persistMainTab(tab) {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    if (tab && tab !== "assets") params.set("main", tab); else params.delete("main");
+    const q = params.toString();
+    const url = window.location.pathname + (q ? "?" + q : "") + window.location.hash;
+    if (url !== window.location.pathname + window.location.search + window.location.hash) {
+      window.history.replaceState(window.history.state, "", url);
+    }
+  } catch (e) { /* no history API */ }
+  try {
+    if (tab && tab !== "assets") window.localStorage.setItem(MAIN_TAB_STORAGE_KEY, tab);
+    else window.localStorage.removeItem(MAIN_TAB_STORAGE_KEY);
   } catch (e) { /* storage blocked — the URL half still works */ }
 }
 
@@ -5959,7 +5994,7 @@ function AssetTracker() {
     setRevisions(next);
   }
 
-  const [mainTab, setMainTab] = useState("assets"); // "assets" | "maintenance" | "map" | "audit" — top-level page tab
+  const [mainTab, setMainTab] = useState(readInitialMainTab); // "assets" | "maintenance" | "map" | "audit" — top-level page tab
   const [view, setView] = useState("list"); // "list" | "detail"
   const [selectedId, setSelectedId] = useState(null);
   const [detailEditing, setDetailEditing] = useState(false);
@@ -6148,6 +6183,7 @@ function AssetTracker() {
     }
     persistScope(scopeId, scopeExact);
   }, [scopeId, scopeExact, assets === null]);
+  useEffect(() => { persistMainTab(mainTab); }, [mainTab]);
   // Set by "Show on map" (see showOnMap below) and cleared by the Map tab
   // once it's acted on it -- a one-shot instruction ("zoom to and pulse this
   // shape next time its plan loads"), not standing state the tab reads every
