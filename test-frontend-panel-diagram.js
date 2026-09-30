@@ -52,7 +52,7 @@ const items = (cell, type) => cell.items.filter(i => i.type === type);
   const bar = items(cl, 'bar');
   check('...with exactly one bar, for the non-contiguous breaker', bar.length === 1 && bar[0].breaker.id === 'outer');
   check('on the ODD side the bar is to the RIGHT of the breakers (toward the centre)',
-    cl.colTemplate === 'minmax(0, 1fr) 52px' && bar[0].gridColumn === 2 && !cl.barsLeft, cl.colTemplate);
+    cl.colTemplate === 'minmax(0, 1fr) clamp(18px, 22%, 52px)' && bar[0].gridColumn === 2 && !cl.barsLeft, cl.colTemplate);
   const pieces = items(cl, 'piece');
   check('the breaker\'s own cells are pieces spanning the main track AND its bar\'s track (no seam)',
     pieces.length === 2 && pieces.every(p => p.gridColumn === '1 / 3' && p.breaker.id === 'outer'));
@@ -77,7 +77,7 @@ const items = (cell, type) => cell.items.filter(i => i.type === type);
   const cells = layout([B('outer', ['2a', '4b']), B('other', ['2b'])], 4, 2);
   const cl = find(cells, c => c.slot === 2);
   check('two DIFFERENT units sharing rows are merged into one cluster', cl.kind === 'cluster' && cl.breakers.length === 2);
-  check('on the EVEN side the bar is to the LEFT', cl.barsLeft && cl.colTemplate === '52px minmax(0, 1fr)' && items(cl, 'bar')[0].gridColumn === 1);
+  check('on the EVEN side the bar is to the LEFT', cl.barsLeft && cl.colTemplate === 'clamp(18px, 22%, 52px) minmax(0, 1fr)' && items(cl, 'bar')[0].gridColumn === 1);
   check('on the even side a piece spans from the bar across the main track',
     items(cl, 'piece').every(p => p.gridColumn === '1 / 3'));
   const spare = items(cl, 'spare');
@@ -100,6 +100,8 @@ const items = (cell, type) => cell.items.filter(i => i.type === type);
   check('single-column: slots 1..4 are consecutive rows', cl.row === 1 && cl.rowSpan === 4);
   check('nested non-contiguous breakers get a bar each, shortest nearest the breakers',
     bars.length === 2 && bars.find(b => b.breaker.id === 'm').gridColumn === 2 && bars.find(b => b.breaker.id === 'o').gridColumn === 3);
+  check('two nested bars each take a smaller share, so together they stay within ~40% of the column',
+    cl.colTemplate === 'minmax(0, 1fr) clamp(18px, 20%, 52px) clamp(18px, 20%, 52px)', cl.colTemplate);
   check('every bar track is filled where its bar is not', items(cl, 'fill').length >= 1);
 }
 
