@@ -3960,7 +3960,7 @@ const FRONTEND_SCRIPT_VERSION = "v46";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-09-30.5";
+const APP_VERSION = "2026-09-30.6";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -18963,6 +18963,25 @@ function floorPlanZoomViewBox(bbox, pad, stageAspect) {
 }
 // Zoom by a factor around a fixed point (cx,cy stay under the cursor/pinch
 // center) — used by Free Zoom's wheel/pinch handling, not by auto-framing.
+const FLOOR_PLAN_GLIDE_MS = 350;
+// A view worth animating to: a move of under a hair is invisible, and
+// gliding to it would only delay the tap's result.
+function floorPlanViewBoxMoves(a, b) {
+  const eps = Math.max(a.w, b.w) * 0.002;
+  return Math.abs(a.x - b.x) > eps || Math.abs(a.y - b.y) > eps || Math.abs(a.w - b.w) > eps;
+}
+// The view a fraction t (0..1) of the way from `a` to `b`, eased. The CENTRE
+// travels linearly and the WIDTH geometrically: interpolating x/y/w directly
+// swings the target across the screen mid-glide whenever the zoom changes,
+// because the corner moves at a different rate to the centre.
+function floorPlanTweenViewBox(a, b, t) {
+  const e = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  const w = a.w * Math.pow(b.w / a.w, e);
+  const aspect = a.h / a.w + (b.h / b.w - a.h / a.w) * e;
+  const cx = a.x + a.w / 2 + (b.x + b.w / 2 - (a.x + a.w / 2)) * e;
+  const cy = a.y + a.h / 2 + (b.y + b.h / 2 - (a.y + a.h / 2)) * e;
+  return { x: cx - w / 2, y: cy - (w * aspect) / 2, w, h: w * aspect };
+}
 function floorPlanZoomAt(vb, factor, cx, cy, maxW) {
   const nw = Math.min(Math.max(vb.w * factor, 80), maxW || Infinity);
   const r = nw / vb.w;
@@ -19334,21 +19353,57 @@ function FloorPlanTabContent({
   // zoom and just recentre on it -- the generous selection padding would
   // otherwise pull a tall space on a wide desktop stage further away than
   // where it started.
-  const zoomToBbox = (bbox, pad, keepIfFits) => {
+  // `animate` glides there instead of jumping -- passed by the taps that move
+  // between spaces on a plan already on screen. The first fit and a
+  // show-on-map arrival stay instant: they come from nowhere, so there is
+  // no "from" view worth gliding out of.
+  const animRef = useRef(null);
+  const cancelViewAnim = () => {
+    if (!animRef.current) return;
+    cancelAnimationFrame(animRef.current.raf);
+    clearTimeout(animRef.current.timer);
+    animRef.current = null;
+  };
+  useEffect(() => cancelViewAnim, []);
+  const commitVB = (target, animate) => {
+    cancelViewAnim();
+    const from = vbRef.current;
+    const reduced = typeof window !== "undefined" && window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (!animate || reduced || !from || !floorPlanViewBoxMoves(from, target)) {
+      vbRef.current = target;
+      applyVB();
+      setVbTick(t => t + 1);
+      return;
+    }
+    const start = performance.now();
+    const finish = () => {
+      cancelViewAnim();
+      vbRef.current = target;
+      applyVB();
+      setVbTick(t => t + 1);
+    };
+    const step = now => {
+      const t = Math.min(1, (now - start) / FLOOR_PLAN_GLIDE_MS);
+      if (t >= 1) { finish(); return; }
+      vbRef.current = floorPlanTweenViewBox(from, target, t);
+      applyVB();
+      animRef.current.raf = requestAnimationFrame(step);
+    };
+    // rAF does not fire while the page is not compositing (the print
+    // trigger's comment says why), so a timer lands the view regardless.
+    animRef.current = { raf: requestAnimationFrame(step), timer: setTimeout(finish, FLOOR_PLAN_GLIDE_MS + 80) };
+  };
+  const zoomToBbox = (bbox, pad, keepIfFits, animate) => {
     const next = floorPlanZoomViewBox(bbox, pad == null ? 0.08 : pad, stageAspect());
     const cur = vbRef.current;
     if (keepIfFits && cur && next.w > cur.w) {
       const snug = floorPlanZoomViewBox(bbox, 0.04, stageAspect());
       if (snug.w <= cur.w) {
-        vbRef.current = { x: bbox.x + bbox.w / 2 - cur.w / 2, y: bbox.y + bbox.h / 2 - cur.h / 2, w: cur.w, h: cur.h };
-        applyVB();
-        setVbTick(t => t + 1);
+        commitVB({ x: bbox.x + bbox.w / 2 - cur.w / 2, y: bbox.y + bbox.h / 2 - cur.h / 2, w: cur.w, h: cur.h }, animate);
         return;
       }
     }
-    vbRef.current = next;
-    applyVB();
-    setVbTick(t => t + 1);
+    commitVB(next, animate);
   };
   // Unit-per-pixel, for turning a drag's screen delta into a viewBox delta.
   const unitsPerPx = () => {
@@ -19416,6 +19471,7 @@ function FloorPlanTabContent({
   };
   const onWheel = e => {
     if (!freeZoom) return;
+    cancelViewAnim();
     e.preventDefault();
     const [px, py] = toStagePoint(e);
     const k = unitsPerPx();
@@ -19425,6 +19481,7 @@ function FloorPlanTabContent({
   };
   const onPointerDown = e => {
     if (!freeZoom) return;
+    cancelViewAnim();
     stageElRef.current.setPointerCapture(e.pointerId);
     dragRef.current = { x: e.clientX, y: e.clientY, vb0: { ...vbRef.current } };
   };
@@ -19505,7 +19562,7 @@ function FloorPlanTabContent({
         if (openGroupId === owner.id) { startGroupEdit(owner.id); return; }
         setOpenGroupId(owner.id);
         const members = plan.status === "ready" ? plan.spaces.filter(s => (owner.memberShapeIds || []).includes(s.gid)) : [];
-        if (members.length) zoomToBbox(floorPlanBbox(members.flatMap(s => s.pts)), 0.15, true);
+        if (members.length) zoomToBbox(floorPlanBbox(members.flatMap(s => s.pts)), 0.15, true, true);
         return;
       }
       setOpenGroupId(null);
@@ -19532,7 +19589,7 @@ function FloorPlanTabContent({
       setOpenGroupId(grp.id);
       setSelectedShapeId(null);
       const members = plan.status === "ready" ? plan.spaces.filter(s => (grp.memberShapeIds || []).includes(s.gid)) : [];
-      if (members.length) zoomToBbox(floorPlanBbox(members.flatMap(s => s.pts)), 0.15, true);
+      if (members.length) zoomToBbox(floorPlanBbox(members.flatMap(s => s.pts)), 0.15, true, true);
       return;
     }
     if (selectedShapeId === shapeId) {
@@ -19547,7 +19604,7 @@ function FloorPlanTabContent({
     }
     setSelectedShapeId(shapeId);
     const shape = plan.status === "ready" ? plan.spaces.find(s => s.gid === shapeId) : null;
-    if (shape) zoomToBbox(floorPlanBbox(shape.pts), 0.5, true);
+    if (shape) zoomToBbox(floorPlanBbox(shape.pts), 0.5, true, true);
   }
   function clearSelection() {
     setSelectedShapeId(null); setOpenGroupId(null);
@@ -19562,7 +19619,7 @@ function FloorPlanTabContent({
   function zoomToFit() {
     clearSelection();
     const allPts = plan.status === "ready" ? plan.spaces.flatMap(s => s.pts) : [];
-    if (allPts.length) zoomToBbox(floorPlanBbox(allPts), 0.06);
+    if (allPts.length) zoomToBbox(floorPlanBbox(allPts), 0.06, false, true);
   }
 
   // Unlinked shapes that are tapped directly (not via the shape-linking mode)

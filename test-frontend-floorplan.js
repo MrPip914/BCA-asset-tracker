@@ -700,5 +700,27 @@ const { floorPlanShapeMatches } = matchMod.exports;
     /setupTab === "group" && !groupEditingId && groupPick\.size === 0\)\) && openGroupId/.test(src));
 }
 
+// ---- Glide between spaces: the tween, and that only in-plan taps use it ----
+{
+  const tw = new Function(
+    'const FLOOR_PLAN_GLIDE_MS = 350;' + src.slice(src.indexOf('function floorPlanViewBoxMoves'), src.indexOf('function floorPlanZoomAt')) +
+    'return { floorPlanViewBoxMoves, floorPlanTweenViewBox };')();
+  const a = { x: 0, y: 0, w: 400, h: 300 }, b = { x: 1000, y: 500, w: 100, h: 75 };
+  const t0 = tw.floorPlanTweenViewBox(a, b, 0), t1 = tw.floorPlanTweenViewBox(a, b, 1), tm = tw.floorPlanTweenViewBox(a, b, 0.5);
+  check('Glide: t=0 is the start view and t=1 is exactly the target',
+    Math.abs(t0.x - a.x) < 1e-6 && Math.abs(t0.w - a.w) < 1e-6 && Math.abs(t1.x - b.x) < 1e-6 && Math.abs(t1.y - b.y) < 1e-6 && Math.abs(t1.w - b.w) < 1e-6);
+  check('Glide: the centre is halfway at t=0.5 and the width is the geometric mean',
+    Math.abs(tm.x + tm.w / 2 - ((a.x + a.w / 2 + b.x + b.w / 2) / 2)) < 1e-6 && Math.abs(tm.w - 200) < 1e-6);
+  check('Glide: a negligible move is not animated, a real one is',
+    !tw.floorPlanViewBoxMoves(a, { ...a, x: 0.1 }) && tw.floorPlanViewBoxMoves(a, b));
+  const fit = src.slice(src.indexOf('function zoomToFit()'), src.indexOf('function onUnlinkedShapeClick'));
+  check('Glide: zoomToFit and the in-plan taps animate; the first fit and show-on-map do not',
+    /zoomToBbox\(floorPlanBbox\(allPts\), 0\.06, false, true\)/.test(fit) &&
+    (src.match(/, 0\.15, true, true\)/g) || []).length === 2 && /0\.5, true, true\)/.test(src) &&
+    /zoomToBbox\(floorPlanBbox\(allPts\), 0\.06\);\n  \}, \[plan\.status/.test(src) && /zoomToBbox\(floorPlanBbox\(shape\.pts\), 0\.5, true\);\n    setPulsingShapeId/.test(src));
+  check('Glide: a manual wheel or drag cancels it',
+    /cancelViewAnim\(\);\s*e\.preventDefault\(\)/.test(src) && /cancelViewAnim\(\);\s*stageElRef\.current\.setPointerCapture/.test(src));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
