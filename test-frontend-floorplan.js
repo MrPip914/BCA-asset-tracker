@@ -91,13 +91,19 @@ setTypeSettings({ Room: { floorPlan: false } });
 check('a per-type override can turn it OFF for a type that ships on', typeHasFloorPlan('Room') === false);
 setTypeSettings({});
 
-// The per-asset "Floor Plan" detail tab was removed once the site-wide Map
-// tab took over managing a plan -- typeHasFloorPlan now decides only what
-// the Map tab shows at a given scope, never a per-asset tab. availableTabsFor
-// must never resurrect it, for ANY type, regardless of the setting above.
-check('availableTabsFor no longer offers a floorPlan tab for Room', !availableTabsFor('Room').includes('floorPlan'));
-check('availableTabsFor no longer offers a floorPlan tab for Building', !availableTabsFor('Building').includes('floorPlan'));
-check('availableTabsFor no longer offers a floorPlan tab for Computer', !availableTabsFor('Computer').includes('floorPlan'));
+// The per-asset "Floor Plan" detail tab is back beside the site-wide Map tab
+// (it was removed once, then restored on request). Like Contents it is DERIVED
+// from typeHasFloorPlan, so the per-type setting decides it.
+check('availableTabsFor offers a floorPlan tab for Room', availableTabsFor('Room').includes('floorPlan'));
+check('availableTabsFor offers a floorPlan tab for Building', availableTabsFor('Building').includes('floorPlan'));
+check('availableTabsFor offers no floorPlan tab for Computer', !availableTabsFor('Computer').includes('floorPlan'));
+setTypeSettings({ Room: { floorPlan: false }, Computer: { floorPlan: true } });
+check('the setting turns the tab off for a type that ships on', !availableTabsFor('Room').includes('floorPlan'));
+check('the setting turns the tab on for a type that ships off', availableTabsFor('Computer').includes('floorPlan'));
+setTypeSettings({});
+check('the detail view renders the tab, bound to the OPEN asset not the scope',
+  /detailTab === "floorPlan" && typeHasFloorPlan\(selectedAsset\.type\)/.test(src)
+  && /uploadFloorPlanSvg\(selectedAsset\.id,/.test(src));
 
 // --- 2. geometry: clearance-based label sizing --------------------------------
 const closeFactorLine = src.match(/const FLOOR_PLAN_CLUSTER_CLOSE_FACTOR = [\d.]+;/);
