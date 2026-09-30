@@ -3172,6 +3172,27 @@ array position can't serve as identity once things move.
   `\\n`, and even that depends on how many escaping layers sit between you and the file, so
   verify escaping empirically (e.g. `sed 's/X/A\\nB/' <<< X | cat -A`) before trusting it on
   a real file, and diff/line-count-check immediately after any bulk substitution.
+- **A circuit has an ID, a Description and a Hot wire color** (backend v44, 2026-09-30).
+  - **"Description" is a LABEL on the stored key `label`** — the `changeType`/"Work type"
+    trade: renaming the key would drop every value on the next write for nothing.
+  - **`tag` is the circuit's own ID from the panel schedule**, unique within its PANEL —
+    across every breaker's circuits and the unassigned list, case- and space-insensitive,
+    a blank never clashing (`circuitTagConflict`). Checked on add and edit before
+    `persist()`, and across the file on a schedule import (which replaces the panel, so the
+    file IS the panel). Never the record's `id`, which stays a uuid.
+  - **`wireColor` is picked from `CIRCUIT_WIRE_COLORS`**, not typed: the 120/208-240V and
+    277/480V conventions plus their multi-pole combinations, and "Other". A picker so a
+    filter or an export can group them; the import matches loosely ("black / red") and
+    stores the canonical spelling, refusing anything outside the list.
+  - Shown in the circuit summary (ID badge, description, swatches), the panel Table view
+    (ID / Description / Wire columns), the door card (ID leads Serves, "Wire:" leads Notes),
+    the Excel workbook's Circuits sheet, the schedule export/import (`Circuit ID`,
+    `Description`, `Wire Color` — a file headed with the old `Circuit` still imports), and
+    the public `panel.html`.
+  - Both columns are on `CIRCUIT_FIELDS` and `PUBLIC_CIRCUIT_FIELDS`, written for breaker
+    AND unassigned circuits; `test-frontend-phases.js` pins all four sites.
+  - **ChildEntityTable's `select` is a `div`, not a `<label>`** — the wire colour was the
+    first select any caller used and hit the picker-reopen bug (`BUGS.md`).
 - **A circuit can belong to a panel without belonging to a breaker** (backend v13). Panel assets
   carry an `unassignedCircuits` array alongside `breakers`, holding circuits that exist but
   aren't wired to a slot yet — a run that's been pulled and labelled but not landed, or one

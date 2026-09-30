@@ -125,13 +125,15 @@ const code = [
   grabFn("breakerPhases"), grabFn("breakerPhaseConflict"),
   grabConst("const PANEL_SCHEDULE_HEADERS = [", "];"), grabConst("const PANEL_BREAKER_COLS", ";"),
   grabConst("const PANEL_CIRCUIT_COLS", ";"), grabConst("const PANEL_SERVES_SEPARATOR", "\"; \";"),
+  grabConst("const PANEL_LEGACY_DESCRIPTION_HEADER", ";"), grabConst("const CIRCUIT_WIRE_COLORS = [", "];"),
+  grabFn("circuitTagConflict"),
   grabFn("panelRefText"), grabFn("cellsFromSlotText"), grabFn("panelScheduleRows"), grabFn("planPanelImport"),
   `module.exports = {
      PERSON_NAME_ORDERS, setNameOrder: v => { PERSON_NAME_ORDER = v; },
      planAssetImport, assetToImportRow, importHeadersFor, importRowsFromGrid,
      resolveImportRef, buildImportRefIndex, resolveImportType, importCellText,
      fullPathOf, nameOf, pathOf, DEFAULT_COLUMNS, IMPORT_KEY_HEADER, splitImportList,
-     splitImportPeople, panelScheduleRows, planPanelImport, cellsFromSlotText, PANEL_SCHEDULE_HEADERS,
+     splitImportPeople, panelScheduleRows, planPanelImport, cellsFromSlotText, PANEL_SCHEDULE_HEADERS, circuitTagConflict,
    };`,
 ].join('\n');
 
@@ -143,7 +145,7 @@ try {
   console.error('Could not evaluate the extracted helpers:\n  ' + e.message);
   process.exit(1);
 }
-const { panelScheduleRows, planPanelImport, cellsFromSlotText, importRowsFromGrid, PANEL_SCHEDULE_HEADERS } = mod.exports;
+const { panelScheduleRows, planPanelImport, cellsFromSlotText, importRowsFromGrid, PANEL_SCHEDULE_HEADERS, circuitTagConflict } = mod.exports;
 
 // --- fixture -------------------------------------------------------------------
 // Two rooms share a NAME in different buildings, so Serves must round-trip by
@@ -163,10 +165,10 @@ const panel = {
   id: 'P1', type: 'Electrical Panel', tag: 'BCA0098', parentId: 'R1', panelSlotCount: 12, panelPhases: '3',
   breakers: [
     { id: 'b1', panelLabel: 'P1', cells: ['1a', '1b', '3a', '3b', '5a', '5b'], ampRating: '40', serial: 'S1', installedDate: '2026-01-02', notes: '', groupId: 'g1', breakerTypeId: 'type-triple-pole', circuits: [
-      { id: 'c1', breakerId: 'b1', panelLabel: 'P1', label: 'RTU', notes: '- roof', roomsServedIds: ['R1'], feedsPanelLabel: '' },
+      { id: 'c1', breakerId: 'b1', panelLabel: 'P1', tag: '1', wireColor: 'Black/Red/Blue', label: 'RTU', notes: '- roof', roomsServedIds: ['R1'], feedsPanelLabel: '' },
     ] },
     { id: 'b2a', panelLabel: 'P1', cells: ['2a'], ampRating: '20', serial: '', installedDate: '', notes: '', groupId: 'g2', breakerTypeId: 'type-tandem', circuits: [
-      { id: 'c2', breakerId: 'b2a', panelLabel: 'P1', label: 'Lights', notes: '', roomsServedIds: ['R1', 'R2'], feedsPanelLabel: '' },
+      { id: 'c2', breakerId: 'b2a', panelLabel: 'P1', tag: '2', label: 'Lights', notes: '', roomsServedIds: ['R1', 'R2'], feedsPanelLabel: '' },
       { id: 'c3', breakerId: 'b2a', panelLabel: 'P1', label: 'Fan', notes: '', roomsServedIds: ['R2'], feedsPanelLabel: '' },
     ] },
     { id: 'b2b', panelLabel: 'P1', cells: ['2b'], ampRating: '15', serial: '', installedDate: '', notes: '', groupId: 'g2', breakerTypeId: 'type-tandem', circuits: [] },
@@ -194,12 +196,12 @@ check('slot text: rubbish is refused', cellsFromSlotText('A1') === null && cells
 // --- export --------------------------------------------------------------------
 const rows = panelScheduleRows(panel, { assets: allAssets, breakerTypes });
 check('one row per circuit, a row for a circuitless breaker, unassigned last',
-  rows.length === 6 && rows[rows.length - 1].Slot === '' && rows[rows.length - 1].Circuit === 'Pulled run',
-  JSON.stringify(rows.map(r => [r.Slot, r.Circuit])));
+  rows.length === 6 && rows[rows.length - 1].Slot === '' && rows[rows.length - 1].Description === 'Pulled run',
+  JSON.stringify(rows.map(r => [r.Slot, r.Description])));
 check('a multi-pole breaker writes its slots the way the app labels them', rows[0].Slot === '1/3/5');
 check('Serves is written as FULL paths, so two Kitchens stay apart',
-  rows.find(r => r.Circuit === 'Lights').Serves === 'Building 100 › Kitchen; Building 200 › Kitchen');
-check('Feeds Panel is written as the sub-panel\'s tag', rows.find(r => r.Circuit === 'Sub feed')['Feeds Panel'] === 'BCA0099');
+  rows.find(r => r.Description === 'Lights').Serves === 'Building 100 › Kitchen; Building 200 › Kitchen');
+check('Feeds Panel is written as the sub-panel\'s tag', rows.find(r => r.Description === 'Sub feed')['Feeds Panel'] === 'BCA0099');
 check('a tandem\'s two breakers share one Unit number',
   rows.find(r => r.Slot === '2a').Unit === rows.find(r => r.Slot === '2b').Unit && rows.find(r => r.Slot === '2a').Unit !== rows[0].Unit);
 
@@ -213,7 +215,7 @@ check('...and every circuit id, in its place', JSON.stringify(same.breakers.find
   && same.unassignedCircuits.map(c => c.id).join() === 'c5');
 
 // --- edits ---------------------------------------------------------------------
-const edited = rows.map(r => (r.Circuit === 'RTU' ? { ...r, Amps: '50' } : r));
+const edited = rows.map(r => (r.Description === 'RTU' ? { ...r, Amps: '50' } : r));
 const e1 = planOf(edited);
 check('an edited amp is a change, not unchanged', e1.errors.length === 0 && !e1.unchanged && e1.breakers.find(b => b.id === 'b1').ampRating === '50');
 
@@ -223,7 +225,7 @@ check('a breaker left OUT of the file is removed, and the plan counts it',
   e2.errors.length === 0 && !e2.breakers.some(b => b.id === 'b4') && e2.removed.breakers === 1 && e2.removed.circuits === 1,
   JSON.stringify(e2.removed));
 
-const added = [...rows, { Slot: '7', 'Breaker Type': 'Single-Pole', Amps: '20', Circuit: 'New outlets', Serves: 'Building 200 › Kitchen' }];
+const added = [...rows, { Slot: '7', 'Breaker Type': 'Single-Pole', Amps: '20', Description: 'New outlets', Serves: 'Building 200 › Kitchen' }];
 const e3 = planOf(added);
 const nb = e3.breakers.find(b => b.cells.join() === '7a,7b');
 check('a keyless row is a NEW breaker with a new id and its own group',
@@ -236,25 +238,25 @@ const e4 = planOf(rows, { ...ctx, panel: single });
 check('a 3-pole on a SINGLE-phase panel is refused, as Add Breaker refuses it',
   e4.errors.some(m => /phase A/.test(m)) && e4.breakers.length === 0);
 
-const bad = [...rows, { Slot: '8', Circuit: 'Ghost', Serves: 'Nowhere' }];
+const bad = [...rows, { Slot: '8', Description: 'Ghost', Serves: 'Nowhere' }];
 const e5 = planOf(bad);
 check('one bad row refuses the WHOLE file, carrying no layout', e5.errors.length > 0 && e5.breakers.length === 0 && e5.unassignedCircuits.length === 0);
 check('a bare room name matching two rooms is ambiguous, not the first one',
-  planOf([...rows, { Slot: '9', Circuit: 'X', Serves: 'Kitchen' }]).errors.some(m => /more than one room/.test(m)));
+  planOf([...rows, { Slot: '9', Description: 'X', Serves: 'Kitchen' }]).errors.some(m => /more than one room/.test(m)));
 check('two breakers on one cell are refused',
-  planOf([...rows, { Slot: '1a', Circuit: 'Clash', Serves: 'Building 100 › Kitchen' }]).errors.some(m => /both use slot/.test(m)));
+  planOf([...rows, { Slot: '1a', Description: 'Clash', Serves: 'Building 100 › Kitchen' }]).errors.some(m => /both use slot/.test(m)));
 check('a slot past the panel\'s count is refused',
-  planOf([...rows, { Slot: '13', Circuit: 'Far', Serves: 'Building 100 › Kitchen' }]).errors.some(m => /beyond/.test(m)));
+  planOf([...rows, { Slot: '13', Description: 'Far', Serves: 'Building 100 › Kitchen' }]).errors.some(m => /beyond/.test(m)));
 check('a split-column run (22/23) is refused',
-  planOf([...rows, { Slot: '8/9', Circuit: 'Odd', Serves: 'Building 100 › Kitchen' }]).errors.some(m => /one column/.test(m)));
+  planOf([...rows, { Slot: '8/9', Description: 'Odd', Serves: 'Building 100 › Kitchen' }]).errors.some(m => /one column/.test(m)));
 check('serves AND feeds is refused',
-  planOf([...rows, { Slot: '10', Circuit: 'Both', Serves: 'Building 100 › Kitchen', 'Feeds Panel': 'BCA0099' }]).errors.some(m => /not both/.test(m)));
+  planOf([...rows, { Slot: '10', Description: 'Both', Serves: 'Building 100 › Kitchen', 'Feeds Panel': 'BCA0099' }]).errors.some(m => /not both/.test(m)));
 check('an Assets export chosen by mistake says so ONCE',
   (() => { const p = planPanelImport(importRowsFromGrid([['Asset Key', 'Name'], ['x', 'y']]), ctx); return p.errors.length === 1 && /isn't a panel schedule/.test(p.errors[0]); })());
 check('an empty schedule is refused rather than emptying the panel',
   planPanelImport(importRowsFromGrid([PANEL_SCHEDULE_HEADERS]), ctx).errors.some(m => /no rows/.test(m)));
 check('an unknown breaker type is a warning, not a refusal',
-  (() => { const p = planOf([...rows, { Slot: '11', 'Breaker Type': 'Mystery', Circuit: 'M', Serves: 'Building 100 › Kitchen' }]); return p.errors.length === 0 && p.warnings.some(m => /catalog/.test(m)); })());
+  (() => { const p = planOf([...rows, { Slot: '11', 'Breaker Type': 'Mystery', Description: 'M', Serves: 'Building 100 › Kitchen' }]); return p.errors.length === 0 && p.warnings.some(m => /catalog/.test(m)); })());
 
 // --- the menu (source) ---------------------------------------------------------
 const diagram = src.slice(src.indexOf('function PanelDiagram('), src.indexOf('function PanelDiagram(') + 40000);
@@ -263,6 +265,53 @@ check('the panel header carries ONE menu, and the four bare icons are gone',
   && !/aria-label="Copy link to this panel"/.test(diagram) && !/aria-label="Print a QR sticker for this panel"/.test(diagram));
 check('import is an editor-only row; export is not',
   /canEdit && onImportSchedule &&/.test(diagram) && /onExportSchedule && \{ key: "export"/.test(diagram));
+
+// --- circuit ID and hot wire colour (v44) -------------------------------------------
+{
+  const r1 = rows.find(r => r.Description === 'RTU');
+  check('the circuit ID and wire color are exported in their own columns',
+    r1['Circuit ID'] === '1' && r1['Wire Color'] === 'Black/Red/Blue');
+  const plan = planOf(rows);
+  check('...and read back onto the same circuit', plan.unchanged === true);
+  const dup = planOf(rows.map(r => (r.Description === 'Fan' ? { ...r, 'Circuit ID': '2' } : r)));
+  check('two circuits sharing an ID on one panel refuse the file',
+    dup.errors.some(m => /circuit ID "2" is already used on row/.test(m)), JSON.stringify(dup.errors));
+  const caseDup = planOf(rows.map(r => (r.Description === 'Fan' ? { ...r, 'Circuit ID': ' 1 ' } : r)));
+  check('...case- and space-insensitively', caseDup.errors.some(m => /already used/.test(m)));
+  check('blank IDs never clash', planOf(rows.map(r => ({ ...r, 'Circuit ID': '' }))).errors.length === 0);
+  const badColor = planOf(rows.map(r => (r.Description === 'Fan' ? { ...r, 'Wire Color': 'Purple' } : r)));
+  check('a wire color outside the list refuses the file', badColor.errors.some(m => /wire color "Purple"/.test(m)));
+  const loose = planOf(rows.map(r => (r.Description === 'Fan' ? { ...r, 'Wire Color': 'black / red' } : r)));
+  const fan = loose.breakers.flatMap(b => b.circuits).find(c => c.label === 'Fan');
+  check('a wire color is matched loosely and stored in its canonical spelling', loose.errors.length === 0 && fan.wireColor === 'Black/Red');
+  // A file exported before the rename still carries "Circuit" where Description is now.
+  const legacyHeaders = PANEL_SCHEDULE_HEADERS.map(h => (h === 'Description' ? 'Circuit' : h));
+  const legacyGrid = [legacyHeaders, ...rows.map(r => PANEL_SCHEDULE_HEADERS.map(h => r[h] || ''))];
+  const legacy = planPanelImport(importRowsFromGrid(legacyGrid), ctx);
+  check('a schedule with the old "Circuit" header still imports', legacy.errors.length === 0 && legacy.unchanged === true, JSON.stringify(legacy.errors));
+}
+{
+  check('circuitTagConflict finds a clash on another breaker of the same panel', circuitTagConflict(panel, ' 2 ', 'c1').id === 'c2');
+  check('...but not against the circuit being edited itself', circuitTagConflict(panel, '2', 'c2') === null);
+  check('...and never for a blank ID', circuitTagConflict(panel, '', null) === null);
+  const withUnassigned = { ...panel, unassignedCircuits: [{ id: 'u9', tag: 'X9', label: 'Loose' }] };
+  check('...and it checks the unassigned circuits too', circuitTagConflict(withUnassigned, 'x9', 'c1').id === 'u9');
+}
+{
+  const addSrc = src.slice(src.indexOf('  function addCircuit(breakerId, draft) {'), src.indexOf('  function saveCircuitEdit('));
+  const editSrc = src.slice(src.indexOf('  function saveCircuitEdit('), src.indexOf('  function deleteCircuit('));
+  check('adding AND editing a circuit both refuse a duplicate ID before persisting',
+    [addSrc, editSrc].every(f => f.indexOf('circuitTagConflict(') !== -1 && f.indexOf('circuitTagConflict(') < f.indexOf('persist(')));
+  check('the circuit form reads Description, ID and Hot wire color',
+    /\{ key: "label", label: "Description"/.test(src) && /\{ key: "tag", label: "ID"/.test(src) && /\{ key: "wireColor", label: "Hot wire color", type: "select"/.test(src));
+}
+
+{
+  const cet = src.slice(src.indexOf('function ChildEntityTable({'), src.indexOf('function ChildEntityTable({') + 6000);
+  const sel = cet.slice(cet.indexOf('if (f.type === "select") {'), cet.indexOf('if (f.type === "textarea") {'));
+  check('ChildEntityTable\'s select is NOT wrapped in a <label> (it would re-open the picker on every choice)',
+    /<div key=\{f\.key\}/.test(sel) && !/<label key=/.test(sel));
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

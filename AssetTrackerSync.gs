@@ -50,7 +50,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v43";
+const SCRIPT_VERSION = "v44";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -245,7 +245,12 @@ const BREAKER_FIELDS = ["id", "panelLabel", "cells", "ampRating", "status", "ser
 // has to touch it. No migration is needed for rows written before this column
 // existed: every one of them has a breakerId, so they still attach to their breaker
 // on read, and each gets its panelLabel filled in the next time the panel is saved.
-const CIRCUIT_FIELDS = ["id", "breakerId", "panelLabel", "label", "roomsServed", "feedsPanelLabel", "notes"];
+// tag and wireColor (v44): the circuit's own ID as written on the panel schedule
+// ("12", "L1-3") -- unique per PANEL, a rule the frontend enforces, never the
+// record's id -- and the colour of its hot conductor(s). `label` is still the
+// stored key for what the app now calls the circuit's Description; renaming the
+// key would drop every existing value on the next write for nothing.
+const CIRCUIT_FIELDS = ["id", "breakerId", "panelLabel", "label", "roomsServed", "feedsPanelLabel", "notes", "tag", "wireColor"];
 
 // A Space-Link ties one shape drawn on a floor plan to a Room (or any other
 // place-type asset) -- scoped to the PLAN-OWNING asset (assetLabel), keyed by
@@ -430,7 +435,7 @@ const PHOTO_FIELDS = [
 // letter beside each slot -- what an electrician at the open door checks first.
 const PUBLIC_PANEL_FIELDS = ["tag", "label", "panelSlotCount", "panelLayout", "panelPhases", "panelVoltage"];
 const PUBLIC_BREAKER_FIELDS = ["id", "cells", "ampRating", "groupId", "breakerTypeId", "notes"];
-const PUBLIC_CIRCUIT_FIELDS = ["id", "breakerId", "label", "roomsServedIds", "feedsPanelLabel", "notes"];
+const PUBLIC_CIRCUIT_FIELDS = ["id", "breakerId", "label", "roomsServedIds", "feedsPanelLabel", "notes", "tag", "wireColor"];
 const PUBLIC_BREAKER_TYPE_FIELDS = ["id", "name", "slotSpan", "members"];
 // Deliberately WITHOUT storageKey, by, bytes or at. storageKey is the handle a
 // write would use; `by` is a staff member's name. Neither answers "what does
@@ -1248,7 +1253,7 @@ function publicPanelPayload_(requestedLabel) {
     const projected = pickPublic_({
       id: c.id, breakerId: c.breakerId, label: c.label,
       roomsServedIds: c.roomsServed ? String(c.roomsServed).split(",").map(s => s.trim()).filter(Boolean) : [],
-      feedsPanelLabel: c.feedsPanelLabel, notes: c.notes,
+      feedsPanelLabel: c.feedsPanelLabel, notes: c.notes, tag: c.tag, wireColor: c.wireColor,
     }, PUBLIC_CIRCUIT_FIELDS);
     // pickPublic_ turns a missing array into "", which the renderer would then
     // have to guard on — an empty list is the honest shape for "serves nothing".
@@ -1570,6 +1575,7 @@ function handleAuthenticatedRead_(body, e) {
             id: c.id, breakerId: c.breakerId, panelLabel: label, label: c.label,
             roomsServedIds: c.roomsServed ? String(c.roomsServed).split(",").map(s => s.trim()) : [],
             feedsPanelLabel: c.feedsPanelLabel, notes: c.notes,
+            tag: c.tag || "", wireColor: c.wireColor || "",
           })),
         })),
         // Circuits that belong to this panel but aren't wired to any breaker yet.
@@ -1584,6 +1590,7 @@ function handleAuthenticatedRead_(body, e) {
             id: c.id, breakerId: "", panelLabel: label, label: c.label,
             roomsServedIds: c.roomsServed ? String(c.roomsServed).split(",").map(s => s.trim()) : [],
             feedsPanelLabel: c.feedsPanelLabel, notes: c.notes,
+            tag: c.tag || "", wireColor: c.wireColor || "",
           })),
         // Only meaningful for an asset whose TYPE currently allows a floor plan
         // (typeHasFloorPlan, frontend-only) -- attached unconditionally here like
@@ -2261,7 +2268,7 @@ function doPost(e) {
           (b.circuits || []).forEach(c => circuitRows.push({
             id: c.id, breakerId: b.id, panelLabel: key, label: c.label,
             roomsServed: (c.roomsServedIds || []).join(","), feedsPanelLabel: c.feedsPanelLabel || "",
-            notes: c.notes || "",
+            notes: c.notes || "", tag: c.tag || "", wireColor: c.wireColor || "",
           }));
         });
         // Same tab, same shape — just with no breaker to point at, so panelLabel is
@@ -2270,7 +2277,7 @@ function doPost(e) {
         (a.unassignedCircuits || []).forEach(c => circuitRows.push({
           id: c.id, breakerId: "", panelLabel: key, label: c.label,
           roomsServed: (c.roomsServedIds || []).join(","), feedsPanelLabel: c.feedsPanelLabel || "",
-          notes: c.notes || "",
+          notes: c.notes || "", tag: c.tag || "", wireColor: c.wireColor || "",
         }));
         // Same "derive the owner from the asset being iterated, never trust the
         // payload" rule as panelLabel above.

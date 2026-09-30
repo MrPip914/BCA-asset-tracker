@@ -61,6 +61,12 @@ Layout/Phase/Voltage pickers are `hideLabel` under their own heading). **Every o
 
 **Blocks:** nothing now that those two are worked around; possibly other pickers.
 
+**Update 2026-09-30 — a third site, fixed the same way.** `ChildEntityTable`'s generic
+`select` field wrapped its (hideLabel) picker in a `<label>`, and the circuit form's new Hot
+wire color was the first select any caller actually used — choosing a colour re-opened the
+picker every time. The wrapper is a `div` now, which fixes every ChildEntityTable select at
+once. The general fix inside `PickerField` itself is still outstanding.
+
 
 ### `deploy.mjs` lets a DIFFERENT backend with the same version number replace a live one
 **Found:** 2026-09-27, by doing it — see "Release ordering" in `CLAUDE.md`.
