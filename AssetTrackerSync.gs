@@ -50,7 +50,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v48";
+const SCRIPT_VERSION = "v49";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -972,6 +972,29 @@ function logDiag_(entry) {
   }
 }
 
+// Per-step timing for a save or a read (v49). Each step goes to console.log, which
+// Apps Script shows under that execution on the Executions page -- and, unlike a
+// Diagnostics row, it is already there if the execution is then killed at the
+// 6-minute limit. That is the case this exists for: on 2026-09-29 a dev save ran
+// 361s and timed out, holding the lock the whole time, and nothing recorded
+// which step it was stuck in. The last line logged names the step that did not
+// finish. The same steps ride in a slow_save or error row's detail when the
+// execution survives long enough to write one.
+let diagStages_ = [];
+let diagLastStage_ = 0;
+function stage_(label) {
+  const now = Date.now();
+  const since = now - (diagLastStage_ || diagStarted_ || now);
+  const total = diagStarted_ ? now - diagStarted_ : 0;
+  diagLastStage_ = now;
+  diagStages_.push(label + " " + since + "ms");
+  try {
+    console.log("[" + (diagOp_ || "?") + "] " + label + " +" + since + "ms (" + total + "ms total)");
+  } catch (err) {
+    /* timing must never break the request it describes */
+  }
+}
+
 // The script lock, or null if it could not be had in time. Replaces a bare
 // waitLock(), which THROWS on timeout -- and a throw outside a handler's try is
 // answered by Apps Script's HTML error page, which the app can only report as
@@ -1107,9 +1130,13 @@ function writeTableIfChanged_(name, headers, rows, configMap, nextHashes) {
   const stored = configMap[TAB_HASH_KEY_PREFIX + name];
   if (stored && String(stored) === hash) {
     const sheet = getSheet_(name);
-    if (Math.max(0, sheet.getLastRow() - 1) === rows.length) return;
+    if (Math.max(0, sheet.getLastRow() - 1) === rows.length) {
+      stage_(name + " unchanged (" + rows.length + " rows)");
+      return;
+    }
   }
   writeTable_(name, headers, rows);
+  stage_(name + " written (" + rows.length + " rows)");
 }
 
 function writeTable_(name, headers, rows) {
@@ -1473,6 +1500,7 @@ function handleSignIn_(body, e) {
 function handleAuthenticatedRead_(body, e) {
   const lock = acquireLock_(10000);
   if (!lock) return respond_(busyResponse_(), e);
+  stage_("lock acquired");
   try {
     // Allowlist read under the same lock as the data: outside it, a Config
     // rewrite in flight would show an empty list and reject everyone.
@@ -1530,6 +1558,7 @@ function handleAuthenticatedRead_(body, e) {
     // row on the first photo save.
     const photoRows = readTable_(SHEET_NAMES.photos, PHOTO_FIELDS);
     const configRows = readTable_(SHEET_NAMES.config, ["key", "value"]);
+    stage_("tabs read (" + assetRows.length + " assets, " + allAuditRows.length + " audit rows)");
 
     const config = {};
     const configRaw = {};
@@ -2096,8 +2125,10 @@ function doPost(e) {
     return handleDiagnostics_(body, e);
   }
 
+  stage_("request parsed (" + String(e.postData.contents || "").length + " bytes)");
   const lock = acquireLock_(10000);
   if (!lock) return jsonOut_(busyResponse_());
+  stage_("lock acquired");
   try {
     const assets = body.assets || [];
     // Which domains actually changed, as reported by the client (see persist()
@@ -2130,6 +2161,7 @@ function doPost(e) {
     // client (no `_revisions` at all) still writes, same fallback philosophy as
     // a missing `_dirty`.
     const configMap = readConfigMap_();
+    stage_("config read");
 
     // --- Authorization ------------------------------------------------------
     // Deliberately inside the lock and re-read on every save, so removing
@@ -2158,6 +2190,7 @@ function doPost(e) {
       });
     }
 
+    stage_("authorized");
     const revisions = readRevisions_(configMap);
     const postedRevisions = body._revisions;
     if (postedRevisions) {
@@ -2330,6 +2363,7 @@ function doPost(e) {
       body.auditLog || [],
       body.auditBase
     );
+    stage_("audit appended");
 
     if (dirty.breakerTypes) {
       const breakerTypeRows = (body.breakerTypes || []).map(t => ({
@@ -2447,16 +2481,17 @@ function doPost(e) {
       Object.keys(nextTabHashes).forEach(name => { hashesOut[name] = nextTabHashes[name]; });
       Object.keys(hashesOut).forEach(name => configRows.push({ key: TAB_HASH_KEY_PREFIX + name, value: hashesOut[name] }));
       writeTable_(SHEET_NAMES.config, ["key", "value"], configRows);
+      stage_("config written");
     }
 
     // The post-write revisions go back with the response so the client can keep
     // saving without a reload first — otherwise its very next save would post
     // the pre-bump numbers and conflict with its own write.
     const tookMs = Date.now() - diagStarted_;
-    if (tookMs > DIAG_SLOW_MS) logDiag_({ event: "slow_save", email: auth.email, ms: tookMs });
+    if (tookMs > DIAG_SLOW_MS) logDiag_({ event: "slow_save", email: auth.email, ms: tookMs, detail: diagStages_.join("; ") });
     return jsonOut_({ ok: true, revisions: revisions });
   } catch (err) {
-    logDiag_({ event: "error", detail: err && err.message });
+    logDiag_({ event: "error", detail: (err && err.message) + " | after: " + diagStages_.join("; ") });
     return jsonOut_({ ok: false, error: err.message });
   } finally {
     lock.releaseLock();

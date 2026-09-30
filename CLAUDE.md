@@ -501,6 +501,18 @@ failure modal and the sign-in screen both said *that* it happened and kept nothi
   - **Neither log ever holds a session id** — it is a week-long bearer credential, and
     the tab is readable by anyone the Sheet is shared with. Emails are logged, the same
     exposure as AuditLog's `by` column.
+- **Saves and reads log per-step timing to the Executions page (backend v49,
+  2026-09-30)** via `stage_()` → `console.log`: request size, lock wait, config read,
+  auth, every tab written or skipped (with row counts), audit append, config write.
+  Built after a dev `doPost` ran 361s into Apps Script's 6-minute limit holding the lock
+  — everything behind it answered "busy" — and nothing recorded where it stuck. **The
+  console log is the only record that survives a killed execution**: a Diagnostics row
+  is written at the end, which a timed-out save never reaches. So after a timeout, open
+  that execution on the Executions page; its LAST line names the step that did not
+  finish. When a save survives but is slow, the same steps ride in the `slow_save` (or
+  `error`) row's detail. No step inside the child-row flattening loop: the
+  backend tests slice that block out by its first `writeTableIfChanged_` call, and a
+  `stage_` line there is outside their eval scope.
 - **The lock timeout is now an ANSWER, not a crash**, and it was the most likely cause of
   the save errors. `waitLock()` throws on timeout, and the three authenticated paths
   called it OUTSIDE their `try` — so a save queued behind others for 10 seconds got Apps
