@@ -4071,7 +4071,7 @@ const FRONTEND_SCRIPT_VERSION = "v50";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-01.27";
+const APP_VERSION = "2026-10-01.28";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -6300,6 +6300,9 @@ function AssetTracker() {
   // { assetId } while the user is choosing a point for that asset on the Map
   // tab. Null the rest of the time; cleared on leaving the tab (below).
   const [mapPlacing, setMapPlacing] = useState(null);
+  // The place selected on the map (a wall, or a selected space's linked room);
+  // the floating + prefills from it ahead of the HierarchyNav scope.
+  const [mapSelectedPlaceId, setMapSelectedPlaceId] = useState(null);
   const [typeFilter, setTypeFilter] = useState("All types");
   const [userFilter, setUserFilter] = useState("All users");
   const [statusFilter, setStatusFilter] = useState("Active");
@@ -8321,7 +8324,14 @@ function AssetTracker() {
     ) || null;
   }
 
-  function startAdd() {
+  // A place the add form prefills from INSTEAD of the HierarchyNav scope -- the
+  // map's selected space. startAdd is also an onClick handler, so it is only
+  // taken as a place when it is a string, never an event.
+  const [addScopeOverride, setAddScopeOverride] = useState(null);
+  const addFormScopeId = addScopeOverride || scopeId;
+  function startAdd(placeId) {
+    const prefillScope = typeof placeId === "string" && placeId ? placeId : null;
+    setAddScopeOverride(prefillScope);
     // A generated id, not the label. This is the first point where the two
     // genuinely differ, and it is the point of the whole change: the label
     // becomes editable in phase 3 and the id never does. Minted client-side
@@ -8338,7 +8348,7 @@ function AssetTracker() {
     // scoping to a Building leaves this blank rather than pointing a new
     // Computer at a parent its own type rejects. Changing the type in the form
     // re-derives it (reScopedParentId) until a parent is picked by hand.
-    const startParentId = scopedParentFor(startType, scopeId, assets);
+    const startParentId = scopedParentFor(startType, prefillScope || scopeId, assets);
     setDraft({
       ...emptyDraftFrom(columns),
       id: crypto.randomUUID(),
@@ -10794,7 +10804,7 @@ function AssetTracker() {
     const newDefault = defaultNewAssetType(nextTypesList);
     if (showAdd && newDefault !== oldDefault) {
       setDraft(d => d && d.type === oldDefault
-        ? { ...d, type: newDefault, parentId: reScopedParentId(d.parentId, newDefault, scopeId, assets) }
+        ? { ...d, type: newDefault, parentId: reScopedParentId(d.parentId, newDefault, addFormScopeId, assets) }
         : d);
     }
   }
@@ -12649,7 +12659,7 @@ function AssetTracker() {
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12 }}>
               {addFormColumns.map(c => (
                 c.key === "type" ? (
-                  <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v, parentId: reScopedParentId(draft.parentId, v, scopeId, assets), ...clearedError(draft, "type") })} types={typesList} labels={typeLabels} onManage={() => setShowTypesManager(true)} />
+                  <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v, parentId: reScopedParentId(draft.parentId, v, addFormScopeId, assets), ...clearedError(draft, "type") })} types={typesList} labels={typeLabels} onManage={() => setShowTypesManager(true)} />
                 ) : c.key === "parent" ? (
                   <ParentField
                     key={c.key}
@@ -16047,6 +16057,7 @@ function AssetTracker() {
           onNavigateToPlan={navigateFloorPlanTo}
           query={mapQuery}
           menuSlot={mapMenuSlot}
+          onSelectedPlaceChange={setMapSelectedPlaceId}
         />
         {/* Add asset opens the Assets tab's own form, in a dialog over the map. */}
         {showAdd && (
@@ -16070,9 +16081,9 @@ function AssetTracker() {
               {showMapAddMenu && (
                 <div role="menu" style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, boxShadow: "0 4px 14px rgba(42,52,57,0.2)", overflow: "hidden", minWidth: 160 }}>
                   {[
-                    { label: "Add asset", run: startAdd },
-                    { label: "Add task", run: () => openMaintenanceAdd(scopeId) },
-                    { label: "Log work", run: () => openChangeAdd(scopeId) },
+                    { label: "Add asset", run: () => startAdd(mapSelectedPlaceId || undefined) },
+                    { label: "Add task", run: () => openMaintenanceAdd(mapSelectedPlaceId || scopeId) },
+                    { label: "Log work", run: () => openChangeAdd(mapSelectedPlaceId || scopeId) },
                   ].map(item => (
                     <button
                       key={item.label}
@@ -20050,7 +20061,7 @@ function MapOptionsOnlyMenu({ canEdit, asset, assets, menuSlot, onSaveMapOptions
 function MapTabContent({
   canEdit, assets, typesList, scopeAsset,
   uploadBusy, uploadError, onUploadPlan, onSaveLink, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveMapOptions,
-  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot,
+  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange,
 }) {
   if (!scopeAsset) {
     return (
@@ -20099,6 +20110,7 @@ function MapTabContent({
       onNavigateToPlan={onNavigateToPlan}
       query={query}
       menuSlot={menuSlot}
+      onSelectedPlaceChange={onSelectedPlaceChange}
     />
   );
 }
@@ -20122,7 +20134,7 @@ function FloorPlanTabContent({
   canEdit, selectedAsset, assets, typesList,
   uploadBusy, uploadError, onUploadPlan,
   onSaveLink, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveMapOptions,
-  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot,
+  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange,
 }) {
   const rawPlan = useFloorPlanSvg(selectedAsset.floorPlanUrl);
   // Rotation is stored on the asset (floorPlanRotation, quarter turns, blank = 0)
@@ -20520,6 +20532,17 @@ function FloorPlanTabContent({
   // Group tab: which existing group the pointer is over, so ALL its members
   // light up together (the per-shape CSS :hover can only ever light one).
   const [hoverGroupId, setHoverGroupId] = useState(null);
+
+  // Tell the page which place is selected (a wall, or the room a selected space
+  // is linked to), so its Add buttons can prefill from it. Reports null when
+  // nothing resolves, and on unmount, so a selection cannot outlive the map.
+  const selectedPlaceId = selectedWallId
+    || (selectedShapeId && linkFor(selectedShapeId) ? linkFor(selectedShapeId).roomId : null);
+  useEffect(() => {
+    if (!onSelectedPlaceChange) return;
+    onSelectedPlaceChange(selectedPlaceId || null);
+    return () => onSelectedPlaceChange(null);
+  }, [selectedPlaceId]);
 
   function exitSetup() {
     setSetupTab(null); setPickerShapeId(null); setHoverGroupId(null); setOpenGroupId(null);

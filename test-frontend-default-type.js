@@ -66,7 +66,7 @@ check('extra keys on an entry survive a rename',
   renameTypeInList([{ id: 'X', name: 'X', extra: 1 }], 'X', 'Y', false)[0].extra === 1);
 
 // --- wiring ------------------------------------------------------------------
-const startAddAt = src.indexOf('  function startAdd() {');
+const startAddAt = src.indexOf('  function startAdd(placeId) {');
 const startAddBody = src.slice(startAddAt, src.indexOf(NL + '  }' + NL, startAddAt));
 check('startAdd resolves the starting type through defaultNewAssetType',
   /const startType = defaultNewAssetType\(typesList\)/.test(startAddBody));
@@ -100,7 +100,7 @@ check('a parent picked BY HAND survives any type change',
   reScopedParentId('R2', 'Room', 'B1', place) === 'R2' && reScopedParentId('R2', 'Computer', 'B1', place) === 'R2');
 check('no scope: a type change leaves a blank parent blank', reScopedParentId('', 'Room', '', place) === '');
 check('the add form\'s Type field re-derives the parent through it',
-  /type: v, parentId: reScopedParentId\(draft\.parentId, v, scopeId, assets\)/.test(src));
+  /type: v, parentId: reScopedParentId\(draft\.parentId, v, addFormScopeId, assets\)/.test(src));
 check('a blank parent under a scope the type cannot sit in is explained',
   /can't be placed in a Building/.test(scopedParentNote('Computer', '', 'B1', place, [])));
 check('no note when the parent was filled, no scope is set, or the scope is legal',
@@ -114,9 +114,9 @@ const saveAt = src.indexOf('  function saveTypeSettings(id, draft) {');
 const saveBody = src.slice(saveAt, src.indexOf(NL + '  }' + NL, saveAt));
 check('saving a new default moves an open, untouched add form onto it',
   /if \(showAdd && newDefault !== oldDefault\)/.test(saveBody)
-  && /d && d\.type === oldDefault\s*\?\s*\{ \.\.\.d, type: newDefault, parentId: reScopedParentId\(d\.parentId, newDefault, scopeId, assets\) \}/.test(saveBody));
+  && /d && d\.type === oldDefault\s*\?\s*\{ \.\.\.d, type: newDefault, parentId: reScopedParentId\(d\.parentId, newDefault, addFormScopeId, assets\) \}/.test(saveBody));
 check('startAdd seeds the parent through the same rule',
-  /const startParentId = scopedParentFor\(startType, scopeId, assets\)/.test(startAddBody));
+  /const startParentId = scopedParentFor\(startType, prefillScope \|\| scopeId, assets\)/.test(startAddBody));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
