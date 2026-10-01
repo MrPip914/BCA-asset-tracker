@@ -4071,7 +4071,7 @@ const FRONTEND_SCRIPT_VERSION = "v50";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-01.24";
+const APP_VERSION = "2026-10-01.25";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -12634,6 +12634,106 @@ function AssetTracker() {
     return columns.filter(c => fieldAppliesTo(c.key, type) && c.key !== "status");
   }
 
+  // The add-asset form, as a render helper (CALLED, not a component, for the
+  // reason renderWorkDialogs gives). It lives inline on the Assets tab and in a
+  // dialog over the Map tab, so both open the same form on the same draft.
+  function renderAddForm() {
+    return (
+      <>
+        {showAdd && (
+          <div style={{ border: `1px solid ${C.border}`, background: C.surface, padding: 20, marginBottom: 18, borderRadius: 10, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <div style={{ fontWeight: 700, fontSize: 15, color: C.brandDark }}>Add asset</div>
+              <button onClick={cancelAdd} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12 }}>
+              {addFormColumns.map(c => (
+                c.key === "type" ? (
+                  <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v, parentId: reScopedParentId(draft.parentId, v, scopeId, assets), ...clearedError(draft, "type") })} types={typesList} labels={typeLabels} onManage={() => setShowTypesManager(true)} />
+                ) : c.key === "parent" ? (
+                  <ParentField
+                    key={c.key}
+                    value={draft.parentId || ""}
+                    onChange={v => setDraft({ ...draft, parentId: v, formError: "", errorFields: [] })}
+                    childType={draft.type}
+                    childId={draft.id}
+                    assets={assets}
+                    error={fieldErrorFor("parent", draft, addFormColumns)}
+                    note={scopedParentNote(draft.type, draft.parentId, scopeId, assets, typesList)}
+                  />
+                ) : c.key === "person" ? (
+                  <UserField
+                    key={c.key}
+                    value={usersAreAssets ? (draft.personIds || []) : (draft.person || "")}
+                    onChange={v => setDraft(usersAreAssets ? { ...draft, personIds: v, ...clearedError(draft, "person") } : { ...draft, person: v, ...clearedError(draft, "person") })}
+                    required={isRequiredField("person", draft.type)}
+                    error={fieldErrorFor("person", draft, addFormColumns)}
+                    userOptions={userNames}
+                    userAssets={usersAreAssets ? userAssets : undefined}
+                    onManage={() => setShowUsersManager(true)}
+                  />
+                ) : c.key === "peripherals" ? (
+                  <PeripheralsField
+                    key={c.key}
+                    value={draft.peripherals || ""}
+                    onChange={v => setDraft({ ...draft, peripherals: v, ...clearedError(draft, "peripherals") })}
+                    required={isRequiredField("peripherals", draft.type)}
+                    error={fieldErrorFor("peripherals", draft, addFormColumns)}
+                    options={peripheralsList}
+                    onManage={() => setShowPeripheralsManager(true)}
+                  />
+                ) : c.key === "subType" ? (
+                  <BulkTypeField
+                    key={c.key}
+                    value={draft.subType || ""}
+                    onChange={v => setDraft({ ...draft, subType: v, ...clearedError(draft, "subType") })}
+                    required={isRequiredField("subType", draft.type)}
+                    error={fieldErrorFor("subType", draft, addFormColumns)}
+                    options={bulkItemTypes}
+                    onManage={() => setShowBulkItemTypesManager(true)}
+                  />
+                ) : (
+                  <Field
+                    key={c.key}
+                    label={c.label}
+                    value={draft[c.key] || ""}
+                    // Editing a field clears a stale error about that same field,
+                    // so a message never outlives the value it was complaining
+                    // about. Generic now: it used to special-case the Asset ID,
+                    // which was the only field that could be complained about.
+                    onChange={v => setDraft({ ...draft, [c.key]: v, ...clearedError(draft, c.key) })}
+                    dataType={columnDataType(c)}
+                    options={columnOptions(c)}
+                    referenceType={c.referenceType}
+                    assets={assets}
+                    typesList={typesList}
+                    excludeId={draft.id}
+                    required={isRequiredField(c.key, draft.type)}
+                    invalid={fieldIsInvalid(c.key, draft)}
+                    error={fieldErrorFor(c.key, draft, addFormColumns)}
+                    // The Name placeholder previews exactly what saving blank
+                    // will store, so the default is visible before it's chosen
+                    // rather than appearing out of nowhere afterwards.
+                    placeholder={c.key === "screenSize" ? 'e.g. 24"' : c.key === "name" ? suggestedNameFor(draft, assets, typesList) : undefined}
+                  />
+                )
+              ))}
+            </div>
+            {showsFormError(draft, addFormColumns) && <div style={{ fontSize: 13, color: C.danger, marginTop: 12 }}>{draft.formError}</div>}
+            <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+              <button onClick={saveDraft} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: C.success, color: "#fff", border: "none", fontWeight: 600, fontSize: 14, borderRadius: 10 }}>
+                <Save size={15} /> Save
+              </button>
+              <button onClick={cancelAdd} style={{ padding: "9px 16px", background: "transparent", border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 14, borderRadius: 10, color: C.ink }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+      </>
+    );
+  }
+
   // The two work dialogs, rendered on BOTH the detail view and the list view.
   // They used to sit inside the detail return, which is why the site-wide
   // Maintenance tab could not offer Add task / Log work at all.
@@ -15495,97 +15595,7 @@ function AssetTracker() {
           </div>
         )}
 
-        {/* Add form */}
-        {showAdd && (
-          <div style={{ border: `1px solid ${C.border}`, background: C.surface, padding: 20, marginBottom: 18, borderRadius: 10, boxShadow: "0 1px 3px rgba(42,52,57,0.08), 0 1px 2px rgba(42,52,57,0.06)" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-              <div style={{ fontWeight: 700, fontSize: 15, color: C.brandDark }}>Add asset</div>
-              <button onClick={cancelAdd} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12 }}>
-              {addFormColumns.map(c => (
-                c.key === "type" ? (
-                  <TypeField key={c.key} value={draft.type || ""} onChange={v => setDraft({ ...draft, type: v, parentId: reScopedParentId(draft.parentId, v, scopeId, assets), ...clearedError(draft, "type") })} types={typesList} labels={typeLabels} onManage={() => setShowTypesManager(true)} />
-                ) : c.key === "parent" ? (
-                  <ParentField
-                    key={c.key}
-                    value={draft.parentId || ""}
-                    onChange={v => setDraft({ ...draft, parentId: v, formError: "", errorFields: [] })}
-                    childType={draft.type}
-                    childId={draft.id}
-                    assets={assets}
-                    error={fieldErrorFor("parent", draft, addFormColumns)}
-                    note={scopedParentNote(draft.type, draft.parentId, scopeId, assets, typesList)}
-                  />
-                ) : c.key === "person" ? (
-                  <UserField
-                    key={c.key}
-                    value={usersAreAssets ? (draft.personIds || []) : (draft.person || "")}
-                    onChange={v => setDraft(usersAreAssets ? { ...draft, personIds: v, ...clearedError(draft, "person") } : { ...draft, person: v, ...clearedError(draft, "person") })}
-                    required={isRequiredField("person", draft.type)}
-                    error={fieldErrorFor("person", draft, addFormColumns)}
-                    userOptions={userNames}
-                    userAssets={usersAreAssets ? userAssets : undefined}
-                    onManage={() => setShowUsersManager(true)}
-                  />
-                ) : c.key === "peripherals" ? (
-                  <PeripheralsField
-                    key={c.key}
-                    value={draft.peripherals || ""}
-                    onChange={v => setDraft({ ...draft, peripherals: v, ...clearedError(draft, "peripherals") })}
-                    required={isRequiredField("peripherals", draft.type)}
-                    error={fieldErrorFor("peripherals", draft, addFormColumns)}
-                    options={peripheralsList}
-                    onManage={() => setShowPeripheralsManager(true)}
-                  />
-                ) : c.key === "subType" ? (
-                  <BulkTypeField
-                    key={c.key}
-                    value={draft.subType || ""}
-                    onChange={v => setDraft({ ...draft, subType: v, ...clearedError(draft, "subType") })}
-                    required={isRequiredField("subType", draft.type)}
-                    error={fieldErrorFor("subType", draft, addFormColumns)}
-                    options={bulkItemTypes}
-                    onManage={() => setShowBulkItemTypesManager(true)}
-                  />
-                ) : (
-                  <Field
-                    key={c.key}
-                    label={c.label}
-                    value={draft[c.key] || ""}
-                    // Editing a field clears a stale error about that same field,
-                    // so a message never outlives the value it was complaining
-                    // about. Generic now: it used to special-case the Asset ID,
-                    // which was the only field that could be complained about.
-                    onChange={v => setDraft({ ...draft, [c.key]: v, ...clearedError(draft, c.key) })}
-                    dataType={columnDataType(c)}
-                    options={columnOptions(c)}
-                    referenceType={c.referenceType}
-                    assets={assets}
-                    typesList={typesList}
-                    excludeId={draft.id}
-                    required={isRequiredField(c.key, draft.type)}
-                    invalid={fieldIsInvalid(c.key, draft)}
-                    error={fieldErrorFor(c.key, draft, addFormColumns)}
-                    // The Name placeholder previews exactly what saving blank
-                    // will store, so the default is visible before it's chosen
-                    // rather than appearing out of nowhere afterwards.
-                    placeholder={c.key === "screenSize" ? 'e.g. 24"' : c.key === "name" ? suggestedNameFor(draft, assets, typesList) : undefined}
-                  />
-                )
-              ))}
-            </div>
-            {showsFormError(draft, addFormColumns) && <div style={{ fontSize: 13, color: C.danger, marginTop: 12 }}>{draft.formError}</div>}
-            <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
-              <button onClick={saveDraft} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: C.success, color: "#fff", border: "none", fontWeight: 600, fontSize: 14, borderRadius: 10 }}>
-                <Save size={15} /> Save
-              </button>
-              <button onClick={cancelAdd} style={{ padding: "9px 16px", background: "transparent", border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 14, borderRadius: 10, color: C.ink }}>
-                Cancel
-              </button>
-            </div>
-          </div>
-        )}
+        {renderAddForm()}
 
         {canEdit && userFilter !== "All users" && filtered.length > 0 && (
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", border: `1.5px solid ${C.brand}`, borderRadius: 10, background: C.surface, padding: "10px 14px", marginBottom: 10, fontSize: 13 }}>
@@ -16032,13 +16042,20 @@ function AssetTracker() {
           query={mapQuery}
           menuSlot={mapMenuSlot}
         />
+        {/* Add asset opens the Assets tab's own form, in a dialog over the map. */}
+        {showAdd && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20, padding: 16 }}>
+            <div style={{ width: "100%", maxWidth: 760, maxHeight: "90vh", overflowY: "auto", borderRadius: 14 }}>
+              {renderAddForm()}
+            </div>
+          </div>
+        )}
         {/* Floating + for the one thing you come to a map to do besides look:
-            create something at the place you are scoped to. Asset goes through
-            the Assets tab, which owns the add form; task and work open their
-            dialogs in place (renderWorkDialogs serves every tab), seeded with
+            create something at the place you are scoped to. All three open as
+            dialogs over the map (renderWorkDialogs / renderAddForm serve every tab), seeded with
             scopeId like the Tasks tab's own buttons. Editors only, and hidden
             while a pin is being placed so it cannot sit over the map taps. */}
-        {canEdit && !mapPlacing && (
+        {canEdit && !mapPlacing && !showAdd && (
           <>
             {showMapAddMenu && (
               <div onClick={() => setShowMapAddMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
@@ -16047,7 +16064,7 @@ function AssetTracker() {
               {showMapAddMenu && (
                 <div role="menu" style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, boxShadow: "0 4px 14px rgba(42,52,57,0.2)", overflow: "hidden", minWidth: 160 }}>
                   {[
-                    { label: "Add asset", run: () => { setMainTab("assets"); startAdd(); } },
+                    { label: "Add asset", run: startAdd },
                     { label: "Add task", run: () => openMaintenanceAdd(scopeId) },
                     { label: "Log work", run: () => openChangeAdd(scopeId) },
                   ].map(item => (
