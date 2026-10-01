@@ -20034,21 +20034,70 @@ function FloorPlanTabContent({
     vbRef.current = floorPlanZoomAt(vbRef.current, Math.exp(e.deltaY * 0.0015), cx, cy, 20000);
     applyVB();
   };
+  // Pointers currently down on the stage, by id. One drags; TWO pinch -- the
+  // two-finger gesture used to be read as a single drag by whichever finger moved
+  // last, so the plan slid around instead of zooming.
+  const pointersRef = useRef(new Map());
+  const beginDrag = e => {
+    dragRef.current = { x: e.clientX, y: e.clientY, vb0: { ...vbRef.current } };
+  };
+  const beginPinch = () => {
+    const pts = [...pointersRef.current.values()];
+    const [a, b] = pts;
+    const r = stageElRef.current.getBoundingClientRect();
+    const mid = { x: (a.x + b.x) / 2 - r.left, y: (a.y + b.y) / 2 - r.top };
+    const vb0 = { ...vbRef.current };
+    const k0 = r.width ? vb0.w / r.width : 1;
+    dragRef.current = {
+      pinch: true, d0: Math.max(Math.hypot(a.x - b.x, a.y - b.y), 1), mid0: mid, vb0,
+      // The plan point under the fingers' midpoint when the pinch began: it stays
+      // under them as they spread, which is what makes it feel like holding the plan.
+      cx0: vb0.x + mid.x * k0, cy0: vb0.y + mid.y * k0,
+    };
+  };
   const onPointerDown = e => {
     if (!freeZoom) return;
     cancelViewAnim();
-    stageElRef.current.setPointerCapture(e.pointerId);
-    dragRef.current = { x: e.clientX, y: e.clientY, vb0: { ...vbRef.current } };
+    try { stageElRef.current.setPointerCapture(e.pointerId); } catch (err) { /* synthetic events */ }
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointersRef.current.size === 2) beginPinch();
+    else if (pointersRef.current.size === 1) beginDrag(e);
   };
   const onPointerMove = e => {
     if (!freeZoom || !dragRef.current) return;
+    if (pointersRef.current.has(e.pointerId)) pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const d = dragRef.current;
+    if (d.pinch) {
+      const pts = [...pointersRef.current.values()];
+      if (pts.length < 2) return;
+      const [a, b] = pts;
+      const r = stageElRef.current.getBoundingClientRect();
+      const dist = Math.max(Math.hypot(a.x - b.x, a.y - b.y), 1);
+      const mid = { x: (a.x + b.x) / 2 - r.left, y: (a.y + b.y) / 2 - r.top };
+      // Zoom about the starting midpoint, then follow the midpoint as it travels.
+      const z = floorPlanZoomAt(d.vb0, d.d0 / dist, d.cx0, d.cy0, 20000);
+      const k = r.width ? z.w / r.width : 1;
+      vbRef.current = { ...z, x: z.x - (mid.x - d.mid0.x) * k, y: z.y - (mid.y - d.mid0.y) * k };
+      applyVB();
+      return;
+    }
     const k = unitsPerPx();
-    const dx = (e.clientX - dragRef.current.x) * k, dy = (e.clientY - dragRef.current.y) * k;
-    vbRef.current = { ...dragRef.current.vb0, x: dragRef.current.vb0.x - dx, y: dragRef.current.vb0.y - dy };
+    const dx = (e.clientX - d.x) * k, dy = (e.clientY - d.y) * k;
+    vbRef.current = { ...d.vb0, x: d.vb0.x - dx, y: d.vb0.y - dy };
     applyVB();
   };
-  const endDrag = () => {
+  const endDrag = e => {
+    if (e && e.pointerId != null) pointersRef.current.delete(e.pointerId);
+    else pointersRef.current.clear();
     if (!dragRef.current) return;
+    // One finger left after a pinch: carry on as a drag from where it is, so
+    // lifting the second finger does not make the plan jump.
+    if (dragRef.current.pinch && pointersRef.current.size === 1) {
+      const [only] = [...pointersRef.current.values()];
+      dragRef.current = { x: only.x, y: only.y, vb0: { ...vbRef.current } };
+      return;
+    }
+    if (pointersRef.current.size > 0) return;
     dragRef.current = null;
     setVbTick(t => t + 1); // commit to state once, at gesture end
   };

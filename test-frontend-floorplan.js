@@ -725,7 +725,9 @@ const { floorPlanShapeMatches } = matchMod.exports;
     (src.match(/, 0\.15, true, true\)/g) || []).length === 2 && /0\.5, true, true\)/.test(src) &&
     /zoomToBbox\(floorPlanBbox\(allPts\), 0\.06\);\n  \}, \[plan\.status/.test(src) && /zoomToBbox\(floorPlanBbox\(shape\.pts\), 0\.5, true\);\n    setPulsingShapeId/.test(src));
   check('Glide: a manual wheel or drag cancels it',
-    /cancelViewAnim\(\);\s*e\.preventDefault\(\)/.test(src) && /cancelViewAnim\(\);\s*stageElRef\.current\.setPointerCapture/.test(src));
+    /cancelViewAnim\(\);\s*e\.preventDefault\(\)/.test(src) && /cancelViewAnim\(\);\s*try \{ stageElRef\.current\.setPointerCapture/.test(src));
+  check('Pinch: two pointers pinch about their midpoint and one left over carries on as a drag',
+    /pointersRef\.current\.size === 2\) beginPinch\(\)/.test(src) && /d\.d0 \/ dist/.test(src) && /dragRef\.current\.pinch && pointersRef\.current\.size === 1/.test(src));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
