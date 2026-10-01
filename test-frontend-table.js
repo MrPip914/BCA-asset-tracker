@@ -47,7 +47,7 @@ eq('every call site says where its header parks',
   calls.filter(a => !/headerTop=\{/.test(a)).length, 0);
 
 eq('and parks it below that screen\'s own sticky chrome',
-  calls.filter(a => !/headerTop=\{(LIST_TABLE_HEADER_TOP|DETAIL_TABLE_HEADER_TOP)\}/.test(a)).length, 0);
+  calls.filter(a => !/headerTop=\{(listTableHeaderTop|DETAIL_TABLE_HEADER_TOP)\}/.test(a)).length, 0);
 
 // The old shape: a horizontally scrolling box holding the header as its first
 // row. Nothing should be built that way any more.
