@@ -4071,7 +4071,7 @@ const FRONTEND_SCRIPT_VERSION = "v50";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-01.19";
+const APP_VERSION = "2026-10-01.20";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -20384,14 +20384,22 @@ function FloorPlanTabContent({
   const onPointerDown = e => {
     if (!freeZoom) return;
     cancelViewAnim();
-    try { stageElRef.current.setPointerCapture(e.pointerId); } catch (err) { /* synthetic events */ }
-    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    // NOT captured here: capturing on pointerdown retargets the click that follows
+    // to the stage, so no space, wall or pin could be tapped while Free zoom was
+    // on. Capture is taken in onPointerMove once the pointer has actually moved.
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY });
     if (pointersRef.current.size === 2) beginPinch();
     else if (pointersRef.current.size === 1) beginDrag(e);
   };
   const onPointerMove = e => {
     if (!freeZoom || !dragRef.current) return;
-    if (pointersRef.current.has(e.pointerId)) pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointersRef.current.has(e.pointerId)) {
+      const prev = pointersRef.current.get(e.pointerId);
+      pointersRef.current.set(e.pointerId, { ...prev, x: e.clientX, y: e.clientY });
+      if (Math.hypot(e.clientX - prev.x0, e.clientY - prev.y0) > 4) {
+        try { if (!stageElRef.current.hasPointerCapture(e.pointerId)) stageElRef.current.setPointerCapture(e.pointerId); } catch (err) { /* synthetic events */ }
+      }
+    }
     const d = dragRef.current;
     if (d.pinch) {
       const pts = [...pointersRef.current.values()];
