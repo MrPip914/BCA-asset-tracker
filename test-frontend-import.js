@@ -117,6 +117,7 @@ const code = [
   // The feature under test.
   grabConst('const IMPORT_KEY_HEADER', ';'),
   grabConst('const IMPORT_HEADER_OVERRIDES', ';'),
+  grabConst('const IMPORT_LEGACY_HEADERS', ';'),
   grabFn('fullPathOf'),
   grabFn('importHeadersFor'),
   grabFn('importCellFor'),
@@ -268,18 +269,18 @@ const planFor = (list, edits, over = {}) =>
 {
   // Two rooms called "Room 101". The export writes the full path, so this must
   // land on the one in Building 200 -- not on whichever is first.
-  const plan = planFor([A('c-1')], { 'c-1': { 'Parent Path': 'Main Campus › Building 200 › Room 101' } });
+  const plan = planFor([A('c-1')], { 'c-1': { 'Location Path': 'Main Campus › Building 200 › Room 101' } });
   check('a parent given as a full path picks the right one of two same-named rooms',
         plan.errors.length === 0 && plan.updates.length === 1
         && plan.updates[0].next.parentId === 'r-101b',
         `errors: ${plan.errors.join(' | ')} parentId=${(plan.updates[0] || {}).next && plan.updates[0].next.parentId}`);
 
-  const bare = planFor([A('c-1')], { 'c-1': { 'Parent Path': 'Room 101' } });
+  const bare = planFor([A('c-1')], { 'c-1': { 'Location Path': 'Room 101' } });
   check('a bare name matching two assets is REFUSED, not guessed at',
         bare.errors.length === 1 && /matches more than one/.test(bare.errors[0]),
         bare.errors.join(' | '));
 
-  const unique = planFor([A('c-1')], { 'c-1': { 'Parent Path': 'Science Lab' } });
+  const unique = planFor([A('c-1')], { 'c-1': { 'Location Path': 'Science Lab' } });
   check('a bare name matching exactly one asset resolves',
         unique.errors.length === 0 && unique.updates[0].next.parentId === 'r-lab',
         unique.errors.join(' | '));
@@ -289,19 +290,19 @@ const planFor = (list, edits, over = {}) =>
   // rooms. An exact, complete address is the more specific answer, so the path
   // tier has to win -- try the name tier first and this reads as "ambiguous",
   // i.e. a parent that can be typed in but can never be resolved.
-  const tiers = planFor([A('c-1')], { 'c-1': { 'Parent Path': 'Storage' } });
+  const tiers = planFor([A('c-1')], { 'c-1': { 'Location Path': 'Storage' } });
   check('an exact full-path match beats a name that matches several',
         tiers.errors.length === 0 && tiers.updates.length === 1
         && tiers.updates[0].next.parentId === 'r-loose',
         `${tiers.errors.join(' | ')} parentId=${(tiers.updates[0] || {}).next && tiers.updates[0].next.parentId}`);
 
-  const missing = planFor([A('c-1')], { 'c-1': { 'Parent Path': 'Room 999' } });
+  const missing = planFor([A('c-1')], { 'c-1': { 'Location Path': 'Room 999' } });
   check('a parent that names nothing is refused',
         missing.errors.length === 1
         && /no row in this file creates it/.test(missing.errors[0]),
         missing.errors.join(' | '));
 
-  const cleared = planFor([A('c-1')], { 'c-1': { 'Parent Path': '' } });
+  const cleared = planFor([A('c-1')], { 'c-1': { 'Location Path': '' } });
   check('a blank Path unassigns rather than being ignored',
         cleared.errors.length === 0 && cleared.updates.length === 1
         && cleared.updates[0].next.parentId === '',
@@ -352,7 +353,7 @@ const planFor = (list, edits, over = {}) =>
   const grid = gridFrom([]);
   grid.push(headers.map(h => ({
     Type: 'Computer', Name: 'New Laptop', 'Asset ID': 'BCA0500',
-    'Parent Path': 'Main Campus › Building 100 › Storage', Serial: 'SN-NEW',
+    'Location Path': 'Main Campus › Building 100 › Storage', Serial: 'SN-NEW',
     Peripherals: 'Dock/Stylus',
   }[h] || '')));
   const plan = planAssetImport(importRowsFromGrid(grid), ctx);
@@ -452,8 +453,8 @@ const planFor = (list, edits, over = {}) =>
   // result is circular, which is exactly why this cannot be checked row by row
   // against the current assets.
   const plan = planFor([A('r-lab'), A('r-storage')], {
-    'r-lab': { 'Parent Path': 'Main Campus › Building 100 › Storage' },
-    'r-storage': { 'Parent Path': 'Main Campus › Building 200 › Science Lab' },
+    'r-lab': { 'Location Path': 'Main Campus › Building 100 › Storage' },
+    'r-storage': { 'Location Path': 'Main Campus › Building 200 › Science Lab' },
   });
   check('a parent loop that exists only in the projected result is refused',
         plan.errors.length > 0 && /inside itself/.test(plan.errors.join(' ')),
@@ -463,7 +464,7 @@ const planFor = (list, edits, over = {}) =>
   // Without it the assertion above would pass just as well on a planner that
   // refused every parent move there is.
   const fine = planFor([A('r-lab')], {
-    'r-lab': { 'Parent Path': 'Main Campus › Building 100 › Storage' },
+    'r-lab': { 'Location Path': 'Main Campus › Building 100 › Storage' },
   });
   check('one of those two moves on its own is fine',
         fine.errors.length === 0 && fine.updates.length === 1
@@ -561,10 +562,10 @@ const planFor = (list, edits, over = {}) =>
   const child = A('c-1');                       // Front Office PC in Room 101 (B100)
   const parent = A('r-101a');
   check("a child's exported Path equals its parent's own full path",
-        rowFor(child)['Parent Path'] === fullPathOf(parent, assets),
-        `${rowFor(child)['Parent Path']} !== ${fullPathOf(parent, assets)}`);
+        rowFor(child)['Location Path'] === fullPathOf(parent, assets),
+        `${rowFor(child)['Location Path']} !== ${fullPathOf(parent, assets)}`);
   check('resolving that string back finds the parent',
-        resolveImportRef(rowFor(child)['Parent Path'], buildImportRefIndex(assets)).asset === parent);
+        resolveImportRef(rowFor(child)['Location Path'], buildImportRefIndex(assets)).asset === parent);
 }
 
 // --- 18. A FILE THAT BUILDS A HIERARCHY FROM NOTHING -------------------------
@@ -582,13 +583,13 @@ const planFor = (list, edits, over = {}) =>
     // a parent being defined earlier in the file -- a person sorting the sheet
     // by name would otherwise break their own import.
     headers.map(h => ({ Type: 'Computer', Name: 'Lab PC',
-      'Parent Path': 'Main Campus › Building 400 › Room 401' }[h] || '')),
+      'Location Path': 'Main Campus › Building 400 › Room 401' }[h] || '')),
     headers.map(h => ({ Type: 'Room', Name: 'Room 401',
-      'Parent Path': 'Main Campus › Building 400' }[h] || '')),
+      'Location Path': 'Main Campus › Building 400' }[h] || '')),
     headers.map(h => ({ Type: 'Room', Name: 'Room 402',
-      'Parent Path': 'Main Campus › Building 400' }[h] || '')),
+      'Location Path': 'Main Campus › Building 400' }[h] || '')),
     headers.map(h => ({ Type: 'Building', Name: 'Building 400',
-      'Parent Path': 'Main Campus' }[h] || '')),
+      'Location Path': 'Main Campus' }[h] || '')),
   ];
   const plan = planAssetImport(importRowsFromGrid(grid), { ...ctx, assets: bare });
   const byName = n => (plan.creates.find(c => c.next.name === n) || {}).next;
@@ -614,9 +615,9 @@ const planFor = (list, edits, over = {}) =>
   // honest reading once the file itself is a source of parents.
   const typo = [headers,
     headers.map(h => ({ Type: 'Room', Name: 'Room 401',
-      'Parent Path': 'Main Campus › Building 999' }[h] || '')),
+      'Location Path': 'Main Campus › Building 999' }[h] || '')),
     headers.map(h => ({ Type: 'Building', Name: 'Building 400',
-      'Parent Path': 'Main Campus' }[h] || '')),
+      'Location Path': 'Main Campus' }[h] || '')),
   ];
   const bad = planAssetImport(importRowsFromGrid(typo), { ...ctx, assets: bare });
   check('a child naming a parent NO row creates is still refused',
@@ -627,8 +628,8 @@ const planFor = (list, edits, over = {}) =>
   // A loop built entirely out of NEW rows. The cycle check runs over the
   // projected inventory, so it sees these even though neither exists yet.
   const loop = [headers,
-    headers.map(h => ({ Type: 'Room', Name: 'Ring A', 'Parent Path': 'Ring B' }[h] || '')),
-    headers.map(h => ({ Type: 'Room', Name: 'Ring B', 'Parent Path': 'Ring A' }[h] || '')),
+    headers.map(h => ({ Type: 'Room', Name: 'Ring A', 'Location Path': 'Ring B' }[h] || '')),
+    headers.map(h => ({ Type: 'Room', Name: 'Ring B', 'Location Path': 'Ring A' }[h] || '')),
   ];
   const looped = planAssetImport(importRowsFromGrid(loop), { ...ctx, assets: bare });
   check('a loop among rows that are ALL new is refused',
@@ -638,7 +639,7 @@ const planFor = (list, edits, over = {}) =>
   // A row pointing at itself. Caught as itself rather than reported as a loop,
   // or someone goes looking for a second row that does not exist.
   const selfRef = [headers,
-    headers.map(h => ({ Type: 'Room', Name: 'Room 500', 'Parent Path': 'Room 500' }[h] || '')),
+    headers.map(h => ({ Type: 'Room', Name: 'Room 500', 'Location Path': 'Room 500' }[h] || '')),
   ];
   const selfed = planAssetImport(importRowsFromGrid(selfRef), { ...ctx, assets: bare });
   check('a row naming itself as its parent says so plainly',
@@ -648,10 +649,10 @@ const planFor = (list, edits, over = {}) =>
 
 // --- 19. an existing asset can move into a newly created parent -------------
 {
-  const movedRow = { ...rowFor(A('c-1')), 'Parent Path': 'Main Campus › Building 100 › New Closet' };
+  const movedRow = { ...rowFor(A('c-1')), 'Location Path': 'Main Campus › Building 100 › New Closet' };
   const grid = [headers, headers.map(h => (movedRow[h] === undefined ? '' : movedRow[h]))];
   grid.push(headers.map(h => ({ Type: 'Room', Name: 'New Closet',
-    'Parent Path': 'Main Campus › Building 100' }[h] || '')));
+    'Location Path': 'Main Campus › Building 100' }[h] || '')));
   const plan = planAssetImport(importRowsFromGrid(grid), ctx);
   const closet = (plan.creates[0] || {}).next;
   const moved = plan.updates.find(u => u.asset.id === 'c-1');
@@ -659,8 +660,8 @@ const planFor = (list, edits, over = {}) =>
         plan.errors.length === 0 && !!closet && !!moved
         && moved.next.parentId === closet.id,
         `${plan.errors.join(' | ')} closet=${closet && closet.id} moved=${moved && moved.next.parentId}`);
-  check('that move is audited as a Parent change like any other',
-        !!moved && moved.changes.some(c => c.key === 'parentId' && c.label === 'Parent'),
+  check('that move is audited as a Location change like any other',
+        !!moved && moved.changes.some(c => c.key === 'parentId' && c.label === 'Location'),
         JSON.stringify(moved && moved.changes));
 }
 
@@ -669,7 +670,7 @@ const planFor = (list, edits, over = {}) =>
 // outlive the wording of the header that produced them -- the same rule
 // `?tab=changes` follows for deep links.
 {
-  const oldHeaders = headers.map(h => (h === 'Parent Path' ? 'Path' : h));
+  const oldHeaders = headers.map(h => (h === 'Location Path' ? 'Path' : h));
   const grid = [oldHeaders, oldHeaders.map(h =>
     ({ 'Asset Key': 'c-1', Type: 'Computer', Name: 'Front Office PC',
        Path: 'Main Campus › Building 200 › Room 101' }[h] || ''))];
@@ -678,6 +679,19 @@ const planFor = (list, edits, over = {}) =>
         plan.errors.length === 0 && plan.updates.length === 1
         && plan.updates[0].next.parentId === 'r-101b',
         `${plan.errors.join(' | ')} ${JSON.stringify((plan.updates[0] || {}).next && plan.updates[0].next.parentId)}`);
+}
+
+// --- 20b. the header an earlier build wrote still lands -------------------
+{
+  const oldHeaders = headers.map(h => (h === 'Location Path' ? 'Parent Path' : h));
+  const grid = [oldHeaders, oldHeaders.map(h =>
+    ({ 'Asset Key': 'c-1', Type: 'Computer', Name: 'Front Office PC',
+       'Parent Path': 'Main Campus › Building 200 › Room 101' }[h] || ''))];
+  const plan = planAssetImport(importRowsFromGrid(grid), ctx);
+  check('a file using the "Parent Path" header still sets the location',
+        plan.errors.length === 0 && plan.updates.length === 1
+        && plan.updates[0].next.parentId === 'r-101b',
+        `${plan.errors.join(' | ')}`);
 }
 
 // --- 21. an EXISTING asset renamed in the file is findable by its NEW name ---
@@ -689,7 +703,7 @@ const planFor = (list, edits, over = {}) =>
   const renamed = { ...rowFor(A('BCB0001')), Name: 'Building 100 (Annex)' };
   const grid = [headers, headers.map(h => (renamed[h] === undefined ? '' : renamed[h]))];
   grid.push(headers.map(h => ({ Type: 'Room', Name: 'Annex Store',
-    'Parent Path': 'Main Campus › Building 100 (Annex)' }[h] || '')));
+    'Location Path': 'Main Campus › Building 100 (Annex)' }[h] || '')));
   const plan = planAssetImport(importRowsFromGrid(grid), ctx);
   const store = (plan.creates[0] || {}).next;
   check('a room resolves a building this same file RENAMED',
@@ -712,7 +726,7 @@ const planFor = (list, edits, over = {}) =>
 {
   const grid = [headers,
     headers.map(h => ({ Type: 'Room',
-      'Parent Path': 'Main Campus › Building 100' }[h] || '')),
+      'Location Path': 'Main Campus › Building 100' }[h] || '')),
   ];
   const plan = planAssetImport(importRowsFromGrid(grid), ctx);
   const room = (plan.creates[0] || {}).next;

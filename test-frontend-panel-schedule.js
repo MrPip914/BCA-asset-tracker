@@ -105,6 +105,7 @@ const code = [
   // The feature under test.
   grabConst('const IMPORT_KEY_HEADER', ';'),
   grabConst('const IMPORT_HEADER_OVERRIDES', ';'),
+  grabConst('const IMPORT_LEGACY_HEADERS', ';'),
   grabFn('fullPathOf'),
   grabFn('importHeadersFor'),
   grabFn('importCellFor'),
