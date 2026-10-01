@@ -4045,7 +4045,7 @@ const FRONTEND_SCRIPT_VERSION = "v49";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-01.6";
+const APP_VERSION = "2026-10-01.7";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -20128,6 +20128,7 @@ function FloorPlanTabContent({
   const [groupPick, setGroupPick] = useState(() => new Set());
   const [groupEditingId, setGroupEditingId] = useState(null);
   const [groupNaming, setGroupNaming] = useState(null); // array of shapeIds pending a name, or null
+  const [groupNameDraft, setGroupNameDraft] = useState(""); // rename field while editing a group
   const [openGroupId, setOpenGroupId] = useState(null); // normal view: which group is expanded
   const [selectedShapeId, setSelectedShapeId] = useState(null);
   // Group tab: which existing group the pointer is over, so ALL its members
@@ -20147,14 +20148,26 @@ function FloorPlanTabContent({
     const g = groups.find(x => x.id === groupId);
     if (!g) return;
     setGroupEditingId(groupId);
+    setGroupNameDraft(g.name || "");
     setGroupPick(new Set(g.memberShapeIds || []));
+  }
+  // The normal view's Configure button: group edit lives in the Group setup
+  // tab, so this enters that tab already editing the open group.
+  function configureGroup(groupId) {
+    setSetupTab("group"); setPickerShapeId(null); setHoverGroupId(null); setGroupNaming(null);
+    startGroupEdit(groupId);
+  }
+  function ungroupEditing() {
+    onDeleteGroup(groupEditingId);
+    setGroupEditingId(null); setGroupPick(new Set()); setOpenGroupId(null);
   }
   function saveGroupEditNow() {
     if (groupPick.size < 2) {
       onDeleteGroup(groupEditingId);
     } else {
       const g = groups.find(x => x.id === groupEditingId);
-      onSaveGroup({ id: groupEditingId, name: g ? g.name : "", hideLabel: g ? g.hideLabel : false, memberShapeIds: [...groupPick] });
+      const name = groupNameDraft.trim() || (g ? g.name : "");
+      onSaveGroup({ id: groupEditingId, name, hideLabel: g ? g.hideLabel : false, memberShapeIds: [...groupPick] });
     }
     setGroupEditingId(null); setGroupPick(new Set());
     if (groupPick.size < 2) setOpenGroupId(null);
@@ -20433,13 +20446,18 @@ function FloorPlanTabContent({
               <span style={{ flex: 1 }}>Tap a shape to set its room · <b>{links.filter(l => l.roomId).length} of {plan.spaces.length} linked</b></span>
             )}
             {setupTab === "group" && groupEditingId && (
-              <span style={{ flex: 1 }}>Editing <b>{(groups.find(g => g.id === groupEditingId) || {}).name || ""}</b> · <b>{groupPick.size}</b> spaces</span>
+              <span style={{ flex: 1, display: "flex", alignItems: "center", gap: 8, minWidth: 160 }}>
+                <input value={groupNameDraft} onChange={e => setGroupNameDraft(e.target.value)} aria-label="Group name" placeholder="Group name"
+                  style={{ flex: 1, minWidth: 0, padding: "4px 8px", borderRadius: 7, border: "none", fontSize: 13, color: C.ink }} />
+                <span style={{ whiteSpace: "nowrap" }}><b>{groupPick.size}</b> spaces · tap shapes to add or remove</span>
+              </span>
             )}
             {setupTab === "group" && !groupEditingId && (
               <span style={{ flex: 1 }}>Tap shapes to group together · <b>{groupPick.size} selected</b></span>
             )}
             {setupTab === "group" && groupEditingId && (
               <>
+                <button type="button" onClick={ungroupEditing} style={{ padding: "4px 10px", borderRadius: 8, border: "1.5px solid rgba(255,255,255,.6)", background: "none", color: "#fff", fontSize: 12, fontWeight: 600 }}>Ungroup</button>
                 <button type="button" onClick={saveGroupEditNow} style={{ padding: "4px 10px", borderRadius: 8, border: "1.5px solid rgba(255,255,255,.6)", background: "none", color: "#fff", fontSize: 12, fontWeight: 600 }}>Save</button>
                 <button type="button" onClick={() => { setGroupEditingId(null); setGroupPick(new Set()); }} style={{ padding: "4px 10px", borderRadius: 8, border: "1.5px solid rgba(255,255,255,.6)", background: "none", color: "#fff", fontSize: 12, fontWeight: 600 }}>Cancel</button>
               </>
@@ -20929,9 +20947,9 @@ function FloorPlanTabContent({
             {(groups.find(g => g.id === openGroupId) || {}).name}
           </span>
           {canEdit && (
-            <button type="button" onClick={() => { onDeleteGroup(openGroupId); setOpenGroupId(null); }}
-              style={{ padding: "3px 9px", borderRadius: 8, border: `1.5px solid ${C.border}`, background: "none", color: C.danger, fontSize: 12, fontWeight: 600 }}>
-              Ungroup
+            <button type="button" onClick={() => configureGroup(openGroupId)}
+              style={{ padding: "3px 9px", borderRadius: 8, border: `1.5px solid ${C.border}`, background: "none", color: C.brandDark, fontSize: 12, fontWeight: 600 }}>
+              Configure
             </button>
           )}
           <button type="button" onClick={() => setOpenGroupId(null)} style={{ padding: "3px 9px", borderRadius: 8, border: "none", background: "none", color: C.brand, fontSize: 12, fontWeight: 600 }}>
@@ -20967,7 +20985,7 @@ function FloorPlanTabContent({
       })()}
 
       {/* An open group with nothing individually selected inside it used to
-          show NOTHING here -- the group-name/Ungroup/Close row above says
+          show NOTHING here -- the group-name/Configure/Close row above says
           which group is open, but not what's actually IN it, so answering
           that meant tapping every member one at a time. Lists every member's
           LINKED room (an unlinked member has no room to list, same as
