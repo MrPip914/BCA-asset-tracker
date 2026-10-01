@@ -4045,7 +4045,7 @@ const FRONTEND_SCRIPT_VERSION = "v49";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-01.2";
+const APP_VERSION = "2026-10-01.3";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -19955,10 +19955,27 @@ function FloorPlanTabContent({
     const pin = mapPinOf(a);
     if (!pin || pin.planId !== selectedAsset.id) { onFocusHandled(); return; }
     const [px, py] = floorPlanRotatePoint(pin.x, pin.y, rotation);
-    const allPts = plan.spaces.flatMap(sp => sp.pts);
-    const bb = allPts.length ? floorPlanBbox(allPts) : { w: 400, h: 400 };
-    const side = Math.max(bb.w, bb.h) * 0.16;
-    zoomToBbox({ x: px - side / 2, y: py - side / 2, w: side, h: side }, 0, true, true);
+    // Frame the SPACE the pin sits in (the smallest one containing it), so the
+    // room fills the view with the pin inside it. A pin on no drawn space falls
+    // back to a window around the point, sized off the whole plan.
+    const inPoly = (pts, x, y) => {
+      let c = false;
+      for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+        const [xi, yi] = pts[i], [xj, yj] = pts[j];
+        if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) c = !c;
+      }
+      return c;
+    };
+    const area = sp => sp.bbox.w * sp.bbox.h;
+    const room = plan.spaces.filter(sp => inPoly(sp.pts, px, py)).sort((a1, b1) => area(a1) - area(b1))[0];
+    if (room) {
+      zoomToBbox(floorPlanBbox(room.pts), 0.15, false, true);
+    } else {
+      const allPts = plan.spaces.flatMap(sp => sp.pts);
+      const bb = allPts.length ? floorPlanBbox(allPts) : { w: 400, h: 400 };
+      const side = Math.max(bb.w, bb.h) * 0.16;
+      zoomToBbox({ x: px - side / 2, y: py - side / 2, w: side, h: side }, 0, true, true);
+    }
     setSelectedPinId(focusPinId);
     setPulsingShapeId("pin:" + focusPinId);
     clearTimeout(pulseTimerRef.current);
