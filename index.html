@@ -4045,7 +4045,7 @@ const FRONTEND_SCRIPT_VERSION = "v49";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-01.9";
+const APP_VERSION = "2026-10-01.10";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -20127,7 +20127,6 @@ function FloorPlanTabContent({
   const [pickerShapeId, setPickerShapeId] = useState(null); // link tab: open picker for this shape
   const [groupPick, setGroupPick] = useState(() => new Set());
   const [groupEditingId, setGroupEditingId] = useState(null);
-  const [groupNaming, setGroupNaming] = useState(null); // array of shapeIds pending a name, or null
   const [groupNameDraft, setGroupNameDraft] = useState(""); // rename field while editing a group
   const [groupHideDraft, setGroupHideDraft] = useState(false); // "hide name" checkbox while editing a group
   const [openGroupId, setOpenGroupId] = useState(null); // normal view: which group is expanded
@@ -20138,12 +20137,14 @@ function FloorPlanTabContent({
 
   function exitSetup() {
     setSetupTab(null); setPickerShapeId(null); setHoverGroupId(null); setOpenGroupId(null);
-    setGroupPick(new Set()); setGroupEditingId(null); setGroupNaming(null);
+    setGroupPick(new Set()); setGroupEditingId(null);
+    setGroupNameDraft(""); setGroupHideDraft(false);
   }
   function switchSetupTab(tab) {
     if (tab === setupTab) return;
     setSetupTab(tab); setPickerShapeId(null); setHoverGroupId(null); setOpenGroupId(null);
-    setGroupPick(new Set()); setGroupEditingId(null); setGroupNaming(null);
+    setGroupPick(new Set()); setGroupEditingId(null);
+    setGroupNameDraft(""); setGroupHideDraft(false);
   }
   function startGroupEdit(groupId) {
     const g = groups.find(x => x.id === groupId);
@@ -20156,7 +20157,7 @@ function FloorPlanTabContent({
   // The normal view's Configure button: group edit lives in the Group setup
   // tab, so this enters that tab already editing the open group.
   function configureGroup(groupId) {
-    setSetupTab("group"); setPickerShapeId(null); setHoverGroupId(null); setGroupNaming(null);
+    setSetupTab("group"); setPickerShapeId(null); setHoverGroupId(null);
     startGroupEdit(groupId);
   }
   function ungroupEditing() {
@@ -20174,13 +20175,12 @@ function FloorPlanTabContent({
     setGroupEditingId(null); setGroupPick(new Set());
     if (groupPick.size < 2) setOpenGroupId(null);
   }
-  function finishGroupPick() {
-    if (groupPick.size < 2) { setGroupPick(new Set()); return; }
-    setGroupNaming([...groupPick]);
-  }
-  function createGroupNow(name, hideLabel) {
-    onSaveGroup({ name, hideLabel, memberShapeIds: groupNaming });
-    setGroupNaming(null); setGroupPick(new Set());
+  // Creating uses the same bar as editing: name + hide-name + Save. Fewer than
+  // two spaces is not a group, so Save does nothing until a second is picked.
+  function createGroupFromBar() {
+    if (groupPick.size < 2) return;
+    onSaveGroup({ name: groupNameDraft.trim(), hideLabel: groupHideDraft, memberShapeIds: [...groupPick] });
+    exitSetup();
   }
 
   function onShapeClick(shapeId) {
@@ -20447,32 +20447,27 @@ function FloorPlanTabContent({
             {setupTab === "link" && (
               <span style={{ flex: 1 }}>Tap a shape to set its room · <b>{links.filter(l => l.roomId).length} of {plan.spaces.length} linked</b></span>
             )}
-            {setupTab === "group" && groupEditingId && (
+            {setupTab === "group" && (
               <div style={{ flexBasis: "100%", display: "flex", flexDirection: "column", gap: 6 }}>
-                <input value={groupNameDraft} onChange={e => setGroupNameDraft(e.target.value)} aria-label="Group name" placeholder="Group name"
+                <input value={groupNameDraft} onChange={e => setGroupNameDraft(e.target.value)} aria-label="Group name" placeholder={groupEditingId ? "Group name" : "Group name, e.g. Women's Locker-Room"}
                   style={{ width: "100%", boxSizing: "border-box", padding: "7px 10px", borderRadius: 8, border: "none", fontSize: 14, color: C.ink, background: "#fff" }} />
                 <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
                   <input type="checkbox" checked={groupHideDraft} onChange={e => setGroupHideDraft(e.target.checked)} style={{ margin: 0 }} />
                   Hide this name when viewing the floor
                 </label>
-                <span><b>{groupPick.size}</b> spaces · tap shapes to add or remove</span>
+                <span><b>{groupPick.size}</b> {groupEditingId ? "spaces · tap shapes to add or remove" : "selected · tap shapes to group together"}</span>
               </div>
             )}
-            {setupTab === "group" && !groupEditingId && (
-              <span style={{ flex: 1 }}>Tap shapes to group together · <b>{groupPick.size} selected</b></span>
-            )}
-            {setupTab === "group" && groupEditingId && (
+            {setupTab === "group" && (
               <div style={{ flexBasis: "100%", display: "flex", gap: 8, alignItems: "center" }}>
-                <button type="button" onClick={ungroupEditing} style={{ padding: "5px 12px", borderRadius: 8, border: "1.5px solid rgba(255,255,255,.6)", background: "none", color: "#fff", fontSize: 12.5, fontWeight: 600 }}>Ungroup</button>
+                {groupEditingId && <button type="button" onClick={ungroupEditing} style={{ padding: "5px 12px", borderRadius: 8, border: "1.5px solid rgba(255,255,255,.6)", background: "none", color: "#fff", fontSize: 12.5, fontWeight: 600 }}>Ungroup</button>}
                 <span style={{ flex: 1 }} />
-                <button type="button" onClick={() => { setGroupEditingId(null); setGroupPick(new Set()); }} style={{ padding: "5px 12px", borderRadius: 8, border: "1.5px solid rgba(255,255,255,.6)", background: "none", color: "#fff", fontSize: 12.5, fontWeight: 600 }}>Cancel</button>
-                <button type="button" onClick={() => { saveGroupEditNow(); exitSetup(); }} style={{ padding: "5px 14px", borderRadius: 8, border: "none", background: "#fff", color: C.brandDark, fontSize: 12.5, fontWeight: 700 }}>Save</button>
+                <button type="button" onClick={() => { if (!groupEditingId && groupPick.size === 0 && !groupNameDraft) { exitSetup(); return; } if (groupEditingId) setGroupEditingId(null); setGroupPick(new Set()); setGroupNameDraft(""); setGroupHideDraft(false); }} style={{ padding: "5px 12px", borderRadius: 8, border: "1.5px solid rgba(255,255,255,.6)", background: "none", color: "#fff", fontSize: 12.5, fontWeight: 600 }}>Cancel</button>
+                <button type="button" disabled={!groupEditingId && groupPick.size < 2} onClick={() => { if (groupEditingId) { saveGroupEditNow(); exitSetup(); } else createGroupFromBar(); }}
+                  style={{ padding: "5px 14px", borderRadius: 8, border: "none", background: "#fff", color: C.brandDark, fontSize: 12.5, fontWeight: 700, opacity: !groupEditingId && groupPick.size < 2 ? 0.5 : 1 }}>Save</button>
               </div>
             )}
-            {setupTab === "group" && !groupEditingId && (
-              <button type="button" onClick={finishGroupPick} style={{ padding: "4px 10px", borderRadius: 8, border: "1.5px solid rgba(255,255,255,.6)", background: "none", color: "#fff", fontSize: 12, fontWeight: 600 }}>Create group</button>
-            )}
-            {!groupEditingId && <button type="button" onClick={exitSetup} style={{ padding: "4px 10px", borderRadius: 8, border: "1.5px solid rgba(255,255,255,.6)", background: "none", color: "#fff", fontSize: 12, fontWeight: 600 }}>Done</button>}
+            {setupTab !== "group" && <button type="button" onClick={exitSetup} style={{ padding: "4px 10px", borderRadius: 8, border: "1.5px solid rgba(255,255,255,.6)", background: "none", color: "#fff", fontSize: 12, fontWeight: 600 }}>Done</button>}
           </div>
         </div>
       )}
@@ -20924,15 +20919,6 @@ function FloorPlanTabContent({
         />
       )}
 
-      {/* ---------- name-this-group dialog ---------- */}
-      {groupNaming && (
-        <FloorPlanGroupNameDialog
-          count={groupNaming.length}
-          onCancel={() => setGroupNaming(null)}
-          onCreate={createGroupNow}
-        />
-      )}
-
       {/* ---------- search status ---------- */}
       {qTrim && (() => {
         const matchingRoomIds = new Set(
@@ -21124,35 +21110,6 @@ function FloorPlanGroupBadge({ cx, cy, k, count }) {
 // Name + "hide this name on the floor" checkbox, shown once 2+ spaces are
 // picked in Group mode. A plain centered card, the same shape the app's
 // other small modals (floor picker, room picker) already take.
-function FloorPlanGroupNameDialog({ count, onCancel, onCreate }) {
-  const [name, setName] = useState("");
-  const [hideLabel, setHideLabel] = useState(false);
-  return (
-    <div onClick={onCancel} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 40, padding: 16 }}>
-      <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, width: "100%", maxWidth: 340, display: "flex", flexDirection: "column", gap: 12 }}>
-        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>
-          Name this group
-        </div>
-        <div style={{ fontSize: 12, color: C.empty }}>{count} spaces selected</div>
-        <input
-          autoFocus value={name} onChange={e => setName(e.target.value)}
-          placeholder="e.g. Women's Locker-Room"
-          onKeyDown={e => { if (e.key === "Enter") onCreate(name, hideLabel); }}
-          style={{ padding: "8px 10px", borderRadius: 9, border: `1.5px solid ${C.border}`, fontSize: 14, color: C.ink }}
-        />
-        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: C.muted, cursor: "pointer" }}>
-          <input type="checkbox" checked={hideLabel} onChange={e => setHideLabel(e.target.checked)} style={{ margin: 0 }} />
-          Hide this name when viewing the floor
-        </label>
-        <button type="button" onClick={() => onCreate(name, hideLabel)}
-          style={{ padding: "9px 0", borderRadius: 10, border: "none", background: C.brand, color: "#fff", fontSize: 13, fontWeight: 700 }}>
-          Create group
-        </button>
-      </div>
-    </div>
-  );
-}
-
 // Everything the Layout tab shows besides the breaker-detail/swap/move-
 // circuit modals (those stay in AssetTracker since they're reachable from
 // other tabs too, e.g. a Room's "Fed by" link jumps straight into one) —
