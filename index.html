@@ -276,7 +276,17 @@ const TYPE_REGISTRY = {
       "purchaseDate", "warrantyUntil", "person", "subType", "totalQuantity",
     ],
   },
-  Other: { parentTypes: ["Room"] },
+  // A wall is an asset in its own right, drawn on a plan as ONE OR MORE segments of
+  // a space's outline (see floorPlanExteriorSegments) and selected as a single
+  // thing, the way a Room is. Parented to what it bounds. `location: true` makes it
+  // a place, so other assets can be filed under it (Contents tab, Location picker)
+  // once their own "Can sit inside" names Wall -- Other ships doing so, the rest
+  // are the school's to tick in the type editor.
+  Wall: {
+    locked: true, icon: Fence, categoryIds: ["Places"], parentTypes: ["Campus", "Building", "Floor", "Room"], location: true,
+    excludedFields: ["tag", "brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
+  },
+  Other: { parentTypes: ["Room", "Wall"] },
 };
 
 // ---------- TYPE LABELS ----------
@@ -4061,7 +4071,7 @@ const FRONTEND_SCRIPT_VERSION = "v50";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-01.17";
+const APP_VERSION = "2026-10-01.18";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -5252,10 +5262,20 @@ const MOCK_SNAPSHOT = {
       floorPlanLinks: [
         { shapeId: "shape-101", roomId: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", at: "2026-09-15T14:00:00.000Z", by: "Eric" },
         { shapeId: "shape-102", roomId: "BCR0002", at: "2026-09-15T14:01:00.000Z", by: "Eric" },
+        // A wall: two exterior segments of shape-101 (its north edge and its west
+        // edge), owned by the Wall asset BCW0001 below. The second row names a
+        // segment on a space this plan no longer has -- a stale one, which must be
+        // ignored rather than drawn or counted.
+        { shapeId: "shape-101#e0", roomId: "BCW0001", at: "2026-10-01T10:00:00.000Z", by: "Eric" },
+        { shapeId: "shape-101#e3", roomId: "BCW0001", at: "2026-10-01T10:00:00.000Z", by: "Eric" },
+        { shapeId: "shape-999#e0", roomId: "BCW0001", at: "2026-10-01T10:00:00.000Z", by: "Eric" },
       ],
       floorPlanGroups: [
         { id: "fpg-storage-hall", name: "Storage & Hallway", hideLabel: false, memberShapeIds: ["shape-103", "shape-104"], at: "2026-09-15T14:05:00.000Z", by: "Eric" },
       ] },
+    // A Wall: an asset in its own right whose geometry is segments of Building 100's
+    // plan (the link rows above). Parented to the Room it bounds.
+    { label: "BCW0001", type: "Wall", name: "Room 102 north & west wall", parentId: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
     // v40 fixture shape 2 of 4: an OPEN, DATED one-off, hanging off a PLACE --
     // the case that makes site-wide work expressible without an asset-less task.
     { label: "BCB0002", type: "Building", name: "Building 200", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active",
@@ -9265,6 +9285,71 @@ function AssetTracker() {
     };
     persist(
       assets.map(a => (a.id === assetId ? { ...a, floorPlanGroups: next } : a)),
+      { auditLog: logAudit([entry]) },
+    );
+  }
+
+  // ---------- Walls: a wall asset owning segments of a plan's spaces ----------
+  // draft = { wallId?, name, parentId, segmentIds }. No wallId creates the asset AND
+  // its links in ONE persist(), so a rejected save cannot leave a wall with no
+  // geometry or geometry naming a wall that was never written. Segments live in the
+  // same link rows a room does (see floorPlanSegmentId), so there is nothing new to
+  // store and no backend release. A segment already claimed by another wall is
+  // refused here rather than stolen -- see floorPlanSetWallSegments.
+  function saveWall(ownerId, draft) {
+    if (savingRef.current) return;
+    const owner = assets.find(a => a.id === ownerId);
+    if (!owner) return;
+    const name = (draft.name || "").trim();
+    const segmentIds = draft.segmentIds || [];
+    if (!name || !segmentIds.length) return;
+    const isNew = !draft.wallId;
+    const wallId = draft.wallId || crypto.randomUUID();
+    const stamp = { at: new Date().toISOString(), by: currentUser || "" };
+    const { links, taken } = floorPlanSetWallSegments(owner.floorPlanLinks || [], wallId, segmentIds, stamp);
+    if (taken.length) { setNotice("Some of those wall segments already belong to another wall, so nothing was saved."); return; }
+    const existing = assets.find(a => a.id === wallId);
+    let nextAssets;
+    const entries = [];
+    if (isNew) {
+      const parentId = draft.parentId || ownerId;
+      const wall = {
+        ...emptyDraftFrom(columns),
+        id: wallId, type: "Wall", status: "Active", name, tag: "", parentId,
+        comments: [], changes: [], allocations: [],
+      };
+      entries.push({ ...stamp, assetLabel: wallId, assetType: "Wall", action: "created", related: relate({ at: parentId }) });
+      nextAssets = [...assets, wall];
+    } else {
+      nextAssets = assets.slice();
+      if (existing && name !== (existing.name || "")) {
+        entries.push({ ...stamp, assetLabel: wallId, assetType: "Wall", action: "edited", field: "Name", from: existing.name || "", to: name });
+        nextAssets = nextAssets.map(a => (a.id === wallId ? { ...a, name } : a));
+      }
+    }
+    entries.push({
+      ...stamp, assetLabel: ownerId, assetType: owner.type, action: "space_linked",
+      field: `${segmentIds.length} wall segment${segmentIds.length === 1 ? "" : "s"}`, to: name,
+    });
+    persist(
+      nextAssets.map(a => (a.id === ownerId ? { ...a, floorPlanLinks: links } : a)),
+      { auditLog: logAudit(entries) },
+    );
+  }
+  // Takes the wall OFF the plan. The asset stays -- what is attached to it, its
+  // tasks and its history are not the plan's to delete; it is archived or deleted
+  // from its own page like any other asset.
+  function unlinkWall(ownerId, wallId) {
+    if (savingRef.current) return;
+    const owner = assets.find(a => a.id === ownerId);
+    if (!owner) return;
+    const links = (owner.floorPlanLinks || []).filter(l => !(floorPlanIsSegmentId(l.shapeId) && l.roomId === wallId));
+    const entry = {
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: ownerId, assetType: owner.type,
+      action: "space_unlinked", field: "wall segments", from: parentNameFor(wallId, assets),
+    };
+    persist(
+      assets.map(a => (a.id === ownerId ? { ...a, floorPlanLinks: links } : a)),
       { auditLog: logAudit([entry]) },
     );
   }
@@ -13354,7 +13439,7 @@ function AssetTracker() {
               details: { label: "Details" },
               contents: { label: "Contents", count: contentsCount },
               // Counts STORED links; the tab's own status line is the live one.
-              floorPlan: { label: "Floor Plan", count: (selectedAsset.floorPlanLinks || []).filter(l => l.roomId).length },
+              floorPlan: { label: "Floor Plan", count: (selectedAsset.floorPlanLinks || []).filter(l => l.roomId && !floorPlanIsSegmentId(l.shapeId)).length },
               maintenance: { label: "Tasks", count: openMaintenanceItems.length, urgent: overdueMaintenanceCount > 0 },
               photos: { label: "Files", count: assetPhotos.length },
               comments: { label: "Comments", count: comments.length },
@@ -13695,6 +13780,8 @@ function AssetTracker() {
                 onUploadPlan={(file, oldSpaces) => uploadFloorPlanSvg(selectedAsset.id, file, oldSpaces)}
                 onSaveLink={(shapeId, roomId) => saveSpaceLink(selectedAsset.id, shapeId, roomId)}
                 onSaveGroup={draft => saveSpaceGroup(selectedAsset.id, draft)}
+                onSaveWall={draft => saveWall(selectedAsset.id, draft)}
+                onUnlinkWall={wallId => unlinkWall(selectedAsset.id, wallId)}
                 onDeleteGroup={groupId => deleteSpaceGroup(selectedAsset.id, groupId)}
                 onRotate={() => rotateFloorPlan(selectedAsset.id)}
                 onSaveMapOptions={(mode, ids) => saveMapSelectOptions(selectedAsset.id, mode, ids)}
@@ -15926,6 +16013,8 @@ function AssetTracker() {
           onUploadPlan={(file, oldSpaces) => uploadFloorPlanSvg(scopeId, file, oldSpaces)}
           onSaveLink={(shapeId, roomId) => saveSpaceLink(scopeId, shapeId, roomId)}
           onSaveGroup={draft => saveSpaceGroup(scopeId, draft)}
+          onSaveWall={draft => saveWall(scopeId, draft)}
+          onUnlinkWall={wallId => unlinkWall(scopeId, wallId)}
           onDeleteGroup={groupId => deleteSpaceGroup(scopeId, groupId)}
           onRotate={() => rotateFloorPlan(scopeId)}
           onSaveMapOptions={(mode, ids) => saveMapSelectOptions(scopeId, mode, ids)}
@@ -19570,13 +19659,131 @@ function floorPlanRemapShapeIds(oldSpaces, newSpaces) {
 // removed by hand.
 function floorPlanRemapLinksAndGroups(links, groups, oldSpaces, newSpaces) {
   const remap = floorPlanRemapShapeIds(oldSpaces, newSpaces);
+  // A wall's segment id is its SPACE's id plus a suffix (see floorPlanSegmentId):
+  // the space survives the replace by the same rule a room link does, and the
+  // suffix rides along. Whether that edge still exists, and still lies on the
+  // outside, is geometry and is re-checked when the plan is drawn -- a segment
+  // that no longer exists simply is not drawn, rather than the link being guessed at.
+  const remapId = id => {
+    const seg = floorPlanSegmentParts(id);
+    if (!seg) return remap(id);
+    const base = remap(seg.gid);
+    return base ? floorPlanSegmentId(base, seg.edge, seg.run) : undefined;
+  };
   const nextLinks = (links || [])
-    .map(l => ({ ...l, shapeId: remap(l.shapeId) }))
+    .map(l => ({ ...l, shapeId: remapId(l.shapeId) }))
     .filter(l => l.shapeId);
   const nextGroups = (groups || [])
     .map(g => ({ ...g, memberShapeIds: (g.memberShapeIds || []).map(remap).filter(Boolean) }))
     .filter(g => g.memberShapeIds.length >= 2);
   return { links: nextLinks, groups: nextGroups };
+}
+
+// ---------- Exterior walls ----------
+// A WALL is an asset drawn as one or more SEGMENTS of a space's outline. There is
+// no wall geometry in the drawing to read -- a Visio "Space" is a closed shape --
+// so the segments are DERIVED from the shapes: each edge of a space is an exterior
+// wall wherever nothing else is on its far side.
+//
+// A segment is stored as an ordinary link row (shapeId -> the wall asset's id), the
+// same row a room link is, with the shape id carrying a suffix:
+//     <spaceGid>#e<edge>            the whole of that edge
+//     <spaceGid>#e<edge>.<n>        the nth exterior run of an edge that is only
+//                                   partly exterior (a neighbour touches the rest)
+// That is what makes "a segment belongs to at most one wall" structural rather
+// than a rule somebody keeps: one row per shape id, as for a room, and no backend
+// change. A segment id outlives an edit to the drawing only for as long as that
+// edge keeps its index, which is why a stale one is dropped at draw time instead
+// of being trusted.
+function floorPlanSegmentId(gid, edge, run) {
+  return gid + "#e" + edge + (run ? "." + run : "");
+}
+function floorPlanSegmentParts(id) {
+  const m = /^(.*)#e(\d+)(?:\.(\d+))?$/.exec(String(id || ""));
+  return m ? { gid: m[1], edge: Number(m[2]), run: m[3] ? Number(m[3]) : 0 } : null;
+}
+function floorPlanIsSegmentId(id) {
+  return !!floorPlanSegmentParts(id);
+}
+
+// Every exterior stretch of every space's outline, as { id, gid, edge, a, b }.
+// An edge is walked in cells and each cell asks one question: a hair's breadth
+// beyond this edge, away from its own space, is that point inside any OTHER
+// space? No -> exterior. Walking in cells rather than testing the edge's midpoint
+// is what lets a wall that a neighbour only partly touches come out as the part
+// that is genuinely exposed. The probe distance is a fraction of the whole plan
+// so it means the same on a campus site plan as on a single room.
+// Runs the probe through each space's bounding box first: a plan has dozens of
+// spaces and every cell would otherwise test all of them.
+function floorPlanExteriorSegments(spaces) {
+  const list = (spaces || []).filter(sp => sp && sp.pts && sp.pts.length >= 3);
+  if (!list.length) return [];
+  const all = floorPlanBbox(list.flatMap(sp => sp.pts));
+  const eps = Math.max(all.w, all.h) * 0.006;
+  const inBox = (bb, p) => p[0] >= bb.x && p[0] <= bb.x + bb.w && p[1] >= bb.y && p[1] <= bb.y + bb.h;
+  const out = [];
+  list.forEach(sp => {
+    const pts = sp.pts;
+    const n = pts.length;
+    for (let i = 0; i < n; i++) {
+      const a = pts[i], b = pts[(i + 1) % n];
+      const dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy);
+      if (len < 1e-6) continue;
+      let nx = -dy / len, ny = dx / len;
+      // Outward is whichever side is NOT inside this space itself.
+      if (floorPlanPointInPoly([(a[0] + b[0]) / 2 + nx * eps, (a[1] + b[1]) / 2 + ny * eps], pts)) { nx = -nx; ny = -ny; }
+      const cells = Math.max(1, Math.min(24, Math.ceil(len / (eps * 4))));
+      const exposed = [];
+      for (let c = 0; c < cells; c++) {
+        const t = (c + 0.5) / cells;
+        const probe = [a[0] + dx * t + nx * eps, a[1] + dy * t + ny * eps];
+        exposed.push(!list.some(o => o !== sp && inBox(o.bbox || floorPlanBbox(o.pts), probe) && floorPlanPointInPoly(probe, o.pts)));
+      }
+      const runs = [];
+      for (let c = 0; c < cells;) {
+        if (!exposed[c]) { c++; continue; }
+        const start = c;
+        while (c < cells && exposed[c]) c++;
+        runs.push([start, c]);
+      }
+      runs.forEach(([s0, e0], r) => {
+        const whole = runs.length === 1 && s0 === 0 && e0 === cells;
+        out.push({
+          id: floorPlanSegmentId(sp.gid, i, whole ? 0 : r + 1), gid: sp.gid, edge: i,
+          a: [a[0] + (dx * s0) / cells, a[1] + (dy * s0) / cells],
+          b: [a[0] + (dx * e0) / cells, a[1] + (dy * e0) / cells],
+        });
+      });
+    }
+  });
+  return out;
+}
+
+// The walls a plan carries: wall asset id -> its segment ids, from the link rows
+// that name a segment. Room links (a bare shape id) are not walls and are skipped.
+function floorPlanWallSegmentIds(links) {
+  const walls = new Map();
+  (links || []).forEach(l => {
+    if (!l || !l.roomId || !floorPlanIsSegmentId(l.shapeId)) return;
+    if (!walls.has(l.roomId)) walls.set(l.roomId, []);
+    walls.get(l.roomId).push(l.shapeId);
+  });
+  return walls;
+}
+
+// The link rows after setting ONE wall's segments: that wall's old rows go, the
+// new ones come in, and every other row is untouched. A segment already claimed by
+// a DIFFERENT wall is refused (returned as `taken`) and not stolen -- the rule that
+// a segment belongs to at most one wall lives here, not in the picker, so a stale
+// screen cannot break it.
+function floorPlanSetWallSegments(links, wallId, segmentIds, stamp) {
+  const wanted = [...new Set(segmentIds || [])];
+  const owner = new Map();
+  (links || []).forEach(l => { if (floorPlanIsSegmentId(l.shapeId)) owner.set(l.shapeId, l.roomId); });
+  const taken = wanted.filter(id => owner.has(id) && owner.get(id) !== wallId);
+  const ok = wanted.filter(id => !taken.includes(id));
+  const kept = (links || []).filter(l => !(floorPlanIsSegmentId(l.shapeId) && l.roomId === wallId));
+  return { links: kept.concat(ok.map(shapeId => ({ shapeId, roomId: wallId, ...(stamp || {}) }))), taken };
 }
 
 // Does a room -- or anything IN it -- match an in-map search query? Reuses
@@ -19777,7 +19984,7 @@ function MapOptionsOnlyMenu({ canEdit, asset, assets, menuSlot, onSaveMapOptions
 // (see its own comment: "a Room's floor plan alongside a Building's").
 function MapTabContent({
   canEdit, assets, typesList, scopeAsset,
-  uploadBusy, uploadError, onUploadPlan, onSaveLink, onSaveGroup, onDeleteGroup, onRotate, onSaveMapOptions,
+  uploadBusy, uploadError, onUploadPlan, onSaveLink, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveMapOptions,
   focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot,
 }) {
   if (!scopeAsset) {
@@ -19811,6 +20018,8 @@ function MapTabContent({
       onSaveLink={onSaveLink}
       onSaveGroup={onSaveGroup}
       onDeleteGroup={onDeleteGroup}
+      onSaveWall={onSaveWall}
+      onUnlinkWall={onUnlinkWall}
       onRotate={onRotate}
       onSaveMapOptions={onSaveMapOptions}
       focusPinId={focusPinId}
@@ -19847,7 +20056,7 @@ function MapTabContent({
 function FloorPlanTabContent({
   canEdit, selectedAsset, assets, typesList,
   uploadBusy, uploadError, onUploadPlan,
-  onSaveLink, onSaveGroup, onDeleteGroup, onRotate, onSaveMapOptions,
+  onSaveLink, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveMapOptions,
   focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot,
 }) {
   const rawPlan = useFloorPlanSvg(selectedAsset.floorPlanUrl);
@@ -19875,6 +20084,30 @@ function FloorPlanTabContent({
     : (selectedAsset.floorPlanGroups || []);
   const linkFor = shapeId => links.find(l => l.shapeId === shapeId) || null;
   const groupOfShape = shapeId => groups.find(g => (g.memberShapeIds || []).includes(shapeId)) || null;
+
+  // ---- walls: exterior segments derived from the spaces, and the wall assets
+  // whose link rows name them. The derivation is the costly part (every edge of
+  // every space is probed), so it is memoised on the spaces and nothing else.
+  const exteriorSegs = useMemo(
+    () => (plan.status === "ready" ? floorPlanExteriorSegments(plan.spaces) : []),
+    [plan]
+  );
+  const segById = useMemo(() => new Map(exteriorSegs.map(sg => [sg.id, sg])), [exteriorSegs]);
+  // Only rows naming a segment that STILL exists and is still exterior count; a
+  // stale one (the drawing changed under it) is ignored here rather than trusted,
+  // the same way a link to a vanished space is filtered above.
+  const wallLinks = (selectedAsset.floorPlanLinks || []).filter(l => l.roomId && segById.has(l.shapeId));
+  const wallsMap = floorPlanWallSegmentIds(wallLinks);
+  const wallOfSegment = segId => { const l = wallLinks.find(x => x.shapeId === segId); return l ? l.roomId : null; };
+  // A box round a wall's segments, grown so a perfectly straight one still has
+  // some height to frame -- zoomToBbox of a zero-height box lands somewhere absurd.
+  const wallBbox = wallId => {
+    const pts = (wallsMap.get(wallId) || []).flatMap(id => { const sg = segById.get(id); return sg ? [sg.a, sg.b] : []; });
+    if (!pts.length) return null;
+    const bb = floorPlanBbox(pts);
+    const m = Math.max(bb.w, bb.h, 1) * 0.35 + 10;
+    return { x: bb.x - m, y: bb.y - m, w: bb.w + m * 2, h: bb.h + m * 2 };
+  };
 
   // ---- pan/zoom: the viewBox lives in a ref, not state, so a drag/pinch
   // writes the SVG's viewBox attribute directly every frame instead of
@@ -20052,6 +20285,8 @@ function FloorPlanTabContent({
   // position, just a new selectedAsset prop -- so nothing else clears this.
   useEffect(() => {
     setSelectedShapeId(null);
+    setSelectedWallId(null);
+    setWallDraft(null);
     setOpenGroupId(null);
     setSelectedPinId(null);
   }, [selectedAsset.id]);
@@ -20061,6 +20296,18 @@ function FloorPlanTabContent({
   useEffect(() => {
     if (plan.status !== "ready" || !focusShapeId) return;
     const shape = plan.spaces.find(s => s.gid === focusShapeId);
+    // Show-on-map for a WALL arrives as one of its segment ids.
+    const wallId = !shape && floorPlanIsSegmentId(focusShapeId) ? wallOfSegment(focusShapeId) : null;
+    const wbb = wallId ? wallBbox(wallId) : null;
+    if (wbb) {
+      setSelectedShapeId(null); setSelectedWallId(wallId); setOpenGroupId(null);
+      zoomToBbox(wbb, 0.3, true);
+      setPulsingShapeId("wall:" + wallId);
+      clearTimeout(pulseTimerRef.current);
+      pulseTimerRef.current = setTimeout(() => setPulsingShapeId(null), 3600);
+      onFocusHandled();
+      return;
+    }
     if (!shape) { onFocusHandled(); return; }
     // A shape inside a COLLAPSED group has no tile of its own, so the pulse
     // would flash the whole group. Open the group first: its members then
@@ -20079,7 +20326,13 @@ function FloorPlanTabContent({
   useEffect(() => {
     if (plan.status !== "ready" || !selectShapeId || !onSelectHandled) return;
     const shape = plan.spaces.find(s => s.gid === selectShapeId);
-    if (shape) {
+    const selWallId = !shape && floorPlanIsSegmentId(selectShapeId) ? wallOfSegment(selectShapeId) : null;
+    const selWbb = selWallId ? wallBbox(selWallId) : null;
+    if (selWbb) {
+      setSelectedShapeId(null); setSelectedWallId(selWallId); setOpenGroupId(null);
+      zoomToBbox(selWbb, 0.3, true);
+    } else if (shape) {
+      setSelectedWallId(null);
       const grp = groupOfShape(selectShapeId);
       setOpenGroupId(grp ? grp.id : null);
       setSelectedShapeId(selectShapeId);
@@ -20186,6 +20439,11 @@ function FloorPlanTabContent({
   const [groupHideDraft, setGroupHideDraft] = useState(false); // "hide name" checkbox while editing a group
   const [openGroupId, setOpenGroupId] = useState(null); // normal view: which group is expanded
   const [selectedShapeId, setSelectedShapeId] = useState(null);
+  // A wall is selected like a space but is its own selection: one or the other.
+  const [selectedWallId, setSelectedWallId] = useState(null);
+  // Walls tab: the wall being defined or edited. null = none open. spaceGid is the
+  // space whose exterior segments are on offer; picks is the set of segment ids.
+  const [wallDraft, setWallDraft] = useState(null);
   // Group tab: which existing group the pointer is over, so ALL its members
   // light up together (the per-shape CSS :hover can only ever light one).
   const [hoverGroupId, setHoverGroupId] = useState(null);
@@ -20193,13 +20451,13 @@ function FloorPlanTabContent({
   function exitSetup() {
     setSetupTab(null); setPickerShapeId(null); setHoverGroupId(null); setOpenGroupId(null);
     setGroupPick(new Set()); setGroupEditingId(null);
-    setGroupNameDraft(""); setGroupHideDraft(false);
+    setGroupNameDraft(""); setGroupHideDraft(false); setWallDraft(null);
   }
   function switchSetupTab(tab) {
     if (tab === setupTab) return;
     setSetupTab(tab); setPickerShapeId(null); setHoverGroupId(null); setOpenGroupId(null);
     setGroupPick(new Set()); setGroupEditingId(null);
-    setGroupNameDraft(""); setGroupHideDraft(false);
+    setGroupNameDraft(""); setGroupHideDraft(false); setWallDraft(null);
   }
   function startGroupEdit(groupId) {
     const g = groups.find(x => x.id === groupId);
@@ -20238,8 +20496,71 @@ function FloorPlanTabContent({
     exitSetup();
   }
 
+  // ---- walls ----
+  // The Walls setup tab works one space at a time: tap a space to see its exterior
+  // segments, tap segments to pick them, name the wall, Save. Tapping an existing
+  // wall reopens it for editing.
+  function startWallDraft(spaceGid) {
+    setWallDraft({ wallId: null, spaceGid, name: "", picks: new Set() });
+    const sp = plan.status === "ready" ? plan.spaces.find(x => x.gid === spaceGid) : null;
+    if (sp) zoomToBbox(floorPlanBbox(sp.pts), 0.3, true, true);
+  }
+  function editWall(wallId) {
+    const ids = wallsMap.get(wallId) || [];
+    const first = ids.length ? segById.get(ids[0]) : null;
+    const wall = assets.find(a => a.id === wallId);
+    if (!first) return;
+    setWallDraft({ wallId, spaceGid: first.gid, name: wall ? (wall.name || "") : "", picks: new Set(ids) });
+    const sp = plan.spaces.find(x => x.gid === first.gid);
+    if (sp) zoomToBbox(floorPlanBbox(sp.pts), 0.3, true, true);
+  }
+  function toggleWallSegment(segId) {
+    setWallDraft(d => {
+      if (!d) return d;
+      const picks = new Set(d.picks);
+      picks.has(segId) ? picks.delete(segId) : picks.add(segId);
+      return { ...d, picks };
+    });
+  }
+  function saveWallNow() {
+    if (!wallDraft || !wallDraft.name.trim() || !wallDraft.picks.size || !onSaveWall) return;
+    const spaceLink = linkFor(wallDraft.spaceGid);
+    onSaveWall({
+      wallId: wallDraft.wallId, name: wallDraft.name.trim(),
+      parentId: wallDraft.wallId ? undefined : (spaceLink && spaceLink.roomId) || "",
+      segmentIds: [...wallDraft.picks],
+    });
+    setWallDraft(null);
+  }
+  function onWallClick(wallId) {
+    setSelectedPinId(null);
+    if (setupTab === "wall") {
+      if (!wallDraft && canEdit) editWall(wallId);
+      return;
+    }
+    if (setupTab) return;
+    if (selectedWallId === wallId) {
+      setSelectedWallId(null);
+      zoomToFit();
+      return;
+    }
+    setSelectedShapeId(null); setOpenGroupId(null);
+    setSelectedWallId(wallId);
+    const bb = wallBbox(wallId);
+    if (bb) zoomToBbox(bb, 0.3, true, true);
+  }
+
   function onShapeClick(shapeId) {
     setSelectedPinId(null); // one selection at a time: a space replaces a selected pin
+    setSelectedWallId(null);
+    if (setupTab === "wall") {
+      if (!canEdit) return;
+      // Switching space is only allowed before anything is picked; after that the
+      // picks belong to the open space and a stray tap must not drop them.
+      if (!wallDraft) { startWallDraft(shapeId); return; }
+      if (wallDraft.spaceGid !== shapeId && wallDraft.picks.size === 0 && !wallDraft.wallId) startWallDraft(shapeId);
+      return;
+    }
     if (setupTab === "link") { setPickerShapeId(shapeId); return; }
     if (setupTab === "group") {
       const owner = groupOfShape(shapeId);
@@ -20336,7 +20657,7 @@ function FloorPlanTabContent({
     if (allPts.length) zoomToBbox(floorPlanBbox(allPts), 0.06, false, true);
   }
   function clearSelection() {
-    setSelectedShapeId(null); setOpenGroupId(null);
+    setSelectedShapeId(null); setSelectedWallId(null); setOpenGroupId(null);
   }
   // The way back out, after tapping a shape or a group zooms in -- tapping
   // empty space between shapes already cleared the SELECTION (clearSelection,
@@ -20357,6 +20678,7 @@ function FloorPlanTabContent({
   // merely looking at an unlinked space impossible.
   function onUnlinkedShapeClick(shapeId) {
     setSelectedPinId(null);
+    setSelectedWallId(null);
     if (selectedShapeId === shapeId && canEdit) {
       setSelectedShapeId(null);
       setSetupTab("link");
@@ -20512,6 +20834,10 @@ function FloorPlanTabContent({
               style={{ flex: 1, padding: "6px 0", borderRadius: 7, border: "none", fontSize: 12.5, fontWeight: 600, background: setupTab === "group" ? "#fff" : "rgba(255,255,255,.16)", color: setupTab === "group" ? C.brandDark : "#fff" }}>
               Group
             </button>
+            <button type="button" onClick={() => switchSetupTab("wall")}
+              style={{ flex: 1, padding: "6px 0", borderRadius: 7, border: "none", fontSize: 12.5, fontWeight: 600, background: setupTab === "wall" ? "#fff" : "rgba(255,255,255,.16)", color: setupTab === "wall" ? C.brandDark : "#fff" }}>
+              Walls
+            </button>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", color: "#fff", fontSize: 12.5 }}>
             {setupTab === "link" && (
@@ -20537,7 +20863,40 @@ function FloorPlanTabContent({
                   style={{ padding: "5px 14px", borderRadius: 8, border: "none", background: "#fff", color: C.brandDark, fontSize: 12.5, fontWeight: 700, opacity: !groupEditingId && groupPick.size < 2 ? 0.5 : 1 }}>Save</button>
               </div>
             )}
-            {setupTab !== "group" && <button type="button" onClick={exitSetup} style={{ padding: "4px 10px", borderRadius: 8, border: "1.5px solid rgba(255,255,255,.6)", background: "none", color: "#fff", fontSize: 12, fontWeight: 600 }}>Done</button>}
+            {setupTab === "wall" && !wallDraft && (
+              <span style={{ flex: 1 }}>Tap a space, then pick its exterior walls · <b>{wallsMap.size} wall{wallsMap.size === 1 ? "" : "s"} defined</b> · tap one to edit it</span>
+            )}
+            {setupTab === "wall" && wallDraft && (() => {
+              const segsHere = exteriorSegs.filter(sg => sg.gid === wallDraft.spaceGid && (!wallOfSegment(sg.id) || wallOfSegment(sg.id) === wallDraft.wallId));
+              const space = plan.spaces.find(x => x.gid === wallDraft.spaceGid);
+              const spaceLink = space ? linkFor(space.gid) : null;
+              const spaceName = spaceLink && spaceLink.roomId ? parentNameFor(spaceLink.roomId, assets) : "";
+              const barBtn = { padding: "5px 12px", borderRadius: 8, border: "1.5px solid rgba(255,255,255,.6)", background: "none", color: "#fff", fontSize: 12.5, fontWeight: 600 };
+              const ready = !!wallDraft.name.trim() && wallDraft.picks.size > 0;
+              return (
+                <div style={{ flexBasis: "100%", display: "flex", flexDirection: "column", gap: 6 }}>
+                  <input value={wallDraft.name} onChange={e => setWallDraft(d => ({ ...d, name: e.target.value }))} aria-label="Wall name" placeholder="Wall name, e.g. North wall"
+                    style={{ width: "100%", boxSizing: "border-box", padding: "7px 10px", borderRadius: 8, border: "none", fontSize: 14, color: C.ink, background: "#fff" }} />
+                  <span>
+                    {spaceName ? <>{spaceName} · </> : null}
+                    <b>{wallDraft.picks.size}</b> of {segsHere.length} segment{segsHere.length === 1 ? "" : "s"} · tap the lines to add or remove
+                    {segsHere.length === 0 && " (this space has no exterior walls)"}
+                  </span>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <button type="button" onClick={() => setWallDraft(d => ({ ...d, picks: new Set(segsHere.map(sg => sg.id)) }))} style={barBtn}>All</button>
+                    <button type="button" onClick={() => setWallDraft(d => ({ ...d, picks: new Set() }))} style={barBtn}>None</button>
+                    {wallDraft.wallId && onUnlinkWall && (
+                      <button type="button" onClick={() => { onUnlinkWall(wallDraft.wallId); setWallDraft(null); }} style={barBtn}>Remove from plan</button>
+                    )}
+                    <span style={{ flex: 1 }} />
+                    <button type="button" onClick={() => setWallDraft(null)} style={barBtn}>Cancel</button>
+                    <button type="button" disabled={!ready} onClick={saveWallNow}
+                      style={{ padding: "5px 14px", borderRadius: 8, border: "none", background: "#fff", color: C.brandDark, fontSize: 12.5, fontWeight: 700, opacity: ready ? 1 : 0.5 }}>Save</button>
+                  </div>
+                </div>
+              );
+            })()}
+            {setupTab !== "group" && !(setupTab === "wall" && wallDraft) && <button type="button" onClick={exitSetup} style={{ padding: "4px 10px", borderRadius: 8, border: "1.5px solid rgba(255,255,255,.6)", background: "none", color: "#fff", fontSize: 12, fontWeight: 600 }}>Done</button>}
           </div>
         </div>
       )}
@@ -20594,6 +20953,20 @@ function FloorPlanTabContent({
             const grp = groupOfShape(s.gid);
 
             // ---- setup-mode rendering ----
+            if (setupTab === "wall") {
+              const active = !!wallDraft && wallDraft.spaceGid === s.gid;
+              const segCount = exteriorSegs.filter(sg => sg.gid === s.gid).length;
+              const spaceName = link && link.roomId ? parentNameFor(link.roomId, assets) : "";
+              return (
+                <g key={s.gid} className="fp-room" onClick={() => onShapeClick(s.gid)} style={wallDraft && !active ? { opacity: 0.35 } : undefined}>
+                  <path className="fp-area" d={d}
+                    fill={active ? C.brandDark : (segCount ? "#2F7D8C" : "transparent")} fillOpacity={active ? 0.1 : (segCount ? 0.07 : 0)}
+                    stroke={active ? C.brandDark : "#8FA6B8"} strokeWidth={active ? 1.8 : 1.2}
+                    strokeDasharray={active ? undefined : "5 4"} />
+                  {spaceName && <FloorPlanLabel x={s.pole.x} y={s.pole.y} k={k} clear={s.pole.clear} maxPx={11} text={spaceName} fontWeight={600} fill="#5C6F7D" />}
+                </g>
+              );
+            }
             if (setupTab === "link") {
               const linked = !!(link && link.roomId);
               const sel = pickerShapeId === s.gid;
@@ -20763,6 +21136,60 @@ function FloorPlanTabContent({
               repeats above every cluster rather than floating once over an
               arbitrary one of them, so a scattered group never leaves a
               border with no visible label of its own. */}
+          {/* ---- walls: each wall is ONE selectable thing made of its segments.
+              Drawn above the spaces so a wall on a room's edge wins the tap, with a
+              wider invisible stroke under the visible one so a thin line is
+              still a fingertip-sized target. ---- */}
+          {(!setupTab || setupTab === "wall") && [...wallsMap.entries()].map(([wallId, segIds]) => {
+            const wall = assets.find(a => a.id === wallId);
+            if (!wall || (wall.status || "Active") === "Archived") return null;
+            const editing = !!wallDraft && wallDraft.wallId === wallId;
+            if (editing) return null; // its segments are drawn by the picker below
+            const segs = segIds.map(id => segById.get(id)).filter(Boolean);
+            const sel = !setupTab && selectedWallId === wallId;
+            const isHit = qTrim && floorPlanShapeMatches(wall, assets, typesList, query);
+            const dim = setupTab === "wall" ? !!wallDraft : ((qTrim && !isHit) || (!!openGroupId));
+            const longest = segs.reduce((best, sg) => (!best || Math.hypot(sg.b[0] - sg.a[0], sg.b[1] - sg.a[1]) > Math.hypot(best.b[0] - best.a[0], best.b[1] - best.a[1])) ? sg : best, null);
+            return (
+              <g key={"wall-" + wallId} className="fp-wall" onClick={() => onWallClick(wallId)}
+                style={{ cursor: setupTab === "wall" && wallDraft ? "default" : "pointer", opacity: dim ? 0.3 : 1 }}>
+                {segs.map(sg => (
+                  <g key={sg.id}>
+                    <line x1={sg.a[0]} y1={sg.a[1]} x2={sg.b[0]} y2={sg.b[1]} stroke="transparent" strokeWidth={18 * k} strokeLinecap="round" />
+                    <line x1={sg.a[0]} y1={sg.a[1]} x2={sg.b[0]} y2={sg.b[1]} stroke={sel ? C.brandDark : FLOOR_PLAN_WALL_COLOR} strokeWidth={(sel ? 7 : 4.5) * k} strokeLinecap="round" />
+                    {isHit && <line x1={sg.a[0]} y1={sg.a[1]} x2={sg.b[0]} y2={sg.b[1]} stroke={C.accent} strokeWidth={10 * k} strokeLinecap="round" strokeOpacity={0.5} />}
+                    {pulsingShapeId === "wall:" + wallId && (
+                      <line className="fp-pulse" x1={sg.a[0]} y1={sg.a[1]} x2={sg.b[0]} y2={sg.b[1]} stroke={C.accent} strokeWidth={14 * k} strokeLinecap="round" />
+                    )}
+                  </g>
+                ))}
+                {sel && longest && (
+                  <FloorPlanLabel x={(longest.a[0] + longest.b[0]) / 2} y={(longest.a[1] + longest.b[1]) / 2} k={k}
+                    clear={Math.hypot(longest.b[0] - longest.a[0], longest.b[1] - longest.a[1]) / 2} maxPx={11}
+                    text={nameOf(wall, typesList)} fontWeight={700} fill="#1F1F1F" />
+                )}
+              </g>
+            );
+          })}
+          {/* The picker for the wall being defined: the open space's exterior
+              segments only. One a DIFFERENT wall already owns is shown grey and
+              inert -- a segment belongs to at most one wall, so it is not on offer. */}
+          {setupTab === "wall" && wallDraft && exteriorSegs.filter(sg => sg.gid === wallDraft.spaceGid).map(sg => {
+            const owner = wallOfSegment(sg.id);
+            const claimed = !!owner && owner !== wallDraft.wallId;
+            const picked = wallDraft.picks.has(sg.id);
+            if (claimed) {
+              return <line key={sg.id} x1={sg.a[0]} y1={sg.a[1]} x2={sg.b[0]} y2={sg.b[1]} stroke="#8FA6B8" strokeWidth={4 * k} strokeLinecap="round" opacity={0.7} pointerEvents="none" />;
+            }
+            return (
+              <g key={sg.id} style={{ cursor: "pointer" }} onClick={() => toggleWallSegment(sg.id)}>
+                <line x1={sg.a[0]} y1={sg.a[1]} x2={sg.b[0]} y2={sg.b[1]} stroke="transparent" strokeWidth={22 * k} strokeLinecap="round" />
+                <line x1={sg.a[0]} y1={sg.a[1]} x2={sg.b[0]} y2={sg.b[1]}
+                  stroke={picked ? C.brandDark : "#C98A3B"} strokeWidth={(picked ? 7 : 5) * k} strokeLinecap="round"
+                  strokeDasharray={picked ? undefined : `${9 * k} ${6 * k}`} />
+              </g>
+            );
+          })}
           {(!setupTab || (setupTab === "group" && !groupEditingId && groupPick.size === 0)) && openGroupId && (() => {
             const grp = groups.find(g => g.id === openGroupId);
             const members = grp && plan.status === "ready"
@@ -20809,7 +21236,7 @@ function FloorPlanTabContent({
             const r = (sel ? 10 : 8) * k;
             return (
               <g key={"pin-" + a.id} className="fp-pin" style={{ cursor: "pointer" }}
-                onClick={e => { e.stopPropagation(); setSelectedShapeId(null); setSelectedPinId(sel ? null : a.id); }}>
+                onClick={e => { e.stopPropagation(); setSelectedShapeId(null); setSelectedWallId(null); setSelectedPinId(sel ? null : a.id); }}>
                 {pulsingShapeId === "pin:" + a.id && (
                   <circle className="fp-pulse" cx={px} cy={py} r={r * 2.2} fill={C.accent} fillOpacity={0.45} />
                 )}
@@ -20881,6 +21308,16 @@ function FloorPlanTabContent({
                           style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
                         >
                           Link &amp; group spaces…
+                        </button>
+                      )}
+                      {!setupTab && (
+                        <button
+                          type="button"
+                          onClick={() => { setMenuOpen(false); setConfigOpen(false); setSetupTab("wall"); }}
+                          className="icon-btn"
+                          style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
+                        >
+                          Define walls…
                         </button>
                       )}
                       {onSaveMapOptions && (
@@ -21024,6 +21461,27 @@ function FloorPlanTabContent({
           renders for an UNLINKED shape: those go straight into the Link
           picker on a SECOND tap (onUnlinkedShapeClick), so nothing extra
           is shown for one: the selection outline is the whole feedback. */}
+      {selectedWallId && !setupTab && (() => {
+        const wall = assets.find(a => a.id === selectedWallId);
+        if (!wall) return null;
+        return (
+          <div style={{ marginTop: 8, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
+              <span style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>
+                {nameOf(wall, typesList)}
+                <span style={{ fontWeight: 400, color: C.empty }}> · {typeNameOf(wall.type, typesList)}</span>
+              </span>
+              {onOpenAsset && (
+                <button type="button" onClick={() => onOpenAsset(wall)}
+                  style={{ padding: "3px 9px", borderRadius: 8, border: `1.5px solid ${C.border}`, background: "none", color: C.brandDark, fontSize: 12, fontWeight: 600 }}>
+                  Open wall
+                </button>
+              )}
+            </div>
+            <ContentsList place={wall} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast />
+          </div>
+        );
+      })()}
       {selectedShapeId && !setupTab && (() => {
         const link = linkFor(selectedShapeId);
         const room = link ? assets.find(a => a.id === link.roomId) : null;
@@ -21082,7 +21540,7 @@ function FloorPlanTabContent({
       {/* Nothing selected on the map: show the location being viewed, so the
           panel below the map is never empty. Open location goes to that
           asset's detail page -- the map is a view of it, not the page. */}
-      {!selectedShapeId && !selectedPinId && !openGroupId && !setupTab && (
+      {!selectedShapeId && !selectedWallId && !selectedPinId && !openGroupId && !setupTab && (
         <div style={{ marginTop: 8, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
             <span style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>{nameOf(selectedAsset, typesList)}</span>
@@ -21162,6 +21620,8 @@ function FloorPlanLabel({ x, y, k, clear, maxPx, text, fill, fontWeight }) {
 // -- this badge was left out of that fix and stayed a flat, illegibly small
 // pill at the default whole-floor zoom for exactly the reason the room
 // labels were.
+// A wall is drawn in this colour until it is selected; nothing else on the map uses it.
+const FLOOR_PLAN_WALL_COLOR = "#2F7D8C";
 const FLOOR_PLAN_GROUP_COLOR = "#7B5EA7";
 function FloorPlanGroupBadge({ cx, cy, k, count }) {
   const label = `${count} spaces`;

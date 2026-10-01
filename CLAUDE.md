@@ -3514,6 +3514,42 @@ being papered over with a contorted test. Driven in Chromium: a four-row sheet l
 two Rooms and their Building **in that order** — every child above its parent — imported
 clean and landed the PC three levels down.
 
+## Exterior walls on a floor plan (2026-10-01)
+
+A **Wall** is an asset (locked type, `location: true`) whose geometry is one or more
+SEGMENTS of a plan space's outline, selected on the map as ONE thing the way a Room is.
+**Frontend only: no backend change, no version bump, no deploy.**
+
+- **A segment is stored as an ordinary link row**, `shapeId` -> the wall asset's id, with the
+  shape id carrying a suffix: `<spaceGid>#e<edge>` (whole edge) or `<spaceGid>#e<edge>.<n>`
+  (the nth exposed run of an edge a neighbour only partly touches). That is what makes
+  "a segment belongs to at most one wall" STRUCTURAL — one row per shape id, exactly as for a
+  room — and why no Sheet column or Config key was needed. `floorPlanSetWallSegments` is the
+  one place the rule is enforced (a claimed segment is REFUSED, never stolen), so a stale
+  screen cannot break it.
+- **There is no wall geometry in the drawing to read** (a Visio Space is a closed shape), so
+  segments are DERIVED: `floorPlanExteriorSegments` walks every edge in cells and asks whether
+  a point a hair beyond it, away from its own space, lies inside any OTHER space. The probe
+  distance is a fraction of the whole plan so it means the same on a campus plan as on a room.
+  A building outline with rooms inside it is exterior all round, which is what lets you pick
+  "the exterior walls of a building space".
+- **A segment id outlives an edit to the drawing only while that edge keeps its index.** A
+  stale one is IGNORED at draw time (the fixture carries one deliberately), and a plan replace
+  carries a segment onto the new space by title like any room link, suffix kept
+  (`floorPlanRemapLinksAndGroups`).
+- **Walls are their own selection** (`selectedWallId`), and the Walls setup tab works one space
+  at a time: tap a space, tap its segments, name it, Save — the asset and its link rows are
+  written in ONE `persist()`. Tapping an existing wall in that tab reopens it. "Remove from
+  plan" drops the link rows and KEEPS the asset (what is attached to it, its tasks and history
+  are not the plan's to delete). A wall's parent defaults to the Room its space is linked to.
+- **Filing assets under a wall needs the type to allow it**: the type editor's "Can sit
+  inside" must name Wall. Only `Other` ships doing so; the rest are the school's to tick.
+- **The Floor Plan count badge excludes segment rows** (`floorPlanIsSegmentId`) so walls do not
+  inflate "N spaces linked".
+- Covered by `test-frontend-floorplan.js` (real geometry, link rule, remap), mutation-checked.
+  The tab itself — picking, saving, reopening, removing, show-on-map — was driven in Chromium
+  against Sandbox.
+
 ## Known constraints / things to watch
 
 **Nothing here records what is deployed, or what is on a live Sheet.** Both are one

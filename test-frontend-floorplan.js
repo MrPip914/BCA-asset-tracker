@@ -487,6 +487,8 @@ check('a plain translation just adds tx/ty', JSON.stringify(translated) === JSON
 // plan that, as far as anyone could see, had never been linked at all.
 const remapMod = { exports: {} };
 new Function('module', [
+  grabFn('floorPlanSegmentId'),
+  grabFn('floorPlanSegmentParts'),
   grabFn('floorPlanRemapShapeIds'),
   grabFn('floorPlanRemapLinksAndGroups'),
   'module.exports = { floorPlanRemapShapeIds, floorPlanRemapLinksAndGroups };',
@@ -728,6 +730,99 @@ const { floorPlanShapeMatches } = matchMod.exports;
     /cancelViewAnim\(\);\s*e\.preventDefault\(\)/.test(src) && /cancelViewAnim\(\);\s*try \{ stageElRef\.current\.setPointerCapture/.test(src));
   check('Pinch: two pointers pinch about their midpoint and one left over carries on as a drag',
     /pointersRef\.current\.size === 2\) beginPinch\(\)/.test(src) && /d\.d0 \/ dist/.test(src) && /dragRef\.current\.pinch && pointersRef\.current\.size === 1/.test(src));
+}
+
+// ---- Exterior walls ---------------------------------------------------------
+// A wall is an asset owning SEGMENTS of a space's outline, stored as ordinary link
+// rows whose shape id carries a suffix. These run the real geometry and the real
+// link-setting rule; the picking UI itself is browser behaviour.
+{
+  const wallMod = { exports: {} };
+  new Function('module', [
+    grabFn('floorPlanPointInPoly'),
+    grabFn('floorPlanBbox'),
+    grabFn('floorPlanSegmentId'),
+    grabFn('floorPlanSegmentParts'),
+    grabFn('floorPlanIsSegmentId'),
+    grabFn('floorPlanExteriorSegments'),
+    grabFn('floorPlanWallSegmentIds'),
+    grabFn('floorPlanSetWallSegments'),
+    grabFn('floorPlanRemapShapeIds'),
+    grabFn('floorPlanRemapLinksAndGroups'),
+    'module.exports = { floorPlanSegmentId, floorPlanSegmentParts, floorPlanIsSegmentId, floorPlanExteriorSegments, floorPlanWallSegmentIds, floorPlanSetWallSegments, floorPlanRemapLinksAndGroups };',
+  ].join('\n'))(wallMod);
+  const W = wallMod.exports;
+  const sq = (gid, x, y, w, h) => ({ gid, title: 'Space.' + gid, pts: [[x, y], [x + w, y], [x + w, y + h], [x, y + h]], bbox: { x, y, w, h } });
+
+  check('Wall ids: a plain shape id is not a segment, a suffixed one is, and they round-trip',
+    !W.floorPlanIsSegmentId('shape-101') && W.floorPlanIsSegmentId('shape-101#e2') && W.floorPlanIsSegmentId('shape-101#e2.1') &&
+    JSON.stringify(W.floorPlanSegmentParts('a#b#e3.2')) === JSON.stringify({ gid: 'a#b', edge: 3, run: 2 }) &&
+    W.floorPlanSegmentId('s', 3, 0) === 's#e3' && W.floorPlanSegmentId('s', 3, 2) === 's#e3.2');
+
+  // One lone square: all four edges are exterior, each a whole edge (no run suffix).
+  const lone = W.floorPlanExteriorSegments([sq('A', 0, 0, 100, 100)]);
+  check('Exterior: a lone square has four whole-edge segments', lone.length === 4 && lone.every(sg => /^A#e\d$/.test(sg.id)),
+    lone.map(l => l.id).join(','));
+
+  // Two squares sharing a full wall: that wall is interior for both.
+  const pair = W.floorPlanExteriorSegments([sq('A', 0, 0, 100, 100), sq('B', 100, 0, 100, 100)]);
+  const idsA = pair.filter(sg => sg.gid === 'A').map(sg => sg.id).sort();
+  const idsB = pair.filter(sg => sg.gid === 'B').map(sg => sg.id).sort();
+  check('Exterior: a wall two spaces share is on neither list', idsA.length === 3 && idsB.length === 3 &&
+    !pair.some(sg => sg.gid === 'A' && sg.a[0] === 100 && sg.b[0] === 100), JSON.stringify({ idsA, idsB }));
+
+  // A smaller room abutting only the lower half of A's right edge: the upper half
+  // stays exposed and comes out as its own run, with a run suffix.
+  const part = W.floorPlanExteriorSegments([sq('A', 0, 0, 100, 100), sq('B', 100, 50, 100, 50)]);
+  const aRight = part.filter(sg => sg.gid === 'A' && Math.abs(sg.a[0] - 100) < 1e-6 && Math.abs(sg.b[0] - 100) < 1e-6);
+  check('Exterior: a partly shared wall yields only the exposed stretch, as a suffixed run',
+    aRight.length === 1 && /^A#e1\.1$/.test(aRight[0].id) &&
+    Math.min(aRight[0].a[1], aRight[0].b[1]) < 1 && Math.max(aRight[0].a[1], aRight[0].b[1]) > 40 && Math.max(aRight[0].a[1], aRight[0].b[1]) < 60,
+    JSON.stringify(aRight));
+
+  // A building outline with a room inside it: the outline's edges are exterior (nothing
+  // outside), and so are the inner room's edges that sit ON the outline.
+  const nested = W.floorPlanExteriorSegments([sq('Bldg', 0, 0, 200, 200), sq('Rm', 0, 0, 100, 100)]);
+  check('Exterior: a building outline is exterior all round even with rooms inside it',
+    nested.filter(sg => sg.gid === 'Bldg').length === 4, nested.filter(sg => sg.gid === 'Bldg').map(s2 => s2.id).join(','));
+  check('Exterior: an interior room edge, away from the outline, is not offered',
+    !nested.some(sg => sg.gid === 'Rm' && Math.abs(sg.a[0] - 100) < 1e-6 && Math.abs(sg.b[0] - 100) < 1e-6));
+
+  // The link rows.
+  const links = [
+    { shapeId: 'A', roomId: 'room-1' },                 // a room link: not a wall
+    { shapeId: 'A#e0', roomId: 'wall-N' }, { shapeId: 'A#e1', roomId: 'wall-N' },
+    { shapeId: 'B#e2', roomId: 'wall-S' },
+  ];
+  const map = W.floorPlanWallSegmentIds(links);
+  check('Wall rows: grouped by wall, and a room link is not a wall',
+    map.size === 2 && map.get('wall-N').length === 2 && map.get('wall-S')[0] === 'B#e2' && !map.has('room-1'));
+  const set1 = W.floorPlanSetWallSegments(links, 'wall-N', ['A#e0', 'A#e3'], { at: 't' });
+  check('Set segments: the wall\'s old rows are replaced, everything else is untouched',
+    set1.taken.length === 0 && set1.links.filter(l => l.roomId === 'wall-N').map(l => l.shapeId).sort().join() === 'A#e0,A#e3' &&
+    set1.links.some(l => l.shapeId === 'A' && l.roomId === 'room-1') && set1.links.some(l => l.shapeId === 'B#e2'));
+  const set2 = W.floorPlanSetWallSegments(links, 'wall-N', ['A#e0', 'B#e2'], {});
+  check('Set segments: a segment another wall owns is REFUSED, not stolen',
+    set2.taken.join() === 'B#e2' && !set2.links.some(l => l.shapeId === 'B#e2' && l.roomId === 'wall-N') &&
+    set2.links.some(l => l.shapeId === 'B#e2' && l.roomId === 'wall-S'));
+  const set3 = W.floorPlanSetWallSegments([], 'w', ['X#e0', 'X#e0'], {});
+  check('Set segments: a repeated id is one row (a segment can only be linked once)', set3.links.length === 1);
+
+  // A plan replace carries a wall segment onto the new space by the space's title.
+  const rem = W.floorPlanRemapLinksAndGroups(
+    [{ shapeId: 'old-1#e2.1', roomId: 'w' }, { shapeId: 'gone#e0', roomId: 'w' }, { shapeId: 'old-1', roomId: 'r' }],
+    [], [{ gid: 'old-1', title: 'Space.101' }, { gid: 'gone', title: 'Space.999' }], [{ gid: 'new-9', title: 'Space.101' }]);
+  check('Replace: a wall segment follows its space to the new id, suffix kept; one whose space is gone is dropped',
+    rem.links.length === 2 && rem.links.some(l => l.shapeId === 'new-9#e2.1' && l.roomId === 'w') && rem.links.some(l => l.shapeId === 'new-9' && l.roomId === 'r'),
+    JSON.stringify(rem.links));
+
+  // Wiring that only the real page can exercise is pinned as source.
+  check('Walls: Wall is a locked place type that other assets can be filed under',
+    /Wall: \{\s*locked: true, icon: Fence, categoryIds: \["Places"\][^}]*location: true/.test(src) && /Other: \{ parentTypes: \["Room", "Wall"\] \}/.test(src));
+  check('Walls: a new wall and its link rows are written in ONE persist, and a claimed segment refuses the save',
+    /function saveWall\([\s\S]*?floorPlanSetWallSegments\([\s\S]*?if \(taken\.length\)[\s\S]*?persist\(\s*nextAssets\.map\(a => \(a\.id === ownerId \? \{ \.\.\.a, floorPlanLinks: links \}/.test(src));
+  check('Walls: the Floor Plan tab count does not count segment rows as linked spaces',
+    /filter\(l => l\.roomId && !floorPlanIsSegmentId\(l\.shapeId\)\)\.length/.test(src));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
