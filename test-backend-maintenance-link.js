@@ -120,11 +120,11 @@ check('MAINTENANCE_FIELDS carries id', mod.MAINTENANCE_FIELDS.indexOf('id') !== 
 
 // Both lists must still be used at all THREE sites rather than re-inlined as
 // literals. A literal that drifts from the constant is the trap v34 removed --
-// and the doGet one is inert (readTable_ ignores its argument), so a re-inlined
+// and the doGet one is inert (readTimed_ ignores its argument), so a re-inlined
 // copy there looks authoritative while doing nothing.
 [['CHANGE_FIELDS', 'changes'], ['MAINTENANCE_FIELDS', 'maintenance']].forEach(([constName, tab]) => {
   const uses = [
-    `readTable_(SHEET_NAMES.${tab}, ${constName})`,
+    `readTimed_(SHEET_NAMES.${tab}, ${constName})`,
     `${TAB_WRITE_CALL}(SHEET_NAMES.${tab}, ${constName},`,
     `{ name: SHEET_NAMES.${tab}, headers: ${constName} }`,
   ];

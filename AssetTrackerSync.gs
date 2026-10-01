@@ -50,7 +50,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v49";
+const SCRIPT_VERSION = "v50";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -925,6 +925,12 @@ const DIAG_READ_LIMIT = 300;
 // background, so nobody feels one -- which is exactly why a slow backend would
 // otherwise go unnoticed until it started timing out.
 const DIAG_SLOW_MS = 8000;
+// The same threshold for a READ (v50), which until then logged nothing however
+// long it took. On 2026-10-01 a phone's load held the dev lock for over a minute
+// -- every other request answered "busy" -- and the log held only those busy
+// rows, because a read that eventually succeeds was never recorded. A read is
+// normally 1-2s, so anything past this is worth a row with its steps.
+const DIAG_SLOW_READ_MS = DIAG_SLOW_MS;
 
 // Set by doPost as it routes, so a helper deep inside a handler can say which op
 // it was serving without every call site passing it. Per-execution: Apps Script
@@ -1523,6 +1529,7 @@ function handleAuthenticatedRead_(body, e) {
       sessionId = body.sessionId;
       auth = authorizeSession_(sessionId, configMap);
     }
+    stage_("authorized");
 
     if (!auth.ok) {
       return respond_({
@@ -1535,17 +1542,24 @@ function handleAuthenticatedRead_(body, e) {
       }, e);
     }
 
-    const assetRows = readTable_(SHEET_NAMES.assets, ASSET_FIELDS);
-    const commentRows = readTable_(SHEET_NAMES.comments, ["assetLabel", "text", "at", "by"]);
-    const changeRows = readTable_(SHEET_NAMES.changes, CHANGE_FIELDS);
-    const allocationRows = readTable_(SHEET_NAMES.allocations, ["assetLabel", "room", "quantity"]);
-    const maintenanceRows = readTable_(SHEET_NAMES.maintenance, MAINTENANCE_FIELDS);
-    const breakerRows = readTable_(SHEET_NAMES.breakers, BREAKER_FIELDS);
-    const circuitRows = readTable_(SHEET_NAMES.circuits, CIRCUIT_FIELDS);
-    const breakerTypeRows = readTable_(SHEET_NAMES.breakerTypes, BREAKER_TYPE_FIELDS);
-    const spaceLinkRows = readTable_(SHEET_NAMES.spaceLinks, SPACE_LINK_FIELDS);
-    const spaceGroupRows = readTable_(SHEET_NAMES.spaceGroups, SPACE_GROUP_FIELDS);
-    const allAuditRows = readTable_(SHEET_NAMES.audit, AUDIT_FIELDS);
+    // Each tab is its own step in the timing, so a slow read names the tab it
+    // stalled on rather than only saying the whole batch was slow.
+    const readTimed_ = (name, fields) => {
+      const rows = readTable_(name, fields);
+      stage_(name + " read (" + rows.length + " rows)");
+      return rows;
+    };
+    const assetRows = readTimed_(SHEET_NAMES.assets, ASSET_FIELDS);
+    const commentRows = readTimed_(SHEET_NAMES.comments, ["assetLabel", "text", "at", "by"]);
+    const changeRows = readTimed_(SHEET_NAMES.changes, CHANGE_FIELDS);
+    const allocationRows = readTimed_(SHEET_NAMES.allocations, ["assetLabel", "room", "quantity"]);
+    const maintenanceRows = readTimed_(SHEET_NAMES.maintenance, MAINTENANCE_FIELDS);
+    const breakerRows = readTimed_(SHEET_NAMES.breakers, BREAKER_FIELDS);
+    const circuitRows = readTimed_(SHEET_NAMES.circuits, CIRCUIT_FIELDS);
+    const breakerTypeRows = readTimed_(SHEET_NAMES.breakerTypes, BREAKER_TYPE_FIELDS);
+    const spaceLinkRows = readTimed_(SHEET_NAMES.spaceLinks, SPACE_LINK_FIELDS);
+    const spaceGroupRows = readTimed_(SHEET_NAMES.spaceGroups, SPACE_GROUP_FIELDS);
+    const allAuditRows = readTimed_(SHEET_NAMES.audit, AUDIT_FIELDS);
     // The most RECENT rows, which is the end of an append-only tab. Its append
     // order is its chronological order -- the same fact the frontend's
     // auditIndex relies on -- so the tail is the newest history without having
@@ -1556,8 +1570,8 @@ function handleAuthenticatedRead_(body, e) {
     // getSheet_ creates the tab if it is missing, so a sheet that predates v35
     // reads back an empty list here rather than throwing, and gets its header
     // row on the first photo save.
-    const photoRows = readTable_(SHEET_NAMES.photos, PHOTO_FIELDS);
-    const configRows = readTable_(SHEET_NAMES.config, ["key", "value"]);
+    const photoRows = readTimed_(SHEET_NAMES.photos, PHOTO_FIELDS);
+    const configRows = readTimed_(SHEET_NAMES.config, ["key", "value"]);
     stage_("tabs read (" + assetRows.length + " assets, " + allAuditRows.length + " audit rows)");
 
     const config = {};
@@ -1750,6 +1764,12 @@ function handleAuthenticatedRead_(body, e) {
       },
     };
 
+    stage_("payload built");
+    // Measured from doPost's start, so the wait for the lock counts too -- that
+    // wait is half of what a slow read costs everyone queued behind it.
+    const tookMs = Date.now() - diagStarted_;
+    if (diagStarted_ && tookMs > DIAG_SLOW_READ_MS) logDiag_({ event: "slow_read", email: auth.email, ms: tookMs, detail: diagStages_.join("; ") });
+
     // respond_ handles the ?callback= JSONP wrapper — kept because a <script>
     // tag isn't subject to the CORS restrictions a plain fetch() can hit here,
     // Apps Script not sending Access-Control-Allow-Origin headers.
@@ -1757,7 +1777,7 @@ function handleAuthenticatedRead_(body, e) {
   } catch (err) {
     // Used to escape as Apps Script's HTML error page, which the app can only
     // call "Non-JSON response". Answered as JSON now, and recorded.
-    logDiag_({ event: "error", detail: err && err.message });
+    logDiag_({ event: "error", detail: (err && err.message) + " | after: " + diagStages_.join("; ") });
     return respond_({ ok: false, error: "The server couldn't load the inventory: " + (err && err.message), scriptVersion: SCRIPT_VERSION }, e);
   } finally {
     lock.releaseLock();

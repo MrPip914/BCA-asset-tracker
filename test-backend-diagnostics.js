@@ -157,5 +157,24 @@ function fakeSheet(dataRows) {
     !/Diagnostics/.test(grab('const SHEET_NAMES = ')));
 }
 
+// ---------------------------------------------------------------- slow reads (v50)
+// A read that succeeds slowly used to log nothing at all, so a load that held the
+// lock for a minute left only the "busy" rows of everyone it blocked.
+{
+  const read = grab('function handleAuthenticatedRead_');
+  const slowAt = read.indexOf('event: "slow_read"');
+  const replyAt = read.indexOf('return respond_(payload, e)');
+  check('a slow read is logged, before the reply goes back',
+    slowAt !== -1 && replyAt !== -1 && slowAt < replyAt);
+  check('the slow-read row carries the per-step timings',
+    /event: "slow_read"[^\n]*diagStages_\.join/.test(read));
+  check('every tab in the read is timed as its own step (no bare readTable_ left)',
+    !/readTable_\(SHEET_NAMES/.test(read) && (read.match(/readTimed_\(SHEET_NAMES/g) || []).length >= 10);
+  check('a read that throws says which step it got to',
+    /event: "error", detail: [^\n]*diagStages_\.join/.test(read));
+  check('the threshold is a named constant, not a literal',
+    /tookMs > DIAG_SLOW_READ_MS/.test(read) && constLine('DIAG_SLOW_READ_MS') !== '');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

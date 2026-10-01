@@ -484,6 +484,12 @@ failure modal and the sign-in screen both said *that* it happened and kept nothi
   sign-outs, conflicts (posted vs stored revision), refused saves, server errors, lock
   timeouts, and saves slower than `DIAG_SLOW_MS`. **An ordinary successful save logs
   nothing** — a row per save would cost every save a Sheet write to record nothing.
+  - **A READ slower than `DIAG_SLOW_READ_MS` is logged as `slow_read`** (v50), with
+    every tab timed as its own step. Until then a read that eventually succeeded logged
+    nothing however long it took: on 2026-10-01 a phone's load held the dev lock for over
+    a minute and the log held only the `busy` rows of the requests it blocked. A read
+    killed at the 6-minute limit still writes no row — its steps are on the Executions
+    page, where the last one logged names the step that did not finish.
   - **Why a tab and not Google's Executions page:** the script cannot read that without a
     new OAuth scope, and a new scope locks every user out until the owner re-approves
     it. A tab costs no scope. The Executions page is still the fuller record and is
