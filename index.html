@@ -4045,7 +4045,7 @@ const FRONTEND_SCRIPT_VERSION = "v50";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-01.12";
+const APP_VERSION = "2026-10-01.13";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -7033,6 +7033,15 @@ function AssetTracker() {
   useEffect(() => {
     function onPopState(e) {
       const st = e.state || {};
+      // The map's drill-downs push entries (setMapScope), so the entry landed
+      // on names the scope to show. Read from its URL; the setter bypasses
+      // setMapScope so restoring never pushes another entry.
+      try {
+        const params = new URLSearchParams(window.location.search);
+        setScopeId(params.get("scope") || "");
+        const m = params.get("main");
+        setMainTab(MAIN_TABS.includes(m) ? m : "assets");
+      } catch (err) { /* no window */ }
       if (!st.asset) { closeDetail({ fromHistory: true }); return; }
       // Id first, then label — same permanent two-way match the deep-link
       // effect makes, since an entry pushed before this build (or a link pasted
@@ -8173,8 +8182,27 @@ function AssetTracker() {
   // mapQuery/mapFocusShapeId are cleared because they name things on the
   // plan being left -- carrying a match count or a pulse target over to an
   // unrelated plan would be confusing rather than convenient.
+  // THE MAP'S SCOPE IS A PLACE YOU GO BACK TO (unlike narrowing the Assets
+  // list, which replaces). Drilling from a campus to a building to a floor
+  // plan is navigation, and Back used to skip all of it and leave the map
+  // tab entirely, since persistScope only ever replaces. This pushes one
+  // entry per scope change made on the map; the popstate handler restores
+  // the scope from that entry's URL. The URL is built the way persistScope
+  // builds it, so its effect then finds nothing left to write.
+  function setMapScope(id) {
+    id = id || "";
+    if (id === scopeId) return;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (id) params.set("scope", id); else { params.delete("scope"); params.delete("exact"); }
+      const q = params.toString();
+      const depth = currentNavDepth() + 1;
+      window.history.pushState(historyEntry(depth, null, null, null, depth), "", window.location.pathname + (q ? "?" + q : "") + window.location.hash);
+    } catch (e) { /* no history API — the scope still changes, just without a Back step */ }
+    setScopeId(id);
+  }
   function navigateFloorPlanTo(assetId) {
-    setScopeId(assetId);
+    setMapScope(assetId);
     setMapQuery("");
     setMapFocusShapeId(null);
   }
@@ -15826,13 +15854,13 @@ function AssetTracker() {
             it contains, and without the chips it would be a dead end:
             nothing else on this tab lets you go further when there's no
             plan to click through. */}
-        <HierarchyNav assets={assets} scopeId={scopeId} setScopeId={setScopeId} showChildren={!mapScopeAsset || !mapScopeAsset.floorPlanUrl}
+        <HierarchyNav assets={assets} scopeId={scopeId} setScopeId={setMapScope} showChildren={!mapScopeAsset || !mapScopeAsset.floorPlanUrl}
           onCrumb={id => {
             // A crumb with no plan of its own jumps up to the nearest place (itself
             // included) that has one; if nothing above has one, go where it was pointed.
             const target = assets.find(a => a.id === id);
             const withPlan = target && (target.floorPlanUrl ? target : ancestorsOf(target, assets).find(x => x.floorPlanUrl));
-            setScopeId(withPlan ? withPlan.id : id);
+            setMapScope(withPlan ? withPlan.id : id);
             setMapQuery("");
             setMapFocusShapeId(null);
             setMapSelectShapeId(null);
