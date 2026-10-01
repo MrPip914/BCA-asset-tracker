@@ -3543,8 +3543,9 @@ SEGMENTS of a plan space's outline, selected on the map as ONE thing the way a R
   plan" drops the link rows and KEEPS the asset (what is attached to it, its tasks and history
   are not the plan's to delete). A wall's parent defaults to the Room its space is linked to.
 - **A wall is only drawn while its SPACE (or the wall itself) is selected**, so exterior edges
-  are never targets competing with the spaces. In the Walls tab the picker draws them: the open
-  space's own segments, plus other walls' segments in the wall colour — tapping one opens that
+  are never targets competing with the spaces. In the Walls tab EVERY defined wall is shown (dimmed
+  while one is open), and the picker draws the open space's own segments, with other walls'
+  segments on it in the wall colour — tapping one opens that
   wall while nothing has been changed. While a wall is being worked on the spaces are inert (no
   hover, no tap) and a tap on empty map does nothing.
 - **Filing assets under a wall needs the type to allow it**: the type editor's "Can sit
