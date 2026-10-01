@@ -4071,7 +4071,7 @@ const FRONTEND_SCRIPT_VERSION = "v50";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-01.21";
+const APP_VERSION = "2026-10-01.22";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -20879,7 +20879,7 @@ function FloorPlanTabContent({
               </div>
             )}
             {setupTab === "wall" && !wallDraft && (
-              <span style={{ flex: 1 }}>Tap a space, then pick its exterior walls · <b>{wallsMap.size} wall{wallsMap.size === 1 ? "" : "s"} defined</b> · tap one to edit it</span>
+              <span style={{ flex: 1 }}>Tap a space to see its exterior walls · <b>{wallsMap.size} wall{wallsMap.size === 1 ? "" : "s"} defined</b></span>
             )}
             {setupTab === "wall" && wallDraft && (() => {
               const segsHere = exteriorSegs.filter(sg => sg.gid === wallDraft.spaceGid && (!wallOfSegment(sg.id) || wallOfSegment(sg.id) === wallDraft.wallId));
@@ -21159,19 +21159,22 @@ function FloorPlanTabContent({
               Drawn above the spaces so a wall on a room's edge wins the tap, with a
               wider invisible stroke under the visible one so a thin line is
               still a fingertip-sized target. ---- */}
-          {(!setupTab || setupTab === "wall") && [...wallsMap.entries()].map(([wallId, segIds]) => {
+          {!setupTab && [...wallsMap.entries()].map(([wallId, segIds]) => {
             const wall = assets.find(a => a.id === wallId);
             if (!wall || (wall.status || "Active") === "Archived") return null;
-            const editing = !!wallDraft && wallDraft.wallId === wallId;
-            if (editing) return null; // its segments are drawn by the picker below
             const segs = segIds.map(id => segById.get(id)).filter(Boolean);
-            const sel = !setupTab && selectedWallId === wallId;
+            // A wall is only drawn (and only tappable) while the SPACE it belongs to is
+            // selected, or while the wall itself is -- otherwise every exterior edge on
+            // the plan would sit there as a target competing with the spaces. In the
+            // Walls tab they are shown by the picker below instead.
+            const sel = selectedWallId === wallId;
+            if (!sel && pulsingShapeId !== "wall:" + wallId && !segs.some(sg => sg.gid === selectedShapeId)) return null;
             const isHit = qTrim && floorPlanShapeMatches(wall, assets, typesList, query);
-            const dim = setupTab === "wall" ? !!wallDraft : ((qTrim && !isHit) || (!!openGroupId));
+            const dim = (qTrim && !isHit) || !!openGroupId;
             const longest = segs.reduce((best, sg) => (!best || Math.hypot(sg.b[0] - sg.a[0], sg.b[1] - sg.a[1]) > Math.hypot(best.b[0] - best.a[0], best.b[1] - best.a[1])) ? sg : best, null);
             return (
               <g key={"wall-" + wallId} className="fp-wall" onClick={() => onWallClick(wallId)}
-                style={{ cursor: setupTab === "wall" && wallDraft ? "default" : "pointer", opacity: dim ? 0.3 : 1 }}>
+                style={{ cursor: "pointer", opacity: dim ? 0.3 : 1 }}>
                 {segs.map(sg => (
                   <g key={sg.id}>
                     <line x1={sg.a[0]} y1={sg.a[1]} x2={sg.b[0]} y2={sg.b[1]} stroke="transparent" strokeWidth={18 * k} strokeLinecap="round" />
@@ -21198,7 +21201,15 @@ function FloorPlanTabContent({
             const claimed = !!owner && owner !== wallDraft.wallId;
             const picked = wallDraft.picks.has(sg.id);
             if (claimed) {
-              return <line key={sg.id} x1={sg.a[0]} y1={sg.a[1]} x2={sg.b[0]} y2={sg.b[1]} stroke="#8FA6B8" strokeWidth={4 * k} strokeLinecap="round" opacity={0.7} pointerEvents="none" />;
+              // Another wall's segment: grey, and -- while nothing here has been changed --
+              // a way to open that wall instead.
+              const canSwitch = !wallDraftDirty(wallDraft);
+              return (
+                <g key={sg.id} style={{ cursor: canSwitch ? "pointer" : "default" }} onClick={canSwitch ? () => editWall(owner) : undefined}>
+                  <line x1={sg.a[0]} y1={sg.a[1]} x2={sg.b[0]} y2={sg.b[1]} stroke="transparent" strokeWidth={22 * k} strokeLinecap="round" />
+                  <line x1={sg.a[0]} y1={sg.a[1]} x2={sg.b[0]} y2={sg.b[1]} stroke={FLOOR_PLAN_WALL_COLOR} strokeWidth={4.5 * k} strokeLinecap="round" opacity={0.75} />
+                </g>
+              );
             }
             return (
               <g key={sg.id} style={{ cursor: "pointer" }} onClick={() => toggleWallSegment(sg.id)}>

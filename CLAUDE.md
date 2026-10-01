@@ -3542,6 +3542,11 @@ SEGMENTS of a plan space's outline, selected on the map as ONE thing the way a R
   written in ONE `persist()`. Tapping an existing wall in that tab reopens it. "Remove from
   plan" drops the link rows and KEEPS the asset (what is attached to it, its tasks and history
   are not the plan's to delete). A wall's parent defaults to the Room its space is linked to.
+- **A wall is only drawn while its SPACE (or the wall itself) is selected**, so exterior edges
+  are never targets competing with the spaces. In the Walls tab the picker draws them: the open
+  space's own segments, plus other walls' segments in the wall colour — tapping one opens that
+  wall while nothing has been changed. While a wall is being worked on the spaces are inert (no
+  hover, no tap) and a tap on empty map does nothing.
 - **Filing assets under a wall needs the type to allow it**: the type editor's "Can sit
   inside" must name Wall. Only `Other` ships doing so; the rest are the school's to tick.
 - **The Floor Plan count badge excludes segment rows** (`floorPlanIsSegmentId`) so walls do not
