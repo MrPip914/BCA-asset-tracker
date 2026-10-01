@@ -85,8 +85,10 @@ const scopeCode = [
   sliceTopLevel('function reScopedParentId(currentParentId, newType, scopeId, assets) {'),
 ].join('\n');
 const PARENTS = { Computer: ['Room'], Room: ['Room', 'Building'], Building: ['Campus'] };
-const { scopedParentFor, reScopedParentId } = new Function('canBeParentOf',
-  scopeCode + '\nreturn { scopedParentFor, reScopedParentId };')((p, c) => (PARENTS[c] || []).includes(p));
+const noteCode = sliceTopLevel('function scopedParentNote(type, parentId, scopeId, assets, typesList) {');
+const { scopedParentFor, reScopedParentId, scopedParentNote } = new Function('canBeParentOf', 'typeTakesParent', 'typeNameOf', 'nameOf',
+  scopeCode + '\n' + noteCode + '\nreturn { scopedParentFor, reScopedParentId, scopedParentNote };')(
+  (p, c) => (PARENTS[c] || []).includes(p), t => (PARENTS[t] || []).length > 0, t => t, a => a.id);
 const place = [{ id: 'B1', type: 'Building' }, { id: 'R1', type: 'Room' }, { id: 'R2', type: 'Room' }];
 check('scoped to a Building, a Computer starts with no parent (it cannot sit there)',
   scopedParentFor('Computer', 'B1', place) === '');
@@ -99,6 +101,13 @@ check('a parent picked BY HAND survives any type change',
 check('no scope: a type change leaves a blank parent blank', reScopedParentId('', 'Room', '', place) === '');
 check('the add form\'s Type field re-derives the parent through it',
   /type: v, parentId: reScopedParentId\(draft\.parentId, v, scopeId, assets\)/.test(src));
+check('a blank parent under a scope the type cannot sit in is explained',
+  /can't be placed in a Building/.test(scopedParentNote('Computer', '', 'B1', place, [])));
+check('no note when the parent was filled, no scope is set, or the scope is legal',
+  scopedParentNote('Computer', 'R1', 'B1', place, []) === '' && scopedParentNote('Computer', '', '', place, []) === ''
+  && scopedParentNote('Room', '', 'B1', place, []) === '');
+check('no note for a type that takes no parent', scopedParentNote('Campus', '', 'B1', place, []) === '');
+check('the add form passes the note to ParentField', /note=\{scopedParentNote\(draft\.type, draft\.parentId, scopeId, assets, typesList\)\}/.test(src));
 // Changing the default FROM the open add form (its gear opens the type editor)
 // must move that form onto the new default -- not only the next one opened.
 const saveAt = src.indexOf('  function saveTypeSettings(id, draft) {');
