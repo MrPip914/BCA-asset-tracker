@@ -4071,7 +4071,7 @@ const FRONTEND_SCRIPT_VERSION = "v50";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-01.18";
+const APP_VERSION = "2026-10-01.19";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -20501,7 +20501,7 @@ function FloorPlanTabContent({
   // segments, tap segments to pick them, name the wall, Save. Tapping an existing
   // wall reopens it for editing.
   function startWallDraft(spaceGid) {
-    setWallDraft({ wallId: null, spaceGid, name: "", picks: new Set() });
+    setWallDraft({ wallId: null, spaceGid, name: "", picks: new Set(), initial: new Set() });
     const sp = plan.status === "ready" ? plan.spaces.find(x => x.gid === spaceGid) : null;
     if (sp) zoomToBbox(floorPlanBbox(sp.pts), 0.3, true, true);
   }
@@ -20510,7 +20510,7 @@ function FloorPlanTabContent({
     const first = ids.length ? segById.get(ids[0]) : null;
     const wall = assets.find(a => a.id === wallId);
     if (!first) return;
-    setWallDraft({ wallId, spaceGid: first.gid, name: wall ? (wall.name || "") : "", picks: new Set(ids) });
+    setWallDraft({ wallId, spaceGid: first.gid, name: wall ? (wall.name || "") : "", picks: new Set(ids), initial: new Set(ids), initialName: wall ? (wall.name || "") : "" });
     const sp = plan.spaces.find(x => x.gid === first.gid);
     if (sp) zoomToBbox(floorPlanBbox(sp.pts), 0.3, true, true);
   }
@@ -20532,10 +20532,18 @@ function FloorPlanTabContent({
     });
     setWallDraft(null);
   }
+  // A draft is DIRTY once it differs from how it opened. A clean one holds nothing
+  // worth protecting, so tapping elsewhere replaces it; a dirty one is left alone
+  // (Cancel or Save is the way out) rather than silently dropping someone's picks.
+  const wallDraftDirty = d => !!d && (
+    d.name.trim() !== (d.initialName || "") ||
+    d.picks.size !== (d.initial ? d.initial.size : 0) ||
+    [...d.picks].some(id => !(d.initial && d.initial.has(id)))
+  );
   function onWallClick(wallId) {
     setSelectedPinId(null);
     if (setupTab === "wall") {
-      if (!wallDraft && canEdit) editWall(wallId);
+      if (canEdit && !wallDraftDirty(wallDraft) && !(wallDraft && wallDraft.wallId === wallId)) editWall(wallId);
       return;
     }
     if (setupTab) return;
@@ -20557,8 +20565,7 @@ function FloorPlanTabContent({
       if (!canEdit) return;
       // Switching space is only allowed before anything is picked; after that the
       // picks belong to the open space and a stray tap must not drop them.
-      if (!wallDraft) { startWallDraft(shapeId); return; }
-      if (wallDraft.spaceGid !== shapeId && wallDraft.picks.size === 0 && !wallDraft.wallId) startWallDraft(shapeId);
+      if (!wallDraft || (wallDraft.spaceGid !== shapeId && !wallDraftDirty(wallDraft))) startWallDraft(shapeId);
       return;
     }
     if (setupTab === "link") { setPickerShapeId(shapeId); return; }
@@ -20945,7 +20952,7 @@ function FloorPlanTabContent({
             const [rx, ry] = floorPlanRotatePoint(q.x, q.y, 4 - rotation);
             onPlace(rx, ry);
           }}
-          onClick={e => { if (e.target === svgElRef.current) zoomToFit(); }}
+          onClick={e => { if (e.target === svgElRef.current) { if (setupTab === "wall" && !wallDraftDirty(wallDraft)) setWallDraft(null); zoomToFit(); } }}
         >
           {plan.spaces.map(s => {
             const d = "M" + s.pts.map(p => p.join(" ")).join(" L") + " Z";
