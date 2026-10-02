@@ -4085,7 +4085,7 @@ const FRONTEND_SCRIPT_VERSION = "v50";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-01.35";
+const APP_VERSION = "2026-10-02.1";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -20699,6 +20699,35 @@ function FloorPlanTabContent({
     d.picks.size !== (d.initial ? d.initial.size : 0) ||
     [...d.picks].some(id => !(d.initial && d.initial.has(id)))
   );
+  // The second tap on an already-selected PLACE -- a room's space or a wall --
+  // goes where that place's own "On selection" option says, so both behave the
+  // same. Returns true when it navigated or opened the chooser; false means
+  // there is nowhere to go and the caller deselects.
+  function secondTapOnPlace(navAsset) {
+    if (!navAsset || !onNavigateToPlan) return false;
+    const mode = mapSelectModeOf(navAsset);
+    const targets = mapSelectTargetsOf(navAsset, assets);
+    if (mode === "other" && targets.length) {
+      setSelectedShapeId(null); setSelectedWallId(null); setOpenGroupId(null);
+      onNavigateToPlan(targets[0]);
+      return true;
+    }
+    if (mode === "choose" && targets.length) {
+      setSelectedShapeId(null); setSelectedWallId(null); setOpenGroupId(null);
+      setMapChooser(navAsset.id);
+      return true;
+    }
+    // Only go where there IS a plan to show: its own, or one on a location
+    // inside it (a Building whose floors carry the drawings). A type that
+    // merely COULD carry a plan, with none uploaded, is a dead end that
+    // lands on "No floor plan uploaded yet".
+    if (navAsset.floorPlanUrl || descendantsOf(navAsset, assets).some(d => d.floorPlanUrl)) {
+      setSelectedShapeId(null); setSelectedWallId(null); setOpenGroupId(null);
+      onNavigateToPlan(navAsset.id);
+      return true;
+    }
+    return false;
+  }
   function onWallClick(wallId) {
     setSelectedPinId(null);
     if (setupTab === "wall") {
@@ -20707,6 +20736,7 @@ function FloorPlanTabContent({
     }
     if (setupTab) return;
     if (selectedWallId === wallId) {
+      if (secondTapOnPlace(assets.find(a => a.id === wallId))) return;
       setSelectedWallId(null);
       zoomToFit();
       return;
@@ -20774,31 +20804,7 @@ function FloorPlanTabContent({
     if (selectedShapeId === shapeId) {
       const navLink = linkFor(shapeId);
       const navAsset = navLink ? assets.find(a => a.id === navLink.roomId) : null;
-      if (navAsset && onNavigateToPlan) {
-        // The location's own "On selection" option decides where this goes.
-        const mode = mapSelectModeOf(navAsset);
-        const targets = mapSelectTargetsOf(navAsset, assets);
-        if (mode === "other" && targets.length) {
-          setSelectedShapeId(null); setOpenGroupId(null);
-          onNavigateToPlan(targets[0]);
-          return;
-        }
-        if (mode === "choose" && targets.length) {
-          setSelectedShapeId(null); setOpenGroupId(null);
-          setMapChooser(navAsset.id);
-          return;
-        }
-        // Only go where there IS a plan to show: its own, or one on a location
-        // inside it (a Building whose floors carry the drawings). A type that
-        // merely COULD carry a plan, with none uploaded, is a dead end that
-        // lands on "No floor plan uploaded yet".
-        if (navAsset.floorPlanUrl || descendantsOf(navAsset, assets).some(d => d.floorPlanUrl)) {
-          setSelectedShapeId(null);
-          setOpenGroupId(null);
-          onNavigateToPlan(navAsset.id);
-          return;
-        }
-      }
+      if (secondTapOnPlace(navAsset)) return;
       // Nothing to navigate into: the second tap deselects, and the view
       // steps out one level rather than staying framed on the old space.
       setSelectedShapeId(null);
@@ -21641,37 +21647,21 @@ function FloorPlanTabContent({
           renders for an UNLINKED shape: those go straight into the Link
           picker on a SECOND tap (onUnlinkedShapeClick), so nothing extra
           is shown for one: the selection outline is the whole feedback. */}
-      {selectedWallId && !setupTab && (() => {
-        const wall = assets.find(a => a.id === selectedWallId);
-        if (!wall) return null;
+      {(selectedWallId || selectedShapeId) && !setupTab && (() => {
+        // A wall and a room's space are the same thing here: a selected place,
+        // shown with its title and contents. Only how the selection was made
+        // differs, so there is one panel.
+        const link = selectedWallId ? null : linkFor(selectedShapeId);
+        const place = selectedWallId
+          ? assets.find(a => a.id === selectedWallId)
+          : (link ? assets.find(a => a.id === link.roomId) : null);
+        if (!place) return null;
         return (
           <div style={{ marginTop: 8, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
-              <span style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>
-                {nameOf(wall, typesList)}
-                <span style={{ fontWeight: 400, color: C.empty }}> · {typeNameOf(wall.type, typesList)}</span>
-              </span>
-              {onOpenAsset && (
-                <button type="button" onClick={() => onOpenAsset(wall)}
-                  style={{ padding: "3px 9px", borderRadius: 8, border: `1.5px solid ${C.border}`, background: "none", color: C.brandDark, fontSize: 12, fontWeight: 600 }}>
-                  Open wall
-                </button>
-              )}
+              <LocationTitle place={place} typesList={typesList} onOpen={onOpenAsset} />
             </div>
-            <ContentsList place={wall} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast />
-          </div>
-        );
-      })()}
-      {selectedShapeId && !setupTab && (() => {
-        const link = linkFor(selectedShapeId);
-        const room = link ? assets.find(a => a.id === link.roomId) : null;
-        if (!room) return null;
-        return (
-          <div style={{ marginTop: 8, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
-              <LocationTitle place={room} typesList={typesList} onOpen={onOpenAsset} />
-            </div>
-            <ContentsList place={room} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast />
+            <ContentsList place={place} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast />
           </div>
         );
       })()}
