@@ -165,7 +165,7 @@ const noSleep = slept => ({ sleep: async ms => { slept.push(ms); } });
     // Its own opts are not exposed, so the real pause runs here -- 2s, once.
     const got = await m.uploadFloorPlanToCloudinary({ name: 'plan.svg' }, { ...SIG, resourceType: 'raw' }, null);
     check('the floor-plan upload retries a dropped connection too', got.secure_url && made.length === 2);
-    check('...against the raw pipeline', /\/raw\/upload$/.test(made[0].url));
+    check('...against the IMAGE pipeline, whatever resourceType the backend still reports', /\/image\/upload$/.test(made[0].url));
   }
 
   // --- wiring --------------------------------------------------------------------------

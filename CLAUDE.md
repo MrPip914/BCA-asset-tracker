@@ -3556,6 +3556,23 @@ SEGMENTS of a plan space's outline, selected on the map as ONE thing the way a R
   The tab itself — picking, saving, reopening, removing, show-on-map — was driven in Chromium
   against Sandbox.
 
+### The floor plan SVG uploads as an IMAGE, not a raw file (2026-10-04)
+
+`uploadFloorPlanToCloudinary` posts to `/image/upload` and ignores `sig.resourceType`.
+The raw route started answering "Raw file format svg not allowed" for an upload that had
+worked since the Floor Plan tab shipped (2026-09-22), with the same signed
+`allowed_formats: "svg"` — a Cloudinary-side change nobody here can see. SVG is an image
+format at the host, and one stored as an image is delivered unchanged unless a
+transformation is requested (none is), so the app can still fetch and parse the markup.
+- **Frontend only, so no deploy.** `handleFloorPlanSign_` still returns `resourceType: "raw"`;
+  that field is informational and is deliberately not trusted. Tidy it (and its comments)
+  on the next real backend change rather than spending a version on a comment.
+- Plans already uploaded keep their `/raw/upload/` URL, which still serves; only NEW
+  uploads take the image route.
+- **Unverified against the live host**: no Cloudinary credentials exist in a cloud
+  session. The first real upload on the dev tenant is the test; if it is refused too, the
+  cause is the account's own settings and not this code.
+
 ## Known constraints / things to watch
 
 **Nothing here records what is deployed, or what is on a live Sheet.** Both are one

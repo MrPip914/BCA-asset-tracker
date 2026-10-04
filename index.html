@@ -4085,7 +4085,7 @@ const FRONTEND_SCRIPT_VERSION = "v50";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-02.1";
+const APP_VERSION = "2026-10-04.1";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -5022,13 +5022,20 @@ async function retryTransientUpload(attempt, onProgress, opts) {
   }
 }
 
-// The floor plan's own upload, to Cloudinary's RAW pipeline rather than
-// /image/upload — same signed-parameter-driven shape as uploadPhotoToCloudinary
-// above (only send what sig.signedParams names, same XHR-for-progress reason,
-// same error wording), but the file's REAL bytes and REAL name: nothing
-// re-encodes an SVG the way a photo is downscaled to JPEG first, so there's no
-// "announce as upload.jpg" step here — the whole point of the raw pipeline is
-// that what's posted is exactly what comes back.
+// The floor plan's own upload — same signed-parameter-driven shape as
+// uploadPhotoToCloudinary above (only send what sig.signedParams names, same
+// XHR-for-progress reason, same error wording), but the file's REAL bytes and
+// REAL name: nothing re-encodes an SVG the way a photo is downscaled to JPEG
+// first, so there's no "announce as upload.jpg" step here.
+//
+// IT POSTS TO /image/upload, NOT /raw/upload, AND IGNORES sig.resourceType
+// (2026-10-04). Cloudinary started answering the raw route with "Raw file
+// format svg not allowed" for an upload that had worked for a fortnight with
+// the same signed allowed_formats "svg". SVG is an image format there, and an
+// SVG stored as an image is delivered byte-for-byte unless a transformation is
+// asked for — none is — so the markup the app parses back out survives. The
+// backend still says "raw" (informational, never signed); it is deliberately
+// not trusted here, so no backend deploy is needed for this to take effect.
 function uploadFloorPlanToCloudinary(file, sig, onProgress) {
   const form = new FormData();
   form.append("file", file, file.name || "floorplan.svg");
@@ -5038,8 +5045,7 @@ function uploadFloorPlanToCloudinary(file, sig, onProgress) {
     const value = k === "public_id" ? sig.publicId : sig[k];
     if (value !== undefined && value !== null && value !== "") form.append(k, value);
   });
-  const resourceType = sig.resourceType || "raw";
-  const url = "https://api.cloudinary.com/v1_1/" + encodeURIComponent(sig.cloudName) + "/" + resourceType + "/upload";
+  const url = "https://api.cloudinary.com/v1_1/" + encodeURIComponent(sig.cloudName) + "/image/upload";
   return retryTransientUpload(report => sendUploadOnce(url, form, report, "file host"), onProgress);
 }
 
