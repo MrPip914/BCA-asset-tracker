@@ -828,5 +828,17 @@ const { floorPlanShapeMatches } = matchMod.exports;
     /filter\(l => l\.roomId && !floorPlanIsSegmentId\(l\.shapeId\)\)\.length/.test(src));
 }
 
+// The picker must not advertise an image type, or a phone opens the PHOTO library instead of Files.
+{
+  const m = src.match(/const FLOORPLAN_FILE_ACCEPT = ("[^"]*");/);
+  check('Floor plan picker: the accept value is declared once and is not an image type',
+    !!m && !/image|svg/i.test(m[1]));
+  check('Floor plan picker: every plan file input uses it (3 sites), none names an image type',
+    (src.match(/type="file" accept=\{FLOORPLAN_FILE_ACCEPT\}/g) || []).length === 3
+    && !/type="file" accept="\.svg/.test(src));
+  check('Floor plan upload still refuses a non-SVG before reading it',
+    /looksLikeSvg = file\.type === "image\/svg\+xml" \|\| \/\\\.svg\$\/i\.test\(file\.name/.test(src));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

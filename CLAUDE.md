@@ -3575,6 +3575,11 @@ Cloudinary-side change nobody here can see. Two steps, the second of which was t
 - `resourceType: "raw"` is still returned and still ignored by the client; tidy it on the
   next real backend change.
 - Plans uploaded before this keep their `/raw/upload/` URL, which still serves.
+- **The plan's file picker advertises NO type** (`FLOORPLAN_FILE_ACCEPT = "*/*"`, app
+  `2026-10-04.4`). `.svg,image/svg+xml` is an image type to a phone, so Android and iOS opened
+  the PHOTO library rather than Files — and an exported plan lives in Files or Drive.
+  `uploadFloorPlanSvg` refuses a non-SVG before reading it, so only the hint is lost. The
+  opposite of a photo gallery's inputs, which keep `image/*` on purpose. Frontend only.
 - **Unverified against the live host** — no Cloudinary credentials exist in a cloud session.
   If the upload is refused AGAIN with no allowlist signed, the cause is an account setting
   (check Cloudinary's Settings > Security) and not this code.
