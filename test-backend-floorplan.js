@@ -144,7 +144,6 @@ function makeSignHandler(propsOverride) {
     'readConfigMap_', 'authorizeSession_', 'jsonOut_', 'module', `
     ${grab('sha1Hex_')}
     ${grab('cloudinarySignature_')}
-    ${src.slice(src.indexOf('const FLOORPLAN_ALLOWED_FORMATS'), src.indexOf(';', src.indexOf('const FLOORPLAN_ALLOWED_FORMATS')) + 1)}
     ${grab('handleFloorPlanSign_')}
     module.f = handleFloorPlanSign_;
   `)(
@@ -167,10 +166,10 @@ function makeSignHandler(propsOverride) {
 const signHandler = makeSignHandler();
 const signed = signHandler({ sessionId: 'editor-session' });
 eq('signing succeeds for an editor with credentials set', signed.ok, true);
-eq('the allowlist is exactly svg, not the photo pipeline\'s jpg/png/pdf',
-   signed.allowed_formats, 'svg');
+eq('NO allowed_formats is signed or returned (the host refuses it for svg)',
+   [signed.allowed_formats, signed.signedParams.includes('allowed_formats')], [undefined, false]);
 eq('every signed parameter is named in signedParams',
-   signed.signedParams, ['allowed_formats', 'folder', 'public_id', 'timestamp']);
+   signed.signedParams, ['folder', 'public_id', 'timestamp']);
 // resourceType tells the CLIENT which URL to post to; Cloudinary itself reads
 // that from the URL path, not a signed field — including it in signedParams
 // would make Cloudinary compute a different signature than this one covers.
@@ -178,9 +177,9 @@ eq('resourceType is NOT among the signed parameters',
    signed.signedParams.includes('resourceType'), false);
 eq('resourceType is "raw", so the client posts to .../raw/upload',
    signed.resourceType, 'raw');
-eq('the signature matches folder+public_id+timestamp+allowed_formats, secret appended',
+eq('the signature matches folder+public_id+timestamp, secret appended',
    signed.signature,
-   sha1(`allowed_formats=svg&folder=dev&public_id=plan-uuid-fixed&timestamp=${signed.timestamp}SECRET`));
+   sha1(`folder=dev&public_id=plan-uuid-fixed&timestamp=${signed.timestamp}SECRET`));
 eq('the object name is server-chosen, never taken from the request',
    signHandler({ sessionId: 'editor-session', publicId: 'attacker-chosen' }).publicId, 'plan-uuid-fixed');
 

@@ -3556,22 +3556,28 @@ SEGMENTS of a plan space's outline, selected on the map as ONE thing the way a R
   The tab itself — picking, saving, reopening, removing, show-on-map — was driven in Chromium
   against Sandbox.
 
-### The floor plan SVG uploads as an IMAGE, not a raw file (2026-10-04)
+### The floor plan SVG upload: image route, and NO signed allowed_formats (2026-10-04, backend v51)
 
-`uploadFloorPlanToCloudinary` posts to `/image/upload` and ignores `sig.resourceType`.
-The raw route started answering "Raw file format svg not allowed" for an upload that had
-worked since the Floor Plan tab shipped (2026-09-22), with the same signed
-`allowed_formats: "svg"` — a Cloudinary-side change nobody here can see. SVG is an image
-format at the host, and one stored as an image is delivered unchanged unless a
-transformation is requested (none is), so the app can still fetch and parse the markup.
-- **Frontend only, so no deploy.** `handleFloorPlanSign_` still returns `resourceType: "raw"`;
-  that field is informational and is deliberately not trusted. Tidy it (and its comments)
-  on the next real backend change rather than spending a version on a comment.
-- Plans already uploaded keep their `/raw/upload/` URL, which still serves; only NEW
-  uploads take the image route.
-- **Unverified against the live host**: no Cloudinary credentials exist in a cloud
-  session. The first real upload on the dev tenant is the test; if it is refused too, the
-  cause is the account's own settings and not this code.
+The upload started failing with "The file host refused the upload: Raw file format svg not
+allowed" on a path that had worked since the Floor Plan tab shipped (2026-09-22) — a
+Cloudinary-side change nobody here can see. Two steps, the second of which was the real one:
+- **The client now posts to `/image/upload` and ignores `sig.resourceType`** (app
+  `2026-10-04.1`). SVG is an image format at the host and is delivered unchanged without a
+  transformation. **This did NOT change the error** — the diagnostics export (the floor-plan
+  upload now writes `upload_failed`, `2026-10-04.2`) showed the identical "Raw file format
+  svg" message on the image route.
+- **So `handleFloorPlanSign_` no longer signs `allowed_formats` at all (v51).** An identical
+  message on both routes pointed at the one SVG-specific thing sent: the allowlist. The check
+  it did is duplicated — `uploadFloorPlanSvg` refuses a non-.svg file before signing, and the
+  signer is editor-only with a server-chosen object name. **That is a deliberate difference
+  from a photo's signature**, where the host-side list is what stops a hand-rolled client
+  putting a HEIC in the account.
+- `resourceType: "raw"` is still returned and still ignored by the client; tidy it on the
+  next real backend change.
+- Plans uploaded before this keep their `/raw/upload/` URL, which still serves.
+- **Unverified against the live host** — no Cloudinary credentials exist in a cloud session.
+  If the upload is refused AGAIN with no allowlist signed, the cause is an account setting
+  (check Cloudinary's Settings > Security) and not this code.
 
 ## Known constraints / things to watch
 

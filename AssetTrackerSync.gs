@@ -50,7 +50,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v50";
+const SCRIPT_VERSION = "v51";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -1991,7 +1991,15 @@ function handlePhotoSign_(body) {
 // .../image/upload), not by a field in the signed body -- signing one would
 // only produce a signature Cloudinary's own server does not expect and every
 // upload would fail with "invalid signature" and no clearer reason why.
-const FLOORPLAN_ALLOWED_FORMATS = "svg";
+//
+// NO allowed_formats IS SIGNED HERE (v51, 2026-10-04). It was "svg" from the day this
+// shipped, and Cloudinary began answering it with "Raw file format svg not allowed" --
+// identically on the raw route and, after the client moved to /image/upload, on that
+// one too, which is what pointed at this parameter rather than at the route. The
+// client refuses a non-.svg file before it ever signs (uploadFloorPlanSvg), and the
+// signer is editor-only with a server-chosen object name, so the host-side allowlist
+// was a second check on the same thing, not the control. Unlike a photo's, which is
+// what stops a hand-rolled client putting a HEIC in the account.
 
 function handleFloorPlanSign_(body) {
   const configMap = readConfigMap_();
@@ -2030,7 +2038,6 @@ function handleFloorPlanSign_(body) {
     folder: folder,
     public_id: publicId,
     timestamp: timestamp,
-    allowed_formats: FLOORPLAN_ALLOWED_FORMATS,
   };
   return jsonOut_({
     ok: true,
@@ -2039,7 +2046,6 @@ function handleFloorPlanSign_(body) {
     folder: folder,
     publicId: publicId,
     timestamp: timestamp,
-    allowed_formats: FLOORPLAN_ALLOWED_FORMATS,
     // Informational only -- see the comment above on why this is never signed.
     // The frontend reads it to know which upload URL to POST to.
     resourceType: "raw",
