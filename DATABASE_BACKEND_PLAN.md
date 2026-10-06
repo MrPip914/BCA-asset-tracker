@@ -93,8 +93,14 @@ Notes:
   with **no id migration** — the same trick the asset-key refactor used.
 - `audit_log` having no UPDATE/DELETE grant makes "append-only" a database fact, not a
   convention. That is the one table with no rewrite path today.
-- Row-level security: every table carries `tenant_id`; the API uses a service role, so RLS is
-  defence in depth rather than the primary gate in Phase 1 (no browser ever talks to the DB).
+- Row-level security: every table carries `tenant_id`, and RLS is the real separation, not a
+  decoration. **The API must NOT connect as the service role** (it bypasses RLS). It connects as
+  a restricted role and runs `SET LOCAL app.tenant_id = ...` at the start of each transaction;
+  policies compare `tenant_id` to it, so a query that forgets its filter returns nothing
+  instead of another school's rows.
+- `tenant_id` is part of every key and foreign key (composite), so a child row cannot point at
+  another tenant's parent.
+- A session stores its tenant and is refused when a request names a different one.
 
 ## Why the snapshot contract survives Phase 1
 
@@ -139,9 +145,12 @@ backend change no longer has to be repeated per tenant — which removes the who
 "deploy dev, then school, then merge" ordering hazard for backend changes (schema migrations
 still need care; see Rollout).
 
-Isolation trade: this is logical, not structural like one-Sheet-per-school. Mitigate with RLS
-and a test that every query is tenant-scoped. If a school ever demands physical isolation, a
-separate Supabase project per tenant works with the identical code.
+Isolation trade: this is logical, not structural like one-Sheet-per-school. Mitigated by the
+restricted-role RLS above, plus a cross-tenant test (sign in as school A, try to read and write
+school B's rows through every op) and a per-tenant export so one school can be pulled or
+restored alone. **Decided 2026-10-06: no client has a physical-separation requirement, so one
+shared database.** If one ever does, a separate Supabase project per tenant runs the identical
+code.
 
 ## Things that move or change
 
@@ -216,7 +225,7 @@ separate Supabase project per tenant works with the identical code.
 ## Decisions needed from Eric
 
 1. Supabase (recommended) vs Cloudflare Workers + D1.
-2. One shared database (recommended) vs a project per school.
+2. ~~One shared database vs a project per school~~ — DECIDED: shared (see Tenancy).
 3. Is losing spreadsheet-style editing acceptable if a nightly Sheet/Excel backup remains?
 4. Paid tier from the start (~$25/month flat) — needed for backups and no auto-pause.
 
