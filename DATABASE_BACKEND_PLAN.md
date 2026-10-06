@@ -1,0 +1,228 @@
+# Moving the backend from Apps Script + Sheets to Postgres — Phase 1 design
+
+Status: **design, nothing built.** Written 2026-10-06 after saves against the Google
+backend proved unreliable (see "Google's layer in front of Apps Script fails
+intermittently" in CLAUDE.md, and the v42/v49/v50 diagnostics work).
+
+## Goal and non-goal
+
+**Goal:** replace `AssetTrackerSync.gs` with a service on a real database that answers the
+SAME requests the frontend already sends, so `index.html` changes by a URL and a small
+transport shim, not by a rewrite.
+
+**Non-goal (Phase 2, deferred):** per-record writes. Every save still posts the whole
+snapshot in Phase 1. That is a known wart and is kept on purpose — see "Why the snapshot
+contract survives".
+
+## What is being replaced (the contract)
+
+Everything goes through `doPost` (plus a bare `doGet` for the version check and the
+anonymous `?panel=` QR page). Ops, from `AssetTrackerSync.gs`:
+
+| Op | What it does | Notes |
+|---|---|---|
+| `signin` | Google ID token -> allowlist check -> mint 7-day sliding session -> return inventory | token used once, never stored |
+| `read` | session -> whole inventory + revisions + auth block | audit log capped to newest 2000 + `auditTotal` |
+| *(no op)* = save | session, editor role, full snapshot + `_dirty` + `_revisions` -> write | the hard one |
+| `auditFull` | whole audit log | |
+| `signout` | delete session | unconditional ok |
+| `diagnostics` | backend log, editors only | |
+| `photoSign` / `floorPlanSign` | Cloudinary upload signatures | secrets move out of Script Properties |
+| `GET ?panel=` | anonymous public panel page data (whitelisted fields, scoped photos) | |
+| `GET` bare | `{ scriptVersion }` and authFailed | deploy tool and "Backend outdated" banner depend on it |
+
+Behaviours that MUST carry over, because each exists due to an incident:
+
+- **Per-domain revision counters** (`assets`, `config`, `breakerTypes`, `photos`): posted
+  revision != stored revision => write nothing, return `{ ok:false, conflict:[...], revisions }`.
+- **`_dirty` gating**: only write domains the client says changed. Absent `_dirty` = write
+  everything; `op:"read"` carries all-false `_dirty` as its guard against an old backend.
+- **Mass-deletion guard**: refuse an empty asset list over a populated table unless
+  `confirmEmptyAssets`.
+- **Audit append by offset** (`auditBase`), never rewrite. Compare against what the DB holds.
+- **Allowlist re-read on every request**; `OWNER_EMAIL` is always an editor; `authUsers`
+  survives saves that do not carry it.
+- **Failure answers are JSON, never an HTML page**: lock/contention => `{ ok:false, busy:true }`.
+- **Config keys the client does not send are preserved**, not dropped (the v37 lesson).
+- **Sessions never appear in logs**; diagnostics rows hold emails but no session ids.
+
+## Recommended stack
+
+**Supabase** (managed Postgres + Auth + Edge Functions), one project for all tenants.
+
+- *Postgres*: real transactions replace `LockService`; the revision check becomes a
+  row-level `UPDATE ... WHERE rev = $posted` inside the same transaction as the writes.
+- *Edge Functions* (Deno/TypeScript): host the API. They sit behind Supabase's gateway, not
+  Google's, and a cold start is tens of ms, not seconds.
+- *Auth*: Google sign-in is built in, but **don't adopt it in Phase 1** — see Auth below.
+- Alternative considered: Cloudflare Workers + D1/Hyperdrive. Equally capable and cheaper at
+  scale; rejected only because Supabase gives backups, a SQL console and point-in-time
+  recovery with no extra assembly, which is exactly what Sheets' version history was doing
+  for this project. Revisit if cost matters more than convenience.
+
+## Schema: JSONB records, not 60 mirrored columns
+
+Mirroring `ASSET_FIELDS` as columns re-creates today's most fragile property (the field list
+IS the schema; dropping a name drops data) and cannot hold per-tenant **custom columns**,
+which are real fields on every asset. So each Sheet tab becomes a table of:
+
+    (tenant_id, id/key, owner key where one exists, position int, data jsonb)
+
+with real columns only for what the SERVER must query or enforce.
+
+| Table | Key | Real columns beyond `data` |
+|---|---|---|
+| `assets` | `(tenant_id, id)` | `position`, `label` (legacy), `tag`, `type`, `parent_id` |
+| `comments`, `changes`, `allocations`, `maintenance` | `(tenant_id, id)` | `asset_id`, `position` |
+| `breakers` | `(tenant_id, id)` | `panel_id`, `position` |
+| `circuits` | `(tenant_id, id)` | `panel_id`, `breaker_id` (null = unassigned), `position` |
+| `breaker_types`, `space_links`, `space_groups` | as today | `position` |
+| `photos` | `(tenant_id, id)` | `owner_type`, `owner_id`, `kind`, `hidden_from_public` |
+| `audit_log` | `(tenant_id, seq bigserial)` | `asset_id`, `at`, `by`, `action` — **append-only; no UPDATE/DELETE grant** |
+| `config` | `(tenant_id, key)` | `value jsonb` — managed lists, columns, typeSettings, nextAssetNumber… |
+| `revisions` | `(tenant_id, domain)` | `rev int` |
+| `auth_users` | `(tenant_id, email)` | `role` — replaces the `authUsers` Config blob |
+| `sessions` | `(id)` | `tenant_id, email, expires_at, touched_at` |
+| `diagnostics` | `(tenant_id, seq)` | the existing `DIAG_FIELDS`, capped at 1000 by trim |
+| `tenants` | `id` | name, `owner_email`, Cloudinary folder |
+
+Notes:
+- `position` preserves array order, which `writeTable_` preserves today and the UI relies on.
+- Child tables keyed by `asset_id` fix the "two assets share a label" hazard structurally.
+- Assets stay keyed by `id` (already `a.id || a.label`), so every stored reference remains valid
+  with **no id migration** — the same trick the asset-key refactor used.
+- `audit_log` having no UPDATE/DELETE grant makes "append-only" a database fact, not a
+  convention. That is the one table with no rewrite path today.
+- Row-level security: every table carries `tenant_id`; the API uses a service role, so RLS is
+  defence in depth rather than the primary gate in Phase 1 (no browser ever talks to the DB).
+
+## Why the snapshot contract survives Phase 1
+
+A save posts `assets` (with nested comments/changes/allocations/maintenance/breakers/circuits)
+plus managed-list config. The API **diffs it against the stored rows inside one transaction**
+and writes only what differs (upsert changed, delete missing, rewrite `position`). That is
+strictly better than `writeTableIfChanged_`'s hash-the-whole-tab, needs no client change, and
+keeps `persist()`'s ~85 call sites untouched. The cost is that each save still ships the whole
+inventory over the wire (~hundreds of KB); acceptable now, and the thing Phase 2 removes.
+
+Transaction shape for a save:
+
+1. `BEGIN`; `SELECT rev FROM revisions WHERE tenant_id=$1 AND domain = ANY($dirty) FOR UPDATE`.
+2. Any posted != stored => `ROLLBACK`, answer conflict (nothing written, not even audit rows).
+3. Authorize (session -> role) — inside, so a removal takes effect on the next save.
+4. Mass-deletion guard.
+5. Diff-and-write dirty domains; append audit rows from `auditBase`.
+6. Bump only the domains written; `COMMIT`; return new revisions.
+
+`FOR UPDATE` on the revision rows is the lock. Contention becomes a short row-lock wait rather
+than a 10-second script lock; on timeout answer `{ ok:false, busy:true }` exactly as v42 does.
+
+## Auth: keep the existing model in Phase 1
+
+Keep: Google ID token verified once at `signin` (Google's `tokeninfo`, or `jose` against
+Google's JWKS — no network call, faster), then an opaque server-minted session id, 7-day
+sliding, in the `sessions` table. The allowlist moves from a Config blob to `auth_users`.
+
+Why not Supabase Auth now: the frontend, the session id in `localStorage`, the cached-snapshot
+keying (tenant + session id) and the sign-out semantics all assume this exact model. Swapping
+the identity provider is a separate change with its own failure modes. Do it later if per-user
+RLS is ever wanted.
+
+## Tenancy
+
+One database, `tenant_id` on every row, tenant chosen by the request (the frontend already
+sends `?client=` -> `clients.js` entry; the entry gains an `apiUrl` and a tenant id, replacing
+the `/exec` URL). A tenant is **a row in `tenants` plus an allowlist**, not a Sheet + script +
+deploy. `deploy.mjs`, `new-tenant.mjs`, `set-tenant.mjs` and the Cloud Shell walkthrough stop
+being part of the release path. Backend deploys become one `supabase functions deploy`, and a
+backend change no longer has to be repeated per tenant — which removes the whole
+"deploy dev, then school, then merge" ordering hazard for backend changes (schema migrations
+still need care; see Rollout).
+
+Isolation trade: this is logical, not structural like one-Sheet-per-school. Mitigate with RLS
+and a test that every query is tenant-scoped. If a school ever demands physical isolation, a
+separate Supabase project per tenant works with the identical code.
+
+## Things that move or change
+
+- **Cloudinary secrets**: Script Properties -> Edge Function secrets (shared, since all tenants
+  already share one Cloudinary account; folder per tenant from `tenants`). The signing code
+  (`sha1Hex_`, sorted params, server-chosen object name, signed `allowed_formats`) ports
+  line for line; keep its tests.
+- **Public `?panel=`**: stays an anonymous GET on the new API with the same whitelists
+  (`PUBLIC_*_FIELDS`), `hiddenFromPublic` checked first, documents/links never published.
+  QR stickers already printed carry `panel.html?p=<id>&c=<tenant>` on the Pages origin, so they
+  keep working; only `panel.html`'s fetch URL comes from `clients.js`.
+- **Version check**: keep `scriptVersion` in the bare GET so "Backend outdated" and
+  `--status` keep working. The number continues the existing series; it is just a number.
+- **CORS**: Edge Functions can send real CORS headers, so the JSONP `?callback=` wrapper and the
+  `text/plain` POST workaround can eventually go. Leave them in Phase 1 (zero frontend risk).
+- **Diagnostics**: the `Diagnostics` tab becomes a table; the Executions-page equivalent is
+  Supabase's function logs (retained for the plan's period, searchable). Per-step timing
+  (`stage_`) ports as structured logs.
+- **`sheet.mjs`**: replaced by plain SQL / a small CLI for cleanup. It still must bump the
+  revision counters on every direct write — keep that rule (a "write" helper that does it).
+- **Admin menu (wipe/import)**: becomes an owner-only endpoint or CLI, not a Sheet menu.
+- **Backups**: Supabase daily backups (paid tier) plus a nightly job that dumps every tenant to
+  a downloadable file/Sheet. Version history was the project's only undo; this replaces it,
+  and PITR is the upgrade if wanted.
+
+## Rollout
+
+1. **Schema + migrations** in the repo (`db/migrations/`), tested against a throwaway Postgres.
+2. **Importer** (`import-from-sheet.mjs`): reads a tenant's Sheet through the existing
+   service-account path (`sheet.mjs` internals), builds the same shapes `doGet` builds, and
+   inserts. Idempotent per tenant (truncate-and-load inside one transaction). Run it
+   repeatedly against dev while building.
+3. **API**: port op by op, in this order — `read`/`signin`/`signout`, then save, then
+   `auditFull`, photo/floor-plan signing, diagnostics, public panel.
+4. **Parity tests** (the important part): a **replay harness** that feeds the same recorded
+   request sequence to the Apps Script backend (dev tenant) and the new API and compares the
+   responses field for field. The existing `test-backend-*.js` suites, which slice `.gs`
+   source, get a TypeScript twin for each rule they pin (revision conflict, `_dirty`, mass
+   deletion, audit offset, public whitelist, photo signing). Mutation-check them as before.
+5. **Dev tenant cutover**: point `dev` at the new API, import, use it for a week. The old Sheet
+   stays untouched and shareable with the service account as the fallback.
+6. **First school** (ask Eric, per the client-dispatch rule): import, freeze edits for the
+   few minutes the import takes (revision bump on the Sheet side so any open browser is
+   refused), flip `clients.js`, keep the Sheet read-only for several weeks.
+7. Remaining tenants; then retire the `.gs` deploy path and its docs
+   (`test-deploy-docs.js` list updates the same day).
+
+## Frontend changes (small, enumerated)
+
+- `clients.js`: `apiUrl`/tenant id per client; `SHEET_API_URL` derives from it.
+- `backendPost`: no change in logic (retry rules, blip detection stay valid); the bare-GET
+  reply it treats as a blip simply never happens.
+- `panel.html` / `panel-qr-sheet.html`: fetch URL from `clients.js` (they already load it).
+- Optionally drop JSONP and the `text/plain` content-type once CORS is real.
+- Sandbox is untouched — it never contacts a backend.
+
+## Risks and how this design answers them
+
+- **Subtle behavioural drift in the save diff** (ordering, blank-vs-null, number-vs-string
+  cells — Sheets turned everything into strings; JSONB will not). *Answer:* normalise on write
+  to the exact shapes `doGet` returns today, and let the replay harness catch the rest.
+  Expect a pass of "a field that used to read back as `"0"` now reads back as `0`".
+- **Photos/IDs adopted at load time** (work-entry and schedule ids minted by
+  `crypto.randomUUID()` on read) are unchanged: still written by the save that carries the
+  domain. Do not "fix" them here.
+- **Supabase free tier pauses** inactive projects: production must be on a paid plan.
+- **Vendor lock-in** is mild: plain Postgres + a thin TypeScript API; moving hosts is a dump
+  and a redeploy.
+- **Two sources of truth during cutover**: avoided by making the Sheet read-only (revision bump)
+  the moment a tenant flips, never dual-writing.
+
+## Decisions needed from Eric
+
+1. Supabase (recommended) vs Cloudflare Workers + D1.
+2. One shared database (recommended) vs a project per school.
+3. Is losing spreadsheet-style editing acceptable if a nightly Sheet/Excel backup remains?
+4. Paid tier from the start (~$25/month flat) — needed for backups and no auto-pause.
+
+## Phase 2 (for later, not designed here)
+
+Per-record writes: `persist()` sends only changed records; the revision domains become
+per-record versions; conflicts shrink from "anyone saved any asset" to "someone saved THIS
+asset". Large (touches every save site) and optional once Phase 1 has removed the reliability
+problem.
