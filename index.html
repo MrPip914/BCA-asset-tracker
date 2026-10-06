@@ -4085,7 +4085,7 @@ const FRONTEND_SCRIPT_VERSION = "v51";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-04.4";
+const APP_VERSION = "2026-10-06.1";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -8403,9 +8403,26 @@ function AssetTracker() {
     setShowAdd(true);
   }
 
+  // The floor plan room picker's "+": opens the add form on a Room whose Parent
+  // is the plan's own place, and remembers which shape to link the new room to
+  // when it is saved (see saveDraft). Parent goes through scopedParentFor, so it
+  // stays blank rather than illegal if the plan's owner cannot hold a Room.
+  const [pendingSpaceLink, setPendingSpaceLink] = useState(null);
+  function startAddRoomForSpace(ownerId, shapeId) {
+    startAdd(ownerId);
+    setDraft(d => ({
+      ...d,
+      type: "Room",
+      tag: fieldAppliesTo("tag", "Room") ? d.tag : "",
+      parentId: scopedParentFor("Room", ownerId, assets),
+    }));
+    setPendingSpaceLink({ ownerId, shapeId });
+  }
+
   function cancelAdd() {
     setShowAdd(false);
     setDraft({});
+    setPendingSpaceLink(null);
   }
 
   // Every generic field on the form, checked against its column's data type.
@@ -8504,10 +8521,25 @@ function AssetTracker() {
       if (!(named.name || "").trim()) named.name = suggestedNameFor(named, assets, typesList);
       // `tag` last, so the asset stores the trimmed value validated above rather
       // than the raw draft string.
+      // A room created from the floor plan picker is linked to its shape in the
+      // SAME save, so the room and the link land or fail together.
+      let nextAssets = [...assets, { comments: [], changes: [], allocations: [], ...named }];
+      const auditEntries = [createdEntry];
+      const pending = pendingSpaceLink;
+      const linkOwner = pending ? assets.find(a => a.id === pending.ownerId) : null;
+      if (linkOwner) {
+        const links = (linkOwner.floorPlanLinks || []).filter(l => l.shapeId !== pending.shapeId)
+          .concat([{ shapeId: pending.shapeId, roomId: named.id, at: new Date().toISOString(), by: currentUser || "" }]);
+        nextAssets = nextAssets.map(a => (a.id === linkOwner.id ? { ...a, floorPlanLinks: links } : a));
+        auditEntries.push({
+          at: new Date().toISOString(), by: currentUser || "", assetLabel: linkOwner.id, assetType: linkOwner.type,
+          action: "space_linked", field: pending.shapeId, to: nameOf(named),
+        });
+      }
       await persist(
-        [...assets, { comments: [], changes: [], allocations: [], ...named }],
+        nextAssets,
         {
-          auditLog: logAudit([createdEntry]), nextAssetNumber: advanceAssetNumber(tag),
+          auditLog: logAudit(auditEntries), nextAssetNumber: advanceAssetNumber(tag),
           // No assetId: a rejected add is rolled back, so there is no asset left
           // to link to. The draft is the whole of what is recoverable, and
           // re-opening the add form with it is exactly the retype it saves.
@@ -13947,6 +13979,7 @@ function AssetTracker() {
                 uploadError={floorPlanUploadError}
                 onUploadPlan={(file, oldSpaces) => uploadFloorPlanSvg(selectedAsset.id, file, oldSpaces)}
                 onSaveLink={(shapeId, roomId) => saveSpaceLink(selectedAsset.id, shapeId, roomId)}
+                onCreateRoom={shapeId => startAddRoomForSpace(selectedAsset.id, shapeId)}
                 onSaveGroup={draft => saveSpaceGroup(selectedAsset.id, draft)}
                 onSaveWall={draft => saveWall(selectedAsset.id, draft)}
                 onUnlinkWall={wallId => unlinkWall(selectedAsset.id, wallId)}
@@ -13957,6 +13990,13 @@ function AssetTracker() {
                 onNavigateToPlan={navigateFloorPlanTo}
                 menuSlot={floorPlanTabMenuSlot}
               />
+              {showAdd && pendingSpaceLink && (
+                <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20, padding: 16 }}>
+                  <div style={{ width: "100%", maxWidth: 760, maxHeight: "90vh", overflowY: "auto", borderRadius: 14 }}>
+                    {renderAddForm()}
+                  </div>
+                </div>
+              )}
             </>
           )}
 
@@ -16113,6 +16153,7 @@ function AssetTracker() {
           uploadError={floorPlanUploadError}
           onUploadPlan={(file, oldSpaces) => uploadFloorPlanSvg(scopeId, file, oldSpaces)}
           onSaveLink={(shapeId, roomId) => saveSpaceLink(scopeId, shapeId, roomId)}
+          onCreateRoom={shapeId => startAddRoomForSpace(scopeId, shapeId)}
           onSaveGroup={draft => saveSpaceGroup(scopeId, draft)}
           onSaveWall={draft => saveWall(scopeId, draft)}
           onUnlinkWall={wallId => unlinkWall(scopeId, wallId)}
@@ -16734,7 +16775,7 @@ function RoomField({ value, onChange, assets, label = "Room", hideLabel, exclude
 // assign" on a floor plan that's mostly linked already. The room currently on
 // THIS shape is never excluded by its own link, so re-opening the picker to
 // change or clear it always shows the current choice.
-function SpaceRoomPickerField({ shapeId, value, onChange, assets, floorPlanLinks, ownerAsset, onClose }) {
+function SpaceRoomPickerField({ shapeId, value, onChange, assets, floorPlanLinks, ownerAsset, onClose, onCreateRoom }) {
   const all = assets || [];
   // Scoped to the floor plan's own owning asset (a Building, or a Room one
   // level up from a sub-floor) -- otherwise this drilled through the WHOLE
@@ -16764,6 +16805,12 @@ function SpaceRoomPickerField({ shapeId, value, onChange, assets, floorPlanLinks
       excluded={excluded}
       noneLabel="Not linked"
       searchable
+      headerAction={onCreateRoom && (
+        <button type="button" onClick={onCreateRoom} aria-label="Create a new room" title="Create a new room" className="icon-btn"
+          style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.brand, display: "flex" }}>
+          <Plus size={18} />
+        </button>
+      )}
       value={value || ""}
       onChange={onChange}
       onClose={onClose}
@@ -17001,6 +17048,9 @@ function HierarchyBrowserModal({
   // teaching this component a floor-plan-specific concept of its own.
   filterNote,
   searchable,
+  // Optional: a node shown beside the close button (the floor plan room
+  // picker's "create a new room" plus). undefined for every other caller.
+  headerAction,
   // Optional: where to open when nothing is selected yet -- inside this asset if
   // it has anything in it, else beside it. Used by the map Options choosers so
   // they open on the location being configured.
@@ -17105,7 +17155,10 @@ function HierarchyBrowserModal({
       <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 380, maxHeight: "72vh", display: "flex", flexDirection: "column" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>{title}</div>
-          <button onClick={onClose} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+          <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+            {headerAction}
+            <button onClick={onClose} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+          </div>
         </div>
 
         {/* Says what you're looking for, which matters most at the top level,
@@ -20143,7 +20196,7 @@ function MapOptionsOnlyMenu({ canEdit, asset, assets, menuSlot, onSaveMapOptions
 // (see its own comment: "a Room's floor plan alongside a Building's").
 function MapTabContent({
   canEdit, assets, typesList, scopeAsset,
-  uploadBusy, uploadError, onUploadPlan, onSaveLink, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveMapOptions,
+  uploadBusy, uploadError, onUploadPlan, onSaveLink, onCreateRoom, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveMapOptions,
   focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange,
 }) {
   if (!scopeAsset) {
@@ -20175,6 +20228,7 @@ function MapTabContent({
       uploadError={uploadError}
       onUploadPlan={onUploadPlan}
       onSaveLink={onSaveLink}
+      onCreateRoom={onCreateRoom}
       onSaveGroup={onSaveGroup}
       onDeleteGroup={onDeleteGroup}
       onSaveWall={onSaveWall}
@@ -20216,7 +20270,7 @@ function MapTabContent({
 function FloorPlanTabContent({
   canEdit, selectedAsset, assets, typesList,
   uploadBusy, uploadError, onUploadPlan,
-  onSaveLink, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveMapOptions,
+  onSaveLink, onCreateRoom, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveMapOptions,
   focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange,
 }) {
   const rawPlan = useFloorPlanSvg(selectedAsset.floorPlanUrl);
@@ -21629,6 +21683,7 @@ function FloorPlanTabContent({
           floorPlanLinks={links}
           ownerAsset={selectedAsset}
           onClose={() => setPickerShapeId(null)}
+          onCreateRoom={canEdit && onCreateRoom ? () => { const id = pickerShapeId; setPickerShapeId(null); onCreateRoom(id); } : undefined}
         />
       )}
 
