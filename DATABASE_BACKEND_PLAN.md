@@ -286,9 +286,9 @@ for the free tier; Pro's 7 daily backups and no-pause guarantee are what removes
 
 ## Decisions needed from Eric
 
-1. Supabase (recommended) vs Cloudflare Workers + D1.
+1. ~~Supabase vs Cloudflare Workers + D1~~ — DECIDED 2026-10-06: Supabase.
 2. ~~One shared database vs a project per school~~ — DECIDED: shared (see Tenancy).
-3. Is losing spreadsheet-style editing acceptable if a nightly Sheet/Excel backup remains?
+3. ~~Losing spreadsheet-style editing~~ — DECIDED 2026-10-06: acceptable. The nightly export remains the only Sheet-like artifact.
 4. ~~Paid tier from the start~~ — DECIDED: free tier for now, with the safeguards in "Running on the free tier".
 
 ## Phase 2 (for later, not designed here)
