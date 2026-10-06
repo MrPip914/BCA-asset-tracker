@@ -176,6 +176,68 @@ code.
   a downloadable file/Sheet. Version history was the project's only undo; this replaces it,
   and PITR is the upgrade if wanted.
 
+## Running on the free tier (decided 2026-10-06)
+
+Production starts on Supabase's FREE plan. Verified terms (supabase.com/pricing and
+/docs/guides/platform/free-project-pausing, 2026-10-06): paused after ~7 days of low
+activity; a few database requests a day keep it awake and API calls count; a warning email
+goes out about a week before; restorable from the dashboard for up to a year (an older
+changelog says 90 days -- treat 90 as the floor); **no backups at all**; 500 MB database, 5 GB
+egress, 500k function calls, 2 active projects (dev + prod, nothing spare for staging).
+Everything below exists to make that safe. None of it is optional.
+
+1. **Keep-alive.** A scheduled job (GitHub Actions cron, every 12 hours) calls a `/health`
+   endpoint that runs a real `SELECT` against the database -- it must touch the DB, not just
+   the function, since the rule is DATABASE activity. A failed ping fails the workflow, and
+   GitHub emails the repo owner on a failed run. Set the cron to a time that is not the hour.
+2. **Nightly export, which is the ONLY backup.** A cron job dumps every tenant to a file
+   (`pg_dump` plus a per-tenant JSON export in the importer's own format, so a single school
+   can be restored alone). **The repo is public, so the dump is never committed or left as a
+   public artifact**: it is encrypted (age, public key in the repo, private key held by Eric
+   offline) and uploaded to storage that is not the Supabase project -- Cloudflare R2's free
+   tier or a private repo. Keep 30 dailies and 12 weeklies. A backup in the same project it
+   protects is not a backup.
+3. **A restore drill, automated.** Monthly, CI restores the newest export into a throwaway
+   Postgres and checks row counts and a checksum per tenant against the live database. An
+   export that has never been restored is a hope, and this is the single check that stops
+   a silently failing export from being discovered on the worst day. The job pages (fails
+   loudly) if the newest export is older than 36 hours.
+4. **The Sheet stays the fallback for every cut-over tenant** -- read-only, untouched, for
+   several months, not weeks. While the project is on free, a school that has moved can be
+   moved BACK by re-pointing `clients.js` and re-importing from the latest export into its
+   Sheet. This is the reason the importer is built to run in both directions.
+5. **Pause runbook (written down, one page).** The warning email goes to the Supabase account
+   owner: make that a monitored address. Resume is a dashboard click and takes minutes. The
+   runbook also says what the app will show meanwhile (the existing "Saved copy" state, writes
+   blocked) and who tells the schools.
+6. **Frontend says what happened.** A paused or unreachable backend currently surfaces as a
+   generic load failure. The API's `/health` and the paused-project error shape get a
+   specific message ("the service is temporarily unavailable") so a pause is not mistaken for
+   a bug in a school's data. Small frontend change; the cached-snapshot behaviour already
+   keeps the inventory readable.
+7. **Spend the 500 MB and 5 GB budgets deliberately.**
+   - Photos and floor plans are in Cloudinary, so the database holds rows only. Watch the
+     audit log, which never shrinks: a monthly size report per table, alert at 70% of 500 MB.
+   - Every load sends the whole inventory, which is what burns egress. Two cheap fixes inside
+     the Phase 1 contract: **gzip the responses**, and let `op:"read"` carry the client's
+     known revisions so the server answers `{ unchanged: true }` with no payload when nothing
+     moved (the snapshot cache already makes this the common case). Measure real payload size
+     per tenant during the dev spike before assuming the budget is fine.
+   - Function calls (500k/month) are one per load or save, so this is the loosest limit.
+8. **The two-project limit is a design constraint.** `dev` and `prod` use both. There is no
+   staging project, so schema migrations are rehearsed against a throwaway local Postgres in
+   CI (the same one the restore drill uses) before they touch `dev`, then `dev`, then `prod`.
+9. **Stay portable so the exit is cheap.** Plain Postgres, standard SQL migrations, no
+   Supabase-only features in the data path (no Realtime, no Storage, no Supabase Auth). Moving
+   to Pro is a billing change with no migration; moving to another host is restore-and-redeploy.
+10. **Upgrade triggers, decided now so they are not argued later.** Move to Pro when ANY of:
+    a second pause happens despite the ping; the restore drill fails; egress passes 60% or
+    storage 70% of the free limit; or a school asks for an uptime/backup commitment.
+
+Residual risk, stated plainly: a missed ping still pauses everyone until someone clicks
+Resume, and between nightly exports up to a day of edits is unprotected. Both are accepted
+for the free tier; Pro's 7 daily backups and no-pause guarantee are what removes them.
+
 ## Rollout
 
 1. **Schema + migrations** in the repo (`db/migrations/`), tested against a throwaway Postgres.
@@ -227,7 +289,7 @@ code.
 1. Supabase (recommended) vs Cloudflare Workers + D1.
 2. ~~One shared database vs a project per school~~ — DECIDED: shared (see Tenancy).
 3. Is losing spreadsheet-style editing acceptable if a nightly Sheet/Excel backup remains?
-4. Paid tier from the start (~$25/month flat) — needed for backups and no auto-pause.
+4. ~~Paid tier from the start~~ — DECIDED: free tier for now, with the safeguards in "Running on the free tier".
 
 ## Phase 2 (for later, not designed here)
 
