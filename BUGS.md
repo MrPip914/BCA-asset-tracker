@@ -61,18 +61,6 @@ tabs against version history. What made one save take six minutes is still unkno
 no stages; per-stage timing (to the Executions log, which survives a kill where the
 Diagnostics tab row would not) is what would say which write hung next time.
 
-### Choosing a type in the Add asset form also opens "Manage asset types"
-**Found:** 2026-09-28, while adding search to the Type picker.
-**Needs a deploy:** no — frontend only.
-**Confirmed:** in Chromium against Sandbox, with and without the search change. Add asset >
-Type > pick any type: the type is set, and the type manager opens on top of the form.
-
-`TypeField` renders its `SelectionModal` inside its `<label>`, and the label's first
-labelable control is the gear (Manage asset types). Picking an option closes the modal
-mid-click; the click then activates the label, which clicks the gear. Same family as the
-`PickerField` entry above (the fix there was `hideLabel`); `ParentField` is built the same
-way but has no control ahead of its trigger, so it is not hit.
-
 ### Choosing an option in a `PickerField` can re-open the picker
 **Found:** 2026-09-28, building the Diagnostics window's time-window picker.
 **Needs a deploy:** no — `index.html` only.
@@ -445,7 +433,24 @@ say when a sign-in attempt fails for a transport reason rather than an auth one.
 
 ---
 
-### Picking a type reopens the type manager behind the picker
+## Fixed
+
+### Choosing a type in the Add asset form also opens "Manage asset types" — fixed 2026-10-07
+**Found:** 2026-09-28, while adding search to the Type picker.
+**Fixed:** 2026-10-07. `TypeField`'s wrapper is a `div` now, so the closing click has no label to
+forward to the gear. Confirmed in Chromium against Sandbox: before, picking Monitor opened the type
+manager over the form; after, it sets the type and nothing else opens.
+**Needed a deploy:** no — frontend only.
+**Confirmed:** in Chromium against Sandbox, with and without the search change. Add asset >
+Type > pick any type: the type is set, and the type manager opens on top of the form.
+
+`TypeField` renders its `SelectionModal` inside its `<label>`, and the label's first
+labelable control is the gear (Manage asset types). Picking an option closes the modal
+mid-click; the click then activates the label, which clicks the gear. Same family as the
+`PickerField` entry above (the fix there was `hideLabel`); `ParentField` is built the same
+way but has no control ahead of its trigger, so it is not hit.
+
+### Picking a type reopens the type manager behind the picker — fixed 2026-10-07
 **Found:** 2026-09-08, while browser-testing the type-name display fix — pre-existing,
 present identically on the commit before that change.
 **Needs a deploy:** no — `index.html` only.
@@ -466,9 +471,8 @@ user is least sure whether their click worked.
 
 **Blocks:** nothing.
 
----
-
-## Fixed
+**Fixed 2026-10-07** with the entry above, which is the same bug: the "only after the manager was
+opened" reading was wrong — the label forwarded the click to the gear on every pick.
 
 ### An add-form draft kept its Asset ID after switching to a type that has none — fixed 2026-09-23
 **Found:** 2026-09-12, while adding a person to test the first/last name work. **Fixed**
