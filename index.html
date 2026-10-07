@@ -4089,7 +4089,7 @@ const FRONTEND_SCRIPT_VERSION = "v51";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-07.5";
+const APP_VERSION = "2026-10-07.6";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -20363,6 +20363,11 @@ function FloorPlanTabContent({
   const [menuOpen, setMenuOpen] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);   // Configure accordion in the menu
   const [showPins, setShowPins] = useState(false);         // Show/hide pins menu toggle (view only, never saved)
+  // The asset "Show on map" landed on. Its pin stays drawn with Show pins off,
+  // since that pin is the whole point of the trip; every other pin still
+  // follows the toggle. Dropped when the plan changes or pins are hidden.
+  const [revealPinId, setRevealPinId] = useState(null);
+  useEffect(() => { setRevealPinId(null); }, [selectedAsset.id]);
   const [optionsOpen, setOptionsOpen] = useState(false); // Options dialog
   const [mapChooser, setMapChooser] = useState(null);    // asset id whose location chooser is showing
   const [selectedPinId, setSelectedPinId] = useState(null); // a pinned asset's info card
@@ -20494,6 +20499,7 @@ function FloorPlanTabContent({
       zoomToBbox({ x: px - side / 2, y: py - side / 2, w: side, h: side }, 0, true, true);
     }
     setSelectedPinId(focusPinId);
+    setRevealPinId(focusPinId);
     setPulsingShapeId("pin:" + focusPinId);
     clearTimeout(pulseTimerRef.current);
     pulseTimerRef.current = setTimeout(() => setPulsingShapeId(null), 3600);
@@ -21518,12 +21524,16 @@ function FloorPlanTabContent({
               );
             });
           })()}
-          {!setupTab && (showPins || placing || focusPinId) && assets.filter(a => !placing || a.id !== placing.assetId).map(a => {
+          {!setupTab && assets.filter(a => !placing || a.id !== placing.assetId).map(a => {
+            if (!(showPins || placing || a.id === focusPinId || a.id === revealPinId)) return null;
             const pin = mapPinOf(a);
             if (!pin || pin.planId !== selectedAsset.id || (a.status || "Active") === "Archived") return null;
             const [px, py] = floorPlanRotatePoint(pin.x, pin.y, rotation);
             const sel = selectedPinId === a.id;
-            const r = (sel ? 10 : 8) * k;
+            const r = (sel ? 13 : 11) * k;
+            // A pin is the asset's own type icon on a disc, not a generic dot.
+            const PinIcon = iconFor(a.type);
+            const s = r * 1.15;
             return (
               <g key={"pin-" + a.id} className="fp-pin" style={{ cursor: "pointer" }}
                 onClick={e => { e.stopPropagation(); setSelectedShapeId(null); setSelectedWallId(null); setSelectedPinId(sel ? null : a.id); }}>
@@ -21531,7 +21541,7 @@ function FloorPlanTabContent({
                   <circle className="fp-pulse" cx={px} cy={py} r={r * 2.2} fill={C.accent} fillOpacity={0.45} />
                 )}
                 <circle cx={px} cy={py} r={r} fill={sel ? C.accent : C.brandDark} stroke="#fff" strokeWidth={2 * k} />
-                <circle cx={px} cy={py} r={r * 0.35} fill="#fff" />
+                <PinIcon x={px - s / 2} y={py - s / 2} size={s} color="#fff" strokeWidth={2.25} style={{ pointerEvents: "none" }} />
                 <title>{nameOf(a, typesList)}</title>
               </g>
             );
@@ -21540,11 +21550,14 @@ function FloorPlanTabContent({
               it reads as unconfirmed beside the stored pins. */}
           {!setupTab && placing && placing.pending && placing.pending.planId === selectedAsset.id && (() => {
             const [px, py] = floorPlanRotatePoint(placing.pending.x, placing.pending.y, rotation);
-            const r = 10 * k;
+            const r = 13 * k;
+            const placingAsset = assets.find(x => x.id === placing.assetId);
+            const PinIcon = iconFor(placingAsset ? placingAsset.type : null);
+            const s = r * 1.15;
             return (
               <g pointerEvents="none">
                 <circle cx={px} cy={py} r={r} fill={C.accent} stroke="#fff" strokeWidth={2 * k} />
-                <circle cx={px} cy={py} r={r * 0.35} fill="#fff" />
+                <PinIcon x={px - s / 2} y={py - s / 2} size={s} color="#fff" strokeWidth={2.25} />
                 <circle cx={px} cy={py} r={r * 1.5} fill="none" stroke={C.accent} strokeWidth={1.5 * k} strokeDasharray={`${4 * k} ${3 * k}`} />
               </g>
             );
@@ -21653,7 +21666,7 @@ function FloorPlanTabContent({
               </button>
               <button
                 type="button"
-                onClick={() => { setMenuOpen(false); setShowPins(v => !v); if (showPins) setSelectedPinId(null); }}
+                onClick={() => { setMenuOpen(false); setShowPins(v => !v); if (showPins) { setSelectedPinId(null); setRevealPinId(null); } }}
                 className="icon-btn"
                 style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
               >
