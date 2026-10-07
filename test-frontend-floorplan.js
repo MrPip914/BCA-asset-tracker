@@ -708,6 +708,18 @@ const { floorPlanShapeMatches } = matchMod.exports;
     /setupTab === "group" && !groupEditingId && groupPick\.size === 0\)\) && openGroupId/.test(src));
 }
 
+// ---- Normal view: a space outside the open group closes the group ----
+{
+  const i = src.indexOf('function onShapeClick(');
+  const body = src.slice(src.indexOf('// Normal view:', i), src.indexOf('function zoomOutOneLevel', i));
+  check('Normal view: tapping a space outside the open group closes that group (it was left open, dimming the new selection)',
+    /if \(!grp && openGroupId\) setOpenGroupId\(null\)/.test(body));
+  const u = src.indexOf('function onUnlinkedShapeClick(');
+  const ubody = src.slice(u, src.indexOf('const fileInputRef', u));
+  check('Normal view: tapping an unlinked ungrouped space also closes the open group',
+    /setOpenGroupId\(null\)/.test(ubody));
+}
+
 // ---- Glide between spaces: the tween, and that only in-plan taps use it ----
 {
   const tw = new Function(
