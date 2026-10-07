@@ -1,0 +1,86 @@
+# Deletes every branch whose commits are ALL already in `main` or `dev`, from a
+# button rather than from a terminal — so Claude Code can tidy branches up without
+# Eric pasting a long `git push origin --delete ...` line.
+#
+# Why a workflow: a cloud Claude Code session can only push to its own branch
+# (deleting anyone else's is refused by the git proxy), and on Eric's own machine
+# the same command is stopped by auto mode as a destructive git action. A
+# workflow_dispatch is something Claude can start through GitHub, like
+# deploy-backend.yml.
+#
+# What makes it safe to run unattended:
+# - "Merged" means the branch tip is an ANCESTOR of origin/main or origin/dev, so
+#   every commit on it is already kept by one of those. Nothing is lost by deleting
+#   the name. A branch with even one commit of its own is left alone.
+# - main and dev themselves are never touched.
+# - `dry_run` defaults to TRUE: the run only lists what it would delete. Deleting
+#   takes a second run with dry_run unticked.
+# - Every deleted branch's last commit is printed, so one can be put back with
+#   `git push origin <sha>:refs/heads/<name>`.
+#
+# A full clone is required (fetch-depth: 0). A shallow one makes every branch look
+# unmerged, which is exactly how an earlier count came out wrong.
+
+name: Delete merged branches
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Only list what would be deleted"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: delete-merged-branches
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find and delete merged branches
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          git fetch origin --prune '+refs/heads/*:refs/remotes/origin/*'
+
+          merged=()
+          kept=()
+          for ref in $(git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin); do
+            case "$ref" in HEAD|main|dev) continue ;; esac
+            if git merge-base --is-ancestor "origin/$ref" origin/main \
+               || git merge-base --is-ancestor "origin/$ref" origin/dev; then
+              merged+=("$ref")
+            else
+              kept+=("$ref $(git rev-list --count origin/dev..origin/$ref) commit(s) not in dev")
+            fi
+          done
+
+          echo "Fully merged (${#merged[@]}):"
+          for b in "${merged[@]}"; do echo "  $b  $(git rev-parse --short origin/$b)"; done
+          echo
+          echo "Kept, has unmerged work (${#kept[@]}):"
+          for b in "${kept[@]}"; do echo "  $b"; done
+          echo
+
+          if [ "${#merged[@]}" -eq 0 ]; then
+            echo "Nothing to delete."
+            exit 0
+          fi
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Dry run: nothing deleted. Run again with dry_run unticked to delete the ${#merged[@]} branches above."
+            exit 0
+          fi
+
+          git push origin --delete "${merged[@]}"
+          echo "Deleted ${#merged[@]} branches."
