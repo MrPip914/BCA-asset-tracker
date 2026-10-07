@@ -100,6 +100,7 @@ import {
   Hammer, Drill, PaintRoller, PaintBucket, Brush, Ruler, PencilRuler,   // Tools & trades
   Boxes, Container, Recycle,   // Storage & waste
   Cog, Flag, Puzzle,   // Other
+  MoreVertical, MapPinOff, Move,   // the Map panel's row action menu (not in the icon catalog)
 } from "lucide-react";
 
 // Starter managed peripherals/users/bulk-item-type lists — empty until the school
@@ -2386,7 +2387,7 @@ function contentsOf(place, assets) {
 // already drawn as shapes, so the list is the secondary answer. The Contents tab
 // keeps locations first and open. The Map panel also names each device by its
 // NAME alone, the way its group card names rooms -- the Contents tab keeps the
-// "Type · Brand" reading.
+// "Type · Brand" reading -- and drops the asset ID from every row.
 // The title of the location card under a floor plan. It IS the way to the
 // location's own page (no separate "Open location" button beside it); with no
 // onOpen it is plain text.
@@ -2401,8 +2402,12 @@ function LocationTitle({ place, typesList, onOpen }) {
   );
 }
 
-function ContentsList({ place, assets, typesList, onOpen, emptyLabel, locationsLast }) {
+// `rowActions` (Map panel only) returns, for one listed asset, the actions its
+// row menu offers -- [{ key, label, icon, onClick, danger }]. A row with none
+// gets no menu button rather than one that opens onto nothing.
+function ContentsList({ place, assets, typesList, onOpen, emptyLabel, locationsLast, rowActions }) {
   const [locationsOpen, setLocationsOpen] = useState(false);
+  const [menuFor, setMenuFor] = useState(null); // id of the row whose action menu is open
   const { contentRooms, contentDevices, contentAllocations, contentsCount } = contentsOf(place, assets);
   if (contentsCount === 0) {
     return (
@@ -2411,6 +2416,49 @@ function ContentsList({ place, assets, typesList, onOpen, emptyLabel, locationsL
       </div>
     );
   }
+  // The Map panel (locationsLast) shows no asset ID: the row already names the
+  // thing, and the ID is a lookup key, not what anyone scans a map list by.
+  const showIds = !locationsLast;
+  // One row: the body opens the asset; a trailing menu button (when there are
+  // actions) sits OUTSIDE the body, since a button cannot hold a button.
+  const row = (a, Icon, text, trailing) => {
+    const actions = rowActions ? rowActions(a) : [];
+    const open = menuFor === a.id && actions.length > 0;
+    return (
+      <div key={a.id} style={{ position: "relative", display: "flex", alignItems: "stretch", border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface }}>
+        <button onClick={() => onOpen(a)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0, border: "none", borderRadius: 10, background: "none", padding: "10px 14px", textAlign: "left" }}>
+          <Icon size={15} style={{ color: C.brand, flexShrink: 0 }} />
+          <span style={{ fontSize: 14, color: C.ink, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{text}</span>
+          {trailing}
+          {actions.length === 0 && <ChevronRight size={14} style={{ color: C.placeholder }} />}
+        </button>
+        {actions.length > 0 && (
+          <button type="button" onClick={() => setMenuFor(open ? null : a.id)} aria-label={`Actions for ${nameOf(a, typesList)}`} aria-expanded={open} className="icon-btn"
+            style={{ display: "flex", alignItems: "center", padding: "0 10px", border: "none", borderRadius: 10, background: "none", color: C.muted }}>
+            <MoreVertical size={16} />
+          </button>
+        )}
+        {open && (
+          <>
+            <div onClick={() => setMenuFor(null)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
+            <div role="menu" style={{ position: "absolute", right: 0, top: "100%", marginTop: 4, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, minWidth: 170, overflow: "hidden", padding: 4 }}>
+              {actions.map(act => {
+                const AIcon = act.icon;
+                return (
+                  <button key={act.key} type="button" role="menuitem" className="icon-btn"
+                    onClick={() => { setMenuFor(null); act.onClick(); }}
+                    style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: act.danger ? C.danger : C.ink, textAlign: "left", borderRadius: 6 }}>
+                    {AIcon && <AIcon size={15} />} {act.label}
+                  </button>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </div>
+    );
+  };
+  const idTag = a => showIds ? <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.accent }}>{a.label}</span> : null;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       {!locationsLast && (<>
@@ -2419,54 +2467,26 @@ function ContentsList({ place, assets, typesList, onOpen, emptyLabel, locationsL
           Locations ({contentRooms.length})
         </div>
       )}
-      {contentRooms.map(r => {
-        const RIcon = iconFor(r.type);
-        return (
-          <button key={r.label} onClick={() => onOpen(r)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
-            <RIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
-            <span style={{ fontSize: 14, color: C.ink, flex: 1 }}>{nameOf(r, typesList)}</span>
-            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.accent }}>{r.label}</span>
-            <ChevronRight size={14} style={{ color: C.placeholder }} />
-          </button>
-        );
-      })}
+      {contentRooms.map(r => row(r, iconFor(r.type), nameOf(r, typesList), idTag(r)))}
       </>)}
       {contentDevices.length > 0 && (
         <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginTop: (!locationsLast && contentRooms.length) ? 10 : 0, marginBottom: 2 }}>
           Devices ({contentDevices.length})
         </div>
       )}
-      {contentDevices.map(d => {
-        const DIcon = iconFor(d.type);
-        return (
-          <button key={d.id} onClick={() => onOpen(d)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
-            <DIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
-            <span style={{ fontSize: 14, color: C.ink, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {locationsLast
-                ? nameOf(d, typesList)
-                : <>{typeNameOf(d.type, typesList)}{d.brand ? ` · ${d.brand}` : ""}{place.type === "Building" && roomNameOf(d, assets) ? ` · ${roomNameOf(d, assets)}` : ""}</>}
-            </span>
-            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.accent }}>{d.label}</span>
-            <ChevronRight size={14} style={{ color: C.placeholder }} />
-          </button>
-        );
-      })}
+      {contentDevices.map(d => row(d, iconFor(d.type),
+        locationsLast
+          ? nameOf(d, typesList)
+          : <>{typeNameOf(d.type, typesList)}{d.brand ? ` · ${d.brand}` : ""}{place.type === "Building" && roomNameOf(d, assets) ? ` · ${roomNameOf(d, assets)}` : ""}</>,
+        idTag(d)))}
       {contentAllocations.length > 0 && (
         <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginTop: ((!locationsLast && contentRooms.length) || contentDevices.length) ? 10 : 0, marginBottom: 2 }}>
           Bulk Items ({contentAllocations.length})
         </div>
       )}
-      {contentAllocations.map(({ bulk, quantity }) => {
-        const BIcon = iconFor(bulk.type);
-        return (
-          <button key={bulk.id} onClick={() => onOpen(bulk)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
-            <BIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
-            <span style={{ fontSize: 14, color: C.ink, flex: 1 }}>{nameOf(bulk, typesList) !== bulk.tag ? nameOf(bulk, typesList) : typeNameOf(bulk.type, typesList)}</span>
-            <span style={{ fontWeight: 600, color: C.brandDark }}>× {quantity}</span>
-            <ChevronRight size={14} style={{ color: C.placeholder }} />
-          </button>
-        );
-      })}
+      {contentAllocations.map(({ bulk, quantity }) => row(bulk, iconFor(bulk.type),
+        nameOf(bulk, typesList) !== bulk.tag ? nameOf(bulk, typesList) : typeNameOf(bulk.type, typesList),
+        <span style={{ fontWeight: 600, color: C.brandDark }}>× {quantity}</span>))}
       {locationsLast && contentRooms.length > 0 && (
         <div style={{ marginTop: (contentDevices.length || contentAllocations.length) ? 10 : 0 }}>
           <button
@@ -2480,17 +2500,7 @@ function ContentsList({ place, assets, typesList, onOpen, emptyLabel, locationsL
           </button>
           {locationsOpen && (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {contentRooms.map(r => {
-                const RIcon = iconFor(r.type);
-                return (
-                  <button key={r.label} onClick={() => onOpen(r)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
-                    <RIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
-                    <span style={{ fontSize: 14, color: C.ink, flex: 1 }}>{nameOf(r, typesList)}</span>
-                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.accent }}>{r.label}</span>
-                    <ChevronRight size={14} style={{ color: C.placeholder }} />
-                  </button>
-                );
-              })}
+              {contentRooms.map(r => row(r, iconFor(r.type), nameOf(r, typesList), idTag(r)))}
             </div>
           )}
         </div>
@@ -4089,7 +4099,7 @@ const FRONTEND_SCRIPT_VERSION = "v51";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-07.6";
+const APP_VERSION = "2026-10-07.7";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -16177,6 +16187,20 @@ function AssetTracker() {
           placing={mapPlacing}
           onPlace={(x, y) => setMapPlacing(p => (p ? { ...p, pending: { planId: scopeId, x, y } } : p))}
           onClearPin={clearMapPlacement}
+          onShowOnMap={drawn => {
+            // Already on the map: no detail page to close, just go to the plan
+            // (if it is another one) and arm the same one-shot focus.
+            if (drawn.ownerId !== scopeId) setMapScope(drawn.ownerId);
+            setMapPlacing(null);
+            setMapFocusShapeId(drawn.shapeId || null);
+            setMapFocusPinId(drawn.pinAssetId || null);
+          }}
+          onStartPlace={assetId => {
+            // Placed on the plan being viewed -- the user is already looking at
+            // where it goes, so this does not jump to the plan it is pinned on.
+            setMapFocusShapeId(null); setMapFocusPinId(null);
+            setMapPlacing({ assetId });
+          }}
           onFocusHandled={() => { setMapFocusShapeId(null); setMapFocusPinId(null); }}
           onOpenAsset={openDetail}
           onNavigateToPlan={navigateFloorPlanTo}
@@ -20211,7 +20235,7 @@ function MapOptionsOnlyMenu({ canEdit, asset, assets, menuSlot, onSaveMapOptions
 function MapTabContent({
   canEdit, assets, typesList, scopeAsset,
   uploadBusy, uploadError, onUploadPlan, onSaveLink, onCreateRoom, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveMapOptions,
-  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange,
+  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onShowOnMap, onStartPlace, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange,
 }) {
   if (!scopeAsset) {
     return (
@@ -20253,6 +20277,8 @@ function MapTabContent({
       placing={placing}
       onPlace={onPlace}
       onClearPin={onClearPin}
+      onShowOnMap={onShowOnMap}
+      onStartPlace={onStartPlace}
       focusShapeId={focusShapeId}
       selectShapeId={selectShapeId}
       onSelectHandled={onSelectHandled}
@@ -20285,7 +20311,7 @@ function FloorPlanTabContent({
   canEdit, selectedAsset, assets, typesList,
   uploadBusy, uploadError, onUploadPlan,
   onSaveLink, onCreateRoom, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveMapOptions,
-  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange,
+  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onShowOnMap, onStartPlace, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange,
 }) {
   const rawPlan = useFloorPlanSvg(selectedAsset.floorPlanUrl);
   // Rotation is stored on the asset (floorPlanRotation, quarter turns, blank = 0)
@@ -20371,6 +20397,43 @@ function FloorPlanTabContent({
   const [optionsOpen, setOptionsOpen] = useState(false); // Options dialog
   const [mapChooser, setMapChooser] = useState(null);    // asset id whose location chooser is showing
   const [selectedPinId, setSelectedPinId] = useState(null); // a pinned asset's info card
+
+  // The row menu on the panel's asset list: show it on the map, and place, move
+  // or remove its pin -- the same choices the asset's own "On the map" card
+  // offers, without leaving the map. Both map-moving actions bring the plan
+  // back into view first, since the list sits below it and on a phone the plan
+  // has scrolled away by the time a row is reached.
+  const revealStage = () => {
+    const el = stageElRef.current;
+    if (el && el.scrollIntoView) el.scrollIntoView({ block: "center", behavior: "smooth" });
+  };
+  const mapRowActions = a => {
+    const acts = [];
+    const pin = mapPinOf(a);
+    const pinPlan = pin ? assets.find(x => x.id === pin.planId && x.floorPlanUrl) : null;
+    const drawn = drawnOnMapFor(isPlaceType(a.type) ? a.id : a.parentId, assets);
+    if (onShowOnMap && (pinPlan || drawn)) {
+      acts.push({ key: "show", label: "Show on map", icon: MapPin, onClick: () => {
+        revealStage();
+        onShowOnMap(pinPlan ? { ownerId: pinPlan.id, pinAssetId: a.id } : drawn);
+      } });
+    }
+    const pinnable = canEdit && typeCanBePinned(a.type) && (a.status || "Active") !== "Archived";
+    if (pinnable && onStartPlace) {
+      acts.push({ key: "place", label: pin ? "Move pin" : "Place pin", icon: pin ? Move : Plus, onClick: () => {
+        revealStage();
+        setSelectedPinId(null);
+        onStartPlace(a.id);
+      } });
+    }
+    if (canEdit && pin && onClearPin) {
+      acts.push({ key: "remove", label: "Remove pin", icon: MapPinOff, danger: true, onClick: () => {
+        if (selectedPinId === a.id) setSelectedPinId(null);
+        onClearPin(a.id);
+      } });
+    }
+    return acts;
+  };
 
   const applyVB = () => {
     if (svgElRef.current) {
@@ -21008,7 +21071,7 @@ function FloorPlanTabContent({
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
             <LocationTitle place={selectedAsset} typesList={typesList} onOpen={onOpenAsset} />
           </div>
-          <ContentsList place={selectedAsset} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast />
+          <ContentsList place={selectedAsset} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast rowActions={mapRowActions} />
         </div>
       </div>
     );
@@ -21779,7 +21842,7 @@ function FloorPlanTabContent({
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
               <LocationTitle place={place} typesList={typesList} onOpen={onOpenAsset} />
             </div>
-            <ContentsList place={place} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast />
+            <ContentsList place={place} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast rowActions={mapRowActions} />
           </div>
         );
       })()}
@@ -21827,7 +21890,7 @@ function FloorPlanTabContent({
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
             <LocationTitle place={selectedAsset} typesList={typesList} onOpen={onOpenAsset} />
           </div>
-          <ContentsList place={selectedAsset} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast />
+          <ContentsList place={selectedAsset} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast rowActions={mapRowActions} />
         </div>
       )}
       {openGroupId && !selectedShapeId && !setupTab && (() => {

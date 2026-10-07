@@ -3556,6 +3556,24 @@ SEGMENTS of a plan space's outline, selected on the map as ONE thing the way a R
   The tab itself — picking, saving, reopening, removing, show-on-map — was driven in Chromium
   against Sandbox.
 
+### The Map panel's asset list: no IDs, and a row menu (2026-10-07)
+
+The list under the plan (`ContentsList` with `locationsLast`) shows **no asset ID**, and
+each row carries a **⋮ menu** (`rowActions`, built by `mapRowActions` in
+`FloorPlanTabContent`): **Show on map**, **Place pin** / **Move pin**, **Remove pin** — the
+"On the map" card's choices without leaving the map. Frontend only.
+- **The row body still opens the asset**; the menu button sits OUTSIDE it, since a button
+  cannot hold a button. A row with no actions gets no menu button (and keeps its chevron).
+- **Show on map from the map does NOT go through `showOnMap`**, which closes a detail page
+  that is not open; it changes plan only if the target is on another one and arms the same
+  one-shot focus. Placement starts on the plan being VIEWED, not the one the pin is on —
+  the user is already looking at where it goes.
+- Both scroll the plan back into view first: on a phone the list is below it.
+- Pin actions are editors-only and only for types with "Can be pinned"; an archived asset
+  is not offered placement. The Contents tab is unchanged (IDs, no menu).
+- Covered by `test-frontend-map-row-menu.js`; the menu, Show on map, Move pin and Remove
+  pin were driven in Chromium against Sandbox.
+
 ### The floor plan SVG upload: image route, and NO signed allowed_formats (2026-10-04, backend v51)
 
 The upload started failing with "The file host refused the upload: Raw file format svg not
