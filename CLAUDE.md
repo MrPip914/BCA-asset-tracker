@@ -2877,6 +2877,30 @@ that were rejected.
   Eric's call. The Changes sheet's resolved *Maintenance task* column is
   untouched.
 
+**A scheduled task can repeat on a CUSTOM rule (backend v52, 2026-10-07).** The Frequency
+picker keeps its five presets and adds **Custom…**, which offers "every N days / weeks /
+months / years" or "the first/second/third/fourth/last <weekday>, every N months".
+- **One new column, `recurrence`**, holding a short rule string (`interval:2:week`,
+  `weekday:1:1:1` = ordinal:weekday:everyMonths, ordinal -1 = last, weekday 0 = Sunday).
+  **A preset leaves it BLANK, and blank means the pre-v52 arithmetic exactly** —
+  `lastPerformed + frequencyDays` — so every existing task is unchanged, Monthly's 30 days
+  included. An unreadable rule (a hand edit) falls back the same way rather than breaking.
+- **`frequencyLabel` is still written, as the rule's own description** ("Every 6 weeks",
+  "First Monday of every month"), so the table, the Frequency filter and the audit trail
+  needed no change; `frequencyDays` carries an approximate count so an older build lands
+  near the right date. `frequencyFromDraft` is the one function both save paths use.
+- **Custom months and years are CALENDAR months**, clamped (Jan 31 + 1 month = Feb 28),
+  unlike the presets' 30/365 days. Deliberately not applied to the presets.
+- **A weekday rule credits a completion to the occurrence NEAREST it**, then steps that
+  occurrence's month forward. So a "first Monday" job done the Friday before counts for that
+  Monday, and a "last Friday" job done the following Monday still counts for the month it
+  was owed — rather than skipping a month or asking for the same job twice.
+- A never-performed custom task is "Not yet done" with no date, like a preset one.
+- **Supabase**: tasks are a `data jsonb` row, so `recurrence` rides along with no schema
+  change.
+- Covered by `test-frontend-recurrence.js`; `MOCK_SNAPSHOT`'s BCA0086 carries one rule of
+  each shape beside its preset tasks.
+
 **A completion is a change-log entry, linked by `change.maintenanceId` (v34).** Marking a
 task done and logging a change used to be two unconnected acts: "Mark done today" stamped
 `lastPerformed` and wrote one audit row, so what a service visit actually cost, who did it

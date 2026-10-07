@@ -50,7 +50,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v51";
+const SCRIPT_VERSION = "v52";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -361,9 +361,13 @@ const CHANGE_FIELDS = ["assetLabel", "id", "changeType", "vendor", "cost", "note
 // `dueDate` is the one-off's own due date, and a scheduled row leaves it blank:
 // a schedule's due date is DERIVED from lastPerformed + frequencyDays and must
 // stay derived, or the two disagree the first time a completion is back-dated.
+//
+// `recurrence` (v52) is a custom repeat rule -- "interval:2:week",
+// "weekday:1:1:1" (first Monday, every month). Blank on a preset task, and
+// opaque here: only the frontend reads it.
 const MAINTENANCE_FIELDS = [
   "assetLabel", "id", "kind", "task", "notes", "frequencyLabel", "frequencyDays",
-  "dueDate", "lastPerformed", "owner", "at", "by",
+  "recurrence", "dueDate", "lastPerformed", "owner", "at", "by",
 ];
 
 // AuditLog's columns. `related` is LAST and any future column must be too: this
@@ -1617,6 +1621,7 @@ function handleAuthenticatedRead_(body, e) {
         maintenanceItems: maintenanceRows.filter(m => m.assetLabel === label).map(m => ({
           id: m.id || "", kind: m.kind || "", task: m.task, notes: m.notes || "",
           frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
+          recurrence: m.recurrence || "",
           dueDate: m.dueDate || "",
           lastPerformed: m.lastPerformed, owner: m.owner, at: m.at, by: m.by,
         })),
@@ -2324,6 +2329,7 @@ function doPost(e) {
         (a.maintenanceItems || []).forEach(m => maintenanceRows.push({
           assetLabel: key, id: m.id || "", kind: m.kind || "", task: m.task, notes: m.notes || "",
           frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays,
+          recurrence: m.recurrence || "",
           dueDate: m.dueDate || "",
           lastPerformed: m.lastPerformed || "", owner: m.owner || "", at: m.at, by: m.by || "",
         }));
