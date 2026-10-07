@@ -100,6 +100,7 @@ import {
   Hammer, Drill, PaintRoller, PaintBucket, Brush, Ruler, PencilRuler,   // Tools & trades
   Boxes, Container, Recycle,   // Storage & waste
   Cog, Flag, Puzzle,   // Other
+  MoreVertical, MapPinOff, Move,   // the Map panel's row action menu (not in the icon catalog)
 } from "lucide-react";
 
 // Starter managed peripherals/users/bulk-item-type lists — empty until the school
@@ -1120,6 +1121,158 @@ const MAINTENANCE_FREQUENCIES = [
   { label: "Annually", days: 365 },
 ];
 
+// ---------- CUSTOM REPEAT RULES (backend v52) ----------
+// The presets above cover most schedules; "Custom…" in the Frequency picker
+// covers the rest, as one of two rule shapes:
+//
+//   interval  -- every N days / weeks / months / years from the last time it
+//                was done. Months and years are CALENDAR months (Jan 31 + 1
+//                month = Feb 28), not the 30-day approximation the presets use.
+//   weekday   -- the Nth (or last) <weekday> of the month, every N months:
+//                "First Monday of every month", "Last Friday, every 3 months".
+//
+// Stored as one short string in the task's `recurrence` column --
+// "interval:2:week", "weekday:1:1:1" (ordinal:weekday:everyMonths, ordinal -1 =
+// last, weekday 0 = Sunday). A preset task leaves it BLANK, which is what keeps
+// every task saved before v52 computing its due date exactly as it always did.
+// frequencyLabel is still written (the rule's own description) so the table,
+// the Frequency filter and the audit trail need no change, and frequencyDays
+// carries an approximate day count so a build too old to read the rule still
+// lands near the right date rather than nowhere.
+const MAINTENANCE_FREQUENCY_CUSTOM = "Custom…";
+const RECURRENCE_UNITS = [
+  { key: "day", one: "day", many: "days", days: 1 },
+  { key: "week", one: "week", many: "weeks", days: 7 },
+  { key: "month", one: "month", many: "months", days: 30 },
+  { key: "year", one: "year", many: "years", days: 365 },
+];
+const RECURRENCE_ORDINALS = [
+  { key: "1", label: "First" },
+  { key: "2", label: "Second" },
+  { key: "3", label: "Third" },
+  { key: "4", label: "Fourth" },
+  { key: "-1", label: "Last" },
+];
+const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+// What the form's custom controls start on. Strings throughout, because they
+// are bound to inputs and pickers.
+const DEFAULT_RECURRENCE_DRAFT = { mode: "interval", every: "2", unit: "week", ordinal: "1", weekday: "1", months: "1" };
+const RECURRENCE_MAX_EVERY = 999;
+
+function recurrenceCount(v) {
+  const n = Number(String(v == null ? "" : v).trim());
+  return Number.isInteger(n) && n >= 1 && n <= RECURRENCE_MAX_EVERY ? n : null;
+}
+// A stored string -> a rule, or null for blank or anything malformed (a hand
+// edit). Null falls back to the preset day count, so a bad cell degrades to the
+// old behaviour rather than breaking the row.
+function parseRecurrence(str) {
+  const parts = String(str || "").trim().split(":");
+  if (parts[0] === "interval" && parts.length === 3) {
+    const every = recurrenceCount(parts[1]);
+    if (!every || !RECURRENCE_UNITS.some(u => u.key === parts[2])) return null;
+    return { type: "interval", every, unit: parts[2] };
+  }
+  if (parts[0] === "weekday" && parts.length === 4) {
+    const ordinal = Number(parts[1]);
+    const weekday = Number(parts[2]);
+    const every = recurrenceCount(parts[3]);
+    if (!RECURRENCE_ORDINALS.some(o => Number(o.key) === ordinal)) return null;
+    if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6 || !every) return null;
+    return { type: "weekday", ordinal, weekday, every };
+  }
+  return null;
+}
+function formatRecurrence(rule) {
+  if (!rule) return "";
+  return rule.type === "weekday"
+    ? `weekday:${rule.ordinal}:${rule.weekday}:${rule.every}`
+    : `interval:${rule.every}:${rule.unit}`;
+}
+function describeRecurrence(rule) {
+  if (!rule) return "";
+  if (rule.type === "weekday") {
+    const ord = (RECURRENCE_ORDINALS.find(o => Number(o.key) === rule.ordinal) || {}).label || "";
+    const day = WEEKDAY_NAMES[rule.weekday] || "";
+    return rule.every === 1 ? `${ord} ${day} of every month` : `${ord} ${day}, every ${rule.every} months`;
+  }
+  const unit = RECURRENCE_UNITS.find(u => u.key === rule.unit);
+  return rule.every === 1 ? `Every ${unit.one}` : `Every ${rule.every} ${unit.many}`;
+}
+function recurrenceApproxDays(rule) {
+  if (!rule) return "";
+  if (rule.type === "weekday") return 30 * rule.every;
+  return RECURRENCE_UNITS.find(u => u.key === rule.unit).days * rule.every;
+}
+// The form's custom controls -> a rule, or null while they don't describe one.
+function recurrenceFromDraft(d) {
+  const r = d || DEFAULT_RECURRENCE_DRAFT;
+  if (r.mode === "weekday") {
+    return parseRecurrence(`weekday:${r.ordinal}:${r.weekday}:${String(r.months).trim()}`);
+  }
+  return parseRecurrence(`interval:${String(r.every).trim()}:${r.unit}`);
+}
+function recurrenceToDraft(rule) {
+  if (!rule) return { ...DEFAULT_RECURRENCE_DRAFT };
+  return rule.type === "weekday"
+    ? { ...DEFAULT_RECURRENCE_DRAFT, mode: "weekday", ordinal: String(rule.ordinal), weekday: String(rule.weekday), months: String(rule.every) }
+    : { ...DEFAULT_RECURRENCE_DRAFT, mode: "interval", every: String(rule.every), unit: rule.unit };
+}
+// What a task draft's Frequency choice writes: the label, the day count and the
+// rule string. One function for the add and edit paths so they cannot disagree.
+// A custom choice that doesn't describe a rule yet returns null -- Save is
+// disabled on that, so this never silently falls back to a preset.
+function frequencyFromDraft(draft) {
+  if (draft && draft.frequency === MAINTENANCE_FREQUENCY_CUSTOM) {
+    const rule = recurrenceFromDraft(draft.recurrence);
+    if (!rule) return null;
+    return { label: describeRecurrence(rule), days: recurrenceApproxDays(rule), recurrence: formatRecurrence(rule) };
+  }
+  const preset = MAINTENANCE_FREQUENCIES.find(f => f.label === (draft && draft.frequency)) || MAINTENANCE_FREQUENCIES[1];
+  return { label: preset.label, days: preset.days, recurrence: "" };
+}
+// Calendar-month arithmetic, clamping to the month's last day.
+function addCalendarMonths(date, n) {
+  const y = date.getFullYear();
+  const m = date.getMonth() + n;
+  const lastDay = new Date(y, m + 1, 0).getDate();
+  return new Date(y, m, Math.min(date.getDate(), lastDay));
+}
+// The Nth (1-4) or last (-1) given weekday of a month. `month` may run past 11
+// or below 0; Date normalises it.
+function nthWeekdayOfMonth(year, month, ordinal, weekday) {
+  if (ordinal === -1) {
+    const last = new Date(year, month + 1, 0);
+    return new Date(last.getFullYear(), last.getMonth(), last.getDate() - ((last.getDay() - weekday + 7) % 7));
+  }
+  const first = new Date(year, month, 1);
+  const offset = (weekday - first.getDay() + 7) % 7;
+  return new Date(first.getFullYear(), first.getMonth(), 1 + offset + (ordinal - 1) * 7);
+}
+// When a rule next falls due, counting from the date it was last done.
+//
+// A weekday rule treats a completion as satisfying the occurrence NEAREST to it,
+// then steps that occurrence's month forward by the rule's interval. So "first
+// Monday" done the Friday before it counts for that Monday, and "last Friday"
+// done the following Monday still counts for the month it was owed -- rather
+// than either one skipping a month or demanding the same job twice.
+function nextRecurrenceDate(rule, last) {
+  if (!rule || !last || isNaN(last.getTime())) return null;
+  if (rule.type === "weekday") {
+    let best = null;
+    for (let dm = -1; dm <= 1; dm++) {
+      const occ = nthWeekdayOfMonth(last.getFullYear(), last.getMonth() + dm, rule.ordinal, rule.weekday);
+      if (!best || Math.abs(occ - last) < Math.abs(best - last)) best = occ;
+    }
+    return nthWeekdayOfMonth(best.getFullYear(), best.getMonth() + rule.every, rule.ordinal, rule.weekday);
+  }
+  if (rule.unit === "day" || rule.unit === "week") {
+    const days = rule.unit === "week" ? rule.every * 7 : rule.every;
+    return new Date(last.getFullYear(), last.getMonth(), last.getDate() + days);
+  }
+  return addCalendarMonths(last, rule.unit === "year" ? rule.every * 12 : rule.every);
+}
+
 // A field key named in ANY registry entry's onlyFields is restricted app-wide:
 // only the types that name it get it. Derived from the registry rather than
 // declared as a second parallel list, so introducing a type-specific field is a
@@ -1795,9 +1948,13 @@ function taskDueDate(item) {
     const due = new Date(d + "T00:00:00");
     return isNaN(due.getTime()) ? null : due;
   }
-  if (!item.lastPerformed || !item.frequencyDays) return null;
+  // A custom rule (v52) wins over the day count; a blank or unreadable one
+  // leaves the pre-v52 arithmetic exactly as it was.
+  const rule = parseRecurrence(item.recurrence);
+  if (!item.lastPerformed || (!rule && !item.frequencyDays)) return null;
   const last = new Date(dateOnly(item.lastPerformed) + "T00:00:00");
   if (isNaN(last.getTime())) return null;
+  if (rule) return nextRecurrenceDate(rule, last);
   return new Date(last.getTime() + item.frequencyDays * 86400000);
 }
 // "overdue", "due-soon" (within 14 days) and "ok" mean the same thing for both
@@ -2384,7 +2541,9 @@ function contentsOf(place, assets) {
 // `locationsLast` is the Map panel's layout: devices first, then bulk items, then
 // the locations inside, COLLAPSED until opened -- on the map the locations are
 // already drawn as shapes, so the list is the secondary answer. The Contents tab
-// keeps locations first and open.
+// keeps locations first and open. The Map panel also names each device by its
+// NAME alone, the way its group card names rooms -- the Contents tab keeps the
+// "Type · Brand" reading -- and drops the asset ID from every row.
 // The title of the location card under a floor plan. It IS the way to the
 // location's own page (no separate "Open location" button beside it); with no
 // onOpen it is plain text.
@@ -2399,8 +2558,12 @@ function LocationTitle({ place, typesList, onOpen }) {
   );
 }
 
-function ContentsList({ place, assets, typesList, onOpen, emptyLabel, locationsLast }) {
+// `rowActions` (Map panel only) returns, for one listed asset, the actions its
+// row menu offers -- [{ key, label, icon, onClick, danger }]. A row with none
+// gets no menu button rather than one that opens onto nothing.
+function ContentsList({ place, assets, typesList, onOpen, emptyLabel, locationsLast, rowActions }) {
   const [locationsOpen, setLocationsOpen] = useState(false);
+  const [menuFor, setMenuFor] = useState(null); // id of the row whose action menu is open
   const { contentRooms, contentDevices, contentAllocations, contentsCount } = contentsOf(place, assets);
   if (contentsCount === 0) {
     return (
@@ -2409,6 +2572,49 @@ function ContentsList({ place, assets, typesList, onOpen, emptyLabel, locationsL
       </div>
     );
   }
+  // The Map panel (locationsLast) shows no asset ID: the row already names the
+  // thing, and the ID is a lookup key, not what anyone scans a map list by.
+  const showIds = !locationsLast;
+  // One row: the body opens the asset; a trailing menu button (when there are
+  // actions) sits OUTSIDE the body, since a button cannot hold a button.
+  const row = (a, Icon, text, trailing) => {
+    const actions = rowActions ? rowActions(a) : [];
+    const open = menuFor === a.id && actions.length > 0;
+    return (
+      <div key={a.id} style={{ position: "relative", display: "flex", alignItems: "stretch", border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface }}>
+        <button onClick={() => onOpen(a)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0, border: "none", borderRadius: 10, background: "none", padding: "10px 14px", textAlign: "left" }}>
+          <Icon size={15} style={{ color: C.brand, flexShrink: 0 }} />
+          <span style={{ fontSize: 14, color: C.ink, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{text}</span>
+          {trailing}
+          {actions.length === 0 && <ChevronRight size={14} style={{ color: C.placeholder }} />}
+        </button>
+        {actions.length > 0 && (
+          <button type="button" onClick={() => setMenuFor(open ? null : a.id)} aria-label={`Actions for ${nameOf(a, typesList)}`} aria-expanded={open} className="icon-btn"
+            style={{ display: "flex", alignItems: "center", padding: "0 10px", border: "none", borderRadius: 10, background: "none", color: C.muted }}>
+            <MoreVertical size={16} />
+          </button>
+        )}
+        {open && (
+          <>
+            <div onClick={() => setMenuFor(null)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
+            <div role="menu" style={{ position: "absolute", right: 0, top: "100%", marginTop: 4, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, minWidth: 170, overflow: "hidden", padding: 4 }}>
+              {actions.map(act => {
+                const AIcon = act.icon;
+                return (
+                  <button key={act.key} type="button" role="menuitem" className="icon-btn"
+                    onClick={() => { setMenuFor(null); act.onClick(); }}
+                    style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: act.danger ? C.danger : C.ink, textAlign: "left", borderRadius: 6 }}>
+                    {AIcon && <AIcon size={15} />} {act.label}
+                  </button>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </div>
+    );
+  };
+  const idTag = a => showIds ? <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.accent }}>{a.label}</span> : null;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       {!locationsLast && (<>
@@ -2417,52 +2623,26 @@ function ContentsList({ place, assets, typesList, onOpen, emptyLabel, locationsL
           Locations ({contentRooms.length})
         </div>
       )}
-      {contentRooms.map(r => {
-        const RIcon = iconFor(r.type);
-        return (
-          <button key={r.label} onClick={() => onOpen(r)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
-            <RIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
-            <span style={{ fontSize: 14, color: C.ink, flex: 1 }}>{nameOf(r, typesList)}</span>
-            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.accent }}>{r.label}</span>
-            <ChevronRight size={14} style={{ color: C.placeholder }} />
-          </button>
-        );
-      })}
+      {contentRooms.map(r => row(r, iconFor(r.type), nameOf(r, typesList), idTag(r)))}
       </>)}
       {contentDevices.length > 0 && (
         <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginTop: (!locationsLast && contentRooms.length) ? 10 : 0, marginBottom: 2 }}>
           Devices ({contentDevices.length})
         </div>
       )}
-      {contentDevices.map(d => {
-        const DIcon = iconFor(d.type);
-        return (
-          <button key={d.id} onClick={() => onOpen(d)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
-            <DIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
-            <span style={{ fontSize: 14, color: C.ink, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {typeNameOf(d.type, typesList)}{d.brand ? ` · ${d.brand}` : ""}{place.type === "Building" && roomNameOf(d, assets) ? ` · ${roomNameOf(d, assets)}` : ""}
-            </span>
-            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.accent }}>{d.label}</span>
-            <ChevronRight size={14} style={{ color: C.placeholder }} />
-          </button>
-        );
-      })}
+      {contentDevices.map(d => row(d, iconFor(d.type),
+        locationsLast
+          ? nameOf(d, typesList)
+          : <>{typeNameOf(d.type, typesList)}{d.brand ? ` · ${d.brand}` : ""}{place.type === "Building" && roomNameOf(d, assets) ? ` · ${roomNameOf(d, assets)}` : ""}</>,
+        idTag(d)))}
       {contentAllocations.length > 0 && (
         <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginTop: ((!locationsLast && contentRooms.length) || contentDevices.length) ? 10 : 0, marginBottom: 2 }}>
           Bulk Items ({contentAllocations.length})
         </div>
       )}
-      {contentAllocations.map(({ bulk, quantity }) => {
-        const BIcon = iconFor(bulk.type);
-        return (
-          <button key={bulk.id} onClick={() => onOpen(bulk)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
-            <BIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
-            <span style={{ fontSize: 14, color: C.ink, flex: 1 }}>{nameOf(bulk, typesList) !== bulk.tag ? nameOf(bulk, typesList) : typeNameOf(bulk.type, typesList)}</span>
-            <span style={{ fontWeight: 600, color: C.brandDark }}>× {quantity}</span>
-            <ChevronRight size={14} style={{ color: C.placeholder }} />
-          </button>
-        );
-      })}
+      {contentAllocations.map(({ bulk, quantity }) => row(bulk, iconFor(bulk.type),
+        nameOf(bulk, typesList) !== bulk.tag ? nameOf(bulk, typesList) : typeNameOf(bulk.type, typesList),
+        <span style={{ fontWeight: 600, color: C.brandDark }}>× {quantity}</span>))}
       {locationsLast && contentRooms.length > 0 && (
         <div style={{ marginTop: (contentDevices.length || contentAllocations.length) ? 10 : 0 }}>
           <button
@@ -2476,17 +2656,7 @@ function ContentsList({ place, assets, typesList, onOpen, emptyLabel, locationsL
           </button>
           {locationsOpen && (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {contentRooms.map(r => {
-                const RIcon = iconFor(r.type);
-                return (
-                  <button key={r.label} onClick={() => onOpen(r)} className="row-body" style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left", width: "100%" }}>
-                    <RIcon size={15} style={{ color: C.brand, flexShrink: 0 }} />
-                    <span style={{ fontSize: 14, color: C.ink, flex: 1 }}>{nameOf(r, typesList)}</span>
-                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.accent }}>{r.label}</span>
-                    <ChevronRight size={14} style={{ color: C.placeholder }} />
-                  </button>
-                );
-              })}
+              {contentRooms.map(r => row(r, iconFor(r.type), nameOf(r, typesList), idTag(r)))}
             </div>
           )}
         </div>
@@ -4067,7 +4237,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v51";
+const FRONTEND_SCRIPT_VERSION = "v52";
 // The version of THIS file — shown in About (the account menu), so "is my browser
 // actually running the build I just deployed, or a cached one?" is answerable in
 // two clicks instead of by reading view-source.
@@ -4085,7 +4255,7 @@ const FRONTEND_SCRIPT_VERSION = "v51";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-07.1";
+const APP_VERSION = "2026-10-07.7";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -5704,6 +5874,10 @@ const MOCK_SNAPSHOT = {
     { label: "BCA0086", type: "Mini Split", parentId: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
       { id: "mnt-0086-filter", task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "2026-08-14", owner: "Eric", at: "", by: "" },
       { id: "mnt-0086-coil", task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "2026-03-02", owner: "", at: "", by: "" },
+      // Custom repeat rules (v52), beside presets that carry none -- so Sandbox
+      // exercises both the rule path and the day-count path.
+      { id: "mnt-0086-drain", task: "Condensate drain flush", frequencyLabel: "Every 6 weeks", frequencyDays: 42, recurrence: "interval:6:week", lastPerformed: "2026-08-25", owner: "Eric", at: "", by: "" },
+      { id: "mnt-0086-check", task: "Thermostat schedule check", frequencyLabel: "First Monday of every month", frequencyDays: 30, recurrence: "weekday:1:1:1", lastPerformed: "2026-09-07", owner: "", at: "", by: "" },
     ], changes: [
       { id: "chg-0086-filter-may", changeType: "Maintenance", vendor: "", cost: "", note: "Filter rinsed and dried. Light dust only.", at: "2026-07-15T16:20:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0086-filter", performedOn: "2026-05-28" },
       { id: "chg-0086-coil-mar", changeType: "Maintenance", vendor: "Central Coast HVAC", cost: "185.00", note: "Coil cleaned, condensate line flushed. Tech noted slight fin damage on the return side — watch it next visit.", at: "2026-03-02T18:05:00.000Z", by: "Eric Stamand", maintenanceId: "mnt-0086-coil", performedOn: "2026-03-02" },
@@ -6148,7 +6322,7 @@ function AssetTracker() {
   // The draft behind the task dialog, filled by BOTH modes -- `id` is the item
   // the dialog acts on, minted on open in add mode so a photo can name the task
   // while the form is still being filled in.
-  const [maintenanceDraft, setMaintenanceDraft] = useState({ id: "", kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, dueDate: "", lastPerformed: "", owner: "" });
+  const [maintenanceDraft, setMaintenanceDraft] = useState({ id: "", kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "" });
   // null when closed; { mode: "add" } or { mode: "edit", itemId }. ONE dialog
   // for both, the shape changeModal already uses and for the same reason: a
   // separate edit form is a second copy of the same fields to keep in step, and
@@ -8131,7 +8305,7 @@ function AssetTracker() {
     setConfirmArchive(null);
     setAllocationDraft({ roomId: "", quantity: "", error: "" });
     setConfirmAllocationRemove(null);
-    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, dueDate: "", lastPerformed: "", owner: "" });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "" });
     setConfirmMaintenanceDelete(null);
     setMaintenanceCompleteModal(null);
     setOpenMaintenanceHistory(null);
@@ -9795,7 +9969,7 @@ function AssetTracker() {
     setWorkDialogAssetId(assetId === undefined ? null : assetId);
     // Minted on OPEN so a photo can name this schedule while the form is still
     // being filled in -- the same rule openChangeAdd follows.
-    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, dueDate: "", lastPerformed: "", owner: "" });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "" });
     setMaintenanceModal({ mode: "add" });
   }
 
@@ -9818,7 +9992,10 @@ function AssetTracker() {
       kind: taskKindOf(item),
       task: item.task,
       notes: item.notes || "",
-      frequency: item.frequencyLabel || MAINTENANCE_FREQUENCIES[1].label,
+      // A task carrying a readable rule opens on Custom with its controls
+      // seeded; everything else opens on its preset as before.
+      frequency: parseRecurrence(item.recurrence) ? MAINTENANCE_FREQUENCY_CUSTOM : (item.frequencyLabel || MAINTENANCE_FREQUENCIES[1].label),
+      recurrence: recurrenceToDraft(parseRecurrence(item.recurrence)),
       dueDate: dateOnly(item.dueDate),
       lastPerformed: dateOnly(item.lastPerformed),
       owner: item.owner || "",
@@ -9830,7 +10007,8 @@ function AssetTracker() {
     if (savingRef.current) return; // double-submit guard, see savingRef
     if (!maintenanceDraft.task.trim() || !workTarget) return;
     const oneOff = maintenanceDraft.kind === TASK_KIND_ONEOFF;
-    const freq = MAINTENANCE_FREQUENCIES.find(f => f.label === maintenanceDraft.frequency) || MAINTENANCE_FREQUENCIES[1];
+    const freq = frequencyFromDraft(maintenanceDraft);
+    if (!oneOff && !freq) return; // a Custom choice that isn't a rule yet; Save is disabled on it
     const item = {
       // Was absent entirely until 2026-09-11, which was a bug: rows key on
       // item.id and every handler takes one, so an id-less row could not be
@@ -9846,6 +10024,7 @@ function AssetTracker() {
       // a question its interval already answers.
       frequencyLabel: oneOff ? "" : freq.label,
       frequencyDays: oneOff ? "" : freq.days,
+      recurrence: oneOff ? "" : freq.recurrence,
       dueDate: oneOff ? (maintenanceDraft.dueDate || "") : "",
       lastPerformed: oneOff ? "" : (maintenanceDraft.lastPerformed || ""),
       owner: maintenanceDraft.owner.trim(),
@@ -9854,7 +10033,7 @@ function AssetTracker() {
     };
     const next = assets.map(a => (a.id === workTargetId ? { ...a, maintenanceItems: [...(a.maintenanceItems || []), item] } : a));
     await persist(next, { columns });
-    setMaintenanceDraft({ id: crypto.randomUUID(), kind: maintenanceDraft.kind, task: "", notes: "", frequency: freq.label, dueDate: "", lastPerformed: "", owner: "" });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: maintenanceDraft.kind, task: "", notes: "", frequency: maintenanceDraft.frequency, recurrence: maintenanceDraft.recurrence, dueDate: "", lastPerformed: "", owner: "" });
     setMaintenanceModal(null);
   }
 
@@ -9870,7 +10049,8 @@ function AssetTracker() {
     const original = items.find(m => m && m.id === maintenanceModal.itemId);
     if (!original) { setMaintenanceModal(null); return; }
     const oneOff = maintenanceDraft.kind === TASK_KIND_ONEOFF;
-    const freq = MAINTENANCE_FREQUENCIES.find(f => f.label === maintenanceDraft.frequency) || MAINTENANCE_FREQUENCIES[1];
+    const freq = frequencyFromDraft(maintenanceDraft);
+    if (!oneOff && !freq) return; // a Custom choice that isn't a rule yet; Save is disabled on it
     const updated = {
       ...original,
       // Always written, never left to the blank-means-scheduled default: an
@@ -9882,6 +10062,7 @@ function AssetTracker() {
       notes: (maintenanceDraft.notes || "").trim(),
       frequencyLabel: oneOff ? "" : freq.label,
       frequencyDays: oneOff ? "" : freq.days,
+      recurrence: oneOff ? "" : freq.recurrence,
       dueDate: oneOff ? (maintenanceDraft.dueDate || "") : "",
       // Clearing this on a one-off is how a finished job is REOPENED -- there
       // is no separate done flag to unset, and the change is audited below
@@ -13016,6 +13197,8 @@ function AssetTracker() {
               : null;
             if (editing && !taskItem) return null;
             const taskDone = taskItem ? taskIsDone(taskItem) : false;
+            // A Custom frequency must describe a real rule before Save lights.
+            const maintenanceFrequencyOk = maintenanceDraft.kind === TASK_KIND_ONEOFF || !!frequencyFromDraft(maintenanceDraft);
             const taskStatusMeta = taskItem ? maintenanceStatusMeta(maintenanceStatusOf(taskItem)) : null;
             // Only ever shown for a dialog opened somewhere OTHER than the
             // asset's own page -- workDialogAssetId is null exactly when the
@@ -13145,7 +13328,7 @@ function AssetTracker() {
                         label="Frequency"
                         value={maintenanceDraft.frequency}
                         onChange={v => setMaintenanceDraft({ ...maintenanceDraft, frequency: v })}
-                        options={MAINTENANCE_FREQUENCIES.map(f => f.label)}
+                        options={[...MAINTENANCE_FREQUENCIES.map(f => f.label), MAINTENANCE_FREQUENCY_CUSTOM]}
                         title="Select frequency"
                       />
                       <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -13157,6 +13340,12 @@ function AssetTracker() {
                           style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
                         />
                       </label>
+                      {maintenanceDraft.frequency === MAINTENANCE_FREQUENCY_CUSTOM && (
+                        <RecurrenceEditor
+                          value={maintenanceDraft.recurrence || DEFAULT_RECURRENCE_DRAFT}
+                          onChange={r => setMaintenanceDraft({ ...maintenanceDraft, recurrence: r })}
+                        />
+                      )}
                     </>
                   )}
                   <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -13240,8 +13429,8 @@ function AssetTracker() {
                   <button onClick={() => setMaintenanceModal(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                   <button
                     onClick={editing ? saveMaintenanceEdit : addMaintenanceItem}
-                    disabled={!maintenanceDraft.task.trim() || !workTarget}
-                    style={{ padding: "8px 14px", background: (maintenanceDraft.task.trim() && workTarget) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                    disabled={!maintenanceDraft.task.trim() || !workTarget || !maintenanceFrequencyOk}
+                    style={{ padding: "8px 14px", background: (maintenanceDraft.task.trim() && workTarget && maintenanceFrequencyOk) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                   >
                     {editing ? "Save changes" : (maintenanceDraft.kind === TASK_KIND_ONEOFF ? "Add task" : "Schedule")}
                   </button>
@@ -16173,6 +16362,20 @@ function AssetTracker() {
           placing={mapPlacing}
           onPlace={(x, y) => setMapPlacing(p => (p ? { ...p, pending: { planId: scopeId, x, y } } : p))}
           onClearPin={clearMapPlacement}
+          onShowOnMap={drawn => {
+            // Already on the map: no detail page to close, just go to the plan
+            // (if it is another one) and arm the same one-shot focus.
+            if (drawn.ownerId !== scopeId) setMapScope(drawn.ownerId);
+            setMapPlacing(null);
+            setMapFocusShapeId(drawn.shapeId || null);
+            setMapFocusPinId(drawn.pinAssetId || null);
+          }}
+          onStartPlace={assetId => {
+            // Placed on the plan being viewed -- the user is already looking at
+            // where it goes, so this does not jump to the plan it is pinned on.
+            setMapFocusShapeId(null); setMapFocusPinId(null);
+            setMapPlacing({ assetId });
+          }}
           onFocusHandled={() => { setMapFocusShapeId(null); setMapFocusPinId(null); }}
           onOpenAsset={openDetail}
           onNavigateToPlan={navigateFloorPlanTo}
@@ -16609,6 +16812,98 @@ function Field({ label, value, onChange, placeholder, wide, dataType, options, e
   );
 }
 
+// The Custom frequency's controls: either "every N days/weeks/months/years" or
+// "the Nth weekday of every N months". Spans the dialog's full width and sits
+// in a div rather than a <label>, since a picker inside a label re-opens after
+// a choice (BUGS.md). A sentence underneath reads the rule back, or says what
+// is missing while the count is not a whole number from 1 to 999.
+function RecurrenceEditor({ value, onChange }) {
+  const v = value || DEFAULT_RECURRENCE_DRAFT;
+  const set = patch => onChange({ ...v, ...patch });
+  const rule = recurrenceFromDraft(v);
+  const fieldLabel = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent };
+  const numberInput = (val, onVal, aria) => (
+    <input
+      type="number" min={1} max={RECURRENCE_MAX_EVERY} inputMode="numeric"
+      value={val}
+      onChange={e => onVal(e.target.value)}
+      aria-label={aria}
+      style={{ width: 72, padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+    />
+  );
+  const modes = [
+    { key: "interval", label: "Every few…" },
+    { key: "weekday", label: "Day of the month" },
+  ];
+  const unitLabel = k => {
+    const u = RECURRENCE_UNITS.find(x => x.key === k);
+    return u ? (String(v.every).trim() === "1" ? u.one : u.many) : k;
+  };
+  return (
+    <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 10, padding: 12, border: `1px solid ${C.border}`, borderRadius: 10, background: C.bg }}>
+      <span style={fieldLabel}>Repeats</span>
+      <div style={{ display: "flex", gap: 8 }}>
+        {modes.map(m => {
+          const active = v.mode === m.key;
+          return (
+            <button
+              key={m.key} type="button" aria-pressed={active}
+              onClick={() => set({ mode: m.key })}
+              style={{
+                flex: 1, padding: "6px 10px", borderRadius: 10, fontSize: 13, cursor: "pointer",
+                background: active ? C.brand : "transparent", color: active ? "#fff" : C.ink,
+                border: `1.5px solid ${active ? C.brand : C.border}`, fontWeight: active ? 700 : 500,
+              }}
+            >{m.label}</button>
+          );
+        })}
+      </div>
+      {v.mode === "weekday" ? (
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+          <div style={{ minWidth: 110 }}>
+            <PickerField
+              label="Which" hideLabel title="Which one"
+              value={String(v.ordinal)}
+              onChange={o => set({ ordinal: o })}
+              options={RECURRENCE_ORDINALS.map(o => o.key)}
+              labelForOption={k => (RECURRENCE_ORDINALS.find(o => o.key === k) || {}).label || k}
+            />
+          </div>
+          <div style={{ minWidth: 130 }}>
+            <PickerField
+              label="Weekday" hideLabel title="Weekday"
+              value={String(v.weekday)}
+              onChange={d => set({ weekday: d })}
+              options={WEEKDAY_NAMES.map((_, i) => String(i))}
+              labelForOption={k => WEEKDAY_NAMES[Number(k)] || k}
+            />
+          </div>
+          <span style={{ fontSize: 14, color: C.ink }}>of every</span>
+          {numberInput(v.months, m => set({ months: m }), "Every how many months")}
+          <span style={{ fontSize: 14, color: C.ink }}>{String(v.months).trim() === "1" ? "month" : "months"}</span>
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 14, color: C.ink }}>Every</span>
+          {numberInput(v.every, n => set({ every: n }), "Every how many")}
+          <div style={{ minWidth: 120 }}>
+            <PickerField
+              label="Unit" hideLabel title="Repeat every"
+              value={v.unit}
+              onChange={u => set({ unit: u })}
+              options={RECURRENCE_UNITS.map(u => u.key)}
+              labelForOption={unitLabel}
+            />
+          </div>
+        </div>
+      )}
+      <span style={{ fontSize: 12, color: rule ? C.muted : C.danger }}>
+        {rule ? describeRecurrence(rule) : `Enter a whole number from 1 to ${RECURRENCE_MAX_EVERY}.`}
+      </span>
+    </div>
+  );
+}
+
 // Does this task repeat? Two buttons rather than a PickerField, for the same
 // reason the Circuit form's serves-rooms/feeds-sub-panel pair is a toggle: it
 // is a binary that CHANGES WHICH FIELDS ARE BELOW IT, and a modal picker hides
@@ -16694,8 +16989,12 @@ function TypeField({ value, onChange, types, onManage, labels }) {
   // all, so filtering it away would leave the asset's own current value with no
   // row to show it selected.
   const options = ids.includes(value) || !value ? ids : [value, ...ids];
+  // A <div>, NOT a <label>: the picker renders inside this wrapper, and the click
+  // that chooses an option closes the picker mid-click, so a label would forward
+  // it to its first labelable control -- the gear -- and open the type manager on
+  // top of the form. The same forwarding PickerField's hideLabel works around.
   return (
-    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>
         Type
         {onManage && (
@@ -16720,7 +17019,7 @@ function TypeField({ value, onChange, types, onManage, labels }) {
           searchable
         />
       )}
-    </label>
+    </div>
   );
 }
 
@@ -20203,7 +20502,7 @@ function MapOptionsOnlyMenu({ canEdit, asset, assets, menuSlot, onSaveMapOptions
 function MapTabContent({
   canEdit, assets, typesList, scopeAsset,
   uploadBusy, uploadError, onUploadPlan, onSaveLink, onCreateRoom, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveMapOptions,
-  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange,
+  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onShowOnMap, onStartPlace, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange,
 }) {
   if (!scopeAsset) {
     return (
@@ -20245,6 +20544,8 @@ function MapTabContent({
       placing={placing}
       onPlace={onPlace}
       onClearPin={onClearPin}
+      onShowOnMap={onShowOnMap}
+      onStartPlace={onStartPlace}
       focusShapeId={focusShapeId}
       selectShapeId={selectShapeId}
       onSelectHandled={onSelectHandled}
@@ -20277,7 +20578,7 @@ function FloorPlanTabContent({
   canEdit, selectedAsset, assets, typesList,
   uploadBusy, uploadError, onUploadPlan,
   onSaveLink, onCreateRoom, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveMapOptions,
-  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange,
+  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onShowOnMap, onStartPlace, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange,
 }) {
   const rawPlan = useFloorPlanSvg(selectedAsset.floorPlanUrl);
   // Rotation is stored on the asset (floorPlanRotation, quarter turns, blank = 0)
@@ -20355,9 +20656,51 @@ function FloorPlanTabContent({
   const [menuOpen, setMenuOpen] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);   // Configure accordion in the menu
   const [showPins, setShowPins] = useState(false);         // Show/hide pins menu toggle (view only, never saved)
+  // The asset "Show on map" landed on. Its pin stays drawn with Show pins off,
+  // since that pin is the whole point of the trip; every other pin still
+  // follows the toggle. Dropped when the plan changes or pins are hidden.
+  const [revealPinId, setRevealPinId] = useState(null);
+  useEffect(() => { setRevealPinId(null); }, [selectedAsset.id]);
   const [optionsOpen, setOptionsOpen] = useState(false); // Options dialog
   const [mapChooser, setMapChooser] = useState(null);    // asset id whose location chooser is showing
   const [selectedPinId, setSelectedPinId] = useState(null); // a pinned asset's info card
+
+  // The row menu on the panel's asset list: show it on the map, and place, move
+  // or remove its pin -- the same choices the asset's own "On the map" card
+  // offers, without leaving the map. Both map-moving actions bring the plan
+  // back into view first, since the list sits below it and on a phone the plan
+  // has scrolled away by the time a row is reached.
+  const revealStage = () => {
+    const el = stageElRef.current;
+    if (el && el.scrollIntoView) el.scrollIntoView({ block: "center", behavior: "smooth" });
+  };
+  const mapRowActions = a => {
+    const acts = [];
+    const pin = mapPinOf(a);
+    const pinPlan = pin ? assets.find(x => x.id === pin.planId && x.floorPlanUrl) : null;
+    const drawn = drawnOnMapFor(isPlaceType(a.type) ? a.id : a.parentId, assets);
+    if (onShowOnMap && (pinPlan || drawn)) {
+      acts.push({ key: "show", label: "Show on map", icon: MapPin, onClick: () => {
+        revealStage();
+        onShowOnMap(pinPlan ? { ownerId: pinPlan.id, pinAssetId: a.id } : drawn);
+      } });
+    }
+    const pinnable = canEdit && typeCanBePinned(a.type) && (a.status || "Active") !== "Archived";
+    if (pinnable && onStartPlace) {
+      acts.push({ key: "place", label: pin ? "Move pin" : "Place pin", icon: pin ? Move : Plus, onClick: () => {
+        revealStage();
+        setSelectedPinId(null);
+        onStartPlace(a.id);
+      } });
+    }
+    if (canEdit && pin && onClearPin) {
+      acts.push({ key: "remove", label: "Remove pin", icon: MapPinOff, danger: true, onClick: () => {
+        if (selectedPinId === a.id) setSelectedPinId(null);
+        onClearPin(a.id);
+      } });
+    }
+    return acts;
+  };
 
   const applyVB = () => {
     if (svgElRef.current) {
@@ -20486,6 +20829,7 @@ function FloorPlanTabContent({
       zoomToBbox({ x: px - side / 2, y: py - side / 2, w: side, h: side }, 0, true, true);
     }
     setSelectedPinId(focusPinId);
+    setRevealPinId(focusPinId);
     setPulsingShapeId("pin:" + focusPinId);
     clearTimeout(pulseTimerRef.current);
     pulseTimerRef.current = setTimeout(() => setPulsingShapeId(null), 3600);
@@ -20881,8 +21225,23 @@ function FloorPlanTabContent({
       if (members.length) zoomToBbox(floorPlanBbox(members.flatMap(s => s.pts)), 0.15, true, true);
       return;
     }
+    // A space OUTSIDE the open group closes the group: selecting it is a new
+    // selection, not one inside the group. Leaving the group open dimmed the
+    // newly selected space with everything else outside it, so the tap only
+    // zoomed and read as doing nothing.
+    if (!grp && openGroupId) setOpenGroupId(null);
     if (selectedShapeId === shapeId) {
       const navLink = linkFor(shapeId);
+      // An UNLINKED space inside a group gets here too (grouped shapes all
+      // route through onShapeClick), so its second tap has to do what
+      // onUnlinkedShapeClick's does for an ungrouped one: open the Link
+      // picker for it, rather than just deselecting.
+      if (!navLink && canEdit) {
+        setSelectedShapeId(null);
+        setSetupTab("link");
+        setPickerShapeId(shapeId);
+        return;
+      }
       const navAsset = navLink ? assets.find(a => a.id === navLink.roomId) : null;
       if (secondTapOnPlace(navAsset)) return;
       // Nothing to navigate into: the second tap deselects, and the view
@@ -20931,6 +21290,7 @@ function FloorPlanTabContent({
   function onUnlinkedShapeClick(shapeId) {
     setSelectedPinId(null);
     setSelectedWallId(null);
+    setOpenGroupId(null); // only ungrouped shapes come here, so never inside the open group
     if (selectedShapeId === shapeId && canEdit) {
       setSelectedShapeId(null);
       setSetupTab("link");
@@ -20978,7 +21338,7 @@ function FloorPlanTabContent({
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
             <LocationTitle place={selectedAsset} typesList={typesList} onOpen={onOpenAsset} />
           </div>
-          <ContentsList place={selectedAsset} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast />
+          <ContentsList place={selectedAsset} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast rowActions={mapRowActions} />
         </div>
       </div>
     );
@@ -21494,12 +21854,16 @@ function FloorPlanTabContent({
               );
             });
           })()}
-          {!setupTab && (showPins || placing || focusPinId) && assets.filter(a => !placing || a.id !== placing.assetId).map(a => {
+          {!setupTab && assets.filter(a => !placing || a.id !== placing.assetId).map(a => {
+            if (!(showPins || placing || a.id === focusPinId || a.id === revealPinId)) return null;
             const pin = mapPinOf(a);
             if (!pin || pin.planId !== selectedAsset.id || (a.status || "Active") === "Archived") return null;
             const [px, py] = floorPlanRotatePoint(pin.x, pin.y, rotation);
             const sel = selectedPinId === a.id;
-            const r = (sel ? 10 : 8) * k;
+            const r = (sel ? 13 : 11) * k;
+            // A pin is the asset's own type icon on a disc, not a generic dot.
+            const PinIcon = iconFor(a.type);
+            const s = r * 1.15;
             return (
               <g key={"pin-" + a.id} className="fp-pin" style={{ cursor: "pointer" }}
                 onClick={e => { e.stopPropagation(); setSelectedShapeId(null); setSelectedWallId(null); setSelectedPinId(sel ? null : a.id); }}>
@@ -21507,7 +21871,7 @@ function FloorPlanTabContent({
                   <circle className="fp-pulse" cx={px} cy={py} r={r * 2.2} fill={C.accent} fillOpacity={0.45} />
                 )}
                 <circle cx={px} cy={py} r={r} fill={sel ? C.accent : C.brandDark} stroke="#fff" strokeWidth={2 * k} />
-                <circle cx={px} cy={py} r={r * 0.35} fill="#fff" />
+                <PinIcon x={px - s / 2} y={py - s / 2} size={s} color="#fff" strokeWidth={2.25} style={{ pointerEvents: "none" }} />
                 <title>{nameOf(a, typesList)}</title>
               </g>
             );
@@ -21516,11 +21880,14 @@ function FloorPlanTabContent({
               it reads as unconfirmed beside the stored pins. */}
           {!setupTab && placing && placing.pending && placing.pending.planId === selectedAsset.id && (() => {
             const [px, py] = floorPlanRotatePoint(placing.pending.x, placing.pending.y, rotation);
-            const r = 10 * k;
+            const r = 13 * k;
+            const placingAsset = assets.find(x => x.id === placing.assetId);
+            const PinIcon = iconFor(placingAsset ? placingAsset.type : null);
+            const s = r * 1.15;
             return (
               <g pointerEvents="none">
                 <circle cx={px} cy={py} r={r} fill={C.accent} stroke="#fff" strokeWidth={2 * k} />
-                <circle cx={px} cy={py} r={r * 0.35} fill="#fff" />
+                <PinIcon x={px - s / 2} y={py - s / 2} size={s} color="#fff" strokeWidth={2.25} />
                 <circle cx={px} cy={py} r={r * 1.5} fill="none" stroke={C.accent} strokeWidth={1.5 * k} strokeDasharray={`${4 * k} ${3 * k}`} />
               </g>
             );
@@ -21629,7 +21996,7 @@ function FloorPlanTabContent({
               </button>
               <button
                 type="button"
-                onClick={() => { setMenuOpen(false); setShowPins(v => !v); if (showPins) setSelectedPinId(null); }}
+                onClick={() => { setMenuOpen(false); setShowPins(v => !v); if (showPins) { setSelectedPinId(null); setRevealPinId(null); } }}
                 className="icon-btn"
                 style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
               >
@@ -21742,7 +22109,7 @@ function FloorPlanTabContent({
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
               <LocationTitle place={place} typesList={typesList} onOpen={onOpenAsset} />
             </div>
-            <ContentsList place={place} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast />
+            <ContentsList place={place} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast rowActions={mapRowActions} />
           </div>
         );
       })()}
@@ -21790,7 +22157,7 @@ function FloorPlanTabContent({
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
             <LocationTitle place={selectedAsset} typesList={typesList} onOpen={onOpenAsset} />
           </div>
-          <ContentsList place={selectedAsset} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast />
+          <ContentsList place={selectedAsset} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast rowActions={mapRowActions} />
         </div>
       )}
       {openGroupId && !selectedShapeId && !setupTab && (() => {

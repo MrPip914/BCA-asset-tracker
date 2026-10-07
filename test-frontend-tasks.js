@@ -31,6 +31,8 @@ const ctx = new Function(
     sliceConst('TASK_KIND_SCHEDULED'),
     sliceConst('TASK_KIND_ONEOFF'),
     sliceFn('dateOnly'),
+    // taskDueDate reads custom repeat rules (v52); the whole block comes along.
+    src.slice(src.indexOf('const MAINTENANCE_FREQUENCIES ='), src.indexOf('// A field key named in ANY registry entry')),
     sliceFn('taskKindOf'),
     sliceFn('isOneOffTask'),
     sliceFn('taskIsDone'),
