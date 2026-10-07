@@ -720,6 +720,14 @@ const { floorPlanShapeMatches } = matchMod.exports;
     /setOpenGroupId\(null\)/.test(ubody));
 }
 
+// ---- Normal view: an unlinked space inside a group opens the Link picker on its second tap ----
+{
+  const i = src.indexOf('function onShapeClick(');
+  const body = src.slice(src.indexOf('if (selectedShapeId === shapeId) {', i), src.indexOf('function zoomOutOneLevel', i));
+  check('Normal view: a second tap on an unlinked GROUPED space opens the Link picker, like an ungrouped one',
+    /if \(!navLink && canEdit\) \{\s*setSelectedShapeId\(null\);\s*setSetupTab\("link"\);\s*setPickerShapeId\(shapeId\)/.test(body));
+}
+
 // ---- Glide between spaces: the tween, and that only in-plan taps use it ----
 {
   const tw = new Function(
