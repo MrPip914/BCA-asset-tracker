@@ -1,0 +1,100 @@
+# Applies db/migrations/ to the DEV Supabase database, after rehearsing them on a
+# throwaway Postgres. See DATABASE_BACKEND_PLAN.md, "Rollout" and item 8 of
+# "Running on the free tier": there is no staging project, so CI is the rehearsal.
+#
+# Why this exists at all: a Claude Code cloud session cannot open a raw TCP
+# connection to Postgres (its proxy carries HTTPS only), so migrations run here.
+#
+# ---------------------------------------------------------------- ONE-TIME SETUP
+#
+# Settings > Environments > New environment > `supabase-dev`, then add an
+# environment secret:
+#
+#   SUPABASE_DB_URL   the dev project's SESSION POOLER connection string
+#                     (postgresql://postgres.<ref>:<password>@aws-…pooler.supabase.com:5432/postgres)
+#
+# An ENVIRONMENT secret, not a repository secret, for the reason deploy-backend.yml
+# gives: only a job naming that environment can read it.
+#
+# ---------------------------------------------------------------- WHAT RUNS WHEN
+#
+#   pull request touching db/   rehearse only. No secrets, safe for forks.
+#   push to `dev` touching db/  rehearse, then apply to the dev database.
+#   manual run                  the same as a push (only once this file is on main,
+#                               which is where GitHub looks for dispatchable workflows).
+#
+# Production is deliberately NOT here. When a school moves, it gets its own
+# environment and a manual trigger, per the client-dispatch rule in CLAUDE.md.
+#
+# This repo is public, so run logs are world-readable: nothing below echoes the
+# connection string, and there is no `set -x`.
+
+name: Database migrations
+
+on:
+  pull_request:
+    paths:
+      - "db/**"
+      - ".github/workflows/db-migrate.yml"
+  push:
+    branches: [dev]
+    paths:
+      - "db/**"
+      - ".github/workflows/db-migrate.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never two applies at once, and never cancel one mid-flight.
+concurrency:
+  group: db-migrate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  rehearse:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # Match Supabase's major version.
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: rehearsal
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:rehearsal@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply every migration to an empty database
+        run: db/migrate.sh
+      - name: Apply again, which must be a no-op
+        run: db/migrate.sh
+      - name: Check isolation, append-only audit, and cascades
+        run: psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f db/test-schema.sql
+
+  apply-dev:
+    needs: rehearse
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment:
+      name: supabase-dev
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply to the dev database
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DATABASE_URL:-}" ]; then
+            echo "::error::SUPABASE_DB_URL is not set on the supabase-dev environment. See the setup notes at the top of this workflow."
+            exit 1
+          fi
+          db/migrate.sh
+      - name: What is applied now
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          psql "$DATABASE_URL" -X -A -c "select name, applied_at from asset_tracker.schema_migrations order by name"
