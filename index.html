@@ -2556,8 +2556,8 @@ function LocationTitle({ place, typesList, onOpen }) {
 // `rowActions` (Map panel only) returns, for one listed asset, the actions its
 // row menu offers -- [{ key, label, icon, onClick, danger }]. A row with none
 // gets no menu button rather than one that opens onto nothing.
-// `typeFilter` (Map panel's filter) keeps only assets of those type ids.
-function ContentsList({ place, assets, typesList, onOpen, emptyLabel, locationsLast, rowActions, onlyId, typeFilter }) {
+// `filterAsset` (Map panel's filter) keeps only the assets it returns true for.
+function ContentsList({ place, assets, typesList, onOpen, emptyLabel, locationsLast, rowActions, onlyId, filterAsset }) {
   const [locationsOpenState, setLocationsOpen] = useState(false);
   const [menuFor, setMenuFor] = useState(null); // id of the row whose action menu is open
   let { contentRooms, contentDevices, contentAllocations, contentsCount } = contentsOf(place, assets);
@@ -2575,8 +2575,8 @@ function ContentsList({ place, assets, typesList, onOpen, emptyLabel, locationsL
     }
     contentsCount = contentRooms.length + contentDevices.length + contentAllocations.length;
   }
-  if (typeFilter && typeFilter.length) {
-    const keep = a => typeFilter.includes(a.type || "");
+  if (filterAsset) {
+    const keep = filterAsset;
     contentRooms = contentRooms.filter(keep);
     contentDevices = contentDevices.filter(keep);
     contentAllocations = contentAllocations.filter(al => keep(al.bulk));
@@ -2744,7 +2744,19 @@ function mapWorkRows(scopeAssets) {
 const MAP_TASK_STATUS_ORDER = ["overdue", "due-soon", "never", "ok", "undated", "done"];
 const MAP_HISTORY_PERIODS = AUDIT_PERIOD_OPTIONS.filter(o => o.value !== AUDIT_ALL_TIME && o.value !== "today");
 const MAP_NO_WORK_TYPE = "No work type";
-function mapListFilterGroups(mode, items, typesList) {
+const MAP_UNASSIGNED_USER = "__unassigned";
+// The people an asset is assigned to, as filter values: the User asset's id when
+// assignments are stored by id, else the legacy name. A place carries no
+// assignment at all, so it neither offers nor matches "Unassigned".
+function mapAssetPersonKeys(a, assets) {
+  const ids = personLabelsOf(a);
+  const names = personNamesOf(a, assets);
+  const keys = ids.length ? ids.map((id, i) => ({ value: id, label: names[i] }))
+    : names.map(n => ({ value: "name:" + n, label: n }));
+  if (!keys.length && !isPlaceType(a.type)) return [{ value: MAP_UNASSIGNED_USER, label: UNASSIGNED_LABEL }];
+  return keys;
+}
+function mapListFilterGroups(mode, items, typesList, assets) {
   const groups = [];
   const distinct = (vals, label) => {
     const seen = new Map();
@@ -2755,6 +2767,11 @@ function mapListFilterGroups(mode, items, typesList) {
     const types = distinct((items || []).map(a => a.type || ""), t => typeNameOf(t, typesList) || "Other")
       .sort((a, b) => a.label.localeCompare(b.label));
     groups.push({ key: "type", label: "Type", options: types });
+    const people = new Map();
+    (items || []).forEach(a => mapAssetPersonKeys(a, assets).forEach(k => { if (!people.has(k.value)) people.set(k.value, k.label); }));
+    groups.push({ key: "user", label: "User",
+      options: [...people].map(([value, label]) => ({ value, label }))
+        .sort((x, y) => (x.value === MAP_UNASSIGNED_USER) - (y.value === MAP_UNASSIGNED_USER) || x.label.localeCompare(y.label)) });
   } else if (mode === "tasks") {
     const present = new Set((items || []).map(r => r.status));
     groups.push({ key: "status", label: "Status",
@@ -2782,9 +2799,12 @@ function mapListActiveFilter(groups, stored) {
   });
   return out;
 }
-function mapListFilterMatches(mode, active, item, now) {
+function mapListFilterMatches(mode, active, item, now, assets) {
   const has = (key, v) => !active[key] || active[key].includes(v);
-  if (mode === "assets") return has("type", item.type || "");
+  if (mode === "assets") {
+    return has("type", item.type || "")
+      && (!active.user || mapAssetPersonKeys(item, assets).some(k => active.user.includes(k.value)));
+  }
   if (mode === "tasks") return has("status", item.status) && has("kind", taskKindOf(item.item));
   if (mode === "history") {
     return has("workType", item.change.changeType || "")
@@ -2793,41 +2813,62 @@ function mapListFilterMatches(mode, active, item, now) {
   return true;
 }
 
-// The chips under the switch while the filter is open. Same chip look as the
-// Type picker's label filter.
-function MapListFilterBar({ groups, active, onToggle, onClear }) {
+// The Filter button's dropdown: each group as a heading with checkable rows,
+// built like the toolbar menus (fixed click-catcher + absolutely positioned
+// card). It stays open while choices are ticked, so several can be picked in
+// one visit; a tap outside closes it.
+function MapListFilterMenu({ groups, active, onToggle, onClear, onClose }) {
   const any = Object.keys(active).length > 0;
+  const heading = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, padding: "8px 12px 4px" };
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "10px 0", marginBottom: 10, borderTop: `1px solid ${C.border}`, borderBottom: `1px solid ${C.border}` }}>
-      {groups.length === 0 && <div style={{ fontSize: 13, color: C.empty }}>Nothing to filter here.</div>}
-      {groups.map(g => (
-        <div key={g.key}>
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginBottom: 4 }}>{g.label}</div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+    <>
+      <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
+      <div role="menu" aria-label="Filter list" style={{ position: "absolute", right: 0, top: "100%", marginTop: -4, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, minWidth: 200, maxWidth: "calc(100vw - 48px)", maxHeight: 360, overflowY: "auto", padding: 4 }}>
+        {groups.length === 0 && <div style={{ fontSize: 13, color: C.empty, padding: "9px 12px" }}>Nothing to filter here.</div>}
+        {groups.map(g => (
+          <div key={g.key}>
+            <div style={heading}>{g.label}</div>
             {g.options.map(o => {
               const sel = (active[g.key] || []).includes(o.value);
               return (
-                <button key={o.value || "__blank__"} type="button" aria-pressed={sel} onClick={() => onToggle(g, o.value)}
-                  style={{
-                    padding: "3px 9px", borderRadius: 999, fontSize: 12,
-                    border: `1px solid ${sel ? C.brand : C.border}`,
-                    background: sel ? C.brand : "transparent",
-                    color: sel ? "#fff" : C.muted, fontWeight: sel ? 600 : 400,
-                    fontStyle: o.value ? "normal" : "italic",
-                  }}>
+                <button key={o.value || "__blank__"} type="button" role="menuitemcheckbox" aria-checked={sel} className="icon-btn"
+                  onClick={() => onToggle(g, o.value)}
+                  style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "8px 12px", background: "none", border: "none", borderRadius: 6, fontSize: 14, color: C.ink, textAlign: "left", fontWeight: sel ? 600 : 400, fontStyle: o.value ? "normal" : "italic" }}>
+                  <span style={{ width: 15, display: "flex", flexShrink: 0 }}>{sel && <Check size={15} style={{ color: C.brand }} />}</span>
                   {o.label}
                 </button>
               );
             })}
           </div>
-        </div>
-      ))}
-      {any && (
-        <button type="button" onClick={onClear}
-          style={{ alignSelf: "flex-start", background: "none", border: "none", padding: 0, fontSize: 13, color: C.brandDark, textDecoration: "underline" }}>
-          Clear filters
+        ))}
+        {any && (
+          <button type="button" role="menuitem" className="icon-btn" onClick={() => { onClear(); onClose(); }}
+            style={{ display: "block", width: "100%", marginTop: 4, padding: "9px 12px", background: "none", border: "none", borderTop: `1px solid ${C.border}`, fontSize: 14, color: C.brandDark, textAlign: "left" }}>
+            Clear filters
+          </button>
+        )}
+      </div>
+    </>
+  );
+}
+
+// What is filtered, shown only while something is: one chip per active value,
+// its x removing just that one. Nothing renders with no filter in force.
+function MapListActiveFilters({ groups, active, onToggle }) {
+  const chips = [];
+  groups.forEach(g => (active[g.key] || []).forEach(v => {
+    const o = g.options.find(x => x.value === v);
+    if (o) chips.push({ g, v, label: o.label });
+  }));
+  if (!chips.length) return null;
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 10 }}>
+      {chips.map(({ g, v, label }) => (
+        <button key={g.key + ":" + v} type="button" onClick={() => onToggle(g, v)} aria-label={`Remove filter ${label}`}
+          style={{ display: "flex", alignItems: "center", gap: 4, padding: "3px 6px 3px 9px", borderRadius: 999, fontSize: 12, fontWeight: 600, border: `1px solid ${C.brand}`, background: C.brand, color: "#fff" }}>
+          {label} <X size={12} />
         </button>
-      )}
+      ))}
     </div>
   );
 }
@@ -4530,7 +4571,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-08.7";
+const APP_VERSION = "2026-10-08.9";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -21026,7 +21067,7 @@ function FloorPlanTabContent({
         items = [...c.contentRooms, ...c.contentDevices, ...c.contentAllocations.map(al => al.bulk)];
       }
     } else items = listMode === "tasks" ? mapTaskRows(scope) : mapWorkRows(scope);
-    const groups = filterable ? mapListFilterGroups(listMode, items, typesList) : [];
+    const groups = filterable ? mapListFilterGroups(listMode, items, typesList, assets) : [];
     const stored = listFilters[listMode] || {};
     const active = mapListActiveFilter(groups, stored);
     const count = Object.values(active).reduce((n, v) => n + v.length, 0);
@@ -21036,13 +21077,18 @@ function FloorPlanTabContent({
       return { ...f, [listMode]: { ...(f[listMode] || {}), [g.key]: next } };
     });
     const clear = () => setListFilters(f => ({ ...f, [listMode]: {} }));
+    const keepAsset = count ? (a => mapListFilterMatches("assets", active, a, 0, assets)) : null;
     return (<>
-      <MapListModeSwitch value={listMode} onChange={setListMode}
-        {...(filterable ? { filterCount: count, filterOpen, onToggleFilter: () => setFilterOpen(v => !v) } : {})} />
-      {filterable && filterOpen && <MapListFilterBar groups={groups} active={active} onToggle={toggle} onClear={clear} />}
+      <div style={{ position: "relative" }}>
+        <MapListModeSwitch value={listMode} onChange={setListMode}
+          {...(filterable ? { filterCount: count, filterOpen, onToggleFilter: () => setFilterOpen(v => !v) } : {})} />
+        {filterable && filterOpen && <MapListFilterMenu groups={groups} active={active} onToggle={toggle} onClear={clear} onClose={() => setFilterOpen(false)} />}
+      </div>
+      {filterable && <MapListActiveFilters groups={groups} active={active} onToggle={toggle} />}
       {listMode === "assets"
         ? (opts.assetsBody || <ContentsList place={place} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast rowActions={mapRowActions} onlyId={opts.onlyId}
-            typeFilter={active.type} emptyLabel={active.type ? "Nothing here matches the filter." : undefined} />)
+            filterAsset={keepAsset}
+            emptyLabel={count ? "Nothing here matches the filter." : undefined} />)
         : <MapWorkList mode={listMode} scopeAssets={scope} typesList={typesList}
             onOpenTask={onOpenTask || ((item, a) => onOpenAsset && onOpenAsset(a, "maintenance"))}
             onOpenWork={onOpenWork || ((ch, a) => onOpenAsset && onOpenAsset(a, "changes"))}
