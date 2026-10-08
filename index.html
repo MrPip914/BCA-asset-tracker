@@ -2556,8 +2556,8 @@ function LocationTitle({ place, typesList, onOpen }) {
 // `rowActions` (Map panel only) returns, for one listed asset, the actions its
 // row menu offers -- [{ key, label, icon, onClick, danger }]. A row with none
 // gets no menu button rather than one that opens onto nothing.
-// `typeFilter` (Map panel's filter) keeps only assets of those type ids.
-function ContentsList({ place, assets, typesList, onOpen, emptyLabel, locationsLast, rowActions, onlyId, typeFilter }) {
+// `filterAsset` (Map panel's filter) keeps only the assets it returns true for.
+function ContentsList({ place, assets, typesList, onOpen, emptyLabel, locationsLast, rowActions, onlyId, filterAsset }) {
   const [locationsOpenState, setLocationsOpen] = useState(false);
   const [menuFor, setMenuFor] = useState(null); // id of the row whose action menu is open
   let { contentRooms, contentDevices, contentAllocations, contentsCount } = contentsOf(place, assets);
@@ -2575,8 +2575,8 @@ function ContentsList({ place, assets, typesList, onOpen, emptyLabel, locationsL
     }
     contentsCount = contentRooms.length + contentDevices.length + contentAllocations.length;
   }
-  if (typeFilter && typeFilter.length) {
-    const keep = a => typeFilter.includes(a.type || "");
+  if (filterAsset) {
+    const keep = filterAsset;
     contentRooms = contentRooms.filter(keep);
     contentDevices = contentDevices.filter(keep);
     contentAllocations = contentAllocations.filter(al => keep(al.bulk));
@@ -2744,7 +2744,19 @@ function mapWorkRows(scopeAssets) {
 const MAP_TASK_STATUS_ORDER = ["overdue", "due-soon", "never", "ok", "undated", "done"];
 const MAP_HISTORY_PERIODS = AUDIT_PERIOD_OPTIONS.filter(o => o.value !== AUDIT_ALL_TIME && o.value !== "today");
 const MAP_NO_WORK_TYPE = "No work type";
-function mapListFilterGroups(mode, items, typesList) {
+const MAP_UNASSIGNED_USER = "__unassigned";
+// The people an asset is assigned to, as filter values: the User asset's id when
+// assignments are stored by id, else the legacy name. A place carries no
+// assignment at all, so it neither offers nor matches "Unassigned".
+function mapAssetPersonKeys(a, assets) {
+  const ids = personLabelsOf(a);
+  const names = personNamesOf(a, assets);
+  const keys = ids.length ? ids.map((id, i) => ({ value: id, label: names[i] }))
+    : names.map(n => ({ value: "name:" + n, label: n }));
+  if (!keys.length && !isPlaceType(a.type)) return [{ value: MAP_UNASSIGNED_USER, label: UNASSIGNED_LABEL }];
+  return keys;
+}
+function mapListFilterGroups(mode, items, typesList, assets) {
   const groups = [];
   const distinct = (vals, label) => {
     const seen = new Map();
@@ -2755,6 +2767,11 @@ function mapListFilterGroups(mode, items, typesList) {
     const types = distinct((items || []).map(a => a.type || ""), t => typeNameOf(t, typesList) || "Other")
       .sort((a, b) => a.label.localeCompare(b.label));
     groups.push({ key: "type", label: "Type", options: types });
+    const people = new Map();
+    (items || []).forEach(a => mapAssetPersonKeys(a, assets).forEach(k => { if (!people.has(k.value)) people.set(k.value, k.label); }));
+    groups.push({ key: "user", label: "User",
+      options: [...people].map(([value, label]) => ({ value, label }))
+        .sort((x, y) => (x.value === MAP_UNASSIGNED_USER) - (y.value === MAP_UNASSIGNED_USER) || x.label.localeCompare(y.label)) });
   } else if (mode === "tasks") {
     const present = new Set((items || []).map(r => r.status));
     groups.push({ key: "status", label: "Status",
@@ -2782,9 +2799,12 @@ function mapListActiveFilter(groups, stored) {
   });
   return out;
 }
-function mapListFilterMatches(mode, active, item, now) {
+function mapListFilterMatches(mode, active, item, now, assets) {
   const has = (key, v) => !active[key] || active[key].includes(v);
-  if (mode === "assets") return has("type", item.type || "");
+  if (mode === "assets") {
+    return has("type", item.type || "")
+      && (!active.user || mapAssetPersonKeys(item, assets).some(k => active.user.includes(k.value)));
+  }
   if (mode === "tasks") return has("status", item.status) && has("kind", taskKindOf(item.item));
   if (mode === "history") {
     return has("workType", item.change.changeType || "")
@@ -4551,7 +4571,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-08.8";
+const APP_VERSION = "2026-10-08.9";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -21047,7 +21067,7 @@ function FloorPlanTabContent({
         items = [...c.contentRooms, ...c.contentDevices, ...c.contentAllocations.map(al => al.bulk)];
       }
     } else items = listMode === "tasks" ? mapTaskRows(scope) : mapWorkRows(scope);
-    const groups = filterable ? mapListFilterGroups(listMode, items, typesList) : [];
+    const groups = filterable ? mapListFilterGroups(listMode, items, typesList, assets) : [];
     const stored = listFilters[listMode] || {};
     const active = mapListActiveFilter(groups, stored);
     const count = Object.values(active).reduce((n, v) => n + v.length, 0);
@@ -21057,6 +21077,7 @@ function FloorPlanTabContent({
       return { ...f, [listMode]: { ...(f[listMode] || {}), [g.key]: next } };
     });
     const clear = () => setListFilters(f => ({ ...f, [listMode]: {} }));
+    const keepAsset = count ? (a => mapListFilterMatches("assets", active, a, 0, assets)) : null;
     return (<>
       <div style={{ position: "relative" }}>
         <MapListModeSwitch value={listMode} onChange={setListMode}
@@ -21066,7 +21087,8 @@ function FloorPlanTabContent({
       {filterable && <MapListActiveFilters groups={groups} active={active} onToggle={toggle} />}
       {listMode === "assets"
         ? (opts.assetsBody || <ContentsList place={place} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast rowActions={mapRowActions} onlyId={opts.onlyId}
-            typeFilter={active.type} emptyLabel={active.type ? "Nothing here matches the filter." : undefined} />)
+            filterAsset={keepAsset}
+            emptyLabel={count ? "Nothing here matches the filter." : undefined} />)
         : <MapWorkList mode={listMode} scopeAssets={scope} typesList={typesList}
             onOpenTask={onOpenTask || ((item, a) => onOpenAsset && onOpenAsset(a, "maintenance"))}
             onOpenWork={onOpenWork || ((ch, a) => onOpenAsset && onOpenAsset(a, "changes"))}

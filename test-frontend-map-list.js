@@ -80,7 +80,7 @@ check(/panelList\(null, groupRooms, \{ assetsBody:/.test(fp), "a group's Tasks/H
 check(/<MapListFilterMenu /.test(fp) && /filterOpen && <MapListFilterMenu/.test(fp), 'the filter choices are a menu, drawn only while open');
 const activeFn = src.slice(src.indexOf('function MapListActiveFilters('), src.indexOf('\n}', src.indexOf('function MapListActiveFilters(')));
 check(/if \(!chips\.length\) return null;/.test(activeFn) && /<MapListActiveFilters /.test(fp), 'only the active filters show under the switch, nothing when none');
-check(/typeFilter=\{active\.type\}/.test(fp) && /filter=\{active\}/.test(fp), 'the active filter reaches both list kinds');
+check(/const keepAsset = count \? \(a => mapListFilterMatches\("assets", active, a, 0, assets\)\)/.test(fp) && /filterAsset=\{keepAsset\}/.test(fp) && /filter=\{active\}/.test(fp), 'the active filter reaches both list kinds');
 
 // The filter (2026-10-08).
 const fctx = new Function(`
@@ -94,6 +94,11 @@ const fctx = new Function(`
   ${sliceFn('withinAuditPeriod')}
   ${src.slice(src.indexOf('const MAP_TASK_STATUS_ORDER'), src.indexOf('const MAP_NO_WORK_TYPE'))}
   const MAP_NO_WORK_TYPE = "No work type";
+  const UNASSIGNED_LABEL = "Unassigned";
+  const isPlaceType = t => t === 'Room';
+  const personLabelsOf = a => a.personIds || [];
+  const personNamesOf = (a, all) => (a.personIds || []).map(id => (all.find(x => x.id === id) || {}).n);
+  ${src.slice(src.indexOf('const MAP_UNASSIGNED_USER'), src.indexOf('function mapListFilterGroups('))}
   ${sliceFn('mapListFilterGroups')}
   ${sliceFn('mapListActiveFilter')}
   ${sliceFn('mapListFilterMatches')}
@@ -101,7 +106,13 @@ const fctx = new Function(`
 `)();
 const g1 = fctx.mapListFilterGroups('assets', [{ type: 'M' }, { type: 'C' }, { type: 'C' }]);
 check(g1.length === 1 && g1[0].options.map(o => o.label).join() === 'Computer,Monitor', 'assets filter by the types present, A-Z, once each');
-check(fctx.mapListFilterGroups('assets', [{ type: 'C' }, { type: 'C' }]).length === 0, 'one type offers no filter (a dead control)');
+const people = [{ id: 'u1', n: 'Ann' }, { id: 'u2', n: 'Bo' }];
+const devs = [{ type: 'C', personIds: ['u2'] }, { type: 'C', personIds: ['u1', 'u2'] }, { type: 'C' }, { type: 'Room' }];
+const gu = fctx.mapListFilterGroups('assets', devs, null, people).find(g => g.key === 'user');
+check(gu && gu.options.map(o => o.label).join() === 'Ann,Bo,Unassigned', 'assets filter by user, A-Z, Unassigned last, a room offering none');
+check(devs.filter(a => fctx.mapListFilterMatches('assets', { user: ['u2'] }, a, 0, people)).length === 2, 'a user filter matches every asset that person is on');
+check(devs.filter(a => fctx.mapListFilterMatches('assets', { user: ['__unassigned'] }, a, 0, people)).length === 1, 'Unassigned matches a device with nobody, never a place');
+check(fctx.mapListFilterGroups('assets', [{ type: 'C' }, { type: 'C' }], null, []).length === 0, 'one type and no users offers no filter (a dead control)');
 const trows = [{ status: 'done', item: {} }, { status: 'overdue', item: { kind: 'oneoff' } }, { status: 'never', item: {} }];
 const g2 = fctx.mapListFilterGroups('tasks', trows);
 check(g2.map(g => g.key).join() === 'status,kind' && g2[0].options.map(o => o.value).join() === 'overdue,never,done', 'tasks filter by status (urgent first) and kind');
