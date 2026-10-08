@@ -2,25 +2,30 @@
 // See /mnt/project-files/evaluations/claude-connector.md for why, and
 // CLAUDE.md "Claude connector" for the rules.
 //
-// THIS DOES NOT ANSWER ANYONE YET. Sign-in (OAuth with Google, checked against
-// each site's allowlist) is the next piece, and until it exists `whoIs()`
-// returns nobody, so every request is refused with 401. That is deliberate:
-// the alternative is an inventory readable by anyone holding the URL.
+// Sign-in is OAuth (oauth.js), whose one proof of identity is the app's own
+// Google sign-in, checked against each site's allowlist on EVERY request.
+// No valid token, no answer: 401 with a pointer to the sign-in metadata.
 //
 // Everything that decides an answer lives in plain JS beside this file
-// (protocol.js, tools.js, inventory.js, from-app.js) so Node can test it with
-// no Deno and no database. This file is only HTTP and SQL.
+// (protocol.js, tools.js, inventory.js, from-app.js, oauth.js) so Node can test
+// it with no Deno and no database. This file is only HTTP and SQL.
 //
-// Secrets (Supabase > Edge Functions > Secrets):
-//   MCP_DATABASE_URL  a LOGIN role that is a member of asset_api -- never the
-//                     service role, which skips row-level security.
+// Nothing to configure. Supabase injects SUPABASE_URL, SUPABASE_DB_URL and
+// SUPABASE_SERVICE_ROLE_KEY. Optional secrets (Supabase > Edge Functions > Secrets):
 //   MCP_TENANT_IDS    comma-separated tenants this connector serves (default "dev").
+//   MCP_SIGNING_KEY   the token-signing secret; defaults to one derived from the
+//                     service role key. Changing it signs everyone out of Claude.
+//   MCP_CONNECT_URL   the app's connect page (default the dev build's).
 
 import postgres from "npm:postgres@3.4.5";
 import { handleMcp } from "./protocol.js";
 import { roleFor } from "./tools.js";
+import { createOAuth, makeSigner } from "./oauth.js";
+import { verifyGoogleIdToken } from "../asset-api/auth.ts";
 
-const sql = postgres(Deno.env.get("MCP_DATABASE_URL") ?? "", {
+// The project's own database URL, a role that bypasses RLS -- which is why
+// every query goes through withTenant below, whose `set local role` turns it on.
+const sql = postgres(Deno.env.get("SUPABASE_DB_URL") ?? "", {
   max: 3,
   prepare: false, // Supabase's pooler runs in transaction mode
   idle_timeout: 20,
@@ -80,11 +85,16 @@ async function sitesFor(email: string) {
   return out;
 }
 
-// TODO(sign-in): verify the bearer token issued by this connector's own OAuth
-// flow and return the email it names. Until then: nobody.
-async function whoIs(_req: Request): Promise<string | null> {
-  return null;
-}
+const BASE = `${(Deno.env.get("SUPABASE_URL") ?? "").replace(/\/$/, "")}/functions/v1/mcp`;
+const CONNECT_URL = Deno.env.get("MCP_CONNECT_URL") ?? "https://assets.stama.tech/dev/mcp-connect.html";
+// The connect page is the one browser caller, and it is on the app's origin.
+const CONNECT_ORIGIN = new URL(CONNECT_URL).origin;
+
+const signingSecret = Deno.env.get("MCP_SIGNING_KEY") || Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ||
+  Deno.env.get("SUPABASE_DB_URL") || "";
+const oauthPromise = makeSigner(signingSecret).then((signer) =>
+  createOAuth({ base: BASE, connectUrl: CONNECT_URL, signer, verifyGoogle: (t: unknown) => verifyGoogleIdToken(t), sitesFor })
+);
 
 const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
   new Response(body === null ? null : JSON.stringify(body), {
@@ -92,12 +102,77 @@ const json = (status: number, body: unknown, headers: Record<string, string> = {
     headers: { "content-type": "application/json", ...headers },
   });
 
+const cors = {
+  "access-control-allow-origin": CONNECT_ORIGIN,
+  "access-control-allow-methods": "POST, OPTIONS",
+  "access-control-allow-headers": "content-type",
+  "vary": "origin",
+};
+// Discovery documents are public and read by Claude's browser-side code too.
+const openCors = { "access-control-allow-origin": "*" };
+
+// The path after the function name. Supabase hands the function its full
+// path (/functions/v1/mcp/...) or just (/mcp/...) depending on the route.
+function subPath(url: URL) {
+  const i = url.pathname.indexOf("/mcp");
+  const rest = i < 0 ? url.pathname : url.pathname.slice(i + 4);
+  return rest.replace(/\/+$/, "") || "/";
+}
+
+async function readForm(req: Request): Promise<Record<string, string> | URLSearchParams> {
+  const type = req.headers.get("content-type") ?? "";
+  if (type.includes("application/json")) return await req.json().catch(() => ({}));
+  return new URLSearchParams(await req.text());
+}
+
 Deno.serve(async (req) => {
+  const url = new URL(req.url);
+  const path = subPath(url);
+  const oauth = await oauthPromise;
+
+  // Discovery. Served with and without a path suffix, since clients build the
+  // well-known URL from the issuer in more than one way.
+  if (req.method === "GET" && path.startsWith("/.well-known/oauth-protected-resource")) {
+    return json(200, oauth.resourceMetadata(), openCors);
+  }
+  if (req.method === "GET" &&
+    (path.startsWith("/.well-known/oauth-authorization-server") || path.startsWith("/.well-known/openid-configuration"))) {
+    return json(200, oauth.metadata(), openCors);
+  }
+  if (req.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: path === "/authorize/complete" ? cors : { ...openCors, "access-control-allow-headers": "authorization, content-type, mcp-protocol-version", "access-control-allow-methods": "GET, POST, OPTIONS" },
+    });
+  }
+  if (req.method === "POST" && path === "/register") {
+    const out = await oauth.register(await req.json().catch(() => ({})));
+    return json(out.status, out.body, openCors);
+  }
+  if (req.method === "GET" && path === "/authorize") {
+    const out = await oauth.authorize(url.searchParams);
+    if ("location" in out) return new Response(null, { status: 302, headers: { location: out.location } });
+    return json(out.status, out.body);
+  }
+  if (req.method === "POST" && path === "/authorize/complete") {
+    const out = await oauth.complete(await req.json().catch(() => ({})));
+    return json(out.status, out.body, { ...cors, "cache-control": "no-store" });
+  }
+  if (req.method === "POST" && path === "/token") {
+    const out = await oauth.token(await readForm(req));
+    return json(out.status, out.body, { ...openCors, "cache-control": "no-store", "pragma": "no-cache" });
+  }
+
+  if (path !== "/") return json(404, { error: "Not found." });
   if (req.method !== "POST") return json(405, { error: "POST only" }, { allow: "POST" });
 
-  const email = await whoIs(req);
+  const email = await oauth.bearer(req.headers.get("authorization"));
   if (!email) {
-    return json(401, { error: "Sign-in required." }, { "www-authenticate": 'Bearer realm="asset-tracker"' });
+    return json(401, { error: "Sign-in required." }, {
+      ...openCors,
+      "www-authenticate": `Bearer resource_metadata="${BASE}/.well-known/oauth-protected-resource"`,
+      "access-control-expose-headers": "www-authenticate",
+    });
   }
 
   let body: unknown;
@@ -115,8 +190,8 @@ Deno.serve(async (req) => {
       if (!sites.some((s) => s.id === tenant)) throw new Error("site not permitted");
       return load(tenant, table);
     },
-    log: (event: string, detail: unknown) => console.log(JSON.stringify({ event, detail })),
+    log: (event: string, detail: unknown) => console.log(JSON.stringify({ event, email, detail })),
   };
   const out = await handleMcp(body, ctx);
-  return json(out.status, out.body);
+  return json(out.status, out.body, openCors);
 });

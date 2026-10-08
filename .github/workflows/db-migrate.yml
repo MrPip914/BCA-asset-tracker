@@ -192,6 +192,9 @@ jobs:
             || { echo "::error::Could not read the project ref from SUPABASE_DB_URL (expected a pooler URL whose user is postgres.<ref>)."; exit 1; }
           echo "PROJECT_REF=$ref" >> "$GITHUB_ENV"
           supabase functions deploy asset-api --project-ref "$ref" --no-verify-jwt
+          # The Claude connector. It imports asset-api's Google check, so the
+          # two always deploy together from the same commit.
+          supabase functions deploy mcp --project-ref "$ref" --no-verify-jwt
       - name: Ask the deployed function two questions
         run: |
           set -euo pipefail
@@ -206,3 +209,13 @@ jobs:
           echo "POST -> $post"
           node -e 'const r=JSON.parse(process.argv[1]); if(!(r.authFailed && r.reason==="signin")) process.exit(1)' "$post"
           echo "✓ asset-api is up on dev and reaches the database."
+          # 3. The connector: a question with no token must be refused with a
+          #    pointer to its sign-in metadata, and that metadata must load.
+          mcp="https://$PROJECT_REF.supabase.co/functions/v1/mcp"
+          code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"ping"}' "$mcp")
+          echo "MCP POST (no token) -> $code"
+          [ "$code" = "401" ] || exit 1
+          meta=$(curl -sS --max-time 30 "$mcp/.well-known/oauth-authorization-server")
+          echo "MCP metadata -> $meta"
+          node -e 'const r=JSON.parse(process.argv[1]); if(!(r.token_endpoint && r.code_challenge_methods_supported.includes("S256"))) process.exit(1)' "$meta"
+          echo "✓ the Claude connector is up on dev and asks for sign-in."

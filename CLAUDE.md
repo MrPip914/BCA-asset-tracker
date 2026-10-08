@@ -557,10 +557,26 @@ A remote MCP server, as a Supabase Edge Function, so Claude (web, desktop, phone
 answer questions from the inventory. The evaluation behind it is
 `/mnt/project-files/evaluations/claude-connector.md`. **Dev tenant only, and READ-ONLY.**
 
-- **It refuses every request until sign-in exists.** `whoIs()` in `index.ts` returns
-  nobody, so the function answers 401 whatever it is sent. An unauthenticated connector
-  would be the inventory readable by anyone holding the URL; the next piece is OAuth with
-  Google, checked against each site's allowlist exactly as the app checks it.
+- **Sign-in is OAuth whose only proof of identity is the app's Google sign-in**
+  (`oauth.js`). Claude registers, `/authorize` redirects to `mcp-connect.html` on the app
+  origin (the only origin Google sign-in is registered for; Supabase will not serve HTML),
+  the page posts the Google ID token to `/authorize/complete`, which checks it with the
+  same `verifyGoogleIdToken` the Supabase backend uses and requires at least one site, and
+  Claude trades the code (PKCE S256) for an hour's access token and a 30-day refresh.
+  - **Stateless: every client id, request, code and token is HMAC-signed JSON**, so there
+    is no table. A token cannot be revoked by itself, which is why access is re-read from
+    the allowlists on EVERY request and on every refresh — removing someone works on their
+    next question, as in the app.
+  - **The connect page PINS the connector URL.** Reading it from the link would let a
+    crafted link collect a Google token that also signs into the app.
+  - **Codes only go back to Claude's own callbacks or a loopback address**, checked at
+    registration, at authorize, and again by the page.
+  - Discovery is served under the function itself (`/functions/v1/mcp/.well-known/...`),
+    since the supabase.co root is not ours; the 401 names it in `WWW-Authenticate`.
+  - The signing key derives from the service role key unless `MCP_SIGNING_KEY` is set
+    (Supabase > Edge Functions > Secrets). Changing either signs everyone out of Claude.
+  - Deployed by `deploy-api-dev` beside `asset-api`, from the same commit, since it imports
+    `asset-api/auth.ts`.
 - **Built on the Phase 1 tables, never on Apps Script.** Apps Script cannot send the status
   codes and headers an MCP sign-in needs, and every Claude request would meet Google's
   intermittent failures.

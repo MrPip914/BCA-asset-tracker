@@ -3,7 +3,8 @@
 // reports are the app's own.
 //
 // Drives the real modules with fixture rows shaped like the Phase 1 tables, so
-// it needs no Deno and no database. index.ts (HTTP + SQL) is not covered here.
+// it needs no Deno and no database. Sign-in (oauth.js) runs on Node's WebCrypto.
+// index.ts (HTTP routing + SQL) is not covered here; CI's deploy smoke-checks it.
 //
 // Run: node test-mcp-connector.mjs   (exits non-zero on failure)
 import fs from "node:fs";
@@ -11,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { handleMcp, PROTOCOL_VERSIONS } from "./supabase/functions/mcp/protocol.js";
 import { TOOLS, roleFor } from "./supabase/functions/mcp/tools.js";
+import { createOAuth, makeSigner, redirectAllowed, sha256b64url, ACCESS_TTL_MS } from "./supabase/functions/mcp/oauth.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 let pass = 0, fail = 0;
@@ -276,6 +278,101 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   check("panel and room together is refused", both.isError);
   const nothing = (await call("panel_lookup", { room: "Building 300" })).data;
   eq("a place no circuit serves says so", nothing.circuits, []);
+}
+
+// ---------------------------------------------------------------- sign-in (oauth.js)
+
+{
+  let clock = 1_000_000;
+  const allowed = new Map([["eric@example.com", [{ id: "dev", name: "Dev" }]]]);
+  const signer = await makeSigner("test-secret");
+  const oauth = createOAuth({
+    base: "https://x.supabase.co/functions/v1/mcp",
+    connectUrl: "https://assets.stama.tech/dev/mcp-connect.html",
+    signer,
+    verifyGoogle: async (t) => (t === "good-google" ? { ok: true, email: "eric@example.com" }
+      : t === "stranger" ? { ok: true, email: "nobody@example.com" } : { ok: false, detail: "bad token" }),
+    sitesFor: async (e) => allowed.get(e) || [],
+    now: () => clock,
+  });
+  const CB = "https://claude.ai/api/mcp/auth_callback";
+
+  check("Claude's callback is allowed", redirectAllowed(CB));
+  check("loopback is allowed", redirectAllowed("http://127.0.0.1:33418/callback"));
+  check("an arbitrary https callback is refused", !redirectAllowed("https://evil.example/cb"));
+  check("a lookalike host is refused", !redirectAllowed("https://claude.ai.evil.example/api/mcp/auth_callback"));
+
+  const bad = await oauth.register({ redirect_uris: ["https://evil.example/cb"] });
+  eq("registering a foreign callback is refused", bad.status, 400);
+  const reg = await oauth.register({ redirect_uris: [CB], client_name: "Claude" });
+  eq("registration succeeds", reg.status, 201);
+  const clientId = reg.body.client_id;
+
+  const verifier = "v".repeat(50);
+  const challenge = await sha256b64url(verifier);
+  const params = (o) => new URLSearchParams({ client_id: clientId, redirect_uri: CB, response_type: "code",
+    code_challenge: challenge, code_challenge_method: "S256", state: "st1", ...o });
+
+  eq("authorize with a forged client is refused", (await oauth.authorize(params({ client_id: clientId + "x" }))).status, 400);
+  eq("authorize to an unregistered redirect is refused", (await oauth.authorize(params({ redirect_uri: "http://localhost:1/cb" }))).status, 400);
+  eq("authorize without PKCE is refused", (await oauth.authorize(params({ code_challenge_method: "plain" }))).status, 400);
+  const az = await oauth.authorize(params());
+  check("authorize sends the browser to the connect page", az.status === 302 && az.location.startsWith("https://assets.stama.tech/dev/mcp-connect.html?req="));
+  const req = decodeURIComponent(az.location.split("req=")[1]);
+
+  eq("a bad Google token is refused", (await oauth.complete({ req, credential: "nope" })).status, 401);
+  const stranger = await oauth.complete({ req, credential: "stranger" });
+  check("someone on no allowlist is refused", stranger.status === 403 && /access list/.test(stranger.body.error));
+  const done = await oauth.complete({ req, credential: "good-google" });
+  check("a listed person gets a code", done.status === 200 && done.body.ok);
+  const back = new URL(done.body.redirect);
+  check("the code goes back to the registered callback with its state",
+    back.origin + back.pathname === CB && back.searchParams.get("state") === "st1");
+  const code = back.searchParams.get("code");
+  check("the Google token is never handed back", !JSON.stringify(done.body).includes("good-google"));
+
+  const tok = (o) => oauth.token(new URLSearchParams({ grant_type: "authorization_code", code, client_id: clientId,
+    redirect_uri: CB, code_verifier: verifier, ...o }));
+  eq("a wrong PKCE verifier is refused", (await tok({ code_verifier: "w".repeat(50) })).status, 400);
+  const other = (await oauth.register({ redirect_uris: [CB] })).body.client_id;
+  eq("a code presented by another client is refused", (await tok({ client_id: other })).status, 400);
+  const t = await tok();
+  check("the code trades for tokens", t.status === 200 && t.body.access_token && t.body.refresh_token);
+
+  eq("the access token names the person", await oauth.bearer(`Bearer ${t.body.access_token}`), "eric@example.com");
+  eq("a code is not an access token", await oauth.bearer(`Bearer ${code}`), null);
+  eq("a refresh token is not an access token", await oauth.bearer(`Bearer ${t.body.refresh_token}`), null);
+  const tampered = t.body.access_token.replace(/^./, (c) => (c === "e" ? "f" : "e"));
+  eq("a tampered token is refused", await oauth.bearer(`Bearer ${tampered}`), null);
+  const otherSigner = await makeSigner("another-secret");
+  eq("a token signed with another key is refused", await oauth.bearer(`Bearer ${await otherSigner.sign({ typ: "access", e: "eric@example.com", exp: clock + 1000 })}`), null);
+
+  clock += 6 * 60 * 1000;
+  eq("an expired code is refused", (await tok()).status, 400);
+  clock += ACCESS_TTL_MS;
+  eq("an expired access token is refused", await oauth.bearer(`Bearer ${t.body.access_token}`), null);
+
+  const refresh = (o) => oauth.token(new URLSearchParams({ grant_type: "refresh_token", refresh_token: t.body.refresh_token, client_id: clientId, ...o }));
+  const r = await refresh();
+  check("a refresh issues a new access token", r.status === 200 && (await oauth.bearer(`Bearer ${r.body.access_token}`)) === "eric@example.com");
+  eq("a refresh by another client is refused", (await refresh({ client_id: other })).status, 400);
+  allowed.delete("eric@example.com");
+  eq("a refresh after losing every site is refused", (await refresh()).status, 400);
+  eq("an unknown grant is refused", (await oauth.token(new URLSearchParams({ grant_type: "password" }))).status, 400);
+
+  const meta = oauth.metadata();
+  check("metadata advertises PKCE S256 and registration", meta.code_challenge_methods_supported.includes("S256") && meta.registration_endpoint);
+  eq("the resource names its own authorization server", oauth.resourceMetadata().authorization_servers, [meta.issuer]);
+}
+
+// ---------------------------------------------------------------- the connect page
+
+{
+  const page = fs.readFileSync(path.join(here, "mcp-connect.html"), "utf8");
+  check("the connect page pins the connector URL rather than reading it from the link",
+    /var CONNECTOR_URL = "https:\/\/[a-z0-9]+\.supabase\.co\/functions\/v1\/mcp";/.test(page) && !/searchParams\.get\("(api|url|connector)"\)/.test(page));
+  const appId = /const GOOGLE_CLIENT_ID = "([^"]+)"/.exec(fs.readFileSync(path.join(here, "index.html"), "utf8"))[1];
+  check("the connect page uses the app's Google client", page.includes(`"${appId}"`));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
