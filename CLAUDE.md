@@ -3611,6 +3611,20 @@ view state only, and it stays put as the selection moves. Frontend only.
 - Covered by `test-frontend-map-list.js` (runs the real scope/sort helpers); driven in
   Chromium against Sandbox.
 
+### Which pins the map draws (2026-10-08)
+
+The map menu's **Pins** row opens in place (like Configure) with **All pins**, **No pins**,
+and a checkbox per asset type that has a pin on THIS plan ("Only these types"). View only,
+never saved, and still defaults to no pins. Frontend only.
+- **A ticked type is a type ID**, compared against `a.type`, and the list is A→Z by name.
+  Types with nothing pinned on the plan are not offered: a checkbox there changes nothing.
+- **"Show on map" and placement still draw their pin whatever the filter says** — the same
+  bypass the old Show/Hide toggle had (`focusPinId`, `revealPinId`, `placing`). Changing
+  the filter drops the reveal, and drops the info card if its pin was filtered away.
+- Unticking the last type falls back to No pins rather than an empty "types" state.
+- `MOCK_SNAPSHOT` pins BCA0098 (Electrical Panel, now `mapPin`) in the Kitchen beside the
+  Mini Split, so Sandbox has two types to choose between. Driven in Chromium against Sandbox.
+
 ### The floor plan SVG upload: image route, and NO signed allowed_formats (2026-10-04, backend v51)
 
 The upload started failing with "The file host refused the upload: Raw file format svg not

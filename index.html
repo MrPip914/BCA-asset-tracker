@@ -4402,7 +4402,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-08.4";
+const APP_VERSION = "2026-10-08.5";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -5533,7 +5533,9 @@ const MOCK_SNAPSHOT = {
     // type had an icon to name.)
     "Mini Split": { categoryId: "Equipment", iconName: "AirVent", mapPin: true },
     "Condenser": { iconName: "Fan" },
-    "Electrical Panel": { categoryIds: ["Facilities", "Equipment"] },
+    // mapPin on a second type (with BCA0098 pinned in the Kitchen) so the
+    // map's per-type pin filter has two types to choose between in Sandbox.
+    "Electrical Panel": { categoryIds: ["Facilities", "Equipment"], mapPin: true },
     "Stream Deck": { categoryIds: [] },
   },
   // A column config as an OLDER client would have saved it — carrying the
@@ -6171,7 +6173,7 @@ const MOCK_SNAPSHOT = {
     // blank. Two 3-pole breakers (A-B-C on 1/3/5 and 7/9/11), a 2-pole that
     // lands on A-B, and single-poles on each phase.
     {
-      label: "BCA0098", type: "Electrical Panel", parentId: "BCR0002", brand: "Square D", model: "NQ", serial: "",
+      label: "BCA0098", type: "Electrical Panel", parentId: "BCR0002", mapPlanId: "BCB0001", mapX: "300", mapY: "120", brand: "Square D", model: "NQ", serial: "",
       notes: "Sandbox fixture: a three-phase kitchen panel.",
       status: "Active",
       panelSlotCount: 18, panelLayout: "two-column", panelPhases: "3", panelVoltage: "120/208",
@@ -20780,7 +20782,22 @@ function FloorPlanTabContent({
   // extraction was meant to avoid, not a step toward it.
   const [menuOpen, setMenuOpen] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);   // Configure accordion in the menu
-  const [showPins, setShowPins] = useState(false);         // Show/hide pins menu toggle (view only, never saved)
+  // Which pins are drawn: "none", "all", or "types" (only the asset types in
+  // pinTypes). View only, never saved -- the same footing the old Show/Hide
+  // toggle had. A type ticked here is a type ID, compared against a.type.
+  const [pinMode, setPinMode] = useState("none");
+  const [pinTypes, setPinTypes] = useState([]);
+  const [pinsOpen, setPinsOpen] = useState(false);       // Pins accordion in the menu
+  const pinTypeShown = t => pinMode === "all" || (pinMode === "types" && pinTypes.includes(t));
+  // Every change to the filter drops the info card if its pin just went away,
+  // and drops the "Show on map" reveal -- choosing what to see is the user
+  // taking the map back, exactly as hiding pins used to be.
+  const applyPinFilter = (mode, types) => {
+    setPinMode(mode); setPinTypes(types);
+    setRevealPinId(null);
+    const sel = selectedPinId && assets.find(a => a.id === selectedPinId);
+    if (sel && !(mode === "all" || (mode === "types" && types.includes(sel.type)))) setSelectedPinId(null);
+  };
   // The asset "Show on map" landed on. Its pin stays drawn with Show pins off,
   // since that pin is the whole point of the trip; every other pin still
   // follows the toggle. Dropped when the plan changes or pins are hidden.
@@ -21994,7 +22011,7 @@ function FloorPlanTabContent({
             });
           })()}
           {!setupTab && assets.filter(a => !placing || a.id !== placing.assetId).map(a => {
-            if (!(showPins || placing || a.id === focusPinId || a.id === revealPinId)) return null;
+            if (!(pinTypeShown(a.type) || placing || a.id === focusPinId || a.id === revealPinId)) return null;
             const pin = mapPinOf(a);
             if (!pin || pin.planId !== selectedAsset.id || (a.status || "Active") === "Archived") return null;
             const [px, py] = floorPlanRotatePoint(pin.x, pin.y, rotation);
@@ -22133,14 +22150,67 @@ function FloorPlanTabContent({
               >
                 <Repeat size={15} /> Free zoom ({freeZoom ? "on" : "off"})
               </button>
+              {/* Pins: All, None, or a tick per asset type that has a pin on
+                  THIS plan -- a type with nothing pinned here would be a
+                  checkbox that changes nothing. Opened in place like
+                  Configure; ticking a type keeps the menu open so several
+                  can be chosen in one visit. */}
               <button
                 type="button"
-                onClick={() => { setMenuOpen(false); setShowPins(v => !v); if (showPins) { setSelectedPinId(null); setRevealPinId(null); } }}
+                onClick={() => setPinsOpen(v => !v)}
+                aria-expanded={pinsOpen}
                 className="icon-btn"
                 style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
               >
-                <MapPin size={15} /> {showPins ? "Hide pins" : "Show pins"}
+                <MapPin size={15} /> Pins
+                <span style={{ marginLeft: "auto", paddingLeft: 10, fontSize: 12, color: C.muted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 120 }}>
+                  {pinMode === "all" ? "All" : pinMode === "none" ? "None" : pinTypes.length === 1 ? typeNameOf(pinTypes[0], typesList) : pinTypes.length + " types"}
+                </span>
+                <ChevronDown size={14} style={{ transform: pinsOpen ? "rotate(180deg)" : "none" }} />
               </button>
+              {pinsOpen && (() => {
+                const rowStyle = { display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "8px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6, cursor: "pointer" };
+                const tick = on => <span style={{ width: 15, display: "inline-flex" }}>{on && <Check size={15} color={C.brand} />}</span>;
+                const planTypes = [...new Set(assets.filter(a => {
+                  const pin = mapPinOf(a);
+                  return pin && pin.planId === selectedAsset.id && (a.status || "Active") !== "Archived";
+                }).map(a => a.type))]
+                  .sort((x, y) => typeNameOf(x, typesList).localeCompare(typeNameOf(y, typesList)));
+                return (
+                  <div style={{ paddingLeft: 14 }}>
+                    <button type="button" className="icon-btn" style={rowStyle}
+                      onClick={() => { setMenuOpen(false); setPinsOpen(false); applyPinFilter("all", []); }}>
+                      {tick(pinMode === "all")} All pins
+                    </button>
+                    <button type="button" className="icon-btn" style={rowStyle}
+                      onClick={() => { setMenuOpen(false); setPinsOpen(false); applyPinFilter("none", []); }}>
+                      {tick(pinMode === "none")} No pins
+                    </button>
+                    {planTypes.length > 0 && (
+                      <div style={{ fontSize: 11, fontWeight: 700, color: C.muted, textTransform: "uppercase", letterSpacing: 0.4, padding: "8px 12px 2px" }}>
+                        Only these types
+                      </div>
+                    )}
+                    {planTypes.map(t => {
+                      const on = pinMode === "types" && pinTypes.includes(t);
+                      return (
+                        <label key={t} className="icon-btn" style={rowStyle}>
+                          <input type="checkbox" checked={on} style={{ margin: 0 }}
+                            onChange={() => {
+                              const base = pinMode === "types" ? pinTypes : [];
+                              const next = on ? base.filter(x => x !== t) : [...base, t];
+                              applyPinFilter(next.length ? "types" : "none", next);
+                            }} />
+                          {typeNameOf(t, typesList)}
+                        </label>
+                      );
+                    })}
+                    {planTypes.length === 0 && (
+                      <div style={{ fontSize: 12, color: C.muted, padding: "4px 12px 8px" }}>Nothing is pinned on this plan yet.</div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
           </>
         )}
