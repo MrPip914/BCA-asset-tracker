@@ -2561,10 +2561,26 @@ function LocationTitle({ place, typesList, onOpen }) {
 // `rowActions` (Map panel only) returns, for one listed asset, the actions its
 // row menu offers -- [{ key, label, icon, onClick, danger }]. A row with none
 // gets no menu button rather than one that opens onto nothing.
-function ContentsList({ place, assets, typesList, onOpen, emptyLabel, locationsLast, rowActions }) {
-  const [locationsOpen, setLocationsOpen] = useState(false);
+function ContentsList({ place, assets, typesList, onOpen, emptyLabel, locationsLast, rowActions, onlyId }) {
+  const [locationsOpenState, setLocationsOpen] = useState(false);
   const [menuFor, setMenuFor] = useState(null); // id of the row whose action menu is open
-  const { contentRooms, contentDevices, contentAllocations, contentsCount } = contentsOf(place, assets);
+  let { contentRooms, contentDevices, contentAllocations, contentsCount } = contentsOf(place, assets);
+  // `onlyId` narrows the list to ONE asset, drawn exactly as it reads in its
+  // place's full list (the Map panel's selected pin). Something the place's
+  // contents do not hold -- a pin with no parent, or one filed elsewhere --
+  // still gets its one row, as a device, rather than an empty panel.
+  if (onlyId) {
+    contentRooms = contentRooms.filter(a => a.id === onlyId);
+    contentDevices = contentDevices.filter(a => a.id === onlyId);
+    contentAllocations = contentAllocations.filter(al => al.bulk.id === onlyId).slice(0, 1);
+    if (!contentRooms.length && !contentDevices.length && !contentAllocations.length) {
+      const only = (assets || []).find(a => a.id === onlyId);
+      if (only) contentDevices = [only];
+    }
+    contentsCount = contentRooms.length + contentDevices.length + contentAllocations.length;
+  }
+  // A single location is shown open: collapsed, it would be a header with nothing under it.
+  const locationsOpen = locationsOpenState || !!onlyId;
   if (contentsCount === 0) {
     return (
       <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>
@@ -4255,7 +4271,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-07.7";
+const APP_VERSION = "2026-10-08.1";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -22122,30 +22138,21 @@ function FloorPlanTabContent({
           ContentsList's own Rooms section never lists a non-room). Yields to
           the single-room panel above the moment a specific member is picked
           -- a more specific selection should win over the group-wide one. */}
+      {/* A selected pin narrows the panel to that one asset, drawn exactly as
+          it reads when its space is selected: the same card, titled with its
+          place, and the same row with its own action menu. */}
       {selectedPinId && !setupTab && (() => {
         const a = assets.find(x => x.id === selectedPinId);
         const pin = mapPinOf(a);
         if (!a || !pin || pin.planId !== selectedAsset.id) return null;
+        const parent = a.parentId ? assets.find(x => x.id === a.parentId) : null;
+        const place = parent && isPlaceType(parent.type) ? parent : selectedAsset;
         return (
-          <div style={{ marginTop: 8, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-            <span style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>
-              {nameOf(a, typesList)}
-              <span style={{ fontWeight: 400, color: C.empty }}> · {typeNameOf(a.type, typesList)}</span>
-            </span>
-            <span style={{ display: "flex", gap: 8 }}>
-              {onOpenAsset && (
-                <button type="button" onClick={() => onOpenAsset(a)}
-                  style={{ padding: "3px 9px", borderRadius: 8, border: `1.5px solid ${C.border}`, background: "none", color: C.brandDark, fontSize: 12, fontWeight: 600 }}>
-                  Open asset
-                </button>
-              )}
-              {canEdit && onClearPin && (
-                <button type="button" onClick={() => { setSelectedPinId(null); onClearPin(a.id); }}
-                  style={{ padding: "3px 9px", borderRadius: 8, border: `1.5px solid ${C.border}`, background: "none", color: C.muted, fontSize: 12, fontWeight: 600 }}>
-                  Remove pin
-                </button>
-              )}
-            </span>
+          <div style={{ marginTop: 8, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
+              <LocationTitle place={place} typesList={typesList} onOpen={onOpenAsset} />
+            </div>
+            <ContentsList place={place} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast rowActions={mapRowActions} onlyId={a.id} />
           </div>
         );
       })()}
