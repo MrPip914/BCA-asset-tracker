@@ -80,7 +80,7 @@ check(/panelList\(null, groupRooms, \{ assetsBody:/.test(fp), "a group's Tasks/H
 check(/<MapListFilterMenu /.test(fp) && /filterOpen && <MapListFilterMenu/.test(fp), 'the filter choices are a menu, drawn only while open');
 const activeFn = src.slice(src.indexOf('function MapListActiveFilters('), src.indexOf('\n}', src.indexOf('function MapListActiveFilters(')));
 check(/if \(!chips\.length\) return null;/.test(activeFn) && /<MapListActiveFilters /.test(fp), 'only the active filters show under the switch, nothing when none');
-check(/const keepAsset = count \? \(a => mapListFilterMatches\("assets", active, a, 0, assets\)\)/.test(fp) && /filterAsset=\{keepAsset\}/.test(fp) && /filter=\{active\}/.test(fp), 'the active filter reaches both list kinds');
+check(/const keepAsset = \(count \|\| assetQ\) \? \(a => mapListFilterMatches\("assets", active, a, 0, assets\) && assetMatchesSearch\(a, assets, typesList, assetQ\)\)/.test(fp) && /filterAsset=\{keepAsset\}/.test(fp) && /filter=\{active\}/.test(fp), 'the active filter reaches both list kinds');
 
 // The filter (2026-10-08).
 const fctx = new Function(`
@@ -130,6 +130,47 @@ const call = src.slice(src.indexOf('<MapTabContent'), src.indexOf('/>', src.inde
 check(/onOpenTask=\{\(item, a\) => \(canEdit \? openMaintenanceEdit\(item\.id, a\.id\)/.test(call), 'a task row opens the task dialog for editors, against its own asset');
 const mapTab = src.slice(src.indexOf('function MapTabContent({'), src.indexOf('function FloorPlanTabContent({'));
 check(/onOpenTask=\{onOpenTask\}/.test(mapTab) && /onOpenWork=\{onOpenWork\}/.test(mapTab), 'MapTabContent passes both handlers through');
+
+// The search (2026-10-08): the Map tab's search box narrows the panel list with
+// the SAME match the Assets, Tasks and History tabs use -- one function each,
+// called by the tab and by the map, so the two cannot drift.
+const sctx = new Function(`
+  const nameOf = a => a.name || a.label || "";
+  const typeNameOf = t => ({ C: "Computer", Room: "Room" })[t] || t || "";
+  const isPersonType = () => false;
+  const personNameVariants = () => [];
+  function ancestorsOf(a, assets) {
+    const out = []; let p = a;
+    while (p && p.parentId) { p = assets.find(x => x.id === p.parentId); if (p) out.push(p); }
+    return out;
+  }
+  const roomNameOf = (a, assets) => { const r = [a, ...ancestorsOf(a, assets)].find(x => x.type === "Room"); return r ? r.name : ""; };
+  const buildingNameOf = () => "";
+  ${sliceFn('assetMatchesSearch')}
+  ${sliceFn('taskMatchesSearch')}
+  ${sliceFn('workMatchesSearch')}
+  return { assetMatchesSearch, taskMatchesSearch, workMatchesSearch };
+`)();
+const sRoom = { id: 'r', type: 'Room', name: 'Library' };
+const sPc = { id: 'p', type: 'C', name: 'Front desk', parentId: 'r', serial: 'XJ-9' };
+const sAll = [sRoom, sPc];
+check(sctx.assetMatchesSearch(sPc, sAll, null, 'xj-9') && !sctx.assetMatchesSearch(sRoom, sAll, null, 'xj-9'), 'search finds an asset by any field and leaves others out');
+check(sctx.assetMatchesSearch(sPc, sAll, null, 'library'), "search finds equipment by the room it sits in, as the Assets tab does");
+check(sctx.assetMatchesSearch(sPc, sAll, null, '') , 'a blank search matches everything');
+check(sctx.taskMatchesSearch({ asset: sPc, item: { task: 'Clean filter' } }, sAll, null, 'filter')
+  && sctx.taskMatchesSearch({ asset: sPc, item: { task: 'x' } }, sAll, null, 'library')
+  && !sctx.taskMatchesSearch({ asset: sPc, item: { task: 'x' } }, sAll, null, 'roof'), 'task search matches the task, its asset and its room');
+check(sctx.workMatchesSearch({ asset: sPc, change: { vendor: 'Acme' } }, null, 'acme')
+  && sctx.workMatchesSearch({ asset: sPc, change: {} }, null, 'front desk'), 'history search matches the vendor and the asset name');
+check(/return assetMatchesSearch\(a, assets, typesList, q\);/.test(src) && /return taskMatchesSearch\(r, assets, typesList, q\);/.test(src)
+  && /return workMatchesSearch\(r, typesList, q\);/.test(src), 'the Assets, Tasks and History tabs use the same search functions');
+const mwl = sliceFn('MapWorkList');
+check(/taskMatchesSearch\(r, assets \|\| \[\], typesList, q\)/.test(mwl) && /workMatchesSearch\(r, typesList, q\)/.test(mwl)
+  && /query=\{listQ\} assets=\{assets\}/.test(fp), "the map's Tasks and History lists apply the search");
+check(/const listQ = \(query \|\| ""\)/.test(fp) && fp.indexOf('const listQ') < fp.indexOf('const qTrim'),
+  'the list reads the query itself, ahead of the no-plan early return (qTrim there would be a TDZ crash)');
+check(/const shownRooms = qTrim \? groupRooms\.filter/.test(fp), "an open group's room list is narrowed by the search too");
+check(/query=\{mapQuery\}/.test(src) && !/popstate[\s\S]{0,400}setMapQuery/.test(src), 'the search text lives on the page, so Back from an asset keeps it');
 
 if (failed) { console.log(`\n${failed} check(s) failed`); process.exit(1); }
 console.log('\nall map list checks passed');

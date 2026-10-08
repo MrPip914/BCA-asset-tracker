@@ -2734,6 +2734,38 @@ function mapWorkRows(scopeAssets) {
   return rows;
 }
 
+// The Assets tab's search, as one function so the Map panel's list asks the
+// SAME question (2026-10-08). `q` is already trimmed and lowercased; blank
+// matches everything.
+function assetMatchesSearch(a, assets, typesList, q) {
+  if (!q) return true;
+  // Searching matches the whole chain above an asset, so typing a building
+  // name finds the equipment inside it however many levels down it sits.
+  const chainNames = [roomNameOf(a, assets), buildingNameOf(a, assets), ...ancestorsOf(a, assets).map(p => nameOf(p))];
+  if (chainNames.some(n => n && n.toLowerCase().includes(q))) return true;
+  // The type by NAME. The raw scan below sees a.type, which is an id — so a
+  // user-created type was findable only by typing its uuid.
+  if (typeNameOf(a.type, typesList).toLowerCase().includes(q)) return true;
+  // The composed name, because a person's is not stored as one string: the
+  // raw scan below sees "Jen" and "Kramer" in separate fields, so typing a
+  // full name -- the obvious thing to type -- would find nobody. Both
+  // spellings, so the search does not depend on how the list is sorted.
+  if (isPersonType(a.type) && personNameVariants(a).some(n => n.toLowerCase().includes(q))) return true;
+  return Object.values(a).some(v => typeof v === "string" && v.toLowerCase().includes(q));
+}
+// The Tasks tab's search over one task row ({ asset, item }).
+function taskMatchesSearch(r, assets, typesList, q) {
+  if (!q) return true;
+  return [r.item.task, r.item.notes, r.item.owner, r.asset.tag, nameOf(r.asset, typesList), roomNameOf(r.asset, assets), typeNameOf(r.asset.type, typesList)]
+    .some(v => (v || "").toLowerCase().includes(q));
+}
+// The History tab's search over one work row ({ asset, change }).
+function workMatchesSearch(r, typesList, q) {
+  if (!q) return true;
+  return [nameOf(r.asset, typesList), r.asset.tag, r.change.changeType, r.change.vendor, r.change.note]
+    .some(v => String(v || "").toLowerCase().includes(q));
+}
+
 // The Map panel list's FILTER (2026-10-08). Each mode offers what its rows can
 // be told apart by: Assets by type, Tasks by status and kind, History by work
 // type and a rolling date window. Options are derived from the rows in THIS
@@ -2915,23 +2947,24 @@ function MapListModeSwitch({ value, onChange, filterCount, filterOpen, onToggleF
 // the same name on every row.
 // `filter` is the active filter (mapListActiveFilter). A status filter decides
 // on its own whether done tasks show, so the Show completed toggle steps aside.
-function MapWorkList({ mode, scopeAssets, typesList, onOpenTask, onOpenWork, single, filter }) {
+function MapWorkList({ mode, scopeAssets, typesList, onOpenTask, onOpenWork, single, filter, query, assets }) {
   const active = filter || {};
-  const filtering = Object.keys(active).length > 0;
+  const q = query || "";
+  const filtering = Object.keys(active).length > 0 || !!q;
   const now = Date.now();
   const [showDone, setShowDone] = useState(false);
   const rowStyle = { display: "flex", alignItems: "center", gap: 10, width: "100%", border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left" };
   const sub = { fontSize: 12, color: C.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
   const empty = text => <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>{text}</div>;
   if (mode === "tasks") {
-    const all = mapTaskRows(scopeAssets).filter(r => mapListFilterMatches("tasks", active, r, now));
+    const all = mapTaskRows(scopeAssets).filter(r => mapListFilterMatches("tasks", active, r, now) && taskMatchesSearch(r, assets || [], typesList, q));
     const byStatus = !!active.status;
     const done = byStatus ? [] : all.filter(r => r.status === "done");
     const open = byStatus ? all : all.filter(r => r.status !== "done");
     const shown = showDone ? all : open;
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {shown.length === 0 && empty(filtering && !done.length ? "No tasks match the filter." : (done.length ? "No open tasks here." : "No tasks here."))}
+        {shown.length === 0 && empty(filtering && !done.length ? (q ? "No tasks match the search." : "No tasks match the filter.") : (done.length ? "No open tasks here." : "No tasks here."))}
         {shown.map(({ asset, item, status, due }) => {
           const meta = maintenanceStatusMeta(status);
           const when = status === "done"
@@ -2959,10 +2992,10 @@ function MapWorkList({ mode, scopeAssets, typesList, onOpenTask, onOpenWork, sin
       </div>
     );
   }
-  const rows = mapWorkRows(scopeAssets).filter(r => mapListFilterMatches("history", active, r, now));
+  const rows = mapWorkRows(scopeAssets).filter(r => mapListFilterMatches("history", active, r, now) && workMatchesSearch(r, typesList, q));
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      {rows.length === 0 && empty(filtering ? "No work matches the filter." : "No work logged here.")}
+      {rows.length === 0 && empty(filtering ? (q ? "No work matches the search." : "No work matches the filter.") : "No work logged here.")}
       {rows.map(({ asset, change, performedOn }) => {
         const title = [change.changeType, change.note].filter(Boolean).join(" · ") || "Work entry";
         return (
@@ -4571,7 +4604,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-08.9";
+const APP_VERSION = "2026-10-08.10";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -8096,20 +8129,7 @@ function AssetTracker() {
       if (userFilter !== "All users"
         && !personNamesOf(a, assets).some(n => personMatchKey(n) === personMatchKey(userFilter))) return false;
       if (statusFilter !== "All statuses" && (a.status || "Active") !== statusFilter) return false;
-      if (!q) return true;
-      // Searching matches the whole chain above an asset, so typing a building
-      // name finds the equipment inside it however many levels down it sits.
-      const chainNames = [roomNameOf(a, assets), buildingNameOf(a, assets), ...ancestorsOf(a, assets).map(p => nameOf(p))];
-      if (chainNames.some(n => n && n.toLowerCase().includes(q))) return true;
-      // The type by NAME. The raw scan below sees a.type, which is an id — so a
-      // user-created type was findable only by typing its uuid.
-      if (typeNameOf(a.type, typesList).toLowerCase().includes(q)) return true;
-      // The composed name, because a person's is not stored as one string: the
-      // raw scan below sees "Jen" and "Kramer" in separate fields, so typing a
-      // full name -- the obvious thing to type -- would find nobody. Both
-      // spellings, so the search does not depend on how the list is sorted.
-      if (isPersonType(a.type) && personNameVariants(a).some(n => n.toLowerCase().includes(q))) return true;
-      return Object.values(a).some(v => typeof v === "string" && v.toLowerCase().includes(q));
+      return assetMatchesSearch(a, assets, typesList, q);
     });
     if (sortConfig) {
       const { key, dir } = sortConfig;
@@ -8276,9 +8296,7 @@ function AssetTracker() {
       if (!inHierarchyScope(r.asset, scopeId, assets)) return false;
       if (workTypeFilter !== "All work types" && r.change.changeType !== workTypeFilter) return false;
       if (workVendorFilter !== "All vendors" && r.change.vendor !== workVendorFilter) return false;
-      if (!q) return true;
-      return [r.assetName, r.asset.tag, r.change.changeType, r.change.vendor, r.change.note]
-        .some(v => String(v || "").toLowerCase().includes(q));
+      return workMatchesSearch(r, typesList, q);
     });
     if (workSortConfig) {
       const { key, dir } = workSortConfig;
@@ -8346,9 +8364,7 @@ function AssetTracker() {
       if (maintenanceKindFilter !== "All kinds" && taskKindOf(r.item) !== maintenanceKindFilter) return false;
       if (maintenanceFrequencyFilter !== "All frequencies" && r.item.frequencyLabel !== maintenanceFrequencyFilter) return false;
       if (maintenanceOwnerFilter !== "All owners" && r.item.owner !== maintenanceOwnerFilter) return false;
-      if (!q) return true;
-      return [r.item.task, r.item.notes, r.item.owner, r.asset.tag, nameOf(r.asset, typesList), roomNameOf(r.asset, assets), typeNameOf(r.asset.type, typesList)]
-        .some(v => (v || "").toLowerCase().includes(q));
+      return taskMatchesSearch(r, assets, typesList, q);
     });
     if (maintenanceSortConfig) {
       const { key, dir } = maintenanceSortConfig;
@@ -21077,7 +21093,15 @@ function FloorPlanTabContent({
       return { ...f, [listMode]: { ...(f[listMode] || {}), [g.key]: next } };
     });
     const clear = () => setListFilters(f => ({ ...f, [listMode]: {} }));
-    const keepAsset = count ? (a => mapListFilterMatches("assets", active, a, 0, assets)) : null;
+    // Read here rather than from qTrim, which is declared below the no-plan
+    // early return that also calls this (a temporal-dead-zone crash).
+    const listQ = (query || "").trim().toLowerCase();
+    // The search box in the Map tab's header narrows this list too, the way it
+    // narrows the Assets and Tasks tabs -- the same match those tabs use, on
+    // top of the filter. A selected pin is not hidden by it: it IS the list.
+    const assetQ = opts.onlyId ? "" : listQ;
+    const keepAsset = (count || assetQ) ? (a => mapListFilterMatches("assets", active, a, 0, assets) && assetMatchesSearch(a, assets, typesList, assetQ)) : null;
+    const narrowed = count ? (assetQ ? "Nothing here matches the filter and search." : "Nothing here matches the filter.") : (assetQ ? `Nothing here matches "${query.trim()}".` : undefined);
     return (<>
       <div style={{ position: "relative" }}>
         <MapListModeSwitch value={listMode} onChange={setListMode}
@@ -21088,11 +21112,11 @@ function FloorPlanTabContent({
       {listMode === "assets"
         ? (opts.assetsBody || <ContentsList place={place} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast rowActions={mapRowActions} onlyId={opts.onlyId}
             filterAsset={keepAsset}
-            emptyLabel={count ? "Nothing here matches the filter." : undefined} />)
+            emptyLabel={narrowed} />)
         : <MapWorkList mode={listMode} scopeAssets={scope} typesList={typesList}
             onOpenTask={onOpenTask || ((item, a) => onOpenAsset && onOpenAsset(a, "maintenance"))}
             onOpenWork={onOpenWork || ((ch, a) => onOpenAsset && onOpenAsset(a, "changes"))}
-            single={!!opts.single} filter={active} />}
+            single={!!opts.single} filter={active} query={listQ} assets={assets} />}
     </>);
   };
 
@@ -22635,14 +22659,19 @@ function FloorPlanTabContent({
           .map(l => assets.find(a => a.id === l.roomId))
           .filter(Boolean);
         if (!groupRooms.length) return null;
+        // The search narrows a group's room list as it narrows every other
+        // list here: a room matches by itself or by what is in it, the same
+        // test that highlights it on the plan.
+        const shownRooms = qTrim ? groupRooms.filter(room => floorPlanShapeMatches(room, assets, typesList, query)) : groupRooms;
         return (
           <div style={{ marginTop: 8, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14 }}>
             {panelList(null, groupRooms, { assetsBody: (<>
             <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginBottom: 8 }}>
-              Rooms in this group ({groupRooms.length})
+              Rooms in this group ({qTrim ? `${shownRooms.length} of ${groupRooms.length}` : groupRooms.length})
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {groupRooms.map(room => {
+              {shownRooms.length === 0 && <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>{`Nothing here matches "${query.trim()}".`}</div>}
+              {shownRooms.map(room => {
                 const RIcon = iconFor(room.type);
                 return (
                   <button key={room.id} onClick={() => onOpenAsset && onOpenAsset(room)} className="row-body"
