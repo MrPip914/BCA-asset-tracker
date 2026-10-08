@@ -551,6 +551,39 @@ failure modal and the sign-in screen both said *that* it happened and kept nothi
   picking a time window, View, Download, the disabled state with nothing ticked, and
   About surviving a close — was driven in Chromium against a mocked backend.
 
+## Claude connector (`supabase/functions/mcp/`, started 2026-10-08)
+
+A remote MCP server, as a Supabase Edge Function, so Claude (web, desktop, phone) can
+answer questions from the inventory. The evaluation behind it is
+`/mnt/project-files/evaluations/claude-connector.md`. **Dev tenant only, and READ-ONLY.**
+
+- **It refuses every request until sign-in exists.** `whoIs()` in `index.ts` returns
+  nobody, so the function answers 401 whatever it is sent. An unauthenticated connector
+  would be the inventory readable by anyone holding the URL; the next piece is OAuth with
+  Google, checked against each site's allowlist exactly as the app checks it.
+- **Built on the Phase 1 tables, never on Apps Script.** Apps Script cannot send the status
+  codes and headers an MCP sign-in needs, and every Claude request would meet Google's
+  intermittent failures.
+- **Everything that decides an answer is plain JS** (`protocol.js`, `tools.js`,
+  `inventory.js`, `from-app.js`) so `test-mcp-connector.mjs` drives it in Node with
+  fixture rows. `index.ts` is only HTTP and SQL. The MCP protocol is hand-written
+  (stateless streamable HTTP, JSON replies) rather than the SDK, per the no-dependency rule.
+- **`from-app.js` is a VERBATIM copy of the app's task due-date rules and `cellsLabel_`**,
+  pinned by the test the way `panel.html`'s copies are. Change `index.html`, then re-copy.
+- **A tenant is named per tool call (`site`)**, and a person sees only the sites whose
+  allowlist (or owner) names them, re-read on every request. "No such site" and "not
+  yours" are the same answer. Every read sets `app.tenant_id` first, so row-level security
+  separates tenants underneath; the function must connect as an `asset_api` login role,
+  never the service role.
+- **Every tool is annotated read-only.** Writes, when they come, are to be Postgres
+  functions that check the role, write, append the audit row and bump the revision in one
+  transaction, so an open browser reloads rather than overwriting the change. Never a
+  direct table write from the connector: that is `sheet.mjs`'s bypass all over again.
+- **Names are not unique, so a lookup is tiered** (id, tag, name, full path) and two
+  matches is an error listing both with their locations, never the first one.
+- **The whole tenant is loaded per call.** Fine at hundreds of assets; the audit log is the
+  table that will make it slow, and the fix then is filtering it in SQL.
+
 ## Local Sandbox mode
 
 Sandbox swaps the real Google Sheet for a local fixture (`MOCK_SNAPSHOT` in
