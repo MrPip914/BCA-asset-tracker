@@ -42,10 +42,17 @@ const TABLE_SQL: Record<string, string> = {
 };
 
 // Every read runs inside a transaction that first names its tenant, which is
-// what row-level security keys on. A query that forgot would see nothing.
+// what row-level security keys on, then drops to asset_api (the raw
+// connection would bypass RLS) and is declared READ ONLY, since asset_api
+// holds write grants and this connector must never use them. Same shape as
+// asset-api/db.ts's withTenant (PR #26); switch to importing that once it
+// lands, keeping the read-only line.
 function withTenant<T>(tenant: string, fn: (tx: postgres.TransactionSql) => Promise<T>): Promise<T> {
   return sql.begin(async (tx) => {
+    await tx`set transaction read only`;
     await tx`select set_config('app.tenant_id', ${tenant}, true)`;
+    await tx`select set_config('search_path', 'asset_tracker, public', true)`;
+    await tx`set local role asset_api`;
     return fn(tx);
   }) as Promise<T>;
 }
