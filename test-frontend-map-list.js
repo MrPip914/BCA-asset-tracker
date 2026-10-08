@@ -64,7 +64,16 @@ check(work.join() === 'c2,c1', 'history is newest first');
 
 // Wiring.
 const fp = src.slice(src.indexOf('function FloorPlanTabContent({'), src.indexOf('\n// Every room/group name label drawn ON the plan'));
-check(/const \[listMode, setListMode\] = useState\("assets"\)/.test(fp), 'the list defaults to Assets');
+check(/const \[localListMode, setLocalListMode\] = useState\("assets"\)/.test(fp)
+  && /const \[mapListMode, setMapListMode\] = useState\("assets"\)/.test(src), 'the list defaults to Assets');
+// Back from an asset opened off the panel lands on the list the user left: the
+// mode lives on the page (the map unmounts while an asset is open), and the
+// selection is remembered there and put back on remount.
+check(/const listMode = listModeProp \|\| localListMode/.test(fp) && /listMode=\{mapListMode\}/.test(src)
+  && /onListModeChange=\{setMapListMode\}/.test(src) && /const listFilters = listFiltersProp \|\| localListFilters/.test(fp)
+  && /listFilters=\{mapListFilters\}/.test(src), 'the list mode and filters are held by the page, so they survive opening an asset');
+check(/selectionMemoRef=\{mapSelectionMemoRef\}/.test(src) && /applySelect\(m\.selectId\)/.test(fp)
+  && !/return \(\) => \{[^}]*selectionMemoRef\.current = null/.test(fp), 'the selected space is remembered across the unmount and restored');
 check((fp.match(/<MapListModeSwitch /g) || []).length === 1 && /return \(<>\s*<MapListModeSwitch/.test(fp), 'the switch is drawn by panelList, so every card that lists carries it');
 check((fp.match(/\{panelList\(/g) || []).length === 5, 'all five list cards go through panelList (no plan, space, pin, nothing selected, group)');
 check(/panelList\(null, groupRooms, \{ assetsBody:/.test(fp), "a group's Tasks/History cover its rooms, its Assets list its rooms");
