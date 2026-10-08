@@ -4402,7 +4402,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-08.5";
+const APP_VERSION = "2026-10-08.6";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -6660,6 +6660,17 @@ function AssetTracker() {
   // The place selected on the map (a wall, or a selected space's linked room);
   // the floating + prefills from it ahead of the HierarchyNav scope.
   const [mapSelectedPlaceId, setMapSelectedPlaceId] = useState(null);
+  // What the map panel was showing, kept HERE because the map unmounts while an
+  // asset is open: Back from an asset reached through the panel's History list
+  // has to land on that History list, on the same space, not on a fresh map
+  // showing Assets with nothing selected. View state only, never saved.
+  const [mapListMode, setMapListMode] = useState("assets");
+  const mapSelectionMemoRef = useRef(null); // { planId, selectId } or null
+  // Where the page was scrolled when an asset was opened off the map. The
+  // browser cannot restore it on Back by itself: the plan loads after the map
+  // remounts, so the page is too short at the moment it tries. Used once.
+  const mapReturnScrollRef = useRef(null);
+  const openFromMap = fn => (...args) => { mapReturnScrollRef.current = window.scrollY; return fn(...args); };
   const [typeFilter, setTypeFilter] = useState("All types");
   const [userFilter, setUserFilter] = useState("All users");
   const [statusFilter, setStatusFilter] = useState("Active");
@@ -16516,15 +16527,19 @@ function AssetTracker() {
             setMapPlacing({ assetId });
           }}
           onFocusHandled={() => { setMapFocusShapeId(null); setMapFocusPinId(null); }}
-          onOpenAsset={openDetail}
+          onOpenAsset={openFromMap(openDetail)}
           // A task opens its own dialog (editors), the same as a row on the
           // Tasks tab; a viewer, and every History row, go to the asset's page.
-          onOpenTask={(item, a) => (canEdit ? openMaintenanceEdit(item.id, a.id) : openDetail(a, "maintenance"))}
-          onOpenWork={(ch, a) => openDetail(a, "changes")}
+          onOpenTask={(item, a) => (canEdit ? openMaintenanceEdit(item.id, a.id) : openFromMap(openDetail)(a, "maintenance"))}
+          onOpenWork={openFromMap((ch, a) => openDetail(a, "changes"))}
           onNavigateToPlan={navigateFloorPlanTo}
           query={mapQuery}
           menuSlot={mapMenuSlot}
           onSelectedPlaceChange={setMapSelectedPlaceId}
+          listMode={mapListMode}
+          onListModeChange={setMapListMode}
+          selectionMemoRef={mapSelectionMemoRef}
+          returnScrollRef={mapReturnScrollRef}
         />
         {/* Add asset opens the Assets tab's own form, in a dialog over the map. */}
         {showAdd && (
@@ -20627,7 +20642,7 @@ function MapOptionsOnlyMenu({ canEdit, asset, assets, menuSlot, onSaveMapOptions
 function MapTabContent({
   canEdit, assets, typesList, scopeAsset,
   uploadBusy, uploadError, onUploadPlan, onSaveLink, onCreateRoom, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveMapOptions,
-  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onShowOnMap, onStartPlace, onFocusHandled, onOpenAsset, onOpenTask, onOpenWork, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange,
+  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onShowOnMap, onStartPlace, onFocusHandled, onOpenAsset, onOpenTask, onOpenWork, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange, listMode, onListModeChange, selectionMemoRef, returnScrollRef,
 }) {
   if (!scopeAsset) {
     return (
@@ -20682,6 +20697,10 @@ function MapTabContent({
       query={query}
       menuSlot={menuSlot}
       onSelectedPlaceChange={onSelectedPlaceChange}
+      listMode={listMode}
+      onListModeChange={onListModeChange}
+      selectionMemoRef={selectionMemoRef}
+      returnScrollRef={returnScrollRef}
     />
   );
 }
@@ -20705,7 +20724,7 @@ function FloorPlanTabContent({
   canEdit, selectedAsset, assets, typesList,
   uploadBusy, uploadError, onUploadPlan,
   onSaveLink, onCreateRoom, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveMapOptions,
-  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onShowOnMap, onStartPlace, onFocusHandled, onOpenAsset, onOpenTask, onOpenWork, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange,
+  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onShowOnMap, onStartPlace, onFocusHandled, onOpenAsset, onOpenTask, onOpenWork, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange, listMode: listModeProp, onListModeChange, selectionMemoRef, returnScrollRef,
 }) {
   const rawPlan = useFloorPlanSvg(selectedAsset.floorPlanUrl);
   // Rotation is stored on the asset (floorPlanRotation, quarter turns, blank = 0)
@@ -20846,7 +20865,11 @@ function FloorPlanTabContent({
   // What the list under the plan shows for the current selection: its assets,
   // its tasks, or its history. View state only, never saved; it stays put as
   // the selection changes, so stepping from space to space keeps reading tasks.
-  const [listMode, setListMode] = useState("assets");
+  // Held by the page when it passes one (it outlives this component, which
+  // unmounts while an asset is open), local otherwise.
+  const [localListMode, setLocalListMode] = useState("assets");
+  const listMode = listModeProp || localListMode;
+  const setListMode = onListModeChange || setLocalListMode;
   // The list body for one selection. `places` is what the Tasks and History
   // modes cover (each place and everything below it); `single` drops the asset
   // name from their rows when the selection is one asset.
@@ -21042,23 +21065,28 @@ function FloorPlanTabContent({
 
   // Select-and-frame, without the pulse: the same state a first tap on the shape
   // leaves behind, so a second tap continues exactly as it would have.
-  useEffect(() => {
-    if (plan.status !== "ready" || !selectShapeId || !onSelectHandled) return;
-    const shape = plan.spaces.find(s => s.gid === selectShapeId);
-    const selWallId = !shape && floorPlanIsSegmentId(selectShapeId) ? wallOfSegment(selectShapeId) : null;
+  // A space's gid, or one of a wall's segment ids, selects that space or wall.
+  function applySelect(id) {
+    const shape = plan.spaces.find(s => s.gid === id);
+    const selWallId = !shape && floorPlanIsSegmentId(id) ? wallOfSegment(id) : null;
     const selWbb = selWallId ? wallBbox(selWallId) : null;
     if (selWbb) {
       setSelectedShapeId(null); setSelectedWallId(selWallId); setOpenGroupId(null);
       zoomToBbox(selWbb, 0.3, true);
     } else if (shape) {
       setSelectedWallId(null);
-      const grp = groupOfShape(selectShapeId);
+      const grp = groupOfShape(id);
       setOpenGroupId(grp ? grp.id : null);
-      setSelectedShapeId(selectShapeId);
+      setSelectedShapeId(id);
       zoomToBbox(floorPlanBbox(shape.pts), 0.5, true);
     }
+  }
+  useEffect(() => {
+    if (plan.status !== "ready" || !selectShapeId || !onSelectHandled) return;
+    applySelect(selectShapeId);
     onSelectHandled();
   }, [plan.status, plan.spaces, selectedAsset.id, selectShapeId]);
+
 
   // ---- Free Zoom gestures: wheel-to-zoom-at-cursor, drag-to-pan. Off by
   // default -- most of the time tapping a shape (which auto-frames it) is
@@ -21168,6 +21196,29 @@ function FloorPlanTabContent({
   const [selectedShapeId, setSelectedShapeId] = useState(null);
   // A wall is selected like a space but is its own selection: one or the other.
   const [selectedWallId, setSelectedWallId] = useState(null);
+  // Coming BACK to the map (Back from an asset opened off this panel) puts the
+  // space or wall that was selected back, so the list under the plan is the one
+  // the user left. Once per mount, only for the same plan, and never over an
+  // explicit select or focus that arrived with this mount.
+  const restoredSelectionRef = useRef(false);
+  useEffect(() => {
+    if (restoredSelectionRef.current || plan.status !== "ready") return;
+    restoredSelectionRef.current = true;
+    const y = returnScrollRef ? returnScrollRef.current : null;
+    if (returnScrollRef) returnScrollRef.current = null;
+    if (selectShapeId || focusShapeId || focusPinId) return;
+    const m = selectionMemoRef && selectionMemoRef.current;
+    if (m && m.planId === selectedAsset.id) applySelect(m.selectId);
+    // After the restored list has rendered, so the page is tall enough again.
+    if (typeof y === "number" && y > 0) setTimeout(() => window.scrollTo(0, y), 0);
+  }, [plan.status]);
+  // Keep the page's memo in step with the selection. Not cleared on unmount:
+  // remembering it across the unmount is the whole point.
+  useEffect(() => {
+    if (!selectionMemoRef || plan.status !== "ready") return;
+    const selectId = selectedWallId ? ((wallsMap.get(selectedWallId) || [])[0] || null) : selectedShapeId;
+    selectionMemoRef.current = selectId ? { planId: selectedAsset.id, selectId } : null;
+  }, [plan.status, selectedAsset.id, selectedShapeId, selectedWallId]);
   // Walls tab: the wall being defined or edited. null = none open. spaceGid is the
   // space whose exterior segments are on offer; picks is the set of segment ids.
   const [wallDraft, setWallDraft] = useState(null);
