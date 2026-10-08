@@ -2792,41 +2792,62 @@ function mapListFilterMatches(mode, active, item, now) {
   return true;
 }
 
-// The chips under the switch while the filter is open. Same chip look as the
-// Type picker's label filter.
-function MapListFilterBar({ groups, active, onToggle, onClear }) {
+// The Filter button's dropdown: each group as a heading with checkable rows,
+// built like the toolbar menus (fixed click-catcher + absolutely positioned
+// card). It stays open while choices are ticked, so several can be picked in
+// one visit; a tap outside closes it.
+function MapListFilterMenu({ groups, active, onToggle, onClear, onClose }) {
   const any = Object.keys(active).length > 0;
+  const heading = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, padding: "8px 12px 4px" };
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "10px 0", marginBottom: 10, borderTop: `1px solid ${C.border}`, borderBottom: `1px solid ${C.border}` }}>
-      {groups.length === 0 && <div style={{ fontSize: 13, color: C.empty }}>Nothing to filter here.</div>}
-      {groups.map(g => (
-        <div key={g.key}>
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginBottom: 4 }}>{g.label}</div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+    <>
+      <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
+      <div role="menu" aria-label="Filter list" style={{ position: "absolute", right: 0, top: "100%", marginTop: -4, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, minWidth: 200, maxWidth: "calc(100vw - 48px)", maxHeight: 360, overflowY: "auto", padding: 4 }}>
+        {groups.length === 0 && <div style={{ fontSize: 13, color: C.empty, padding: "9px 12px" }}>Nothing to filter here.</div>}
+        {groups.map(g => (
+          <div key={g.key}>
+            <div style={heading}>{g.label}</div>
             {g.options.map(o => {
               const sel = (active[g.key] || []).includes(o.value);
               return (
-                <button key={o.value || "__blank__"} type="button" aria-pressed={sel} onClick={() => onToggle(g, o.value)}
-                  style={{
-                    padding: "3px 9px", borderRadius: 999, fontSize: 12,
-                    border: `1px solid ${sel ? C.brand : C.border}`,
-                    background: sel ? C.brand : "transparent",
-                    color: sel ? "#fff" : C.muted, fontWeight: sel ? 600 : 400,
-                    fontStyle: o.value ? "normal" : "italic",
-                  }}>
+                <button key={o.value || "__blank__"} type="button" role="menuitemcheckbox" aria-checked={sel} className="icon-btn"
+                  onClick={() => onToggle(g, o.value)}
+                  style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "8px 12px", background: "none", border: "none", borderRadius: 6, fontSize: 14, color: C.ink, textAlign: "left", fontWeight: sel ? 600 : 400, fontStyle: o.value ? "normal" : "italic" }}>
+                  <span style={{ width: 15, display: "flex", flexShrink: 0 }}>{sel && <Check size={15} style={{ color: C.brand }} />}</span>
                   {o.label}
                 </button>
               );
             })}
           </div>
-        </div>
-      ))}
-      {any && (
-        <button type="button" onClick={onClear}
-          style={{ alignSelf: "flex-start", background: "none", border: "none", padding: 0, fontSize: 13, color: C.brandDark, textDecoration: "underline" }}>
-          Clear filters
+        ))}
+        {any && (
+          <button type="button" role="menuitem" className="icon-btn" onClick={() => { onClear(); onClose(); }}
+            style={{ display: "block", width: "100%", marginTop: 4, padding: "9px 12px", background: "none", border: "none", borderTop: `1px solid ${C.border}`, fontSize: 14, color: C.brandDark, textAlign: "left" }}>
+            Clear filters
+          </button>
+        )}
+      </div>
+    </>
+  );
+}
+
+// What is filtered, shown only while something is: one chip per active value,
+// its x removing just that one. Nothing renders with no filter in force.
+function MapListActiveFilters({ groups, active, onToggle }) {
+  const chips = [];
+  groups.forEach(g => (active[g.key] || []).forEach(v => {
+    const o = g.options.find(x => x.value === v);
+    if (o) chips.push({ g, v, label: o.label });
+  }));
+  if (!chips.length) return null;
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 10 }}>
+      {chips.map(({ g, v, label }) => (
+        <button key={g.key + ":" + v} type="button" onClick={() => onToggle(g, v)} aria-label={`Remove filter ${label}`}
+          style={{ display: "flex", alignItems: "center", gap: 4, padding: "3px 6px 3px 9px", borderRadius: 999, fontSize: 12, fontWeight: 600, border: `1px solid ${C.brand}`, background: C.brand, color: "#fff" }}>
+          {label} <X size={12} />
         </button>
-      )}
+      ))}
     </div>
   );
 }
@@ -4529,7 +4550,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-08.6";
+const APP_VERSION = "2026-10-08.7";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -21005,9 +21026,12 @@ function FloorPlanTabContent({
     });
     const clear = () => setListFilters(f => ({ ...f, [listMode]: {} }));
     return (<>
-      <MapListModeSwitch value={listMode} onChange={setListMode}
-        {...(filterable ? { filterCount: count, filterOpen, onToggleFilter: () => setFilterOpen(v => !v) } : {})} />
-      {filterable && filterOpen && <MapListFilterBar groups={groups} active={active} onToggle={toggle} onClear={clear} />}
+      <div style={{ position: "relative" }}>
+        <MapListModeSwitch value={listMode} onChange={setListMode}
+          {...(filterable ? { filterCount: count, filterOpen, onToggleFilter: () => setFilterOpen(v => !v) } : {})} />
+        {filterable && filterOpen && <MapListFilterMenu groups={groups} active={active} onToggle={toggle} onClear={clear} onClose={() => setFilterOpen(false)} />}
+      </div>
+      {filterable && <MapListActiveFilters groups={groups} active={active} onToggle={toggle} />}
       {listMode === "assets"
         ? (opts.assetsBody || <ContentsList place={place} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast rowActions={mapRowActions} onlyId={opts.onlyId}
             typeFilter={active.type} emptyLabel={active.type ? "Nothing here matches the filter." : undefined} />)

@@ -65,9 +65,12 @@ check(work.join() === 'c2,c1', 'history is newest first');
 // Wiring.
 const fp = src.slice(src.indexOf('function FloorPlanTabContent({'), src.indexOf('\n// Every room/group name label drawn ON the plan'));
 check(/const \[listMode, setListMode\] = useState\("assets"\)/.test(fp), 'the list defaults to Assets');
-check((fp.match(/<MapListModeSwitch /g) || []).length === 1 && /return \(<>\s*<MapListModeSwitch/.test(fp), 'the switch is drawn by panelList, so every card that lists carries it');
+check((fp.match(/<MapListModeSwitch /g) || []).length === 1 && /return \(<>\s*<div style=\{\{ position: "relative" \}\}>\s*<MapListModeSwitch/.test(fp), 'the switch is drawn by panelList, so every card that lists carries it');
 check((fp.match(/\{panelList\(/g) || []).length === 5, 'all five list cards go through panelList (no plan, space, pin, nothing selected, group)');
 check(/panelList\(null, groupRooms, \{ assetsBody:/.test(fp), "a group's Tasks/History cover its rooms, its Assets list its rooms");
+check(/<MapListFilterMenu /.test(fp) && /filterOpen && <MapListFilterMenu/.test(fp), 'the filter choices are a menu, drawn only while open');
+const activeFn = src.slice(src.indexOf('function MapListActiveFilters('), src.indexOf('\n}', src.indexOf('function MapListActiveFilters(')));
+check(/if \(!chips\.length\) return null;/.test(activeFn) && /<MapListActiveFilters /.test(fp), 'only the active filters show under the switch, nothing when none');
 check(/typeFilter=\{active\.type\}/.test(fp) && /filter=\{active\}/.test(fp), 'the active filter reaches both list kinds');
 
 // The filter (2026-10-08).
