@@ -33,8 +33,11 @@ check(/rowActions \? rowActions\(a\) : \[\]/.test(list), 'rows ask rowActions fo
 
 const fp = slice('function FloorPlanTabContent({', '\n}\n');
 const mapLists = (src.match(/<ContentsList [^>]*locationsLast[^>]*\/>/g) || []);
-check(mapLists.length === 3, 'three Map panel lists (found ' + mapLists.length + ')');
+check(mapLists.length === 4, 'four Map panel lists (found ' + mapLists.length + ')');
 check(mapLists.every(l => /rowActions=\{mapRowActions\}/.test(l)), 'every Map panel list gets the row menu');
+check(mapLists.some(l => /onlyId=\{a\.id\}/.test(l)), 'a selected pin is the standard list narrowed to that asset');
+check(!/Open asset\s*</.test(fp), 'no separate pin card with its own Open asset button');
+check(/if \(onlyId\) \{/.test(list) && /contentDevices = \[only\]/.test(list), 'onlyId narrows the list and never leaves it empty');
 check(/onShowOnMap, onStartPlace/.test(fp), 'FloorPlanTabContent takes onShowOnMap/onStartPlace');
 
 const actions = slice('const mapRowActions = a =>', '\n  };\n');
