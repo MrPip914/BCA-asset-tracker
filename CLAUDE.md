@@ -718,8 +718,8 @@ onboard one.
   `DEFAULT_CLIENT_ID` ever changed. **The adoption is default-tenant-only** — the bare keys
   were written when there was one tenant, so they belong to whoever the default is; adopting
   them for an arbitrary `?client=` would hand a second school the first one's session.
-- **The location navigator survives a refresh** (2026-09-28). `scopeId` and `scopeExact`
-  ("Hide children") are written to the address bar (`?scope=<id>&exact=1`, by
+- **The location navigator survives a refresh** (2026-09-28). `scopeId` is written
+  to the address bar (`?scope=<id>`, by
   `replaceState`, never a push) and to per-device `localStorage`
   (`asset-tracker-scope:<tenant>`); the URL wins when it names a scope, storage is the
   fallback for a bare open. `navUrl()` rebuilds from the current search string, so the
@@ -2113,22 +2113,17 @@ separate from the column **filters**: they intersect rather than override.
   the same scope test: a Building has its own row, can carry its own tasks (a roof inspection,
   not tied to any room) and its own audit history, and hiding those from a view scoped to that
   exact Building was the one place scoping disagreed with itself. `inHierarchyScope(a, scopeId,
-  assets, exact)` is the one shared test now — `a.id === scopeId` short-circuits true before
+  assets)` is the one shared test now — `a.id === scopeId` short-circuits true before
   the `ancestorsOf` walk, so the place counts as inside its own scope everywhere the test is
   used: the Assets list, Tasks (both Scheduled and History), and the master Audit tab.
 - **`roomMovable` (the bulk move-to-room toolbar) is UNCHANGED by this**, because it was never
   built on the exclusion — it separately filters `a.id !== bulkMoveSourceId`, by id, regardless
   of what the underlying `filtered` list contains. The old reasoning about a room "dragging
   itself along" was really about that filter, not about the scope test, and it still holds.
-- **"Hide children" is a checkbox under HierarchyNav** (`scopeExact`, shared the same way
-  `scopeId` is — narrowing on one tab and switching to another keeps the checkbox where you
-  left it), rendered only where a scope is actually applied to a list — Assets, Tasks, Audit —
-  and only once something is scoped (unchecked, inert, and hidden with nothing chosen). Checked
-  narrows `inHierarchyScope` from "this place and everything beneath it" to "this place's own
-  row only," for "what does this location's own record say" without every device in every room
-  in the way. The Map tab's own `HierarchyNav` doesn't pass `setScopeExact` at all — it has no
-  filtered list for the checkbox to act on, the same reason it doesn't get one on the Add
-  asset/Add task prefill either.
+- **"Hide children" was REMOVED on 2026-10-08** (Eric's call). It was a checkbox under
+  HierarchyNav (`scopeExact`, `?exact=1`) narrowing a scope to the place's own row only.
+  `persistScope` still strips a stale `exact` param, since old links and bookmarks carry it,
+  and a remembered storage entry with a `scopeExact` key still reads (the key is ignored).
 
 It's deliberately NOT built on `HierarchyBrowserModal` despite the overlap. That component
 picks one thing out of a tree and closes, and to do it it hides rows you can't pick and
