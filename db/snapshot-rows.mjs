@@ -150,7 +150,7 @@ export function snapshotToRows(tenantId, snap) {
 
   for (const [domain, rev] of Object.entries(payload.revisions || {})) t.revisions.push({ domain, rev });
 
-  authUsers.forEach((u) => t.auth_users.push({ email: u.email, role: u.role, name: u.name || "" }));
+  authUsers.forEach((u, position) => t.auth_users.push({ email: u.email, role: u.role, name: u.name || "", position }));
 
   // Every row carries its tenant; set once here rather than at fifteen sites.
   for (const rows of Object.values(t)) rows.forEach((r) => { r.tenant_id = tenantId; });

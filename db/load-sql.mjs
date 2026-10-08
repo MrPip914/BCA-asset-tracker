@@ -29,7 +29,7 @@ export const TABLE_COLUMNS = {
   audit_log: { asset_id: "text", at: "text", by: "text", action: "text", data: "jsonb" },
   config: { key: "text", value: "jsonb" },
   revisions: { domain: "text", rev: "integer" },
-  auth_users: { email: "text", role: "text", name: "text" },
+  auth_users: { email: "text", role: "text", name: "text", position: "integer" },
 };
 
 // Deleted children first is not required (the foreign keys are deferred and

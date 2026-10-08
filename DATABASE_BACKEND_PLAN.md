@@ -1,6 +1,6 @@
 # Moving the backend from Apps Script + Sheets to Postgres — Phase 1 design
 
-Status: **Rollout step 1 (schema, `db/migrations/`) applied to dev 2026-10-07; step 2 (importer, `db/import-from-sheet.mjs`) built 2026-10-08.** Written 2026-10-06 after saves against the Google
+Status: **Rollout step 1 (schema, `db/migrations/`) applied to dev 2026-10-07; step 2 (importer, `db/import-from-sheet.mjs`) run against dev 2026-10-08; step 3 (API, `supabase/functions/asset-api/`) started 2026-10-08 with `signin`, `read` and `signout`.** Written 2026-10-06 after saves against the Google
 backend proved unreliable (see "Google's layer in front of Apps Script fails
 intermittently" in CLAUDE.md, and the v42/v49/v50 diagnostics work).
 
@@ -247,6 +247,21 @@ for the free tier; Pro's 7 daily backups and no-pause guarantee are what removes
    repeatedly against dev while building.
 3. **API**: port op by op, in this order — `read`/`signin`/`signout`, then save, then
    `auditFull`, photo/floor-plan signing, diagnostics, public panel.
+   - **Where it is**: `supabase/functions/asset-api/` — `api.ts` routes, `auth.ts` is the
+     session/allowlist port, `inventory.ts` reassembles the read payload, `db.ts` holds
+     `withTenant`. The tenant is named by `?tenant=` (or `client`/`c`). `deploy-api-dev` in
+     `db-migrate.yml` deploys it to the dev project on every push to `dev` and asks it two
+     questions; it needs `SUPABASE_ACCESS_TOKEN` on the `supabase-dev` GitHub environment.
+   - **One change from "Row-level security" above**: the function connects with the
+     project's own `SUPABASE_DB_URL` (which bypasses RLS) and every transaction runs
+     `set local role asset_api` in `withTenant`, rather than a separate login role holding a
+     password. Same isolation, no password to create or rotate. The cost is a rule: NOTHING
+     queries outside `withTenant`. Migration 0005 grants the membership that `set role` needs.
+   - **Parity is already tested for the read**: `api_test.ts` runs the `.gs` file's own read
+     over the shared fixture Sheet (`db/fixture-grids.mjs`) and requires this API's answer to
+     equal it, except for the two differences the import makes on purpose (a duplicate
+     asset id keeps its first row; a blank work-entry id gets a stable minted one).
+   - The allowlist gained a `position` (migration 0004) so the Access screen keeps its order.
 4. **Parity tests** (the important part): a **replay harness** that feeds the same recorded
    request sequence to the Apps Script backend (dev tenant) and the new API and compares the
    responses field for field. The existing `test-backend-*.js` suites, which slice `.gs`
