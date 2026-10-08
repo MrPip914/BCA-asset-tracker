@@ -67,7 +67,7 @@ import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from "re
 import {
   Search, Plus, X, Pencil, Trash2, Save, ChevronRight, ChevronDown, ChevronUp, ArrowLeft, MessageSquare,
   Monitor, Phone, Tv, Camera, HardDrive, HelpCircle, Columns3, Lock, Filter, Check, DoorOpen, Download,
-  Wrench, UserCircle, Settings, History, Archive, ArchiveRestore, Building2, Package, Copy, Zap, Repeat, ArrowLeftRight, Menu,
+  Wrench, UserCircle, Settings, History, Archive, ArchiveRestore, Building2, Package, Copy, Zap, Repeat, Globe, ArrowLeftRight, Menu,
   FlaskConical, Layers, RotateCcw, RotateCw, AlertTriangle, Loader2, Printer, MapPin, QrCode, Info, LogOut, Users, Maximize,
   ImagePlus, Eye, EyeOff, Home, Paperclip, FileText, ExternalLink, Upload,
   // Star is the favorite toggle in the icon browser, not a type icon.
@@ -4586,7 +4586,7 @@ function waitForGoogleIdentity(timeoutMs = 10000) {
 // byte-identical in two files — which failed at v18, where one said "here" and
 // the other "there" and the banner would have cried wolf forever. Change
 // descriptions belong in git history and CLAUDE.md.
-const FRONTEND_SCRIPT_VERSION = "v52";
+const FRONTEND_SCRIPT_VERSION = "v53";
 // The version of THIS file — shown in About (the account menu), so "is my browser
 // actually running the build I just deployed, or a cached one?" is answerable in
 // two clicks instead of by reading view-source.
@@ -4604,7 +4604,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-08.10";
+const APP_VERSION = "2026-10-08.11";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -9817,6 +9817,13 @@ function AssetTracker() {
     const next = String(((parseInt(targetAsset.floorPlanRotation, 10) || 0) + 1) % 4);
     persist(assets.map(a => (a.id === assetId ? { ...a, floorPlanRotation: next } : a)));
   }
+  // Where the plan sits on the satellite map under it (floorPlanGeo, blank =
+  // not aligned). Like rotation: how the drawing is shown, so not audited.
+  function saveFloorPlanGeo(assetId, geo) {
+    if (savingRef.current) return;
+    if (!assets.some(a => a.id === assetId)) return;
+    persist(assets.map(a => (a.id === assetId ? { ...a, floorPlanGeo: geo || "" } : a)));
+  }
   // What tapping this location again does on a map -- see mapSelectModeOf.
   // Configuration rather than inventory, so not audited (like rotation).
   function saveMapSelectOptions(assetId, mode, ids) {
@@ -14541,6 +14548,7 @@ function AssetTracker() {
                 onUnlinkWall={wallId => unlinkWall(selectedAsset.id, wallId)}
                 onDeleteGroup={groupId => deleteSpaceGroup(selectedAsset.id, groupId)}
                 onRotate={() => rotateFloorPlan(selectedAsset.id)}
+                onSaveGeo={geo => saveFloorPlanGeo(selectedAsset.id, geo)}
                 onSaveMapOptions={(mode, ids) => saveMapSelectOptions(selectedAsset.id, mode, ids)}
                 onOpenAsset={openDetail}
                 onNavigateToPlan={navigateFloorPlanTo}
@@ -16690,6 +16698,7 @@ function AssetTracker() {
           onUnlinkWall={wallId => unlinkWall(scopeId, wallId)}
           onDeleteGroup={groupId => deleteSpaceGroup(scopeId, groupId)}
           onRotate={() => rotateFloorPlan(scopeId)}
+          onSaveGeo={geo => saveFloorPlanGeo(scopeId, geo)}
           onSaveMapOptions={(mode, ids) => saveMapSelectOptions(scopeId, mode, ids)}
           focusShapeId={mapFocusShapeId}
           selectShapeId={mapSelectShapeId}
@@ -19862,6 +19871,73 @@ function floorPlanBbox(pts) {
   const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
   return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
 }
+// ---------- satellite imagery under a plan (backend v53) ----------
+// The plan files carry no real-world coordinates, so where a plan sits on the
+// Earth is stored per plan as floorPlanGeo: "lat,lng,mpu,deg,ax,ay". The
+// drawing point (ax, ay) -- in the plan's OWN unrotated coordinates, so the
+// Rotate 90° button cannot break an alignment -- is at (lat, lng); one drawing
+// unit is mpu metres on the ground; north points deg degrees clockwise from the
+// drawing's "up". Blank or unreadable = not aligned, which every plan was before.
+//
+// The imagery is Esri World Imagery: free, no API key, attribution required
+// (shown on the map). ONE square image is fetched from its export endpoint for
+// a ground square centred on (lat, lng), and drawn as an SVG <image> in plan
+// coordinates -- so it pans, zooms and rotates with the plan for free, and no
+// map library is loaded.
+const FLOOR_PLAN_SAT_PX = 2048;
+const FLOOR_PLAN_SAT_ATTRIBUTION = "Imagery: Esri, Maxar, Earthstar Geographics, and the GIS User Community";
+function floorPlanGeoParse(str) {
+  const n = String(str || "").split(",").map(v => parseFloat(v));
+  if (n.length < 6 || n.some(v => !Number.isFinite(v))) return null;
+  const [lat, lng, mpu, deg, ax, ay] = n;
+  if (Math.abs(lat) > 85 || Math.abs(lng) > 180 || !(mpu > 0)) return null;
+  return { lat, lng, mpu, deg, ax, ay };
+}
+function floorPlanGeoFormat(g) {
+  const r = (v, d) => String(Number(v.toFixed(d)));
+  return [r(g.lat, 7), r(g.lng, 7), String(Number(g.mpu.toPrecision(6))), r(((g.deg % 360) + 360) % 360, 2), r(g.ax, 2), r(g.ay, 2)].join(",");
+}
+// "35.4921, -120.6680" as copied out of Google Maps (or a phone's map app).
+function floorPlanParseLatLng(text) {
+  const m = String(text || "").match(/(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)/);
+  if (!m) return null;
+  const lat = parseFloat(m[1]), lng = parseFloat(m[2]);
+  return Math.abs(lat) <= 85 && Math.abs(lng) <= 180 ? { lat, lng } : null;
+}
+// The image to draw for a placement, given the plan's largest dimension in
+// drawing units. The ground square covers three plan-widths (room to drag the
+// photo into line), rounded UP to a power of two so a small scale nudge reuses
+// the image already loaded instead of fetching a new one. Web Mercator metres
+// are stretched by 1/cos(lat), which is why the half-width is divided by it.
+function floorPlanSatImage(g, planSize) {
+  if (!g || !(planSize > 0)) return null;
+  const want = Math.max(planSize * g.mpu * 3, 60);
+  const ground = Math.pow(2, Math.ceil(Math.log2(want)));
+  const R = 6378137;
+  const mx = R * g.lng * Math.PI / 180;
+  const my = R * Math.log(Math.tan(Math.PI / 4 + g.lat * Math.PI / 360));
+  const half = (ground / 2) / Math.cos(g.lat * Math.PI / 180);
+  const bbox = [mx - half, my - half, mx + half, my + half].map(v => v.toFixed(2)).join(",");
+  return {
+    href: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export"
+      + `?bbox=${bbox}&bboxSR=3857&imageSR=3857&size=${FLOOR_PLAN_SAT_PX},${FLOOR_PLAN_SAT_PX}&format=jpg&f=image`,
+    size: ground / g.mpu, // drawing units
+  };
+}
+// Scale (f > 1 = the photo grows) and/or turn (d degrees clockwise) the photo
+// about the drawing point (px, py) -- the middle of the screen -- rather than
+// about its own far-off centre, so what the user is looking at stays put.
+function floorPlanGeoTransform(g, px, py, f, d) {
+  const t = (d || 0) * Math.PI / 180;
+  const vx = (g.ax - px) * f, vy = (g.ay - py) * f;
+  return {
+    ...g,
+    mpu: g.mpu / f,
+    deg: g.deg + (d || 0),
+    ax: px + vx * Math.cos(t) - vy * Math.sin(t),
+    ay: py + vx * Math.sin(t) + vy * Math.cos(t),
+  };
+}
 // THE BORDER AROUND AN OPEN SPACE GROUP. Four steps, and the order is the
 // point -- each one exists because a simpler version failed on a real plan:
 //
@@ -20829,7 +20905,7 @@ function MapOptionsOnlyMenu({ canEdit, asset, assets, menuSlot, onSaveMapOptions
 // (see its own comment: "a Room's floor plan alongside a Building's").
 function MapTabContent({
   canEdit, assets, typesList, scopeAsset,
-  uploadBusy, uploadError, onUploadPlan, onSaveLink, onCreateRoom, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveMapOptions,
+  uploadBusy, uploadError, onUploadPlan, onSaveLink, onCreateRoom, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveGeo, onSaveMapOptions,
   focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onShowOnMap, onStartPlace, onFocusHandled, onOpenAsset, onOpenTask, onOpenWork, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange, listMode, onListModeChange, listFilters, onListFiltersChange, selectionMemoRef, returnScrollRef,
 }) {
   if (!scopeAsset) {
@@ -20867,6 +20943,7 @@ function MapTabContent({
       onSaveWall={onSaveWall}
       onUnlinkWall={onUnlinkWall}
       onRotate={onRotate}
+      onSaveGeo={onSaveGeo}
       onSaveMapOptions={onSaveMapOptions}
       focusPinId={focusPinId}
       placing={placing}
@@ -20913,7 +20990,7 @@ function MapTabContent({
 function FloorPlanTabContent({
   canEdit, selectedAsset, assets, typesList,
   uploadBusy, uploadError, onUploadPlan,
-  onSaveLink, onCreateRoom, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveMapOptions,
+  onSaveLink, onCreateRoom, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveGeo, onSaveMapOptions,
   focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onShowOnMap, onStartPlace, onFocusHandled, onOpenAsset, onOpenTask, onOpenWork, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange, listMode: listModeProp, onListModeChange, listFilters: listFiltersProp, onListFiltersChange, selectionMemoRef, returnScrollRef,
 }) {
   const rawPlan = useFloorPlanSvg(selectedAsset.floorPlanUrl);
@@ -21338,7 +21415,7 @@ function FloorPlanTabContent({
     return [e.clientX - r.left, e.clientY - r.top];
   };
   const onWheel = e => {
-    if (!freeZoom) return;
+    if (!freeZoom || aligning) return;
     cancelViewAnim();
     e.preventDefault();
     const [px, py] = toStagePoint(e);
@@ -21369,6 +21446,7 @@ function FloorPlanTabContent({
     };
   };
   const onPointerDown = e => {
+    if (aligning) { geoDragStart(e); return; }
     if (!freeZoom) return;
     cancelViewAnim();
     // NOT captured here: capturing on pointerdown retargets the click that follows
@@ -21379,6 +21457,7 @@ function FloorPlanTabContent({
     else if (pointersRef.current.size === 1) beginDrag(e);
   };
   const onPointerMove = e => {
+    if (aligning) { geoDragMove(e); return; }
     if (!freeZoom || !dragRef.current) return;
     if (pointersRef.current.has(e.pointerId)) {
       const prev = pointersRef.current.get(e.pointerId);
@@ -21408,6 +21487,7 @@ function FloorPlanTabContent({
     applyVB();
   };
   const endDrag = e => {
+    if (aligning) { geoDragEnd(); return; }
     if (e && e.pointerId != null) pointersRef.current.delete(e.pointerId);
     else pointersRef.current.clear();
     if (!dragRef.current) return;
@@ -21750,6 +21830,115 @@ function FloorPlanTabContent({
 
   const fileInputRef = useRef(null);
 
+  // ---- satellite view (floorPlanGeo) ----
+  // satOn is a per-visit view choice, never saved, like Free zoom. Aligning is
+  // its own mode: drag moves the PHOTO, not the plan, and the plan goes inert
+  // and see-through so the buildings underneath can be lined up with it.
+  const savedGeo = floorPlanGeoParse(selectedAsset.floorPlanGeo);
+  const [satOn, setSatOn] = useState(false);
+  const [aligning, setAligning] = useState(false);
+  const [geoDraft, setGeoDraft] = useState(null);       // placement being aligned
+  const [geoWhere, setGeoWhere] = useState("");         // the location field
+  const [geoWidth, setGeoWidth] = useState("");         // the width field, metres
+  const [geoMsg, setGeoMsg] = useState("");
+  const [satFailed, setSatFailed] = useState("");       // href that failed to load
+  const satGRef = useRef(null);
+  const geoDragRef = useRef(null);
+  // The plan's own (unrotated) extent: its size sets how much ground to fetch,
+  // and its centre is where a brand-new alignment puts the location typed in.
+  const rawExtent = useMemo(() => {
+    if (rawPlan.status !== "ready" || !rawPlan.spaces.length) return null;
+    return floorPlanBbox(rawPlan.spaces.flatMap(s => s.pts));
+  }, [rawPlan]);
+  const planSize = rawExtent ? Math.max(rawExtent.w, rawExtent.h) : 0;
+  const shownGeo = aligning ? geoDraft : (satOn ? savedGeo : null);
+  const satImg = floorPlanSatImage(shownGeo, planSize);
+  const satTransform = g => `rotate(${90 * rotation}) translate(${g.ax} ${g.ay}) rotate(${g.deg})`;
+  // The middle of the screen, in the drawing's own coordinates.
+  const viewCentreDrawing = () => {
+    const b = vbRef.current;
+    return floorPlanRotatePoint(b.x + b.w / 2, b.y + b.h / 2, 4 - rotation);
+  };
+  const startAlign = () => {
+    setAligning(true);
+    setGeoDraft(savedGeo);
+    setGeoWhere(savedGeo ? `${savedGeo.lat.toFixed(6)}, ${savedGeo.lng.toFixed(6)}` : "");
+    setGeoWidth(savedGeo && planSize ? String(Math.round(planSize * savedGeo.mpu)) : "");
+    setGeoMsg("");
+    zoomToFit();
+  };
+  const placeAt = (lat, lng) => {
+    if (!rawExtent) return;
+    const width = parseFloat(geoWidth);
+    const mpu = geoDraft ? geoDraft.mpu : (width > 0 ? width : 150) / planSize;
+    // A new location re-centres the photo on the plan; an existing alignment
+    // keeps its scale and turn, so correcting a typo'd location does not undo them.
+    setGeoDraft({
+      lat, lng, mpu, deg: geoDraft ? geoDraft.deg : 0,
+      ax: rawExtent.x + rawExtent.w / 2, ay: rawExtent.y + rawExtent.h / 2,
+    });
+    if (!geoWidth) setGeoWidth(String(Math.round(planSize * mpu)));
+    setGeoMsg("");
+  };
+  const applyWhere = () => {
+    const ll = floorPlanParseLatLng(geoWhere);
+    if (!ll) { setGeoMsg("Paste coordinates like 35.4921, -120.6680 (in Google Maps, long-press or right-click the spot)."); return; }
+    placeAt(ll.lat, ll.lng);
+  };
+  const useHere = () => {
+    if (!navigator.geolocation) { setGeoMsg("This browser can't share its location."); return; }
+    setGeoMsg("Finding your location…");
+    navigator.geolocation.getCurrentPosition(
+      p => { setGeoWhere(`${p.coords.latitude.toFixed(6)}, ${p.coords.longitude.toFixed(6)}`); placeAt(p.coords.latitude, p.coords.longitude); },
+      () => setGeoMsg("Couldn't get your location. Paste coordinates instead."),
+      { enableHighAccuracy: true, timeout: 15000 }
+    );
+  };
+  const nudgeGeo = (f, d) => {
+    if (!geoDraft) return;
+    const [px, py] = viewCentreDrawing();
+    const next = floorPlanGeoTransform(geoDraft, px, py, f, d);
+    setGeoDraft(next);
+    if (planSize) setGeoWidth(String(Math.round(planSize * next.mpu)));
+  };
+  const applyWidth = () => {
+    const w = parseFloat(geoWidth);
+    if (!geoDraft || !(w > 0) || !planSize) return;
+    nudgeGeo((planSize * geoDraft.mpu) / w, 0);
+  };
+  const saveAlign = () => {
+    if (!geoDraft || !onSaveGeo) return;
+    onSaveGeo(floorPlanGeoFormat(geoDraft));
+    setAligning(false); setGeoDraft(null); setSatOn(true);
+  };
+  const removeAlign = () => {
+    if (onSaveGeo) onSaveGeo("");
+    setAligning(false); setGeoDraft(null); setSatOn(false);
+  };
+  // Dragging while aligning moves the photo. The <g> transform is written
+  // directly each frame and committed to state once at the end, the same
+  // ref-over-state rule the viewBox follows.
+  const geoDragStart = e => {
+    if (!geoDraft) return false;
+    geoDragRef.current = { id: e.pointerId, x: e.clientX, y: e.clientY, g0: geoDraft, g: geoDraft };
+    try { stageElRef.current.setPointerCapture(e.pointerId); } catch (err) { /* synthetic events */ }
+    return true;
+  };
+  const geoDragMove = e => {
+    const d = geoDragRef.current;
+    if (!d || d.id !== e.pointerId) return;
+    const k = unitsPerPx();
+    const [dx, dy] = floorPlanRotatePoint((e.clientX - d.x) * k, (e.clientY - d.y) * k, 4 - rotation);
+    d.g = { ...d.g0, ax: d.g0.ax + dx, ay: d.g0.ay + dy };
+    if (satGRef.current) satGRef.current.setAttribute("transform", satTransform(d.g));
+  };
+  const geoDragEnd = () => {
+    const d = geoDragRef.current;
+    if (!d) return;
+    geoDragRef.current = null;
+    setGeoDraft(d.g);
+  };
+
   if (!selectedAsset.floorPlanUrl) {
     return (
       <div className="card" style={{ padding: 18 }}>
@@ -21827,7 +22016,9 @@ function FloorPlanTabContent({
   }
 
   const css = `
-    .fp-stage { touch-action: ${freeZoom ? "none" : "pan-y"}; cursor: ${freeZoom ? "grab" : "default"}; }
+    .fp-stage { touch-action: ${freeZoom || aligning ? "none" : "pan-y"}; cursor: ${aligning ? "move" : freeZoom ? "grab" : "default"}; }
+    .fp-sat .fp-area { stroke: #fff; }
+    .fp-aligning .fp-area { fill-opacity: .06; stroke: #FFE066; stroke-width: 2px; vector-effect: non-scaling-stroke; }
     .fp-room { cursor: pointer; }
     @media (hover: hover) { .fp-room:hover > .fp-area { fill-opacity: .55; } }
     .fp-text { font-family: inherit; paint-order: stroke; stroke: #fff; stroke-linejoin: round; pointer-events: none; }
@@ -21953,6 +22144,49 @@ function FloorPlanTabContent({
         </div>
       )}
 
+      {canEdit && aligning && (() => {
+        const bb = { padding: "5px 10px", borderRadius: 8, border: "1.5px solid rgba(255,255,255,.6)", background: "none", color: "#fff", fontSize: 12.5, fontWeight: 600 };
+        const field = { padding: "5px 8px", borderRadius: 7, border: "none", fontSize: 13, minWidth: 0 };
+        return (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10, background: C.brandDark, borderRadius: 10, padding: "9px 12px", color: "#fff" }}>
+            <div style={{ fontSize: 13, fontWeight: 700 }}>Align satellite map</div>
+            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+              <input value={geoWhere} onChange={e => setGeoWhere(e.target.value)} onKeyDown={e => { if (e.key === "Enter") applyWhere(); }}
+                placeholder="Latitude, longitude" aria-label="Location as latitude, longitude" style={{ ...field, flex: "1 1 160px" }} />
+              <button type="button" onClick={applyWhere} style={bb}>Go</button>
+              <button type="button" onClick={useHere} style={bb}>Use my location</button>
+            </div>
+            {geoDraft ? (<>
+              <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", fontSize: 12.5 }}>
+                <span>Plan width</span>
+                <input type="number" min="1" value={geoWidth} onChange={e => setGeoWidth(e.target.value)}
+                  onBlur={applyWidth} onKeyDown={e => { if (e.key === "Enter") applyWidth(); }}
+                  aria-label="Plan width in metres" style={{ ...field, width: 72 }} />
+                <span>m</span>
+                <button type="button" onClick={() => nudgeGeo(1 / 1.02, 0)} style={bb} aria-label="Shrink the photo">−</button>
+                <button type="button" onClick={() => nudgeGeo(1.02, 0)} style={bb} aria-label="Enlarge the photo">+</button>
+                <span style={{ marginLeft: 6 }}>Turn</span>
+                <button type="button" onClick={() => nudgeGeo(1, -5)} style={bb} aria-label="Turn the photo 5 degrees left">−5°</button>
+                <button type="button" onClick={() => nudgeGeo(1, -0.5)} style={bb} aria-label="Turn the photo half a degree left">−½°</button>
+                <button type="button" onClick={() => nudgeGeo(1, 0.5)} style={bb} aria-label="Turn the photo half a degree right">+½°</button>
+                <button type="button" onClick={() => nudgeGeo(1, 5)} style={bb} aria-label="Turn the photo 5 degrees right">+5°</button>
+              </div>
+              <div style={{ fontSize: 12, opacity: 0.85 }}>Drag the photo until the buildings sit under the plan's outlines.</div>
+            </>) : (
+              <div style={{ fontSize: 12, opacity: 0.85 }}>Paste the campus's coordinates (in Google Maps, long-press or right-click the spot), or stand on site and use your location.</div>
+            )}
+            {geoMsg && <div style={{ fontSize: 12, color: "#FFE066" }}>{geoMsg}</div>}
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              {savedGeo && <button type="button" onClick={removeAlign} style={bb}>Remove map</button>}
+              <span style={{ flex: 1 }} />
+              <button type="button" onClick={() => { setAligning(false); setGeoDraft(null); }} style={bb}>Cancel</button>
+              <button type="button" disabled={!geoDraft} onClick={saveAlign}
+                style={{ padding: "5px 14px", borderRadius: 8, border: "none", background: "#fff", color: C.brandDark, fontSize: 12.5, fontWeight: 700, opacity: geoDraft ? 1 : 0.5 }}>Save</button>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ---------- the plan itself ---------- */}
       <div
         ref={stageElRef}
@@ -21978,10 +22212,19 @@ function FloorPlanTabContent({
         >
           <Maximize size={15} />
         </button>
+        {satImg && (
+          // Esri's terms require the attribution wherever the imagery shows.
+          <div style={{ position: "absolute", left: 4, bottom: 4, zIndex: 1, maxWidth: "calc(100% - 8px)", padding: "1px 5px", borderRadius: 4, background: "rgba(255,255,255,.75)", color: "#333", fontSize: 9.5, lineHeight: 1.4, pointerEvents: "none" }}>
+            {satFailed === satImg.href ? "Satellite imagery couldn't load. " : ""}{FLOOR_PLAN_SAT_ATTRIBUTION}
+          </div>
+        )}
         <svg
           ref={svgElRef}
           width="100%" height="100%"
-          style={placing ? { cursor: "crosshair" } : undefined}
+          className={aligning ? "fp-sat fp-aligning" : satImg ? "fp-sat" : undefined}
+          // Aligning: the plan is see-through scenery and every pointer goes to
+          // the stage, where a drag moves the photo.
+          style={aligning ? { pointerEvents: "none" } : placing ? { cursor: "crosshair" } : undefined}
           onClickCapture={e => {
             // While placing, ANY tap on the plan -- on a space or between them --
             // is the point being chosen, so it must not also select a space.
@@ -21999,6 +22242,13 @@ function FloorPlanTabContent({
           }}
           onClick={e => { if (e.target === svgElRef.current && !(setupTab === "wall" && wallDraft)) zoomToFit(); }}
         >
+          {satImg && (
+            <g ref={satGRef} transform={satTransform(shownGeo)} style={{ pointerEvents: "none" }}>
+              <image key={satImg.href} href={satImg.href} x={-satImg.size / 2} y={-satImg.size / 2}
+                width={satImg.size} height={satImg.size} preserveAspectRatio="none"
+                onError={() => setSatFailed(satImg.href)} onLoad={() => setSatFailed(f => (f === satImg.href ? "" : f))} />
+            </g>
+          )}
           {plan.spaces.map(s => {
             const d = "M" + s.pts.map(p => p.join(" ")).join(" L") + " Z";
             const link = linkFor(s.gid);
@@ -22419,6 +22669,16 @@ function FloorPlanTabContent({
                           Rotate 90°
                         </button>
                       )}
+                      {!setupTab && !aligning && onSaveGeo && (
+                        <button
+                          type="button"
+                          onClick={() => { setMenuOpen(false); setConfigOpen(false); startAlign(); }}
+                          className="icon-btn"
+                          style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
+                        >
+                          Align satellite map…
+                        </button>
+                      )}
                       <button
                         type="button"
                         disabled={uploadBusy}
@@ -22440,6 +22700,16 @@ function FloorPlanTabContent({
               >
                 <Repeat size={15} /> Free zoom ({freeZoom ? "on" : "off"})
               </button>
+              {savedGeo && !aligning && (
+                <button
+                  type="button"
+                  onClick={() => { setMenuOpen(false); setSatOn(v => !v); }}
+                  className="icon-btn"
+                  style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
+                >
+                  <Globe size={15} /> Satellite view ({satOn ? "on" : "off"})
+                </button>
+              )}
               {/* Pins: All, None, or a tick per asset type that has a pin on
                   THIS plan -- a type with nothing pinned here would be a
                   checkbox that changes nothing. Opened in place like
