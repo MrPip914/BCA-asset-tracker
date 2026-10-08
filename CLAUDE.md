@@ -551,6 +551,55 @@ failure modal and the sign-in screen both said *that* it happened and kept nothi
   picking a time window, View, Download, the disabled state with nothing ticked, and
   About surviving a close — was driven in Chromium against a mocked backend.
 
+## Claude connector (`supabase/functions/mcp/`, started 2026-10-08)
+
+A remote MCP server, as a Supabase Edge Function, so Claude (web, desktop, phone) can
+answer questions from the inventory. The evaluation behind it is
+`/mnt/project-files/evaluations/claude-connector.md`. **Dev tenant only, and READ-ONLY.**
+
+- **Sign-in is OAuth whose only proof of identity is the app's Google sign-in**
+  (`oauth.js`). Claude registers, `/authorize` redirects to `mcp-connect.html` on the app
+  origin (the only origin Google sign-in is registered for; Supabase will not serve HTML),
+  the page posts the Google ID token to `/authorize/complete`, which checks it with the
+  same `verifyGoogleIdToken` the Supabase backend uses and requires at least one site, and
+  Claude trades the code (PKCE S256) for an hour's access token and a 30-day refresh.
+  - **Stateless: every client id, request, code and token is HMAC-signed JSON**, so there
+    is no table. A token cannot be revoked by itself, which is why access is re-read from
+    the allowlists on EVERY request and on every refresh — removing someone works on their
+    next question, as in the app.
+  - **The connect page PINS the connector URL.** Reading it from the link would let a
+    crafted link collect a Google token that also signs into the app.
+  - **Codes only go back to Claude's own callbacks or a loopback address**, checked at
+    registration, at authorize, and again by the page.
+  - Discovery is served under the function itself (`/functions/v1/mcp/.well-known/...`),
+    since the supabase.co root is not ours; the 401 names it in `WWW-Authenticate`.
+  - The signing key derives from the service role key unless `MCP_SIGNING_KEY` is set
+    (Supabase > Edge Functions > Secrets). Changing either signs everyone out of Claude.
+  - Deployed by `deploy-api-dev` beside `asset-api`, from the same commit, since it imports
+    `asset-api/auth.ts`.
+- **Built on the Phase 1 tables, never on Apps Script.** Apps Script cannot send the status
+  codes and headers an MCP sign-in needs, and every Claude request would meet Google's
+  intermittent failures.
+- **Everything that decides an answer is plain JS** (`protocol.js`, `tools.js`,
+  `inventory.js`, `from-app.js`) so `test-mcp-connector.mjs` drives it in Node with
+  fixture rows. `index.ts` is only HTTP and SQL. The MCP protocol is hand-written
+  (stateless streamable HTTP, JSON replies) rather than the SDK, per the no-dependency rule.
+- **`from-app.js` is a VERBATIM copy of the app's task due-date rules and `cellsLabel_`**,
+  pinned by the test the way `panel.html`'s copies are. Change `index.html`, then re-copy.
+- **A tenant is named per tool call (`site`)**, and a person sees only the sites whose
+  allowlist (or owner) names them, re-read on every request. "No such site" and "not
+  yours" are the same answer. Every read sets `app.tenant_id` first, so row-level security
+  separates tenants underneath; the function must connect as an `asset_api` login role,
+  never the service role.
+- **Every tool is annotated read-only.** Writes, when they come, are to be Postgres
+  functions that check the role, write, append the audit row and bump the revision in one
+  transaction, so an open browser reloads rather than overwriting the change. Never a
+  direct table write from the connector: that is `sheet.mjs`'s bypass all over again.
+- **Names are not unique, so a lookup is tiered** (id, tag, name, full path) and two
+  matches is an error listing both with their locations, never the first one.
+- **The whole tenant is loaded per call.** Fine at hundreds of assets; the audit log is the
+  table that will make it slow, and the fix then is filtering it in SQL.
+
 ## Local Sandbox mode
 
 Sandbox swaps the real Google Sheet for a local fixture (`MOCK_SNAPSHOT` in
