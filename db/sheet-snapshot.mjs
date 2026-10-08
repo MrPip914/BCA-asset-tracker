@@ -30,7 +30,10 @@ const OVERRIDES = `
 
 // grids: { [tabName]: string[][] } -- each a header row plus data rows, as the
 // Sheets API returns them (trailing blank cells omitted).
-export function snapshotFromGrids(gasSource, grids) {
+//
+// `fullAudit: false` leaves the limit alone, so the payload is exactly what an
+// ordinary read answers -- which is what the API's parity test compares against.
+export function snapshotFromGrids(gasSource, grids, { fullAudit = true } = {}) {
   // An ordinary read returns only the newest AUDIT_READ_LIMIT audit rows; an
   // import must carry ALL of them, since audit_log is append-only and nothing
   // could fill the gap later. The constant is lifted rather than calling a
@@ -39,7 +42,7 @@ export function snapshotFromGrids(gasSource, grids) {
   if (!limitRe.test(gasSource)) {
     throw new Error("AUDIT_READ_LIMIT not found in AssetTrackerSync.gs -- the importer would silently truncate the audit log.");
   }
-  const src = gasSource.replace(limitRe, "const AUDIT_READ_LIMIT = Infinity;");
+  const src = fullAudit ? gasSource.replace(limitRe, "const AUDIT_READ_LIMIT = Infinity;") : gasSource;
 
   const sheetFor = (name) => {
     const grid = grids[name] || [];
