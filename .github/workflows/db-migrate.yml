@@ -12,6 +12,10 @@
 #
 #   SUPABASE_DB_URL   the dev project's SESSION POOLER connection string
 #                     (postgresql://postgres.<ref>:<password>@aws-…pooler.supabase.com:5432/postgres)
+#   GOOGLE_SA_KEY     the contents of ~/.bca-asset-tracker-sheets.json (the
+#                     service-account key sheet.mjs uses), for the import
+#   SHEETS_TENANTS    the contents of ~/.bca-asset-tracker-sheets-tenants.json
+#                     (which Sheet is which tenant's)
 #
 # An ENVIRONMENT secret, not a repository secret, for the reason deploy-backend.yml
 # gives: only a job naming that environment can read it.
@@ -22,6 +26,11 @@
 #   push to `dev` touching db/  rehearse, then apply to the dev database.
 #   manual run                  the same as a push (only once this file is on main,
 #                               which is where GitHub looks for dispatchable workflows).
+#
+# After the migrations, `import-dev` copies the dev tenant's Sheet into the
+# database (db/import-from-sheet.mjs), replacing what dev had. It only READS the
+# Sheet. To refresh dev's data without a new commit, re-run the latest run of
+# this workflow on `dev`.
 #
 # Production is deliberately NOT here. When a school moves, it gets its own
 # environment and a manual trigger, per the client-dispatch rule in CLAUDE.md.
@@ -74,6 +83,8 @@ jobs:
         run: db/migrate.sh
       - name: Check isolation, append-only audit, and cascades
         run: psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f db/test-schema.sql
+      - name: Check the importer against a fixture Sheet, loading it for real
+        run: node db/test-import.mjs
 
   apply-dev:
     needs: rehearse
@@ -98,3 +109,44 @@ jobs:
           DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
           psql "$DATABASE_URL" -X -A -c "select name, applied_at from asset_tracker.schema_migrations order by name"
+
+  import-dev:
+    needs: apply-dev
+    runs-on: ubuntu-latest
+    environment:
+      name: supabase-dev
+    steps:
+      - uses: actions/checkout@v4
+      # Secrets arrive through `env:` and are written to files with umask 077;
+      # nothing echoes them. The files live in RUNNER_TEMP and are deleted at
+      # the end whatever happened.
+      - name: Install the Sheets credential
+        env:
+          GOOGLE_SA_KEY: ${{ secrets.GOOGLE_SA_KEY }}
+          SHEETS_TENANTS: ${{ secrets.SHEETS_TENANTS }}
+        run: |
+          set -euo pipefail
+          for v in GOOGLE_SA_KEY SHEETS_TENANTS; do
+            if [ -z "${!v:-}" ]; then
+              echo "::error::$v is not set on the supabase-dev environment. See the setup notes at the top of this workflow."
+              exit 1
+            fi
+          done
+          umask 077
+          printf '%s' "$GOOGLE_SA_KEY"  > "$RUNNER_TEMP/sa.json"
+          printf '%s' "$SHEETS_TENANTS" > "$RUNNER_TEMP/tenants.json"
+          check_json () {
+            python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$1" 2>/dev/null \
+              || { echo "::error::$2 is not valid JSON. Re-copy the whole file, including the outer braces."; exit 1; }
+          }
+          check_json "$RUNNER_TEMP/sa.json" GOOGLE_SA_KEY
+          check_json "$RUNNER_TEMP/tenants.json" SHEETS_TENANTS
+      - name: Import the dev tenant's Sheet
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          BCA_SHEETS_KEY="$RUNNER_TEMP/sa.json" BCA_SHEETS_TENANTS="$RUNNER_TEMP/tenants.json" \
+            node db/import-from-sheet.mjs dev
+      - name: Forget the credential
+        if: always()
+        run: rm -f "$RUNNER_TEMP/sa.json" "$RUNNER_TEMP/tenants.json"

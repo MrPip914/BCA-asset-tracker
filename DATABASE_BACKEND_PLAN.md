@@ -1,6 +1,6 @@
 # Moving the backend from Apps Script + Sheets to Postgres — Phase 1 design
 
-Status: **design; Rollout step 1 (schema migrations, `db/`) started 2026-10-07.** Written 2026-10-06 after saves against the Google
+Status: **Rollout step 1 (schema, `db/migrations/`) applied to dev 2026-10-07; step 2 (importer, `db/import-from-sheet.mjs`) built 2026-10-08.** Written 2026-10-06 after saves against the Google
 backend proved unreliable (see "Google's layer in front of Apps Script fails
 intermittently" in CLAUDE.md, and the v42/v49/v50 diagnostics work).
 
