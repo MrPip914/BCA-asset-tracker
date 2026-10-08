@@ -180,7 +180,7 @@ const psql = (sql, extra = []) => {
 if (process.env.DATABASE_URL) {
   const tenant = (id) => ({ id, name: id, ownerEmail: snap.ownerEmail, cloudinaryFolder: null });
   const countsFor = (id) => psql(
-    `select string_agg(t || '=' || n, ' ' order by t) from (` +
+    `select string_agg(t || '=' || n, ' ' order by t collate "C") from (` +
     Object.keys(tables).map((t) => `select '${t}' t, count(*) n from asset_tracker.${t} where tenant_id = '${id}'`).join(" union all ") +
     `) x;`);
   const expected = Object.entries(tables).map(([t, r]) => `${t}=${r.length}`).sort().join(" ");
