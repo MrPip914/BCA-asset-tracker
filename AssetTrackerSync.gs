@@ -50,7 +50,7 @@
 //   1. Visit the deployed /exec URL directly in a browser and Ctrl+F for
 //      "scriptVersion" in the raw JSON.
 //   2. Compare this string to FRONTEND_SCRIPT_VERSION at the top of index.html.
-const SCRIPT_VERSION = "v52";
+const SCRIPT_VERSION = "v53";
 
 const SHEET_NAMES = {
   assets: "Assets",
@@ -176,6 +176,11 @@ const ASSET_FIELDS = [
   // asset id; "mapX"/"mapY" are a point in that plan's own (unrotated)
   // coordinates. Blank = not pinned, which every asset was before.
   "mapPlanId", "mapX", "mapY",
+  // v53: where the plan sits on the satellite map shown under it. Blank = not
+  // aligned. "lat,lng,metresPerUnit,northDeg,anchorX,anchorY" -- the drawing
+  // point (anchorX, anchorY), in the plan's own unrotated coordinates, is at
+  // (lat, lng). Display only; the frontend parses it (floorPlanGeoParse).
+  "floorPlanGeo",
 ];
 
 // The Assets tab's real column set: the fixed schema above PLUS whatever custom
