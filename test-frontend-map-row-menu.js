@@ -38,6 +38,7 @@ check(mapLists.every(l => /rowActions=\{mapRowActions\}/.test(l)), 'every Map pa
 check(mapLists.some(l => /onlyId=\{a\.id\}/.test(l)), 'a selected pin is the standard list narrowed to that asset');
 check(!/Open asset\s*</.test(fp), 'no separate pin card with its own Open asset button');
 check(/if \(onlyId\) \{/.test(list) && /contentDevices = \[only\]/.test(list), 'onlyId narrows the list and never leaves it empty');
+check(/\(selectedWallId \|\| selectedShapeId\) && !selectedPinId/.test(fp) && /openGroupId && !selectedShapeId && !selectedPinId/.test(fp), 'a selected pin is the only list: no space or group list beside it');
 check(/onShowOnMap, onStartPlace/.test(fp), 'FloorPlanTabContent takes onShowOnMap/onStartPlace');
 
 const actions = slice('const mapRowActions = a =>', '\n  };\n');
