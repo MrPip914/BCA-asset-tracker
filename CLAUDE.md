@@ -3610,6 +3610,15 @@ view state only, and it stays put as the selection moves. Frontend only.
   site-wide History table does (`openChangeEdit` only knows the open asset).
 - Covered by `test-frontend-map-list.js` (runs the real scope/sort helpers); driven in
   Chromium against Sandbox.
+- **Back from an asset opened off this list lands on the list that was left**
+  (2026-10-08). The map UNMOUNTS while an asset is open, so its own state was rebuilt
+  from scratch on Back: Assets mode, nothing selected, page at the top. The mode and
+  filters now live on the page (`mapListMode`, `mapListFilters`), the selected space or
+  wall is remembered in `mapSelectionMemoRef` and re-selected when the map remounts on
+  the same plan, and the scroll offset at the moment of opening (`mapReturnScrollRef`)
+  is put back once the plan has loaded. **The browser cannot restore that scroll
+  itself**: the plan loads after the remount, so the page is too short when it tries.
+  The selection memo is deliberately NOT cleared on unmount — surviving it is the point.
 
 ### Which pins the map draws (2026-10-08)
 
