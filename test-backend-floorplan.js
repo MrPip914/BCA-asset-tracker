@@ -196,7 +196,7 @@ eq('SpaceLinks is in the admin wipe/import list',
 eq('SpaceGroups is in the admin wipe/import list',
    /SHEET_NAMES\.spaceGroups, headers: SPACE_GROUP_FIELDS/.test(src), true);
 eq('the floor plan file reference rides ASSET_FIELDS, not a child tab',
-   /"floorPlanUrl", "floorPlanStorageKey", "floorPlanFileName",[\s\S]*?"floorPlanRotation",[\s\S]*?"mapSelectMode", "mapSelectTargets",[\s\S]*?"mapPlanId", "mapX", "mapY",[\s\S]*?"floorPlanGeo",\n\];/.test(src), true);
+   /"floorPlanUrl", "floorPlanStorageKey", "floorPlanFileName",[\s\S]*?"floorPlanRotation",[\s\S]*?"mapSelectMode", "mapSelectTargets",[\s\S]*?"mapPlanId", "mapX", "mapY",\n\];/.test(src), true);
 eq('links/groups are NOT their own revision domain (they ride assets, like breakers)',
    /REVISION_DOMAINS = \[[^\]]*"spaceLinks"/.test(src), false);
 eq('doPost writes SpaceLinks/SpaceGroups only when dirty.assets triggers it',

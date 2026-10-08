@@ -3683,34 +3683,6 @@ never saved, and still defaults to no pins. Frontend only.
 - `MOCK_SNAPSHOT` pins BCA0098 (Electrical Panel, now `mapPin`) in the Kitchen beside the
   Mini Split, so Sandbox has two types to choose between. Driven in Chromium against Sandbox.
 
-### Satellite imagery under a plan (backend v53, 2026-10-08)
-
-The plan's menu gains **Satellite view (on/off)** once the plan has been aligned, and
-editors get **Configure > Align satellite map…**. The imagery is **Esri World Imagery**
-(Eric's call over Google: no API key, no billing, no Cloud project), fetched as ONE square
-JPEG from its `export` endpoint and drawn as an SVG `<image>` inside the plan's own SVG, so
-it pans, zooms and rotates with the plan and no map library is loaded.
-- **One new asset field, `floorPlanGeo`**: `"lat,lng,mpu,deg,ax,ay"` — the drawing point
-  (ax, ay) is at (lat, lng), one drawing unit is mpu metres, north is deg degrees clockwise
-  from the drawing's up. Blank or unreadable = not aligned. It is in the drawing's own
-  UNROTATED coordinates, so Rotate 90° never breaks an alignment. A plain string, not JSON,
-  and not audited (how the drawing is shown, like rotation). Supabase stores it in the
-  asset's `data` jsonb with no schema change.
-- **Aligning is its own mode**: drag moves the PHOTO (the svg goes `pointer-events: none`
-  and the stage takes every pointer), the spaces turn into yellow outlines, and scale/turn
-  buttons work about the middle of the screen. Location comes from pasted coordinates or
-  the phone's own location; "Plan width" sets the scale in metres.
-- **The ground square is three plan-widths, rounded UP to a power of two**, so a small
-  scale nudge reuses the loaded image instead of refetching. Mercator half-width is divided
-  by cos(lat) or the photo would be the wrong size away from the equator.
-- **The attribution line is required by Esri's terms** and shows wherever the imagery does.
-  Esri's free basemap use is meant for non-commercial use with attribution; a paying
-  tenant may want an ArcGIS account.
-- `satOn` is a per-visit view choice, never saved, like Free zoom.
-- Covered by `test-frontend-satellite.js` (parse/format, the image request, the
-  scale/turn-about-a-point math). Aligning, saving, the toggle and a reload were driven in
-  Chromium against Sandbox, with the live Esri endpoint.
-
 ### The floor plan SVG upload: image route, and NO signed allowed_formats (2026-10-04, backend v51)
 
 The upload started failing with "The file host refused the upload: Raw file format svg not
