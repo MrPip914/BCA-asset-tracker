@@ -65,8 +65,44 @@ check(work.join() === 'c2,c1', 'history is newest first');
 // Wiring.
 const fp = src.slice(src.indexOf('function FloorPlanTabContent({'), src.indexOf('\n// Every room/group name label drawn ON the plan'));
 check(/const \[listMode, setListMode\] = useState\("assets"\)/.test(fp), 'the list defaults to Assets');
-check((fp.match(/<MapListModeSwitch /g) || []).length === 5, 'every list card carries the switch (no plan, space, pin, nothing selected, group)');
-check(/listMode !== "assets" \? panelList\(null, groupRooms\)/.test(fp), "a group's Tasks/History cover its rooms");
+check((fp.match(/<MapListModeSwitch /g) || []).length === 1 && /return \(<>\s*<MapListModeSwitch/.test(fp), 'the switch is drawn by panelList, so every card that lists carries it');
+check((fp.match(/\{panelList\(/g) || []).length === 5, 'all five list cards go through panelList (no plan, space, pin, nothing selected, group)');
+check(/panelList\(null, groupRooms, \{ assetsBody:/.test(fp), "a group's Tasks/History cover its rooms, its Assets list its rooms");
+check(/typeFilter=\{active\.type\}/.test(fp) && /filter=\{active\}/.test(fp), 'the active filter reaches both list kinds');
+
+// The filter (2026-10-08).
+const fctx = new Function(`
+  const AUDIT_ALL_TIME = "All time";
+  const TASK_KIND_SCHEDULED = "scheduled", TASK_KIND_ONEOFF = "oneoff";
+  ${src.slice(src.indexOf('const AUDIT_PERIOD_OPTIONS = ['), src.indexOf('];', src.indexOf('const AUDIT_PERIOD_OPTIONS = [')) + 2)}
+  ${src.slice(src.indexOf('const TASK_KIND_FILTER_OPTIONS = ['), src.indexOf('];', src.indexOf('const TASK_KIND_FILTER_OPTIONS = [')) + 2)}
+  const typeNameOf = t => ({ C: "Computer", M: "Monitor" })[t] || t;
+  const taskKindOf = it => it.kind || "scheduled";
+  const maintenanceStatusMeta = st => ({ label: st });
+  ${sliceFn('withinAuditPeriod')}
+  ${src.slice(src.indexOf('const MAP_TASK_STATUS_ORDER'), src.indexOf('const MAP_NO_WORK_TYPE'))}
+  const MAP_NO_WORK_TYPE = "No work type";
+  ${sliceFn('mapListFilterGroups')}
+  ${sliceFn('mapListActiveFilter')}
+  ${sliceFn('mapListFilterMatches')}
+  return { mapListFilterGroups, mapListActiveFilter, mapListFilterMatches };
+`)();
+const g1 = fctx.mapListFilterGroups('assets', [{ type: 'M' }, { type: 'C' }, { type: 'C' }]);
+check(g1.length === 1 && g1[0].options.map(o => o.label).join() === 'Computer,Monitor', 'assets filter by the types present, A-Z, once each');
+check(fctx.mapListFilterGroups('assets', [{ type: 'C' }, { type: 'C' }]).length === 0, 'one type offers no filter (a dead control)');
+const trows = [{ status: 'done', item: {} }, { status: 'overdue', item: { kind: 'oneoff' } }, { status: 'never', item: {} }];
+const g2 = fctx.mapListFilterGroups('tasks', trows);
+check(g2.map(g => g.key).join() === 'status,kind' && g2[0].options.map(o => o.value).join() === 'overdue,never,done', 'tasks filter by status (urgent first) and kind');
+const a2 = fctx.mapListActiveFilter(g2, { status: ['overdue', 'ok'], kind: ['oneoff'] });
+check(JSON.stringify(a2) === '{"status":["overdue"],"kind":["oneoff"]}', 'a stored value this selection does not offer is pruned');
+check(fctx.mapListActiveFilter(g1, { type: ['Printer'] }).type === undefined, 'a filter for a type not here is inactive, not an empty list');
+check(trows.filter(r => fctx.mapListFilterMatches('tasks', { status: ['overdue', 'never'], kind: ['scheduled'] }, r, 0)).length === 1, 'OR within a group, AND across groups');
+const now = Date.parse('2026-10-08T12:00:00Z');
+const hrows = [{ performedOn: '2026-10-01', change: { changeType: 'Repair' } }, { performedOn: '2025-01-01', change: {} }];
+const g3 = fctx.mapListFilterGroups('history', hrows);
+check(g3.map(g => g.key).join() === 'workType,period' && g3[0].options[1].label === 'No work type', 'history filters by work type (blank last) and period');
+check(g3[1].single && hrows.filter(r => fctx.mapListFilterMatches('history', { period: ['30'] }, r, now)).length === 1, 'the period is one rolling window');
+check(hrows.filter(r => fctx.mapListFilterMatches('history', { workType: [''] }, r, now)).length === 1, 'blank work type is filterable');
 const call = src.slice(src.indexOf('<MapTabContent'), src.indexOf('/>', src.indexOf('<MapTabContent')));
 check(/onOpenTask=\{\(item, a\) => \(canEdit \? openMaintenanceEdit\(item\.id, a\.id\)/.test(call), 'a task row opens the task dialog for editors, against its own asset');
 const mapTab = src.slice(src.indexOf('function MapTabContent({'), src.indexOf('function FloorPlanTabContent({'));

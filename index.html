@@ -2556,7 +2556,8 @@ function LocationTitle({ place, typesList, onOpen }) {
 // `rowActions` (Map panel only) returns, for one listed asset, the actions its
 // row menu offers -- [{ key, label, icon, onClick, danger }]. A row with none
 // gets no menu button rather than one that opens onto nothing.
-function ContentsList({ place, assets, typesList, onOpen, emptyLabel, locationsLast, rowActions, onlyId }) {
+// `typeFilter` (Map panel's filter) keeps only assets of those type ids.
+function ContentsList({ place, assets, typesList, onOpen, emptyLabel, locationsLast, rowActions, onlyId, typeFilter }) {
   const [locationsOpenState, setLocationsOpen] = useState(false);
   const [menuFor, setMenuFor] = useState(null); // id of the row whose action menu is open
   let { contentRooms, contentDevices, contentAllocations, contentsCount } = contentsOf(place, assets);
@@ -2572,6 +2573,13 @@ function ContentsList({ place, assets, typesList, onOpen, emptyLabel, locationsL
       const only = (assets || []).find(a => a.id === onlyId);
       if (only) contentDevices = [only];
     }
+    contentsCount = contentRooms.length + contentDevices.length + contentAllocations.length;
+  }
+  if (typeFilter && typeFilter.length) {
+    const keep = a => typeFilter.includes(a.type || "");
+    contentRooms = contentRooms.filter(keep);
+    contentDevices = contentDevices.filter(keep);
+    contentAllocations = contentAllocations.filter(al => keep(al.bulk));
     contentsCount = contentRooms.length + contentDevices.length + contentAllocations.length;
   }
   // A single location is shown open: collapsed, it would be a header with nothing under it.
@@ -2725,7 +2733,107 @@ function mapWorkRows(scopeAssets) {
   return rows;
 }
 
-function MapListModeSwitch({ value, onChange }) {
+// The Map panel list's FILTER (2026-10-08). Each mode offers what its rows can
+// be told apart by: Assets by type, Tasks by status and kind, History by work
+// type and a rolling date window. Options are derived from the rows in THIS
+// selection, and a group with only one value is not offered -- a chip whose
+// only effect is to show everything or nothing is a dead control (the rule
+// useLabelFilter already follows). Values OR within a group, AND across groups.
+// View state only, never saved.
+const MAP_TASK_STATUS_ORDER = ["overdue", "due-soon", "never", "ok", "undated", "done"];
+const MAP_HISTORY_PERIODS = AUDIT_PERIOD_OPTIONS.filter(o => o.value !== AUDIT_ALL_TIME && o.value !== "today");
+const MAP_NO_WORK_TYPE = "No work type";
+function mapListFilterGroups(mode, items, typesList) {
+  const groups = [];
+  const distinct = (vals, label) => {
+    const seen = new Map();
+    vals.forEach(v => { if (!seen.has(v)) seen.set(v, label(v)); });
+    return [...seen].map(([value, l]) => ({ value, label: l }));
+  };
+  if (mode === "assets") {
+    const types = distinct((items || []).map(a => a.type || ""), t => typeNameOf(t, typesList) || "Other")
+      .sort((a, b) => a.label.localeCompare(b.label));
+    groups.push({ key: "type", label: "Type", options: types });
+  } else if (mode === "tasks") {
+    const present = new Set((items || []).map(r => r.status));
+    groups.push({ key: "status", label: "Status",
+      options: MAP_TASK_STATUS_ORDER.filter(st => present.has(st)).map(st => ({ value: st, label: maintenanceStatusMeta(st).label })) });
+    const kinds = new Set((items || []).map(r => taskKindOf(r.item)));
+    groups.push({ key: "kind", label: "Kind",
+      options: TASK_KIND_FILTER_OPTIONS.filter(o => kinds.has(o.value)) });
+  } else if (mode === "history") {
+    const types = distinct((items || []).map(r => r.change.changeType || ""), t => t || MAP_NO_WORK_TYPE)
+      .sort((a, b) => (a.value ? 0 : 1) - (b.value ? 0 : 1) || a.label.localeCompare(b.label));
+    groups.push({ key: "workType", label: "Work type", options: types });
+    // A window is one choice, not several: tapping another replaces it.
+    if ((items || []).length) groups.push({ key: "period", label: "Performed", single: true, options: MAP_HISTORY_PERIODS });
+  }
+  return groups.filter(g => g.single ? g.options.length > 0 : g.options.length > 1);
+}
+// The filter in force for these groups: stored values pruned to what this
+// selection offers. The filter stays put as the selection changes (like the
+// mode), and a type that is not here would otherwise silently empty the list.
+function mapListActiveFilter(groups, stored) {
+  const out = {};
+  (groups || []).forEach(g => {
+    const vals = ((stored || {})[g.key] || []).filter(v => g.options.some(o => o.value === v));
+    if (vals.length) out[g.key] = vals;
+  });
+  return out;
+}
+function mapListFilterMatches(mode, active, item, now) {
+  const has = (key, v) => !active[key] || active[key].includes(v);
+  if (mode === "assets") return has("type", item.type || "");
+  if (mode === "tasks") return has("status", item.status) && has("kind", taskKindOf(item.item));
+  if (mode === "history") {
+    return has("workType", item.change.changeType || "")
+      && (!active.period || withinAuditPeriod(item.performedOn, active.period[0], now));
+  }
+  return true;
+}
+
+// The chips under the switch while the filter is open. Same chip look as the
+// Type picker's label filter.
+function MapListFilterBar({ groups, active, onToggle, onClear }) {
+  const any = Object.keys(active).length > 0;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "10px 0", marginBottom: 10, borderTop: `1px solid ${C.border}`, borderBottom: `1px solid ${C.border}` }}>
+      {groups.length === 0 && <div style={{ fontSize: 13, color: C.empty }}>Nothing to filter here.</div>}
+      {groups.map(g => (
+        <div key={g.key}>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginBottom: 4 }}>{g.label}</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+            {g.options.map(o => {
+              const sel = (active[g.key] || []).includes(o.value);
+              return (
+                <button key={o.value || "__blank__"} type="button" aria-pressed={sel} onClick={() => onToggle(g, o.value)}
+                  style={{
+                    padding: "3px 9px", borderRadius: 999, fontSize: 12,
+                    border: `1px solid ${sel ? C.brand : C.border}`,
+                    background: sel ? C.brand : "transparent",
+                    color: sel ? "#fff" : C.muted, fontWeight: sel ? 600 : 400,
+                    fontStyle: o.value ? "normal" : "italic",
+                  }}>
+                  {o.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+      {any && (
+        <button type="button" onClick={onClear}
+          style={{ alignSelf: "flex-start", background: "none", border: "none", padding: 0, fontSize: 13, color: C.brandDark, textDecoration: "underline" }}>
+          Clear filters
+        </button>
+      )}
+    </div>
+  );
+}
+
+// `filterCount` / `onToggleFilter` (optional) add the Filter button at the
+// right of the switch; without them the switch renders exactly as before.
+function MapListModeSwitch({ value, onChange, filterCount, filterOpen, onToggleFilter }) {
   return (
     <div role="tablist" aria-label="List shows" style={{ display: "flex", gap: 6, marginBottom: 10 }}>
       {MAP_LIST_MODES.map(m => {
@@ -2743,6 +2851,19 @@ function MapListModeSwitch({ value, onChange }) {
           </button>
         );
       })}
+      {onToggleFilter && (
+        <button type="button" onClick={onToggleFilter} aria-expanded={!!filterOpen} aria-label="Filter list"
+          style={{
+            marginLeft: "auto", display: "flex", alignItems: "center", gap: 5,
+            padding: "5px 10px", borderRadius: 999, fontSize: 13,
+            fontWeight: filterCount ? 700 : 500,
+            background: filterOpen ? C.bg : "transparent",
+            color: filterCount ? C.brandDark : C.muted,
+            border: `1px solid ${filterCount ? C.brand : C.border}`,
+          }}>
+          <Filter size={13} /> Filter{filterCount ? ` (${filterCount})` : ""}
+        </button>
+      )}
     </div>
   );
 }
@@ -2750,19 +2871,25 @@ function MapListModeSwitch({ value, onChange }) {
 // The Tasks or History list for a map selection. A row names the asset it
 // belongs to unless the selection IS one asset (a pin), where that would say
 // the same name on every row.
-function MapWorkList({ mode, scopeAssets, typesList, onOpenTask, onOpenWork, single }) {
+// `filter` is the active filter (mapListActiveFilter). A status filter decides
+// on its own whether done tasks show, so the Show completed toggle steps aside.
+function MapWorkList({ mode, scopeAssets, typesList, onOpenTask, onOpenWork, single, filter }) {
+  const active = filter || {};
+  const filtering = Object.keys(active).length > 0;
+  const now = Date.now();
   const [showDone, setShowDone] = useState(false);
   const rowStyle = { display: "flex", alignItems: "center", gap: 10, width: "100%", border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left" };
   const sub = { fontSize: 12, color: C.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
   const empty = text => <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>{text}</div>;
   if (mode === "tasks") {
-    const all = mapTaskRows(scopeAssets);
-    const done = all.filter(r => r.status === "done");
-    const open = all.filter(r => r.status !== "done");
+    const all = mapTaskRows(scopeAssets).filter(r => mapListFilterMatches("tasks", active, r, now));
+    const byStatus = !!active.status;
+    const done = byStatus ? [] : all.filter(r => r.status === "done");
+    const open = byStatus ? all : all.filter(r => r.status !== "done");
     const shown = showDone ? all : open;
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {shown.length === 0 && empty(done.length ? "No open tasks here." : "No tasks here.")}
+        {shown.length === 0 && empty(filtering && !done.length ? "No tasks match the filter." : (done.length ? "No open tasks here." : "No tasks here."))}
         {shown.map(({ asset, item, status, due }) => {
           const meta = maintenanceStatusMeta(status);
           const when = status === "done"
@@ -2790,10 +2917,10 @@ function MapWorkList({ mode, scopeAssets, typesList, onOpenTask, onOpenWork, sin
       </div>
     );
   }
-  const rows = mapWorkRows(scopeAssets);
+  const rows = mapWorkRows(scopeAssets).filter(r => mapListFilterMatches("history", active, r, now));
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      {rows.length === 0 && empty("No work logged here.")}
+      {rows.length === 0 && empty(filtering ? "No work matches the filter." : "No work logged here.")}
       {rows.map(({ asset, change, performedOn }) => {
         const title = [change.changeType, change.note].filter(Boolean).join(" · ") || "Work entry";
         return (
@@ -4402,7 +4529,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-08.5";
+const APP_VERSION = "2026-10-08.6";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -20847,15 +20974,49 @@ function FloorPlanTabContent({
   // its tasks, or its history. View state only, never saved; it stays put as
   // the selection changes, so stepping from space to space keeps reading tasks.
   const [listMode, setListMode] = useState("assets");
-  // The list body for one selection. `places` is what the Tasks and History
-  // modes cover (each place and everything below it); `single` drops the asset
-  // name from their rows when the selection is one asset.
-  const panelList = (place, places, opts = {}) => listMode === "assets"
-    ? <ContentsList place={place} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast rowActions={mapRowActions} onlyId={opts.onlyId} />
-    : <MapWorkList mode={listMode} scopeAssets={mapScopeAssets(places, assets)} typesList={typesList}
-        onOpenTask={onOpenTask || ((item, a) => onOpenAsset && onOpenAsset(a, "maintenance"))}
-        onOpenWork={onOpenWork || ((ch, a) => onOpenAsset && onOpenAsset(a, "changes"))}
-        single={!!opts.single} />;
+  // The list's filter, one per mode so switching tabs keeps each one's choice.
+  // View state only, like the mode; it stays put as the selection changes.
+  const [listFilters, setListFilters] = useState({ assets: {}, tasks: {}, history: {} });
+  const [filterOpen, setFilterOpen] = useState(false);
+  // The switch, the filter, and the list body for one selection. `places` is
+  // what the Tasks and History modes cover (each place and everything below
+  // it); `single` drops the asset name from their rows when the selection is
+  // one asset. `assetsBody` replaces the Assets list (an open group lists its
+  // rooms), and a single pin has nothing to filter in Assets mode either.
+  const panelList = (place, places, opts = {}) => {
+    const scope = listMode === "assets" ? null : mapScopeAssets(places, assets);
+    let filterable = true;
+    let items = [];
+    if (listMode === "assets") {
+      if (opts.assetsBody || opts.onlyId) filterable = false;
+      else {
+        const c = contentsOf(place, assets);
+        items = [...c.contentRooms, ...c.contentDevices, ...c.contentAllocations.map(al => al.bulk)];
+      }
+    } else items = listMode === "tasks" ? mapTaskRows(scope) : mapWorkRows(scope);
+    const groups = filterable ? mapListFilterGroups(listMode, items, typesList) : [];
+    const stored = listFilters[listMode] || {};
+    const active = mapListActiveFilter(groups, stored);
+    const count = Object.values(active).reduce((n, v) => n + v.length, 0);
+    const toggle = (g, v) => setListFilters(f => {
+      const cur = (f[listMode] || {})[g.key] || [];
+      const next = g.single ? (cur.includes(v) ? [] : [v]) : (cur.includes(v) ? cur.filter(x => x !== v) : [...cur, v]);
+      return { ...f, [listMode]: { ...(f[listMode] || {}), [g.key]: next } };
+    });
+    const clear = () => setListFilters(f => ({ ...f, [listMode]: {} }));
+    return (<>
+      <MapListModeSwitch value={listMode} onChange={setListMode}
+        {...(filterable ? { filterCount: count, filterOpen, onToggleFilter: () => setFilterOpen(v => !v) } : {})} />
+      {filterable && filterOpen && <MapListFilterBar groups={groups} active={active} onToggle={toggle} onClear={clear} />}
+      {listMode === "assets"
+        ? (opts.assetsBody || <ContentsList place={place} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast rowActions={mapRowActions} onlyId={opts.onlyId}
+            typeFilter={active.type} emptyLabel={active.type ? "Nothing here matches the filter." : undefined} />)
+        : <MapWorkList mode={listMode} scopeAssets={scope} typesList={typesList}
+            onOpenTask={onOpenTask || ((item, a) => onOpenAsset && onOpenAsset(a, "maintenance"))}
+            onOpenWork={onOpenWork || ((ch, a) => onOpenAsset && onOpenAsset(a, "changes"))}
+            single={!!opts.single} filter={active} />}
+    </>);
+  };
 
   const applyVB = () => {
     if (svgElRef.current) {
@@ -21493,7 +21654,6 @@ function FloorPlanTabContent({
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
             <LocationTitle place={selectedAsset} typesList={typesList} onOpen={onOpenAsset} />
           </div>
-          <MapListModeSwitch value={listMode} onChange={setListMode} />
           {panelList(selectedAsset, [selectedAsset])}
         </div>
       </div>
@@ -22318,7 +22478,6 @@ function FloorPlanTabContent({
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
               <LocationTitle place={place} typesList={typesList} onOpen={onOpenAsset} />
             </div>
-            <MapListModeSwitch value={listMode} onChange={setListMode} />
             {panelList(place, [place])}
           </div>
         );
@@ -22346,7 +22505,6 @@ function FloorPlanTabContent({
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
               <LocationTitle place={place} typesList={typesList} onOpen={onOpenAsset} />
             </div>
-            <MapListModeSwitch value={listMode} onChange={setListMode} />
             {panelList(place, [a], { onlyId: a.id, single: true })}
           </div>
         );
@@ -22359,7 +22517,6 @@ function FloorPlanTabContent({
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
             <LocationTitle place={selectedAsset} typesList={typesList} onOpen={onOpenAsset} />
           </div>
-          <MapListModeSwitch value={listMode} onChange={setListMode} />
           {panelList(selectedAsset, [selectedAsset])}
         </div>
       )}
@@ -22374,8 +22531,7 @@ function FloorPlanTabContent({
         if (!groupRooms.length) return null;
         return (
           <div style={{ marginTop: 8, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14 }}>
-            <MapListModeSwitch value={listMode} onChange={setListMode} />
-            {listMode !== "assets" ? panelList(null, groupRooms) : (<>
+            {panelList(null, groupRooms, { assetsBody: (<>
             <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginBottom: 8 }}>
               Rooms in this group ({groupRooms.length})
             </div>
@@ -22393,7 +22549,7 @@ function FloorPlanTabContent({
                 );
               })}
             </div>
-            </>)}
+            </>) })}
           </div>
         );
       })()}
