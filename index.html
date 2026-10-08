@@ -2676,6 +2676,142 @@ function ContentsList({ place, assets, typesList, onOpen, emptyLabel, locationsL
   );
 }
 
+// The Map panel's list modes. The list under a floor plan can show what is IN
+// the selection (Assets, ContentsList above), its TASKS, or its HISTORY (work
+// logged). Same scope in all three -- the whole plan, an open group, one space,
+// or one pin -- so the switch changes what is listed, never where.
+const MAP_LIST_MODES = [
+  { key: "assets", label: "Assets" },
+  { key: "tasks", label: "Tasks" },
+  { key: "history", label: "History" },
+];
+// Every asset a map selection covers: each place itself plus everything below
+// it at any depth (the same "this place and beneath it" rule every scoped list
+// in the app uses), deduped across a group's rooms. Archived assets are left
+// out, matching the site-wide Tasks and History tables.
+function mapScopeAssets(places, assets) {
+  const seen = new Set();
+  const out = [];
+  (places || []).forEach(p => {
+    if (!p) return;
+    [p, ...(isPlaceType(p.type) ? descendantsOf(p, assets) : [])].forEach(a => {
+      if (seen.has(a.id) || (a.status || "Active") === "Archived") return;
+      seen.add(a.id);
+      out.push(a);
+    });
+  });
+  return out;
+}
+// The Tasks rows for a map selection: open first, most urgent first (the same
+// order the Tasks tab uses); finished one-offs hidden behind a toggle so they
+// do not pile up, exactly as an asset's own task list does.
+function mapTaskRows(scopeAssets) {
+  const rows = [];
+  (scopeAssets || []).forEach(a => (a.maintenanceItems || []).forEach(item => {
+    if (!item) return;
+    rows.push({ asset: a, item, status: maintenanceStatusOf(item), due: taskDueDate(item) });
+  }));
+  rows.sort((x, y) => maintenanceSortKey(x) - maintenanceSortKey(y));
+  return rows;
+}
+// The History rows: every work entry, most recently performed first.
+function mapWorkRows(scopeAssets) {
+  const rows = [];
+  (scopeAssets || []).forEach(a => (a.changes || []).forEach(change => {
+    if (!change) return;
+    rows.push({ asset: a, change, performedOn: changePerformedOn(change) });
+  }));
+  rows.sort((x, y) => (y.performedOn || "").localeCompare(x.performedOn || ""));
+  return rows;
+}
+
+function MapListModeSwitch({ value, onChange }) {
+  return (
+    <div role="tablist" aria-label="List shows" style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+      {MAP_LIST_MODES.map(m => {
+        const active = value === m.key;
+        return (
+          <button key={m.key} type="button" role="tab" aria-selected={active} onClick={() => onChange(m.key)}
+            style={{
+              padding: "5px 12px", borderRadius: 999, fontSize: 13,
+              fontWeight: active ? 700 : 500,
+              background: active ? C.brand : "transparent",
+              color: active ? "#fff" : C.muted,
+              border: `1px solid ${active ? C.brand : C.border}`,
+            }}>
+            {m.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// The Tasks or History list for a map selection. A row names the asset it
+// belongs to unless the selection IS one asset (a pin), where that would say
+// the same name on every row.
+function MapWorkList({ mode, scopeAssets, typesList, onOpenTask, onOpenWork, single }) {
+  const [showDone, setShowDone] = useState(false);
+  const rowStyle = { display: "flex", alignItems: "center", gap: 10, width: "100%", border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px", textAlign: "left" };
+  const sub = { fontSize: 12, color: C.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
+  const empty = text => <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>{text}</div>;
+  if (mode === "tasks") {
+    const all = mapTaskRows(scopeAssets);
+    const done = all.filter(r => r.status === "done");
+    const open = all.filter(r => r.status !== "done");
+    const shown = showDone ? all : open;
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {shown.length === 0 && empty(done.length ? "No open tasks here." : "No tasks here.")}
+        {shown.map(({ asset, item, status, due }) => {
+          const meta = maintenanceStatusMeta(status);
+          const when = status === "done"
+            ? `Completed ${formatDateOnly(item.lastPerformed)}`
+            : (due ? `Due ${formatDateOnly(localDateString(due))}` : (isOneOffTask(item) ? "" : (item.frequencyLabel || "")));
+          return (
+            <button key={`${asset.id}:${item.id}`} type="button" className="row-body" onClick={() => onOpenTask && onOpenTask(item, asset)} style={rowStyle}>
+              <Wrench size={15} style={{ color: C.brand, flexShrink: 0 }} />
+              <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+                <span style={{ fontSize: 14, color: C.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.task || "Untitled task"}</span>
+                <span style={sub}>{[single ? "" : nameOf(asset, typesList), when].filter(Boolean).join(" · ")}</span>
+              </span>
+              <span style={{ fontSize: 12, fontWeight: 600, color: meta.color, flexShrink: 0 }}>{meta.label}</span>
+              <ChevronRight size={14} style={{ color: C.placeholder, flexShrink: 0 }} />
+            </button>
+          );
+        })}
+        {done.length > 0 && (
+          <button type="button" onClick={() => setShowDone(v => !v)} aria-expanded={showDone}
+            style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", padding: "2px 0", fontSize: 13, color: C.muted, textAlign: "left" }}>
+            {showDone ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+            {showDone ? "Hide" : "Show"} completed ({done.length})
+          </button>
+        )}
+      </div>
+    );
+  }
+  const rows = mapWorkRows(scopeAssets);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {rows.length === 0 && empty("No work logged here.")}
+      {rows.map(({ asset, change, performedOn }) => {
+        const title = [change.changeType, change.note].filter(Boolean).join(" · ") || "Work entry";
+        return (
+          <button key={`${asset.id}:${change.id}`} type="button" className="row-body" onClick={() => onOpenWork && onOpenWork(change, asset)} style={rowStyle}>
+            <History size={15} style={{ color: C.brand, flexShrink: 0 }} />
+            <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+              <span style={{ fontSize: 14, color: C.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</span>
+              <span style={sub}>{[single ? "" : nameOf(asset, typesList), formatDateOnly(performedOn), change.vendor].filter(Boolean).join(" · ")}</span>
+            </span>
+            {parseFloat(change.cost) ? <span style={{ fontSize: 12, fontWeight: 600, color: C.brandDark, flexShrink: 0 }}>${parseFloat(change.cost).toFixed(2)}</span> : null}
+            <ChevronRight size={14} style={{ color: C.placeholder, flexShrink: 0 }} />
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 // Would pointing `childId` at `parentId` close a loop? True when the proposed
 // parent IS the child, or already sits somewhere below it. ancestorsOf is itself
 // loop-safe, so this stays correct even when the existing data is already bad.
@@ -16379,6 +16515,10 @@ function AssetTracker() {
           }}
           onFocusHandled={() => { setMapFocusShapeId(null); setMapFocusPinId(null); }}
           onOpenAsset={openDetail}
+          // A task opens its own dialog (editors), the same as a row on the
+          // Tasks tab; a viewer, and every History row, go to the asset's page.
+          onOpenTask={(item, a) => (canEdit ? openMaintenanceEdit(item.id, a.id) : openDetail(a, "maintenance"))}
+          onOpenWork={(ch, a) => openDetail(a, "changes")}
           onNavigateToPlan={navigateFloorPlanTo}
           query={mapQuery}
           menuSlot={mapMenuSlot}
@@ -20485,7 +20625,7 @@ function MapOptionsOnlyMenu({ canEdit, asset, assets, menuSlot, onSaveMapOptions
 function MapTabContent({
   canEdit, assets, typesList, scopeAsset,
   uploadBusy, uploadError, onUploadPlan, onSaveLink, onCreateRoom, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveMapOptions,
-  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onShowOnMap, onStartPlace, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange,
+  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onShowOnMap, onStartPlace, onFocusHandled, onOpenAsset, onOpenTask, onOpenWork, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange,
 }) {
   if (!scopeAsset) {
     return (
@@ -20534,6 +20674,8 @@ function MapTabContent({
       onSelectHandled={onSelectHandled}
       onFocusHandled={onFocusHandled}
       onOpenAsset={onOpenAsset}
+      onOpenTask={onOpenTask}
+      onOpenWork={onOpenWork}
       onNavigateToPlan={onNavigateToPlan}
       query={query}
       menuSlot={menuSlot}
@@ -20561,7 +20703,7 @@ function FloorPlanTabContent({
   canEdit, selectedAsset, assets, typesList,
   uploadBusy, uploadError, onUploadPlan,
   onSaveLink, onCreateRoom, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveMapOptions,
-  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onShowOnMap, onStartPlace, onFocusHandled, onOpenAsset, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange,
+  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onShowOnMap, onStartPlace, onFocusHandled, onOpenAsset, onOpenTask, onOpenWork, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange,
 }) {
   const rawPlan = useFloorPlanSvg(selectedAsset.floorPlanUrl);
   // Rotation is stored on the asset (floorPlanRotation, quarter turns, blank = 0)
@@ -20684,6 +20826,19 @@ function FloorPlanTabContent({
     }
     return acts;
   };
+  // What the list under the plan shows for the current selection: its assets,
+  // its tasks, or its history. View state only, never saved; it stays put as
+  // the selection changes, so stepping from space to space keeps reading tasks.
+  const [listMode, setListMode] = useState("assets");
+  // The list body for one selection. `places` is what the Tasks and History
+  // modes cover (each place and everything below it); `single` drops the asset
+  // name from their rows when the selection is one asset.
+  const panelList = (place, places, opts = {}) => listMode === "assets"
+    ? <ContentsList place={place} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast rowActions={mapRowActions} onlyId={opts.onlyId} />
+    : <MapWorkList mode={listMode} scopeAssets={mapScopeAssets(places, assets)} typesList={typesList}
+        onOpenTask={onOpenTask || ((item, a) => onOpenAsset && onOpenAsset(a, "maintenance"))}
+        onOpenWork={onOpenWork || ((ch, a) => onOpenAsset && onOpenAsset(a, "changes"))}
+        single={!!opts.single} />;
 
   const applyVB = () => {
     if (svgElRef.current) {
@@ -21321,7 +21476,8 @@ function FloorPlanTabContent({
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
             <LocationTitle place={selectedAsset} typesList={typesList} onOpen={onOpenAsset} />
           </div>
-          <ContentsList place={selectedAsset} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast rowActions={mapRowActions} />
+          <MapListModeSwitch value={listMode} onChange={setListMode} />
+          {panelList(selectedAsset, [selectedAsset])}
         </div>
       </div>
     );
@@ -22092,7 +22248,8 @@ function FloorPlanTabContent({
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
               <LocationTitle place={place} typesList={typesList} onOpen={onOpenAsset} />
             </div>
-            <ContentsList place={place} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast rowActions={mapRowActions} />
+            <MapListModeSwitch value={listMode} onChange={setListMode} />
+            {panelList(place, [place])}
           </div>
         );
       })()}
@@ -22119,7 +22276,8 @@ function FloorPlanTabContent({
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
               <LocationTitle place={place} typesList={typesList} onOpen={onOpenAsset} />
             </div>
-            <ContentsList place={place} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast rowActions={mapRowActions} onlyId={a.id} />
+            <MapListModeSwitch value={listMode} onChange={setListMode} />
+            {panelList(place, [a], { onlyId: a.id, single: true })}
           </div>
         );
       })()}
@@ -22131,7 +22289,8 @@ function FloorPlanTabContent({
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
             <LocationTitle place={selectedAsset} typesList={typesList} onOpen={onOpenAsset} />
           </div>
-          <ContentsList place={selectedAsset} assets={assets} typesList={typesList} onOpen={onOpenAsset} locationsLast rowActions={mapRowActions} />
+          <MapListModeSwitch value={listMode} onChange={setListMode} />
+          {panelList(selectedAsset, [selectedAsset])}
         </div>
       )}
       {openGroupId && !selectedShapeId && !selectedPinId && !setupTab && (() => {
@@ -22145,6 +22304,8 @@ function FloorPlanTabContent({
         if (!groupRooms.length) return null;
         return (
           <div style={{ marginTop: 8, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 14 }}>
+            <MapListModeSwitch value={listMode} onChange={setListMode} />
+            {listMode !== "assets" ? panelList(null, groupRooms) : (<>
             <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginBottom: 8 }}>
               Rooms in this group ({groupRooms.length})
             </div>
@@ -22162,6 +22323,7 @@ function FloorPlanTabContent({
                 );
               })}
             </div>
+            </>)}
           </div>
         );
       })()}

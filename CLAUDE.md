@@ -3593,6 +3593,24 @@ each row carries a **⋮ menu** (`rowActions`, built by `mapRowActions` in
 - Covered by `test-frontend-map-row-menu.js`; the menu, Show on map, Move pin and Remove
   pin were driven in Chromium against Sandbox.
 
+### The Map panel's list switch: Assets / Tasks / History (2026-10-08)
+
+Every card under the plan (nothing selected, a space or wall, an open group, a
+selected pin, and the no-plan card) carries an **Assets / Tasks / History** pill row.
+It changes WHAT is listed, never the scope: Tasks and History cover the selected
+place and everything beneath it (a group: each of its rooms; a pin: that asset
+alone), archived assets excluded to match the site-wide tables. Defaults to Assets;
+view state only, and it stays put as the selection moves. Frontend only.
+- All cards render through one `panelList()` in `FloorPlanTabContent`, so the switch
+  and the row menu cannot reach one card and miss another.
+- Tasks sort like the Tasks tab (`maintenanceSortKey`) with completed one-offs behind
+  "Show completed"; History is newest first.
+- A task row opens the task dialog for editors (`openMaintenanceEdit(item, asset)`),
+  else the asset's Tasks tab; a History row opens the asset's History, as the
+  site-wide History table does (`openChangeEdit` only knows the open asset).
+- Covered by `test-frontend-map-list.js` (runs the real scope/sort helpers); driven in
+  Chromium against Sandbox.
+
 ### The floor plan SVG upload: image route, and NO signed allowed_formats (2026-10-04, backend v51)
 
 The upload started failing with "The file host refused the upload: Raw file format svg not
