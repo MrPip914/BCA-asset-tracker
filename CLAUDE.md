@@ -704,6 +704,8 @@ but a task; editing a work entry is not offered.
     `name` renames. An edge owned by a wall NOT in the change is refused, never taken;
     every named wall is cleared first, so moving an edge between named walls works.
     `remove` takes a wall off the plan and keeps the asset, as the app's unlink does.
+    `auto` (a list of spaces) expands to one new wall per facing that has edges, named
+    "<linked name> North Wall" etc. -- the building-walls case in one call.
   - **One call to `connector_set_plan_walls`**, which runs `connector_apply` (role, the
     revision, new walls, the app's `space_linked`/`space_unlinked` rows) and then rewrites
     only the named walls' segment rows, refusing an edge still owned by any other row. A

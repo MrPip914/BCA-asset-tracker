@@ -419,7 +419,7 @@ const MANAGE_TOOLS = [
   {
     name: "set_plan_walls",
     title: "Set floor plan walls",
-    description: "Attach Wall assets to outside edges of a place's floor plan, as the Map tab's Walls setup does. Each entry gives one wall its COMPLETE set of edges on this plan: either segment ids from get_plan_walls, or a space plus an optional facing (north, east, south, west) to take every outside edge of that space facing that way. Name an existing Wall in `wall`, or give `name` to create a new Wall asset (parented to the room or building linked to the space unless `parent` says otherwise); `wall` plus `name` renames it. An edge already on a wall not in this change is refused, never taken. `remove` takes walls off this plan and keeps the assets. Recorded in the change history as this person, via Claude. Run with dry_run first and show the person what each wall would get.",
+    description: "Attach Wall assets to outside edges of a place's floor plan, as the Map tab's Walls setup does. Each entry gives one wall its COMPLETE set of edges on this plan: either segment ids from get_plan_walls, or a space plus an optional facing (north, east, south, west) to take every outside edge of that space facing that way. Name an existing Wall in `wall`, or give `name` to create a new Wall asset (parented to the room or building linked to the space unless `parent` says otherwise); `wall` plus `name` renames it. An edge already on a wall not in this change is refused, never taken. `remove` takes walls off this plan and keeps the assets. Recorded in the change history as this person, via Claude. `auto` does the usual case in one go: a new North, East, South and West wall for each space named, from whichever directions its outside edges face. Run with dry_run first and show the person what each wall would get.",
     inputSchema: {
       type: "object",
       properties: {
@@ -441,6 +441,7 @@ const MANAGE_TOOLS = [
             additionalProperties: false,
           },
         },
+        auto: { type: "array", items: { type: "string" }, description: "Spaces (title, shape id, or the room or building linked to it) to give a new wall per direction their outside edges face, named e.g. \"Worship Center North Wall\". Adds to walls." },
         remove: { type: "array", items: { type: "string" }, description: "Walls to take off this plan. The Wall assets are kept." },
         dry_run: { type: "boolean", description: "Say what each wall would get, without writing anything." },
       },
@@ -1238,8 +1239,17 @@ const handlers = {
     const { site, rows, inv } = await openSite(ctx, args, ["space_links", "revisions"]);
     requireEditor(site);
     const p = await openPlanWalls(ctx, rows, inv, args.asset, true);
-    const entries = Array.isArray(args.walls) ? args.walls : [];
+    const entries = Array.isArray(args.walls) ? args.walls.slice() : [];
     const removeRefs = Array.isArray(args.remove) ? args.remove : [];
+    // auto: one new wall per direction a space's outside edges face.
+    for (const ref of Array.isArray(args.auto) ? args.auto : []) {
+      const sp = p.resolveSpace(ref);
+      const linked = p.linkOf.get(sp.gid);
+      const base = linked && inv.byId.has(linked) ? inv.nameOf(inv.byId.get(linked)) : sp.title;
+      const facings = FACINGS.filter((f) => p.edges.some((e) => e.gid === sp.gid && e.facing === f));
+      if (!facings.length) throw new ToolError(`${sp.title} has no outside edges on this plan.`);
+      for (const f of facings) entries.push({ name: `${base} ${f[0].toUpperCase()}${f.slice(1)} Wall`, space: sp.gid, facing: f });
+    }
     if (!entries.length && !removeRefs.length) throw new ToolError("Give at least one wall, or a wall to remove.");
     if (entries.length > MAX_ROWS) throw new ToolError(`At most ${MAX_ROWS} walls at a time.`);
     const segIds = new Set(p.edges.map((e) => e.id));

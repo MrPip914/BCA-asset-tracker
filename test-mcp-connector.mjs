@@ -837,6 +837,19 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
     [false, ["w2"], ["created", "space_linked", "space_unlinked"], ["Room 402 east"]], r.text);
 
   ctx = wctx();
+  r = await call("set_plan_walls", { asset: "b400", auto: ["Room 401"], remove: ["w1"], dry_run: true }, ctx);
+  eq("auto: one new wall per direction the space's outside edges face, named after what it is linked to",
+    [r.isError, r.data?.walls?.map((w) => [w.wall, w.new, w.segments.map((x) => x.split(" ")[0])]), ctx.writes.length],
+    [false, [["Room 401 North Wall", true, ["shapeA#e0"]], ["Room 401 South Wall", true, ["shapeA#e2"]], ["Room 401 West Wall", true, ["shapeA#e3"]]], 0], r.text);
+  check("auto still refuses an edge another wall owns (Room 401's north edge is on Room 401 north)",
+    (await call("set_plan_walls", { asset: "b400", auto: ["Room 401"] }, wctx())).isError);
+  ctx = wctx();
+  r = await call("set_plan_walls", { asset: "b400", auto: ["Room 401"], remove: ["w1"] }, ctx);
+  eq("auto with the old wall removed writes three new walls in one call",
+    [r.isError, ctx.writes[0]?.args[2].filter((o) => o.op === "asset_create").map((o) => [o.data.name, o.data.parentId])],
+    [false, [["Room 401 North Wall", "r401"], ["Room 401 South Wall", "r401"], ["Room 401 West Wall", "r401"]]], r.text);
+
+  ctx = wctx();
   r = await call("set_plan_walls", { asset: "b400", walls: [{ wall: "w2", segments: ["shapeB#e1"] }] }, ctx);
   check("a wall that already has exactly those edges writes nothing", !r.isError && ctx.writes.length === 0 && /Nothing to change/.test(r.data.note), r.text);
   ctx = wctx();
