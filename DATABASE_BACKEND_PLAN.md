@@ -398,9 +398,71 @@ already keeps -- nothing new has to be tracked.
 
 ### 2b. Per-record writes
 
-`persist()` sends only changed records; the revision domains become per-record versions;
-conflicts shrink from "anyone saved any asset" to "someone saved THIS asset". Large (touches
-every save site). Design it before building: which records a save names, how a per-record
-version is posted and checked, how the audit append and the managed lists ride along, and
-how a client that still sends a full snapshot keeps working during the switch. Live refresh
-(2a) makes this easier to verify, since a second browser shows the other's saves arriving.
+`persist()` sends only the assets that changed, and a save is refused only when someone
+else changed THE SAME asset. Today any two saves of any assets in the same moment
+conflict. Designed 2026-10-09; Supabase tenants only, like 2a.
+
+**What a save names.** `persist()` already gets the previous and the next asset list,
+and every call site builds the next one by replacing only the objects it changed (the
+convention `_dirty` already relies on). So the client diffs by reference, per id, with
+no call-site change:
+- `assetChanges.upsert`: every asset whose object is new or changed, sent WHOLE with
+  its nested children, as today's snapshot sends it.
+- `assetChanges.remove`: the ids that are gone.
+- Each entry carries `_rev`, the version of that asset this device last saw, read at
+  SEND time from a map (`assetRevsRef`) rather than off the object. This is the
+  `revisionsRef` lesson: a save queued behind one of this device's own must post the
+  version that one came back with, or it conflicts with itself.
+- A handler that rebuilds every object (a bulk move, the user conversion) just sends
+  every asset. That is correct, only bigger.
+
+**Per-asset versions.** Migration 0007 adds `assets.rev`, and **triggers, not the save
+code, bump it.** A BEFORE UPDATE trigger on `assets` bumps it when the row's content
+changes (not its `position`, which shifts whenever an earlier asset is deleted).
+Statement-level triggers on every child table (comments, allocations, changes,
+maintenance, breakers, circuits, space links and groups) bump the owning asset's `rev`
+for any row inserted, updated or deleted. That one mechanism covers every writer: the
+per-record save, a full-snapshot save from an older build, the Claude connector's
+write functions, the importer, and a hand edit in SQL. A writer that forgot to bump
+would otherwise be the silent hole.
+
+**The server check**, in the same transaction and lock as today:
+- An upsert posting `_rev` conflicts when the asset is gone or its stored `rev`
+  differs. An upsert posting none (a new asset) conflicts when the id already exists.
+  That is also what makes a retried request harmless.
+- A remove conflicts on a moved `rev`. One that is already gone is fine.
+- On conflict, nothing is written and the answer is the existing
+  `{ ok: false, conflict: ["assets"] }` plus `conflictIds`, so the client's
+  reload-and-offer-the-draft path is unchanged.
+- The `assets` DOMAIN check is skipped for such a save, which is the point. The domain
+  counter is still bumped on every asset write, because live refresh and older
+  full-snapshot clients both key off it.
+- Config, breaker types and photos keep their domain checks and are sent only when
+  dirty. They are small, and two people editing the same list is the case they guard.
+
+**Writing it.** Rows are built by the same `snapshotToRows` code from just the named
+assets, then synced SCOPED to those owners: a child row is deleted only when its owner
+is in the save and it was not sent. An existing asset keeps its stored `position`, and
+a new one goes on the end. Removing every asset still needs `confirmEmptyAssets`.
+
+**Audit.** A per-record save sends only the entries it added and the server appends
+them as sent. `auditBase` cannot work here: two saves of different assets now both
+land, so "how many rows sit before mine" goes stale between them and would skip
+entries. A retry is still safe, because the per-asset check refuses it.
+
+**After a save**, the server answers each named asset's new `rev` (`assetRevs`). The
+client adopts a DOMAIN revision only when it is exactly what its own write produced.
+When someone else's write is in the number too, the client keeps the old one, so the
+live refresh sees it moved and fetches their change. Adopting it would mean never
+fetching that change, and, for a domain-checked list, overwriting it on the next save.
+
+**Keeping full-snapshot clients working.** A body with `assets` takes today's path
+untouched: domain-checked, so after any per-record save an older build's next save is
+refused and it reloads, exactly as now. The Sheet backend and Sandbox keep full
+snapshots. Nothing about the stored data changes, so dropping back to full snapshots is
+a client revert.
+
+**What does not get better.** Two people CREATING assets at once still conflict,
+because both advance `nextAssetNumber`, a config value. The same goes for two people
+attaching photos at once (photos domain). Neither was asked for, and each is the next
+narrowing if it ever matters.
