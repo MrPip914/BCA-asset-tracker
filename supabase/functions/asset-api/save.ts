@@ -1,7 +1,11 @@
 // The save: doPost's no-op branch in AssetTrackerSync.gs, ported in the shape
-// DATABASE_BACKEND_PLAN.md ("Transaction shape for a save") lays out. The
-// client still posts the WHOLE snapshot; what changes is that only the rows
-// that actually differ are written, inside one transaction.
+// DATABASE_BACKEND_PLAN.md ("Transaction shape for a save") lays out. Two body
+// shapes, one transaction:
+//   - `assets`: the WHOLE snapshot, as the Sheet takes it. Domain-checked.
+//     Older builds, and anything else that posts a full list, take this path.
+//   - `assetChanges`: per-record (Phase 2b). Only the assets that changed, each
+//     with the version it was edited from, refused only when THAT asset moved.
+// Either way only rows that actually differ are written.
 //
 // The order is the .gs order, and each step's reason is the .gs reason:
 //   1. lock      -- FOR UPDATE on the tenant's revision rows. One save at a
@@ -57,23 +61,34 @@ export const SYNC_TABLES: Record<string, { key: string[]; cols: Record<string, s
   },
 };
 const ASSET_TABLES = ["assets", "comments", "allocations", "changes", "maintenance", "breakers", "circuits", "space_links", "space_groups"];
+// The column naming the asset each table's rows belong to, for a per-record
+// save's scoped write.
+const OWNER_COLUMN: Record<string, string> = {
+  assets: "id", comments: "asset_id", allocations: "asset_id", changes: "asset_id", maintenance: "asset_id",
+  breakers: "panel_id", circuits: "panel_id", space_links: "plan_asset_id", space_groups: "plan_asset_id",
+};
 
 // Makes the table hold exactly `rows`: deletes what is not posted, inserts what
 // is new, and updates only a row whose columns actually differ. One statement,
 // the rows travelling as one jsonb parameter. Returns how many rows moved.
-async function syncTable(tx: Tx, table: string, rows: Row[]): Promise<number> {
+//
+// With `owners`, the delete is SCOPED: only rows belonging to one of those
+// assets can be removed. That is a per-record save -- a row of an asset the
+// save does not name is not the save's to delete.
+async function syncTable(tx: Tx, table: string, rows: Row[], owners?: string[]): Promise<number> {
   const { key, cols } = SYNC_TABLES[table];
   const names = Object.keys(cols);
   const shape = names.map((c) => `${c} ${cols[c]}`).join(", ");
   const rest = names.filter((c) => !key.includes(c));
   const match = key.map((k) => `i.${k} = t.${k}`).join(" and ");
+  const scope = owners ? `t.${OWNER_COLUMN[table]} = any($2::text[]) and ` : "";
   // tx.json, not JSON.stringify: postgres.js serializes a jsonb parameter
   // itself, and a pre-stringified one would arrive as one JSON string.
   const payload = tx.json(rows.map((r) => Object.fromEntries(names.map((c) => [c, r[c] ?? null]))));
   const [moved] = await tx.unsafe(`
     with incoming as (select * from jsonb_to_recordset($1::jsonb) as x(${shape})),
     gone as (
-      delete from ${table} t where not exists (select 1 from incoming i where ${match})
+      delete from ${table} t where ${scope}not exists (select 1 from incoming i where ${match})
       returning 1
     ),
     put as (
@@ -84,7 +99,7 @@ async function syncTable(tx: Tx, table: string, rows: Row[]): Promise<number> {
         where (${rest.map((c) => `${table}.${c}`).join(", ")}) is distinct from (${rest.map((c) => `excluded.${c}`).join(", ")})
       returning 1
     )
-    select (select count(*) from gone)::int + (select count(*) from put)::int as n`, [payload]);
+    select (select count(*) from gone)::int + (select count(*) from put)::int as n`, owners ? [payload, owners] : [payload]);
   return moved.n;
 }
 
@@ -124,6 +139,7 @@ export async function saveInventory(tx: Tx, body: Body, ctx: SaveContext): Promi
   ctx.email = auth.email;
 
   const revisions = Object.fromEntries(REVISION_DOMAINS.map((d) => [d, stored[d] || 0]));
+  const changes = readAssetChanges(body);
 
   // 3. Optimistic concurrency, per domain, only for what this save writes and
   //    only where the client said which revision it holds.
@@ -131,6 +147,9 @@ export async function saveInventory(tx: Tx, body: Body, ctx: SaveContext): Promi
   if (posted) {
     const conflict = REVISION_DOMAINS.filter((d) => {
       if (!dirty[d]) return false;
+      // A per-record save is checked per asset instead (below), which is the
+      // whole point: someone saving a DIFFERENT asset is not a conflict.
+      if (d === "assets" && changes) return false;
       const p = Number(posted[d]);
       return isFinite(p) && Math.floor(p) !== revisions[d];
     });
@@ -143,11 +162,45 @@ export async function saveInventory(tx: Tx, body: Body, ctx: SaveContext): Promi
     }
   }
 
+  // 3b. Per record: each asset the save names, against its stored version.
+  //     A new asset (no version posted) must not exist yet -- which is also
+  //     what makes a retried request harmless. A removal of one already gone
+  //     is not a conflict.
+  let storedById = new Map<string, Row>();
+  if (changes) {
+    const ids = [...changes.upsert.map((a) => a.id), ...changes.remove.map((r) => r.id)];
+    storedById = new Map((await tx`select id, rev, position from assets where id = any(${ids}::text[])`).map((r: Row) => [r.id, r]));
+    const moved = (posted: unknown, s: Row | undefined) =>
+      posted === undefined || posted === null ? !!s : !s || Number(s.rev) !== Math.floor(Number(posted));
+    const conflictIds = [
+      ...changes.upsert.filter((a) => moved(a.rev, storedById.get(a.id))).map((a) => a.id),
+      ...changes.remove.filter((r) => storedById.has(r.id) && moved(r.rev, storedById.get(r.id))).map((r) => r.id),
+    ];
+    if (conflictIds.length) {
+      diag.push({ event: "conflict", email: auth.email, detail: "assets changed since loaded: " + conflictIds.slice(0, 5).join(", ") + (conflictIds.length > 5 ? ` (+${conflictIds.length - 5} more)` : "") });
+      return { ok: false, conflict: ["assets"], conflictIds, revisions };
+    }
+    // Every asset removed and nothing left: the same jump to zero the
+    // full-snapshot guard below refuses.
+    if (changes.remove.length && body.confirmEmptyAssets !== true) {
+      const [{ n }] = await tx`select count(*)::int as n from assets`;
+      const removing = changes.remove.filter((r) => storedById.has(r.id)).length;
+      if (n > 0 && removing === n && !changes.upsert.length) {
+        diag.push({ event: "refused", email: auth.email, reason: "emptyAssets", detail: n + " rows on the tab" });
+        return {
+          ok: false, refused: "emptyAssets", existingRows: n,
+          error: "Refused: this save would have deleted all " + n + " assets at once. Nothing was changed. If that was genuinely intended, "
+            + "it has to be done deliberately rather than as a side effect of a save.",
+        };
+      }
+    }
+  }
+
   // 4. In a full-overwrite save, "the client sent nothing" and "delete
   //    everything" are the same request -- the 2026-08-21 incident. Only the
   //    jump straight to zero, and confirmEmpty* says it was meant.
   const assets = Array.isArray(body.assets) ? body.assets : [];
-  if (dirty.assets && assets.length === 0 && body.confirmEmptyAssets !== true) {
+  if (dirty.assets && !changes && assets.length === 0 && body.confirmEmptyAssets !== true) {
     const [{ n }] = await tx`select count(*)::int as n from assets`;
     if (n > 0) {
       diag.push({ event: "refused", email: auth.email, reason: "emptyAssets", detail: n + " rows on the tab" });
@@ -178,18 +231,48 @@ export async function saveInventory(tx: Tx, body: Body, ctx: SaveContext): Promi
     warnings.push(...built.warnings);
     for (const t of tables) stages.push(`${t} ${await syncTable(tx, t, built.tables[t])} moved`);
   };
-  if (dirty.assets) {
+  let assetRevs: Record<string, number> | undefined;
+  if (dirty.assets || changes) {
     let storedColumns: unknown = null;
     if (!Array.isArray(body.columns)) [{ value: storedColumns } = { value: null }] = await tx`select value from config where key = 'columns'`;
-    await sync(ASSET_TABLES, { assets: shapeAssets(assets, customColumnKeys(body.columns, storedColumns)) });
+    const keys = customColumnKeys(body.columns, storedColumns);
+    if (!changes) {
+      await sync(ASSET_TABLES, { assets: shapeAssets(assets, keys) });
+    } else {
+      // Built by the same code as a full save, from just the named assets,
+      // then written SCOPED to them. An existing asset keeps its place in the
+      // list; a new one goes on the end, in the order sent.
+      const built = rowsFor(tenantId, { assets: shapeAssets(changes.upsert, keys) });
+      warnings.push(...built.warnings);
+      const [{ max }] = await tx`select coalesce(max(position), -1)::int as max from assets`;
+      let next = max + 1;
+      for (const r of built.tables.assets) {
+        const s = storedById.get(r.id);
+        r.position = s ? s.position : next++;
+      }
+      const owners = [...changes.upsert.map((a) => a.id), ...changes.remove.map((r) => r.id)];
+      for (const t of ASSET_TABLES) stages.push(`${t} ${await syncTable(tx, t, built.tables[t], owners)} moved`);
+      // After the writes, so the triggers (0007) have already moved them.
+      const upsertIds = changes.upsert.map((a) => a.id);
+      assetRevs = Object.fromEntries((await tx`select id, rev from assets where id = any(${upsertIds}::text[])`)
+        .map((r: Row) => [r.id, Number(r.rev)]));
+    }
   }
 
   // 6. Append-only. `auditBase` is how many rows sit before the client's first;
   //    comparing against the table's own count is what makes a repeated save
   //    append nothing the second time (appendNewRows_).
-  const auditLog = Array.isArray(body.auditLog) ? body.auditLog : [];
-  const [{ n: existing }] = await tx`select count(*)::int as n from audit_log`;
-  const startAt = existing - (Math.floor(Number(body.auditBase)) || 0);
+  //    A per-record save sends `auditAppend` instead: only the entries it
+  //    added, appended as sent. The offset cannot work there, since two saves
+  //    of different assets both land and the count moves between them; a
+  //    retry is refused by the per-asset check before it gets here.
+  const appendOnly = Array.isArray(body.auditAppend);
+  const auditLog = appendOnly ? body.auditAppend : Array.isArray(body.auditLog) ? body.auditLog : [];
+  let startAt = 0;
+  if (!appendOnly) {
+    const [{ n: existing }] = await tx`select count(*)::int as n from audit_log`;
+    startAt = existing - (Math.floor(Number(body.auditBase)) || 0);
+  }
   if (startAt < auditLog.length) {
     const fresh = rowsFor(tenantId, { auditLog: shapeAuditRows(auditLog.slice(Math.max(0, startAt))) }).tables.audit_log;
     await tx`insert into audit_log (tenant_id, asset_id, at, by, action, data)
@@ -232,7 +315,7 @@ export async function saveInventory(tx: Tx, body: Body, ctx: SaveContext): Promi
 
   // 7. Bump only what was written, so an assets-only save does not invalidate
   //    a config snapshot someone else is holding.
-  const written = REVISION_DOMAINS.filter((d) => dirty[d]);
+  const written = REVISION_DOMAINS.filter((d) => dirty[d] || (d === "assets" && changes));
   if (written.length) {
     await tx`update revisions set rev = rev + 1 where domain = any(${written}::text[])`;
     for (const d of written) revisions[d] += 1;
@@ -242,5 +325,34 @@ export async function saveInventory(tx: Tx, body: Body, ctx: SaveContext): Promi
   // a table key cannot, so the first is kept and a blank id minted. Said once.
   if (warnings.length) diag.push({ event: "save_adjusted", email: auth.email, detail: warnings.slice(0, 3).join(" | ") + (warnings.length > 3 ? ` (+${warnings.length - 3} more)` : "") });
 
-  return { ok: true, revisions };
+  return assetRevs ? { ok: true, revisions, assetRevs } : { ok: true, revisions };
+}
+
+// A per-record save's `assetChanges`, cleaned: every entry an object with an
+// id (an asset's key is `id || label`, as everywhere), the version it posted
+// as `rev`, and a duplicate id kept once -- the first, as a full save keeps it.
+// Null when the body is a full snapshot, or names no asset.
+function readAssetChanges(body: Body): { upsert: Row[]; remove: { id: string; rev: unknown }[] } | null {
+  const c = body.assetChanges;
+  if (!c || typeof c !== "object" || Array.isArray(c)) return null;
+  const seen = new Set<string>();
+  const upsert: Row[] = [];
+  for (const a of Array.isArray(c.upsert) ? c.upsert : []) {
+    if (!a || typeof a !== "object") continue;
+    const id = String(a.id || a.label || "");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const { _rev, ...record } = a;
+    upsert.push({ ...record, id, rev: _rev });
+  }
+  const remove: { id: string; rev: unknown }[] = [];
+  for (const r of Array.isArray(c.remove) ? c.remove : []) {
+    const id = r && String(r.id || "");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    remove.push({ id, rev: r._rev });
+  }
+  // Nothing named is not a per-record save at all: the body then carries no
+  // asset change, and must not bump the assets revision for one.
+  return upsert.length || remove.length ? { upsert, remove } : null;
 }

@@ -91,6 +91,7 @@ if (!DATABASE_URL) {
     delete out.auth;
     delete out.scriptVersion;
     delete out.auditBase;
+    for (const a of out.assets) delete a._rev; // a database version; the Sheet has none
     for (const a of out.assets) for (const c of a.changes) if (String(c.id).startsWith("imp-")) c.id = "";
     return out;
   };
@@ -332,6 +333,163 @@ if (!DATABASE_URL) {
     const last = (await diag()).at(-1);
     assertEquals(last.event, "save_adjusted");
     assertMatch(last.detail, /duplicate key/);
+  });
+
+
+  // ---- per-record saves (Phase 2b) ----
+  // What persist() posts on the Supabase path: only the assets that changed,
+  // each carrying the _rev it was read with.
+  const perRecord = (p: Any, sessionId: string, assetChanges: Any, extra: Any = {}) => ({
+    sessionId, assetChanges,
+    auditAppend: [],
+    _revisions: p.revisions,
+    _dirty: { assets: true, config: false, breakerTypes: false, photos: false },
+    ...extra,
+  });
+  // An asset's key is id || label, as the client adopts it.
+  const k = (a: Any) => a.id || a.label;
+  const byId = (p: Any, id: string) => p.assets.find((a: Any) => k(a) === id);
+
+  Deno.test("per record: two devices saving DIFFERENT assets both land", async () => {
+    await reset();
+    const sid = await signIn();
+    const a = await read(sid), b = await read(sid);
+    const [x, y] = [a.assets[0], a.assets[1]];
+    const r1 = await post(perRecord(a, sid, { upsert: [{ ...x, name: "edited by A" }] }));
+    assertEquals(r1.ok, true);
+    assertEquals(r1.revisions.assets, a.revisions.assets + 1);
+    assert(r1.assetRevs[k(x)] > x._rev, "the saved asset's version moved");
+    // B still holds the old domain revision; a whole-snapshot save would conflict.
+    const r2 = await post(perRecord(b, sid, { upsert: [{ ...byId(b, k(y)), name: "edited by B" }] }));
+    assertEquals(r2.ok, true);
+    const after = await read(sid);
+    assertEquals(byId(after, k(x)).name, "edited by A");
+    assertEquals(byId(after, k(y)).name, "edited by B");
+    assertEquals(after.assets.map((q: Any) => k(q)), a.assets.map((q: Any) => k(q)), "every asset keeps its place");
+  });
+
+  Deno.test("per record: two devices saving the SAME asset -- the second is a conflict and writes nothing", async () => {
+    await reset();
+    const sid = await signIn();
+    const a = await read(sid), b = await read(sid);
+    const x = a.assets[0];
+    assertEquals((await post(perRecord(a, sid, { upsert: [{ ...x, name: "A wins" }] }))).ok, true);
+    const before = await read(sid);
+    const r = await post(perRecord(b, sid, {
+      upsert: [{ ...byId(b, k(x)), name: "B loses" }, { ...b.assets[1], name: "also not written" }],
+    }, { auditAppend: [{ at: "2026-10-09T00:00:00Z", by: "B", action: "edited", assetLabel: k(x), field: "name" }] }));
+    assertEquals([r.ok, r.conflict, r.conflictIds], [false, ["assets"], [k(x)]]);
+    const after = await read(sid);
+    assertEquals(comparable(after), comparable(before), "nothing written, not even the audit row");
+    assertEquals((await diag()).at(-1).event, "conflict");
+  });
+
+  Deno.test("per record: a child-only change (a comment) moves the version too", async () => {
+    await reset();
+    const sid = await signIn();
+    const a = await read(sid), b = await read(sid);
+    const x = a.assets[0];
+    const r = await post(perRecord(a, sid, { upsert: [{ ...x, comments: [...x.comments, { text: "new", at: "2026-10-09", by: "A" }] }] }));
+    assertEquals(r.ok, true);
+    const stale = await post(perRecord(b, sid, { upsert: [{ ...byId(b, k(x)), name: "stale" }] }));
+    assertEquals(stale.conflictIds, [k(x)]);
+  });
+
+  Deno.test("per record: only the named assets' child rows are touched", async () => {
+    await reset();
+    const sid = await signIn();
+    const p = await read(sid);
+    // Normalize once through a whole save, so unchanged rows are byte-identical.
+    await post(bodyFrom(p, sid));
+    const q = await read(sid);
+    const withKids = q.assets.find((a: Any) => a.comments.length || a.changes.length || a.maintenanceItems.length);
+    const panel = q.assets.find((a: Any) => (a.breakers || []).length);
+    assert(withKids && panel && k(withKids) !== k(panel), "fixture has both shapes");
+    const xmin = async () => (await sql`select string_agg(xmin::text, ',' order by id) as x from asset_tracker.circuits where tenant_id = ${TENANT}`)[0].x;
+    const c0 = await xmin();
+    // A list that omits the panel's breakers entirely: in a whole save this
+    // would delete them; per record it cannot, since the panel is not named.
+    const r = await post(perRecord(q, sid, { upsert: [{ ...withKids, comments: [], changes: [], name: "trimmed" }] }));
+    assertEquals(r.ok, true);
+    const after = await read(sid);
+    assertEquals(byId(after, k(withKids)).comments, []);
+    assertEquals(byId(after, k(panel)).breakers, panel.breakers);
+    assertEquals(await xmin(), c0, "no circuit row rewritten");
+    for (const a of q.assets) if (k(a) !== k(withKids)) assertEquals(comparable({ assets: [byId(after, k(a))] }), comparable({ assets: [a] }));
+  });
+
+  Deno.test("per record: a new asset goes on the end; posting it again is a conflict, not a duplicate", async () => {
+    await reset();
+    const sid = await signIn();
+    const p = await read(sid);
+    const fresh = { id: "new-asset-1", label: "", tag: "", type: "Computer", name: "Brand new", status: "Active" };
+    const r = await post(perRecord(p, sid, { upsert: [fresh] }, { _dirty: { assets: true, config: true, breakerTypes: false, photos: false }, nextAssetNumber: 999, columns: p.columns }));
+    assertEquals(r.ok, true);
+    assertEquals(r.revisions.config, p.revisions.config + 1, "the config half of the same save is still domain-checked and written");
+    const after = await read(sid);
+    assertEquals(k(after.assets.at(-1)), "new-asset-1");
+    assertEquals(after.assets.length, p.assets.length + 1);
+    const again = await post(perRecord(after, sid, { upsert: [fresh] }));
+    assertEquals(again.conflictIds, ["new-asset-1"]);
+  });
+
+  Deno.test("per record: a removal deletes the asset and its children; a stale removal is a conflict", async () => {
+    await reset();
+    const sid = await signIn();
+    const a = await read(sid), b = await read(sid);
+    const [x, y] = [a.assets[0], a.assets[1]];
+    assertEquals((await post(perRecord(a, sid, { remove: [{ id: k(x), _rev: x._rev }] }))).ok, true);
+    const after = await read(sid);
+    assert(!byId(after, k(x)));
+    const [{ n }] = await sql`select count(*)::int as n from asset_tracker.comments where tenant_id = ${TENANT} and asset_id = ${k(x)}`;
+    assertEquals(n, 0);
+    // Removing it again is not a conflict -- it is already gone.
+    assertEquals((await post(perRecord(b, sid, { remove: [{ id: k(x), _rev: x._rev }] }))).ok, true);
+    // Removing one someone else edited is.
+    assertEquals((await post(perRecord(after, sid, { upsert: [{ ...byId(after, k(y)), name: "kept" }] }))).ok, true);
+    const stale = await post(perRecord(b, sid, { remove: [{ id: k(y), _rev: byId(b, k(y))._rev }] }));
+    assertEquals(stale.conflictIds, [k(y)]);
+  });
+
+  Deno.test("per record: removing every asset at once is refused unless confirmed", async () => {
+    await reset();
+    const sid = await signIn();
+    const p = await read(sid);
+    const all = p.assets.map((a: Any) => ({ id: k(a), _rev: a._rev }));
+    const r = await post(perRecord(p, sid, { remove: all }));
+    assertEquals([r.ok, r.refused], [false, "emptyAssets"]);
+    assertEquals((await read(sid)).assets.length, p.assets.length);
+  });
+
+  Deno.test("per record: audit rows are appended as sent, from two devices both", async () => {
+    await reset();
+    const sid = await signIn();
+    const a = await read(sid), b = await read(sid);
+    const entry = (who: string, id: string) => ({ at: "2026-10-09T01:00:00Z", by: who, action: "edited", assetLabel: id, field: "name", from: "x", to: "y" });
+    await post(perRecord(a, sid, { upsert: [{ ...a.assets[0], name: "y" }] }, { auditAppend: [entry("A", k(a.assets[0]))] }));
+    await post(perRecord(b, sid, { upsert: [{ ...b.assets[1], name: "y" }] }, { auditAppend: [entry("B", k(b.assets[1]))] }));
+    const after = await read(sid);
+    assertEquals(after.auditTotal, a.auditTotal + 2);
+    assertEquals(after.auditLog.slice(-2).map((e: Any) => e.by), ["A", "B"]);
+  });
+
+  Deno.test("per record: the domain check still guards a whole-snapshot save from an older build", async () => {
+    await reset();
+    const sid = await signIn();
+    const a = await read(sid), old = await read(sid);
+    assertEquals((await post(perRecord(a, sid, { upsert: [{ ...a.assets[0], name: "per record" }] }))).ok, true);
+    const r = await post(bodyFrom(old, sid));
+    assertEquals([r.ok, r.conflict], [false, ["assets"]]);
+    assertEquals(byId(await read(sid), k(a.assets[0])).name, "per record");
+  });
+
+  Deno.test("per record: a viewer is still refused", async () => {
+    await reset();
+    const sid = await signIn("jane@school.test");
+    const p = await read(sid);
+    const r = await post(perRecord(p, sid, { upsert: [{ ...p.assets[0], name: "no" }] }));
+    assertEquals(r.ok, false);
+    assert(r.readOnly || /view/i.test(r.error || ""), JSON.stringify(r));
   });
 
   Deno.test({

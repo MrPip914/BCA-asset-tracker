@@ -113,7 +113,8 @@ if (!DATABASE_URL) {
   };
   const comparable = (payload: Record<string, unknown>) => {
     const p = structuredClone(payload);
-    for (const a of p.assets as { changes: { id: string }[] }[]) {
+    for (const a of p.assets as { changes: { id: string }[]; _rev?: number }[]) {
+      delete a._rev; // a database version; the Sheet has none
       for (const c of a.changes) if (c.id.startsWith("imp-")) c.id = "";
     }
     delete p.auth;

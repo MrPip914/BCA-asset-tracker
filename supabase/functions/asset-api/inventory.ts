@@ -40,7 +40,7 @@ export async function readInventory(tx: Tx) {
   // script lock bought the Sheet read, without anyone waiting on anyone.
   const [assets, comments, allocations, changes, maintenance, breakers, circuits,
     breakerTypes, spaceLinks, spaceGroups, photos, audit, auditCount, config, revisions] = [
-    await tx`select id, data from assets order by position`,
+    await tx`select id, rev, data from assets order by position`,
     await tx`select asset_id, data from comments order by asset_id, position`,
     await tx`select asset_id, data from allocations order by asset_id, position`,
     await tx`select asset_id, data from changes order by asset_id, position`,
@@ -75,6 +75,8 @@ export async function readInventory(tx: Tx) {
   const payload: Row = {
     assets: assets.map((a: Row) => ({
       ...a.data,
+      // The asset's version, posted back by a per-record save (Phase 2b).
+      _rev: Number(a.rev),
       comments: data(commentsBy.get(a.id)),
       changes: data(changesBy.get(a.id)),
       allocations: data(allocationsBy.get(a.id)),
