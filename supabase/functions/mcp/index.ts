@@ -22,6 +22,7 @@ import { handleMcp } from "./protocol.js";
 import { roleFor, ToolError } from "./tools.js";
 import { createOAuth, makeSigner } from "./oauth.js";
 import { verifyGoogleIdToken } from "../asset-api/auth.ts";
+import { credsFromEnv, signFloorPlan, NOT_SET_UP } from "../asset-api/sign.ts";
 
 // The project's own database URL, a role that bypasses RLS -- which is why
 // every query goes through withTenant below, whose `set local role` turns it on.
@@ -44,6 +45,8 @@ const TABLE_SQL: Record<string, string> = {
   breakers: "select id, panel_id, position, data from asset_tracker.breakers",
   circuits: "select id, panel_id, breaker_id, position, data from asset_tracker.circuits",
   audit_log: "select seq, asset_id, data from asset_tracker.audit_log",
+  space_links: "select plan_asset_id, shape_id, position, data from asset_tracker.space_links",
+  space_groups: "select id, plan_asset_id, position, data from asset_tracker.space_groups",
   // What a management write sends back as "the inventory I planned against"
   // (connector_apply refuses if it has moved since).
   revisions: "select domain, rev from asset_tracker.revisions",
@@ -84,6 +87,10 @@ const WRITE_SQL: Record<string, (tx: postgres.TransactionSql, email: string, a: 
   // delete_task): one list of ops, applied whole or not at all (0007).
   apply: (tx, email, [expected, ops]) =>
     tx`select asset_tracker.connector_apply(${email}, ${JSON.stringify(expected)}::text::jsonb, ${JSON.stringify(ops)}::text::jsonb) as out`,
+  // replace_floor_plan (0008): the asset's plan fields, its links and groups.
+  replace_floor_plan: (tx, email, [expected, asset, planFile, links, groups]) =>
+    tx`select asset_tracker.connector_replace_floor_plan(${email}, ${JSON.stringify(expected)}::text::jsonb, ${asset as string},
+      ${JSON.stringify(planFile)}::text::jsonb, ${JSON.stringify(links)}::text::jsonb, ${JSON.stringify(groups)}::text::jsonb) as out`,
 };
 
 async function write(tenant: string, email: string, op: string, args: unknown[]) {
@@ -103,6 +110,48 @@ async function write(tenant: string, email: string, op: string, args: unknown[])
     if (m.startsWith("connector: ")) throw new ToolError(m.slice("connector: ".length));
     throw err;
   }
+}
+
+// ---------------------------------------------------------------- floor plan files
+
+// Only the app's file host is ever fetched: the url comes from a stored row,
+// and a row is not a licence to make this function fetch anything.
+const PLAN_HOST = "https://res.cloudinary.com/";
+const PLAN_MAX_BYTES = 25 * 1024 * 1024;
+
+async function fetchPlan(url: string) {
+  if (!String(url).startsWith(PLAN_HOST)) throw new Error("not the file host");
+  const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
+  if (!res.ok) throw new Error(`file host answered ${res.status}`);
+  const text = await res.text();
+  if (text.length > PLAN_MAX_BYTES) throw new Error("plan too large");
+  return text;
+}
+
+// The app's upload, done here: a signature from asset-api's signFloorPlan (the
+// folder and object name chosen server-side), then the image route, which
+// keeps an SVG as it is (see CLAUDE.md, "The floor plan SVG upload").
+async function uploadPlan(tenant: string, svg: string, fileName: string) {
+  const creds = credsFromEnv((k) => Deno.env.get(k));
+  if (!creds) throw new ToolError(NOT_SET_UP);
+  const folder = await withTenant(tenant, async (tx) => {
+    const [t] = await tx`select cloudinary_folder from asset_tracker.tenants where id = ${tenant}`;
+    return t ? t.cloudinary_folder : null;
+  });
+  const sig = await signFloorPlan({ creds, folder, now: Date.now(), uuid: () => crypto.randomUUID() });
+  const form = new FormData();
+  form.append("file", new Blob([svg], { type: "image/svg+xml" }), fileName);
+  form.append("api_key", sig.apiKey);
+  form.append("signature", sig.signature);
+  for (const k of sig.signedParams) form.append(k, String(k === "public_id" ? sig.publicId : (sig as Record<string, unknown>)[k]));
+  const res = await fetch(`https://api.cloudinary.com/v1_1/${encodeURIComponent(sig.cloudName)}/image/upload`, {
+    method: "POST", body: form, signal: AbortSignal.timeout(60000),
+  });
+  const out = await res.json().catch(() => ({}));
+  if (!res.ok || !out.secure_url) {
+    throw new ToolError(`The file host refused the plan: ${out?.error?.message || `status ${res.status}`}. Nothing was changed.`);
+  }
+  return { url: String(out.secure_url), storageKey: String(out.public_id || sig.publicId) };
 }
 
 async function load(tenant: string, table: string) {
@@ -236,6 +285,11 @@ Deno.serve(async (req) => {
     write: (tenant: string, op: string, args: unknown[]) => {
       if (!sites.some((s) => s.id === tenant)) throw new Error("site not permitted");
       return write(tenant, email, op, args);
+    },
+    fetchPlan,
+    uploadPlan: (tenant: string, svg: string, fileName: string) => {
+      if (!sites.some((s) => s.id === tenant)) throw new Error("site not permitted");
+      return uploadPlan(tenant, svg, fileName);
     },
     log: (event: string, detail: unknown) => console.log(JSON.stringify({ event, email, detail })),
   };

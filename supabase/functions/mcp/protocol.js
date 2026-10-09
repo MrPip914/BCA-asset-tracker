@@ -18,7 +18,7 @@ const INSTRUCTIONS = [
   "A facilities inventory: assets, where they are, who uses them, maintenance tasks,",
   "logged work and costs, the change history, and electrical panels.",
   "Editors can also manage the inventory: create and edit assets in bulk (save_assets, checked by the app's own import rules),",
-  "archive and restore them, add, edit, complete and delete tasks, log work, and add comments. Nothing is ever permanently deleted",
+  "archive and restore them, add, edit, complete and delete tasks, log work, add comments, and replace a place's floor plan (keeping its room links). Nothing is ever permanently deleted",
   "except a task the person asks to delete. Each change is recorded in the change history under the person's name, marked via Claude.",
   "Read get_schema before creating or editing assets. For anything more than a few rows, run save_assets with dry_run first",
   "and show the person what will change before writing. Before any write, make sure the assets and details are what the person meant.",

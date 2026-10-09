@@ -40,7 +40,8 @@ const eq = (name, got, want) => check(name, JSON.stringify(got) === JSON.stringi
     line("WEEKDAY_NAMES"),
     ...["recurrenceCount", "parseRecurrence", "addCalendarMonths", "nthWeekdayOfMonth", "nextRecurrenceDate",
       "dateOnly", "taskKindOf", "isOneOffTask", "taskIsDone", "taskDueDate", "maintenanceStatusOf", "cellsLabel_",
-      "formatRecurrence", "describeRecurrence", "recurrenceApproxDays"].map(fn),
+      "formatRecurrence", "describeRecurrence", "recurrenceApproxDays",
+      "floorPlanPathToPoints", "floorPlanRemapShapeIds", "floorPlanRemapLinksAndGroups", "floorPlanSegmentId", "floorPlanSegmentParts"].map(fn),
   ];
   const missing = pieces.filter((p) => !p || !copy.includes(p)).map((p) => p.split("\n")[0]);
   check("from-app.js matches index.html, piece for piece", missing.length === 0, `stale or missing: ${missing.join(" | ")}`);
@@ -58,7 +59,7 @@ const SITES = {
     assets: [
       A("campus", 0, null, { type: "Campus", name: "Main Campus" }),
       A("b200", 1, "campus", { type: "Building", name: "Building 200" }),
-      A("b300", 2, "campus", { type: "Building", name: "Building 300" }),
+      A("b300", 2, "campus", { type: "Building", name: "Building 300", floorPlanUrl: "https://res.cloudinary.com/demo/raw/upload/old.svg", floorPlanFileName: "old.svg" }),
       A("r101", 3, "b200", { type: "Room", name: "Room 101" }),
       A("r101b", 4, "b300", { type: "Room", name: "Room 101" }),
       A("closet", 5, "r101", { type: "Room", name: "Storage Closet" }),
@@ -67,6 +68,17 @@ const SITES = {
       A("u1", 8, null, { type: "User", firstName: "Aaron", lastName: "Cantrell", name: "old name" }),
       A("panelA", 9, "b200", { type: "Electrical Panel", tag: "BCA0082", panelSlotCount: 24, panelPhases: "1" }),
       A("ms1", 10, "r101", { type: "uuid-ms", name: "Mini Split 1" }),
+    ],
+    space_links: [
+      { plan_asset_id: "b300", shape_id: "shape-1", position: 0, data: { shapeId: "shape-1", roomId: "r101b", at: "2026-09-01T00:00:00Z", by: "Eric" } },
+      { plan_asset_id: "b300", shape_id: "g-old-2", position: 1, data: { shapeId: "g-old-2", roomId: "closet" } },
+      { plan_asset_id: "b300", shape_id: "shape-9", position: 2, data: { shapeId: "shape-9", roomId: "r101" } },
+      { plan_asset_id: "b300", shape_id: "g-old-2#e1", position: 3, data: { shapeId: "g-old-2#e1", roomId: "ms1" } },
+      { plan_asset_id: "b200", shape_id: "shape-1", position: 0, data: { shapeId: "shape-1", roomId: "r101" } },
+    ],
+    space_groups: [
+      { id: "grp1", plan_asset_id: "b300", position: 0, data: { id: "grp1", name: "Wing", memberShapeIds: ["shape-1", "g-old-2"] } },
+      { id: "grp2", plan_asset_id: "b300", position: 1, data: { id: "grp2", name: "Gone", memberShapeIds: ["shape-1", "shape-9"] } },
     ],
     config: [
       { key: "typesList", value: ["Campus", "Building", "Room", "Computer", "User", "Electrical Panel", { id: "uuid-ms", name: "Mini Split" }] },
@@ -155,13 +167,13 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   // Claude asks before a tool not marked read-only, so a write marked
   // read-only would run without asking. Exactly the writes are writes, and the
   // ones that overwrite or remove something say so.
-  const WRITES = ["add_comment", "add_task", "add_tasks", "archive_assets", "complete_task", "delete_task", "edit_task", "log_work", "save_assets"];
+  const WRITES = ["add_comment", "add_task", "add_tasks", "archive_assets", "complete_task", "delete_task", "edit_task", "log_work", "replace_floor_plan", "save_assets"];
   eq("exactly the write tools are marked as writes",
     tools.filter((t) => t.annotations.readOnlyHint !== true).map((t) => t.name).sort(), WRITES);
   eq("the write tool list matches", [...WRITE_TOOL_NAMES].sort(), WRITES);
   eq("exactly the tools that overwrite or remove are marked destructive",
     tools.filter((t) => t.annotations.destructiveHint !== false).map((t) => t.name).sort(),
-    ["archive_assets", "delete_task", "edit_task", "save_assets"]);
+    ["archive_assets", "delete_task", "edit_task", "replace_floor_plan", "save_assets"]);
   check("every tool's annotations carry its title", tools.every((t) => t.annotations.title === t.title));
   check("every tool's schema is a closed object",
     tools.every((t) => t.inputSchema.type === "object" && t.inputSchema.additionalProperties === false));
@@ -652,6 +664,82 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
     /var CONNECTOR_URL = "https:\/\/[a-z0-9]+\.supabase\.co\/functions\/v1\/mcp";/.test(page) && !/searchParams\.get\("(api|url|connector)"\)/.test(page));
   const appId = /const GOOGLE_CLIENT_ID = "([^"]+)"/.exec(fs.readFileSync(path.join(here, "index.html"), "utf8"))[1];
   check("the connect page uses the app's Google client", page.includes(`"${appId}"`));
+}
+
+// ---------------------------------------------------------------- replace_floor_plan
+
+{
+  const svg = (spaces) => `<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">` +
+    spaces.map(([id, t]) => `<g id="${id}"><title>${t}</title><path d="M0 0 L10 0 L10 10 Z"/><g><title>Chair</title><rect x="1" y="1" width="1" height="1"/></g></g>`).join("") +
+    `<g id="noise"><title>Wall</title><path d="M0 0 L5 5 L9 9 Z"/></g><g id="tiny"><title>Space.99</title><path d="M0 0 L1 1"/></g></svg>`;
+  const OLD = svg([["shape-1", "Space.1"], ["g-old-2", "Space.2"], ["shape-9", "Space.9"]]);
+  const NEW = svg([["shape-1", "Space.1"], ["shape-2", "Space.2"], ["shape-3", "Space.3"]]);
+  const pctx = (sites = ONE, oldText = OLD) => {
+    const ctx = ctxFor(sites);
+    ctx.fetched = []; ctx.uploads = [];
+    ctx.fetchPlan = async (url) => { ctx.fetched.push(url); if (oldText === null) throw new Error("404"); return oldText; };
+    ctx.uploadPlan = async (tenant, text, name) => { ctx.uploads.push({ tenant, name, len: text.length }); return { url: "https://res.cloudinary.com/demo/image/upload/new.svg", storageKey: "assets/abc" }; };
+    return ctx;
+  };
+
+  const { floorPlanSpacesOf } = await import("./supabase/functions/mcp/floorplan.js");
+  eq("the SVG reader finds spaces as the app does: own title, real geometry, nested titles ignored",
+    floorPlanSpacesOf(NEW), [{ gid: "shape-1", title: "Space.1" }, { gid: "shape-2", title: "Space.2" }, { gid: "shape-3", title: "Space.3" }]);
+  eq("a group whose first title is a nested one's is skipped, as the app's querySelector skips it",
+    floorPlanSpacesOf(`<svg><g id="x"><g><title>Chair</title><rect/></g><title>Space.5</title><rect/></g></svg>`), []);
+  eq("a space with no id is addressed by its title",
+    floorPlanSpacesOf(`<svg><g><title>Space.4</title><rect x="0" y="0" width="1" height="1"/></g></svg>`), [{ gid: "Space.4", title: "Space.4" }]);
+  for (const bad of ["<svg><g></svg>", "not xml at all <", "<g><title>Space.1</title></g>", "<svg><g></g>"]) {
+    let threw = false; try { floorPlanSpacesOf(bad); } catch { threw = true; }
+    check(`the SVG reader refuses a broken file: ${bad}`, threw);
+  }
+  // Every real plan in the project folder, when present, reads the same as in the app (checked in Chromium when written).
+  for (const f of ["3c/campus.svg", "bca/building-100.svg"]) {
+    const p = path.join("/mnt/project-files/floorplans", f);
+    if (fs.existsSync(p)) check(`a real plan reads: ${f}`, floorPlanSpacesOf(fs.readFileSync(p, "utf8")).length > 0);
+  }
+
+  let ctx = pctx();
+  let r = await call("replace_floor_plan", { asset: "Building 300", svg: NEW, file_name: "b300.svg", dry_run: true }, ctx);
+  eq("dry run: carries links by id and by title, a wall segment rides along, the rest is listed",
+    [r.isError, r.data?.linksCarriedOver, r.data?.linksDropped?.map((l) => [l.shape, l.linkedTo.id]), r.data?.groupsCarriedOver, r.data?.groupsDropped, r.data?.replaces, r.data?.spacesOnNewPlan],
+    [false, 3, [["shape-9", "r101"]], 1, ["Gone"], "old.svg", 3]);
+  check("dry run: reads the old plan, uploads and writes nothing",
+    ctx.fetched[0] === "https://res.cloudinary.com/demo/raw/upload/old.svg" && ctx.uploads.length === 0 && ctx.writes.length === 0);
+
+  ctx = pctx();
+  r = await call("replace_floor_plan", { asset: "b300", svg: NEW, file_name: "b300.svg" }, ctx);
+  const wr = ctx.writes[0];
+  eq("replace: uploads, then one write with the remapped links and groups",
+    [r.isError, ctx.uploads, wr?.op, wr?.args[1], wr?.args[2], wr?.args[3].map((l) => l.shapeId), wr?.args[4].map((g) => g.memberShapeIds)],
+    [false, [{ tenant: "dev", name: "b300.svg", len: NEW.length }], "replace_floor_plan", "b300",
+      { url: "https://res.cloudinary.com/demo/image/upload/new.svg", storageKey: "assets/abc", fileName: "b300.svg" },
+      ["shape-1", "shape-2", "shape-2#e1"], [["shape-1", "shape-2"]]]);
+  eq("replace: a carried link keeps who made it", wr?.args[3][0], { shapeId: "shape-1", roomId: "r101b", at: "2026-09-01T00:00:00Z", by: "Eric" });
+  eq("replace: sends the revisions it read", wr?.args[0], { assets: 7, config: 3 });
+
+  ctx = pctx(ONE, null);
+  r = await call("replace_floor_plan", { asset: "b300", svg: NEW, file_name: "b300.svg", dry_run: true }, ctx);
+  check("an unreadable old plan carries only unchanged ids, and says so",
+    !r.isError && r.data.linksCarriedOver === 1 && /could not be read/.test(r.data.note), r.text);
+
+  ctx = pctx();
+  r = await call("replace_floor_plan", { asset: "Main Campus", svg: NEW, file_name: "campus.svg" }, ctx);
+  check("a first plan: nothing to carry, nothing fetched, written", !r.isError && ctx.fetched.length === 0 && ctx.writes.length === 1 && ctx.writes[0].args[3].length === 0, r.text);
+
+  for (const [label, args, sites] of [
+    ["a viewer", { site: "bca", asset: "x", svg: NEW, file_name: "a.svg" }, TWO],
+    ["an asset that is not a place", { asset: "Teacher PC", svg: NEW, file_name: "a.svg" }],
+    ["an archived asset", { asset: "Lab PC", svg: NEW, file_name: "a.svg" }],
+    ["a file name that is not .svg", { asset: "b300", svg: NEW, file_name: "plan.pdf" }],
+    ["a broken SVG", { asset: "b300", svg: "<svg><g>", file_name: "a.svg" }],
+    ["a drawing with no spaces", { asset: "b300", svg: "<svg><g><title>Wall</title><rect/></g></svg>", file_name: "a.svg" }],
+    ["an empty SVG", { asset: "b300", svg: " ", file_name: "a.svg" }],
+  ]) {
+    ctx = pctx(sites);
+    r = await call("replace_floor_plan", args, ctx);
+    check(`replace_floor_plan refuses ${label}, uploading and writing nothing`, r.isError && ctx.uploads.length === 0 && ctx.writes.length === 0, r.text);
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

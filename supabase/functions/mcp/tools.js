@@ -19,6 +19,8 @@
 // separates tenants again underneath, by row-level security.
 
 import { buildInventory } from "./inventory.js";
+import { isPlaceType } from "./app-rules.js";
+import { floorPlanSpacesOf, planFloorPlanReplace, PlanFileError, FLOORPLAN_TOOL_MAX_BYTES } from "./floorplan.js";
 import {
   appView, schemaOf, planSaveAssets, planArchive, taskEditAudit, PlanError, MAX_ROWS,
 } from "./asset-writes.js";
@@ -376,6 +378,24 @@ const MANAGE_TOOLS = [
         asset: { type: "string", description: "Narrows a task given by name to this asset, or to anything inside this place." },
       },
       required: ["task"],
+      additionalProperties: false,
+    },
+    annotations: DESTRUCTIVE,
+  },
+  {
+    name: "replace_floor_plan",
+    title: "Replace floor plan",
+    description: "Put a new floor plan (an SVG drawing, as exported from Visio) on a place: a campus, building, floor or room. Works for a place's first plan too. As in the app's Replace, every room and wall already linked to a shape on the old plan stays linked when the new plan has a shape with the same id or the same title (Space.N), and a link whose shape is gone is dropped and listed. The file is stored on the app's file host. Recorded in the change history as this person, via Claude. Run with dry_run first and tell the person which links carry over and which would be dropped.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        site: SITE,
+        asset: { type: "string", description: "The place the plan belongs to (id, tag, name or full path)." },
+        svg: { type: "string", description: "The whole SVG file, as text." },
+        file_name: { type: "string", description: "The file's name, shown in the app and the change history, e.g. campus.svg." },
+        dry_run: { type: "boolean", description: "Read the new plan and say which links would carry over, without uploading or writing anything." },
+      },
+      required: ["asset", "svg", "file_name"],
       additionalProperties: false,
     },
     annotations: DESTRUCTIVE,
@@ -1026,6 +1046,79 @@ const handlers = {
     await ctx.write(site.id, "add_comment", [a.id, text]);
     ctx.log?.("write", { tool: "add_comment", site: site.id, asset: a.id });
     return { site: site.id, commented: { asset: inv.summary(a), text } };
+  },
+
+  async replace_floor_plan(args, ctx) {
+    const { site, rows, inv } = await openSite(ctx, args, ["space_links", "space_groups", "revisions"]);
+    requireEditor(site);
+    const a = liveAsset(inv, args.asset);
+    appView(rows, site.id); // applies this site's type settings, which isPlaceType reads
+    if (!isPlaceType(a.type)) {
+      throw new ToolError(`${inv.nameOf(a)} is a ${inv.typeName(a.type)}, which is not a place. A floor plan goes on a campus, building, floor or room.`);
+    }
+    const svg = String(args.svg ?? "");
+    if (!svg.trim()) throw new ToolError("The SVG is empty.");
+    if (new TextEncoder().encode(svg).length > FLOORPLAN_TOOL_MAX_BYTES) {
+      throw new ToolError(`That file is too large: a floor plan sent through Claude has to be under ${FLOORPLAN_TOOL_MAX_BYTES / 1024 / 1024}MB.`);
+    }
+    const fileName = String(args.file_name ?? "").trim().replace(/[\\/]/g, "_");
+    if (!/\.svg$/i.test(fileName)) throw new ToolError("file_name has to end in .svg.");
+    let newSpaces;
+    try {
+      newSpaces = floorPlanSpacesOf(svg);
+    } catch (err) {
+      if (err instanceof PlanFileError) throw new ToolError(err.message);
+      throw err;
+    }
+    if (!newSpaces.length) {
+      throw new ToolError("That drawing has no spaces (groups titled Space...), so nothing on it could be linked to a room.");
+    }
+
+    const mine = (t) => (rows[t] || []).filter((r) => r.plan_asset_id === a.id)
+      .sort((x, y) => (x.position ?? 0) - (y.position ?? 0)).map((r) => r.data);
+    const links = mine("space_links");
+    const groups = mine("space_groups");
+
+    // The plan being replaced, read for its shape titles. Unreadable is not a
+    // refusal: the app goes ahead too, carrying over only unchanged ids.
+    let oldSpaces = null;
+    let oldPlanNote;
+    if (a.floorPlanUrl && (links.length || groups.length)) {
+      try {
+        oldSpaces = floorPlanSpacesOf(await ctx.fetchPlan(a.floorPlanUrl));
+      } catch {
+        oldPlanNote = "The current plan could not be read, so only shapes whose id is unchanged keep their links.";
+      }
+    }
+    const plan = planFloorPlanReplace({ links, groups, oldSpaces, newSpaces });
+    const linkOut = (l) => {
+      const room = inv.byId.get(l.roomId);
+      return { shape: l.shapeId, linkedTo: room ? inv.summary(room) : l.roomId };
+    };
+    const summary = {
+      site: site.id,
+      asset: inv.summary(a),
+      file: fileName,
+      replaces: a.floorPlanFileName || (a.floorPlanUrl ? "(a plan)" : undefined),
+      spacesOnNewPlan: newSpaces.length,
+      linksCarriedOver: plan.links.length,
+      linksDropped: plan.droppedLinks.map(linkOut),
+      groupsCarriedOver: plan.groups.length,
+      groupsDropped: plan.droppedGroups.map((g) => g.name || g.id),
+      note: oldPlanNote,
+    };
+    if (args.dry_run) return { ...summary, dryRun: true };
+
+    // Bytes first, row second, as the app does: a refused write strands a file
+    // at the host rather than leaving a plan that points at nothing.
+    const uploaded = await ctx.uploadPlan(site.id, svg, fileName);
+    await ctx.write(site.id, "replace_floor_plan", [
+      appViewRevisions(rows).revisions, a.id,
+      { url: uploaded.url, storageKey: uploaded.storageKey, fileName },
+      plan.links, plan.groups,
+    ]);
+    ctx.log?.("write", { tool: "replace_floor_plan", site: site.id, asset: a.id });
+    return { ...summary, replaced: true };
   },
 };
 
