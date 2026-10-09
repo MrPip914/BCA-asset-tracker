@@ -20,14 +20,15 @@
 
 import { buildInventory } from "./inventory.js";
 import { isPlaceType } from "./app-rules.js";
-import { floorPlanSpacesOf, planFloorPlanReplace, PlanFileError, FLOORPLAN_TOOL_MAX_BYTES } from "./floorplan.js";
+import { floorPlanSpacesOf, floorPlanGeometryOf, planFloorPlanReplace, PlanFileError, FLOORPLAN_TOOL_MAX_BYTES } from "./floorplan.js";
+import { rotatedSpaces, exteriorWalls, wallsOnPlan, planWallChanges, WallPlanError, FACINGS } from "./walls.js";
 import {
   appView, schemaOf, planSaveAssets, planArchive, taskEditAudit, PlanError, MAX_ROWS,
 } from "./asset-writes.js";
 import {
   dateOnly, taskKindOf, taskDueDate, maintenanceStatusOf, cellsLabel_, isOneOffTask, taskIsDone,
   TASK_KIND_SCHEDULED, TASK_KIND_ONEOFF, MAINTENANCE_FREQUENCIES, WEEKDAY_NAMES,
-  parseRecurrence, formatRecurrence, describeRecurrence, recurrenceApproxDays,
+  parseRecurrence, formatRecurrence, describeRecurrence, recurrenceApproxDays, floorPlanWallCoverSet,
 } from "./from-app.js";
 
 export class ToolError extends Error {}
@@ -164,6 +165,21 @@ const READ_TOOLS = [
         panel: { type: "string", description: "The electrical panel (id, tag, name or path)." },
         room: { type: "string", description: "A room, or an asset whose room should be looked up." },
       },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "get_plan_walls",
+    title: "Floor plan walls",
+    description: "List the outside walls of a place's floor plan: every space (shape) on the plan with what it is linked to, each of its outside edges (segment ids, as the app's Map tab draws them) with the direction it faces and its length, and the Wall assets already attached to edges. North means up on the plan as the app shows it. Use this before set_plan_walls.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        site: SITE,
+        asset: { type: "string", description: "The place whose floor plan to read (id, tag, name or full path)." },
+        space: { type: "string", description: "Only this space: its title (Space.12), its shape id, or the room or building linked to it." },
+      },
+      required: ["asset"],
       additionalProperties: false,
     },
   },
@@ -400,6 +416,40 @@ const MANAGE_TOOLS = [
     },
     annotations: DESTRUCTIVE,
   },
+  {
+    name: "set_plan_walls",
+    title: "Set floor plan walls",
+    description: "Attach Wall assets to outside edges of a place's floor plan, as the Map tab's Walls setup does. Each entry gives one wall its COMPLETE set of edges on this plan: either segment ids from get_plan_walls, or a space plus an optional facing (north, east, south, west) to take every outside edge of that space facing that way. Name an existing Wall in `wall`, or give `name` to create a new Wall asset (parented to the room or building linked to the space unless `parent` says otherwise); `wall` plus `name` renames it. An edge already on a wall not in this change is refused, never taken. `remove` takes walls off this plan and keeps the assets. Recorded in the change history as this person, via Claude. `auto` does the usual case in one go: a new North, East, South and West wall for each space named, from whichever directions its outside edges face. Run with dry_run first and show the person what each wall would get.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        site: SITE,
+        asset: { type: "string", description: "The place whose floor plan the walls are on (id, tag, name or full path)." },
+        walls: {
+          type: "array",
+          description: "One entry per wall.",
+          items: {
+            type: "object",
+            properties: {
+              wall: { type: "string", description: "An existing Wall asset (id, name or path)." },
+              name: { type: "string", description: "A new wall's name, e.g. Worship Center North Wall. With `wall`, renames it." },
+              parent: { type: "string", description: "Where a new wall sits. Default: what the space is linked to, else this place." },
+              segments: { type: "array", items: { type: "string" }, description: "Segment ids from get_plan_walls." },
+              space: { type: "string", description: "Instead of segments: a space (title, shape id, or the room or building linked to it)." },
+              facing: { type: "string", enum: FACINGS, description: "With space: only its outside edges facing this way." },
+            },
+            additionalProperties: false,
+          },
+        },
+        auto: { type: "array", items: { type: "string" }, description: "Spaces (title, shape id, or the room or building linked to it) to give a new wall per direction their outside edges face, named e.g. \"Worship Center North Wall\". Adds to walls." },
+        remove: { type: "array", items: { type: "string" }, description: "Walls to take off this plan. The Wall assets are kept." },
+        dry_run: { type: "boolean", description: "Say what each wall would get, without writing anything." },
+      },
+      required: ["asset"],
+      additionalProperties: false,
+    },
+    annotations: DESTRUCTIVE,
+  },
 ];
 
 export const WRITE_TOOL_NAMES = [...WRITE_TOOLS, ...MANAGE_TOOLS].map((t) => t.name);
@@ -444,6 +494,46 @@ async function apply(ctx, site, view, ops, tool) {
   const out = await ctx.write(site.id, "apply", [view.revisions, ops]);
   ctx.log?.("write", { tool, site: site.id, ops: ops.length });
   return out;
+}
+
+// A place's floor plan, read for its walls: the drawing's spaces turned the way
+// the app shows them, their outside edges, the link rows, and the walls on it.
+async function openPlanWalls(ctx, rows, inv, ref, live) {
+  const a = live ? liveAsset(inv, ref) : resolveOrThrow(inv, ref);
+  if (!a.floorPlanUrl) throw new ToolError(`${inv.nameOf(a)} has no floor plan. Put one on it with replace_floor_plan first.`);
+  let spaces;
+  try {
+    spaces = floorPlanGeometryOf(await ctx.fetchPlan(a.floorPlanUrl));
+  } catch (err) {
+    if (err instanceof PlanFileError) throw new ToolError(`The floor plan on ${inv.nameOf(a)} could not be read: ${err.message}`);
+    throw new ToolError(`The floor plan on ${inv.nameOf(a)} could not be fetched from the file host, so nothing was read or changed.`);
+  }
+  spaces = rotatedSpaces(spaces, a.floorPlanRotation);
+  const links = (rows.space_links || []).filter((r) => r.plan_asset_id === a.id)
+    .sort((x, y) => (x.position ?? 0) - (y.position ?? 0)).map((r) => r.data);
+  // Which spaces close off an edge is the app's call, made exactly as the Map
+  // tab makes it: from the links to shapes this drawing still has.
+  const gids = new Set(spaces.map((sp) => sp.gid));
+  const coverSet = floorPlanWallCoverSet(a, links.filter((l) => l && gids.has(l.shapeId)), [...inv.byId.values()]);
+  const edges = exteriorWalls(spaces, coverSet ? (sp) => coverSet.has(sp.gid) : null);
+  const linkOf = new Map();
+  for (const l of links) if (l?.roomId && !/#e\d+(\.\d+)?$/.test(l.shapeId)) linkOf.set(l.shapeId, l.roomId);
+  const walls = wallsOnPlan(links, new Set(edges.map((e) => e.id)));
+  const resolveSpace = (sref) => {
+    const t = norm(sref);
+    const hit = spaces.filter((sp) => norm(sp.title) === t || norm(sp.gid) === t);
+    if (hit.length === 1) return hit[0];
+    if (hit.length > 1) throw new ToolError(`More than one space is called "${sref}"; use its shape id.`);
+    const r = inv.resolve(sref);
+    if (r.asset) {
+      const linked = spaces.filter((sp) => linkOf.get(sp.gid) === r.asset.id);
+      if (linked.length === 1) return linked[0];
+      if (linked.length > 1) throw new ToolError(`${inv.nameOf(r.asset)} is linked to more than one space; use a shape id.`);
+      throw new ToolError(`${inv.nameOf(r.asset)} is not linked to a space on this plan.`);
+    }
+    throw new ToolError(`No space "${sref}" on this plan.`);
+  };
+  return { asset: a, spaces, edges, links, linkOf, walls, resolveSpace };
 }
 
 function planOrThrow(fn) {
@@ -1119,6 +1209,197 @@ const handlers = {
     ]);
     ctx.log?.("write", { tool: "replace_floor_plan", site: site.id, asset: a.id });
     return { ...summary, replaced: true };
+  },
+
+  async get_plan_walls(args, ctx) {
+    const { site, rows, inv } = await openSite(ctx, args, ["space_links"]);
+    const p = await openPlanWalls(ctx, rows, inv, args.asset);
+    let spaces = p.spaces;
+    if (args.space) spaces = [p.resolveSpace(args.space)];
+    const wallOf = new Map();
+    for (const [wid, w] of p.walls) for (const s of w.segments) wallOf.set(s, wid);
+    const sum = (id) => (inv.byId.has(id) ? inv.summary(inv.byId.get(id)) : { id, missing: true });
+    return {
+      site: site.id,
+      asset: inv.summary(p.asset),
+      plan: p.asset.floorPlanFileName || undefined,
+      north: "up on the plan as the app shows it",
+      spaces: spaces.map((sp) => ({
+        space: sp.title,
+        shape: sp.gid,
+        linkedTo: p.linkOf.get(sp.gid) ? sum(p.linkOf.get(sp.gid)) : undefined,
+        outsideEdges: p.edges.filter((e) => e.gid === sp.gid).map((e) => ({
+          segment: e.id, facing: e.facing, bearing: e.bearing, length: e.length,
+          wall: wallOf.has(e.id) ? sum(wallOf.get(e.id)).name : undefined,
+        })),
+      })),
+      walls: [...p.walls].filter(([, w]) => !args.space || w.segments.some((s) => spaces.some((sp) => s.startsWith(sp.gid + "#")))).map(([wid, w]) => ({
+        wall: sum(wid), segments: w.segments, notOnThisPlan: w.stale.length ? w.stale : undefined,
+      })),
+    };
+  },
+
+  async set_plan_walls(args, ctx) {
+    const { site, rows, inv } = await openSite(ctx, args, ["space_links", "revisions"]);
+    requireEditor(site);
+    const p = await openPlanWalls(ctx, rows, inv, args.asset, true);
+    const entries = Array.isArray(args.walls) ? args.walls.slice() : [];
+    const removeRefs = Array.isArray(args.remove) ? args.remove : [];
+    // auto: one new wall per direction a space's outside edges face.
+    for (const ref of Array.isArray(args.auto) ? args.auto : []) {
+      const sp = p.resolveSpace(ref);
+      const linked = p.linkOf.get(sp.gid);
+      const base = linked && inv.byId.has(linked) ? inv.nameOf(inv.byId.get(linked)) : sp.title;
+      const facings = FACINGS.filter((f) => p.edges.some((e) => e.gid === sp.gid && e.facing === f));
+      if (!facings.length) throw new ToolError(`${sp.title} has no outside edges on this plan.`);
+      for (const f of facings) entries.push({ name: `${base} ${f[0].toUpperCase()}${f.slice(1)} Wall`, space: sp.gid, facing: f });
+    }
+    if (!entries.length && !removeRefs.length) throw new ToolError("Give at least one wall, or a wall to remove.");
+    if (entries.length > MAX_ROWS) throw new ToolError(`At most ${MAX_ROWS} walls at a time.`);
+    const segIds = new Set(p.edges.map((e) => e.id));
+    const problems = [];
+    const asWall = (ref, label, live) => {
+      const r = inv.resolve(ref);
+      if (!r.asset) { problems.push(`${label}: ${r.error}`); return null; }
+      if (r.asset.type !== "Wall") { problems.push(`${label}: ${inv.nameOf(r.asset)} is a ${inv.typeName(r.asset.type)}, not a Wall.`); return null; }
+      if (live && inv.isArchived(r.asset)) { problems.push(`${label}: ${inv.nameOf(r.asset)} is archived. Restore it in the app first.`); return null; }
+      return r.asset;
+    };
+
+    const removes = [];
+    removeRefs.forEach((ref, i) => {
+      const w = asWall(ref, `Remove ${i + 1}`, false);
+      if (w && !removes.includes(w.id)) removes.push(w.id);
+    });
+
+    // Each entry: which wall (existing, or a row for save_assets' planner) and
+    // which edges.
+    const saveRows = [];
+    const planned = entries.map((e, i) => {
+      const label = `Wall ${i + 1}${e?.name ? ` (${String(e.name).trim()})` : ""}`;
+      if (!e || typeof e !== "object") { problems.push(`${label}: not a wall.`); return null; }
+      const name = String(e.name ?? "").trim();
+      let wall = null;
+      if (e.wall) wall = asWall(e.wall, label, true);
+      else if (!name) { problems.push(`${label}: name an existing wall, or give a name for a new one.`); return null; }
+      if (e.wall && !wall) return null;
+      if (wall && e.parent) problems.push(`${label}: parent is only for a new wall; move an existing one with save_assets.`);
+
+      let space = null;
+      if (e.space) {
+        try { space = p.resolveSpace(e.space); } catch (err) { if (err instanceof ToolError) { problems.push(`${label}: ${err.message}`); return null; } throw err; }
+      }
+      let segmentIds;
+      if (Array.isArray(e.segments) && e.segments.length) {
+        if (space || e.facing) { problems.push(`${label}: give segments, or a space and facing, not both.`); return null; }
+        segmentIds = [...new Set(e.segments.map((s) => String(s).trim()))];
+      } else if (space) {
+        segmentIds = p.edges.filter((x) => x.gid === space.gid && (!e.facing || x.facing === e.facing)).map((x) => x.id);
+        if (!segmentIds.length) { problems.push(`${label}: ${space.title} has no outside edge${e.facing ? ` facing ${e.facing}` : ""}.`); return null; }
+      } else { problems.push(`${label}: give segments, or a space.`); return null; }
+
+      if (wall) {
+        if (name && name !== String(wall.name || "").trim()) saveRows.push({ asset: wall.id, fields: { Name: name } });
+        return { label, wallId: wall.id, name: name || inv.nameOf(wall), segmentIds };
+      }
+      // A new wall sits in what its space is linked to, unless told otherwise.
+      let parentId = p.asset.id;
+      if (e.parent) {
+        const r = inv.resolve(e.parent);
+        if (!r.asset) { problems.push(`${label}: ${r.error}`); return null; }
+        parentId = r.asset.id;
+      } else {
+        const gid = space ? space.gid : String(segmentIds[0]).replace(/#e\d+(\.\d+)?$/, "");
+        const linked = p.linkOf.get(gid);
+        if (linked && inv.byId.has(linked) && !inv.isArchived(inv.byId.get(linked))) parentId = linked;
+      }
+      saveRows.push({ fields: { Type: "Wall", Name: name, Location: parentId }, newWall: i });
+      return { label, wallId: null, name, segmentIds, row: saveRows.length };
+    });
+    const seen = new Set();
+    for (const r of planned) {
+      if (!r || !r.wallId) continue;
+      if (seen.has(r.wallId)) problems.push(`${r.label}: that wall is named twice.`);
+      if (removes.includes(r.wallId)) problems.push(`${r.label}: that wall is also in remove.`);
+      seen.add(r.wallId);
+    }
+    if (problems.length) {
+      const err = new ToolError("Nothing was changed.");
+      err.detail = problems.slice(0, 50);
+      throw err;
+    }
+
+    // New walls and renames go through the app's own import rules (a legal
+    // parent, the audit rows), exactly as save_assets would write them.
+    const view = appView(rows, site.id);
+    let saveOps = [];
+    let created = [];
+    if (saveRows.length) {
+      const out = planOrThrow(() => planSaveAssets(view, saveRows.map(({ asset, fields }) => (asset ? { asset, fields } : { fields }))));
+      saveOps = out.ops;
+      created = out.summary.created;
+      for (const r of planned) {
+        if (r.wallId) continue;
+        const c = created.find((x) => x.row === r.row);
+        r.wallId = c ? c.id : null;
+        r.parent = c?.location;
+      }
+    }
+
+    let results;
+    try {
+      results = planWallChanges({ requests: planned, removes, links: p.links, segIds });
+    } catch (err) {
+      if (!(err instanceof WallPlanError)) throw err;
+      const e = new ToolError(err.message);
+      e.detail = err.detail.map((d) => d.replace(/\(([^()]*)\)\. Remove/, (m, ids) => `(${ids.split(", ").map((id) => (inv.byId.has(id) ? inv.nameOf(inv.byId.get(id)) : id)).join(", ")}). Remove`));
+      throw e;
+    }
+    const renamed = new Set(saveRows.filter((r) => r.asset).map((r) => r.asset));
+    const changing = results.filter((r) => !r.unchanged || renamed.has(r.wallId) || !r.before.length);
+    const removing = removes.filter((id) => p.walls.has(id));
+    const edgeOut = (id) => {
+      const e = p.edges.find((x) => x.id === id);
+      return e ? `${id} (${e.facing}, ${e.length})` : id;
+    };
+    const summary = {
+      site: site.id,
+      asset: inv.summary(p.asset),
+      walls: results.map((r) => ({
+        wall: r.name,
+        id: inv.byId.has(r.wallId) ? r.wallId : undefined,
+        new: !inv.byId.has(r.wallId) || undefined,
+        parent: r.parent,
+        segments: r.segmentIds.map(edgeOut),
+        replaces: r.before.length && !r.unchanged ? r.before : undefined,
+        unchanged: (r.unchanged && !renamed.has(r.wallId)) || undefined,
+      })),
+      removed: removing.length ? removing.map((id) => inv.nameOf(inv.byId.get(id))) : undefined,
+      note: removes.length > removing.length ? "Some walls in remove had no edges on this plan; nothing to take off." : undefined,
+    };
+    if (args.dry_run) return { ...summary, dryRun: true };
+    if (!changing.length && !removing.length) return { ...summary, note: "Nothing to change: every wall already has exactly those edges." };
+
+    // The audit rows the app's Walls setup writes on the plan's own history.
+    const ops = [...saveOps];
+    for (const r of changing) {
+      ops.push({ op: "audit", data: {
+        assetLabel: p.asset.id, assetType: p.asset.type, action: "space_linked",
+        field: `${r.segmentIds.length} wall segment${r.segmentIds.length === 1 ? "" : "s"}`, to: r.name,
+      } });
+    }
+    for (const id of removing) {
+      ops.push({ op: "audit", data: {
+        assetLabel: p.asset.id, assetType: p.asset.type, action: "space_unlinked", field: "wall segments", from: inv.nameOf(inv.byId.get(id)),
+      } });
+    }
+    const out = await ctx.write(site.id, "set_plan_walls", [
+      view.revisions, p.asset.id, ops,
+      changing.map((r) => ({ wallId: r.wallId, segmentIds: r.segmentIds })),
+      removing,
+    ]);
+    ctx.log?.("write", { tool: "set_plan_walls", site: site.id, asset: p.asset.id, walls: changing.length, removed: removing.length });
+    return { ...summary, saved: true, revision: out?.revision };
   },
 };
 

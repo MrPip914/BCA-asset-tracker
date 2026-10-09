@@ -91,6 +91,11 @@ const WRITE_SQL: Record<string, (tx: postgres.TransactionSql, email: string, a: 
   replace_floor_plan: (tx, email, [expected, asset, planFile, links, groups]) =>
     tx`select asset_tracker.connector_replace_floor_plan(${email}, ${JSON.stringify(expected)}::text::jsonb, ${asset as string},
       ${JSON.stringify(planFile)}::text::jsonb, ${JSON.stringify(links)}::text::jsonb, ${JSON.stringify(groups)}::text::jsonb) as out`,
+  // set_plan_walls (0009): new walls and audit rows through connector_apply,
+  // then each named wall's edges on the plan.
+  set_plan_walls: (tx, email, [expected, asset, ops, walls, removes]) =>
+    tx`select asset_tracker.connector_set_plan_walls(${email}, ${JSON.stringify(expected)}::text::jsonb, ${asset as string},
+      ${JSON.stringify(ops)}::text::jsonb, ${JSON.stringify(walls)}::text::jsonb, ${JSON.stringify(removes)}::text::jsonb) as out`,
 };
 
 async function write(tenant: string, email: string, op: string, args: unknown[]) {
