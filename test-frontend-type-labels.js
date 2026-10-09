@@ -67,8 +67,9 @@ const code = [
   grabFn('ensureShippedLabels'),
   grabFn('sortTypesByName'),
   grabFn('matchesLabelFilter'),
+  grabFn('groupByLabel'),
   'function setOverride(id, over) { TYPE_SETTINGS[id] = over; }',
-  'module.exports = { DEFAULT_TYPE_LABELS, UNLABELED_LABEL, typeLabelIdsOf, typeLabelNamesOf, ensureShippedLabels, sortTypesByName, matchesLabelFilter, setOverride, TYPE_REGISTRY };',
+  'module.exports = { DEFAULT_TYPE_LABELS, UNLABELED_LABEL, typeLabelIdsOf, typeLabelNamesOf, ensureShippedLabels, sortTypesByName, matchesLabelFilter, groupByLabel, setOverride, TYPE_REGISTRY };',
 ].join('\n');
 
 const mod = { exports: {} };
@@ -80,7 +81,7 @@ try {
 }
 const {
   DEFAULT_TYPE_LABELS, UNLABELED_LABEL, typeLabelIdsOf, typeLabelNamesOf,
-  ensureShippedLabels, sortTypesByName, matchesLabelFilter, setOverride, TYPE_REGISTRY,
+  ensureShippedLabels, sortTypesByName, matchesLabelFilter, groupByLabel, setOverride, TYPE_REGISTRY,
 } = mod.exports;
 
 let pass = 0, fail = 0;
@@ -204,6 +205,29 @@ check('an unregistered type has none either', typeLabelIdsOf('some-uuid').length
   check('null is EXEMPT — it survives every filter',
     matchesLabelFilter(null, ['Equipment']) && matchesLabelFilter(null, ['']),
     'this is what keeps the "All types" row, which clears the filter, on screen');
+}
+
+// --- groupByLabel: the collapsible headings (2026-10-09) ---------------------
+{
+  const VOCAB = [{ id: 'z', name: 'Zeta' }, { id: 'a', name: 'Alpha' }, { id: 'empty', name: 'Nobody' }];
+  const LABELS = { mon: ['a'], tv: ['a', 'z'], pump: ['z'], odd: [], ghost: ['deleted-uuid'], all: null };
+  const { exempt, groups } = groupByLabel(['all', 'mon', 'odd', 'pump', 'tv', 'ghost'], VOCAB, o => LABELS[o]);
+  check('groups follow the VOCABULARY order, not alphabetical',
+    groups.map(g => g.name).join(',') === 'Zeta,Alpha,Unlabeled',
+    'the manager orders the labels; got ' + groups.map(g => g.name).join(','));
+  check('a label nothing carries gets no heading',
+    !groups.some(g => g.id === 'empty'));
+  check('a two-label type is listed under BOTH',
+    groups.find(g => g.id === 'z').options.includes('tv') && groups.find(g => g.id === 'a').options.includes('tv'));
+  check('options keep the order they were passed in',
+    groups.find(g => g.id === 'z').options.join(',') === 'pump,tv');
+  check('no label, or only a DANGLING one, goes under Unlabeled, LAST',
+    groups[groups.length - 1].id === '' && groups[groups.length - 1].options.join(',') === 'odd,ghost');
+  check('null is EXEMPT: returned apart, in no group',
+    exempt.join(',') === 'all' && !groups.some(g => g.options.includes('all')),
+    'the asset\'s own removed type renders above every heading');
+  check('a type naming one label twice is listed once under it',
+    groupByLabel(['x'], VOCAB, () => ['a', 'a']).groups[0].options.length === 1);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

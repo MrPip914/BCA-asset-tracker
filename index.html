@@ -395,6 +395,40 @@ function matchesLabelFilter(labelIds, active) {
   return labelIds.some(id => active.includes(id));
 }
 
+// LABELS AS EXPANDABLE GROUPS (2026-10-09, Eric's call). The Type picker, the
+// type manager and the map's pin filter list types under one heading per label,
+// each heading collapsible. A type carrying TWO labels is listed under BOTH --
+// the double-counting that once retired grouping (see test-frontend-type-labels)
+// is accepted now, because a collapsed group is how someone narrows to "the
+// Facilities types", and a type missing from a group it carries would be the
+// worse lie. A type with no label, or only dangling ones, goes under Unlabeled
+// (id ""), always LAST.
+//
+// Groups follow the VOCABULARY's order (the order the manager sets), empty
+// groups are dropped, and options keep the order they were passed in -- the
+// caller sorts them (A→Z by name everywhere today). `labelsOf(opt)` returning
+// null means EXEMPT, exactly as for matchesLabelFilter; exempt options are
+// returned apart so the caller can render them above every group.
+function groupByLabel(options, labels, labelsOf) {
+  const vocab = labels || [];
+  const known = new Set(vocab.map(l => l.id));
+  const buckets = new Map(vocab.map(l => [l.id, []]));
+  const unlabeled = [];
+  const exempt = [];
+  (options || []).forEach(opt => {
+    const ids = labelsOf(opt);
+    if (ids === null) { exempt.push(opt); return; }
+    const live = [...new Set((ids || []).filter(id => known.has(id)))];
+    if (!live.length) unlabeled.push(opt);
+    else live.forEach(id => buckets.get(id).push(opt));
+  });
+  const groups = vocab
+    .filter(l => buckets.get(l.id).length)
+    .map(l => ({ id: l.id, name: l.name, options: buckets.get(l.id) }));
+  if (unlabeled.length) groups.push({ id: "", name: UNLABELED_LABEL, options: unlabeled });
+  return { exempt, groups };
+}
+
 // THE TYPE-ICON CATALOG, GROUPED.
 //
 // A user-chosen icon is stored as a NAME from this catalog, never a component —
@@ -4604,7 +4638,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-08.12";
+const APP_VERSION = "2026-10-09.1";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -14531,6 +14565,7 @@ function AssetTracker() {
                 selectedAsset={selectedAsset}
                 assets={assets}
                 typesList={typesList}
+                typeLabels={typeLabels}
                 uploadBusy={floorPlanUploadBusy}
                 uploadError={floorPlanUploadError}
                 onUploadPlan={(file, oldSpaces) => uploadFloorPlanSvg(selectedAsset.id, file, oldSpaces)}
@@ -16679,6 +16714,7 @@ function AssetTracker() {
           canEdit={canEdit}
           assets={assets}
           typesList={typesList}
+          typeLabels={typeLabels}
           scopeAsset={mapScopeAsset}
           uploadBusy={floorPlanUploadBusy}
           uploadError={floorPlanUploadError}
@@ -17324,16 +17360,15 @@ function PickerTrigger({ value, placeholder, onClick, ariaLabel, truncateStart, 
 // display only, so renaming a type changes what this shows and nothing else.
 function TypeField({ value, onChange, types, onManage, labels }) {
   const [open, setOpen] = useState(false);
-  // ALPHABETICAL, and nothing else. The list was ordered by category because the
-  // picker drew a heading per category; a type carries several labels now, so
-  // the labels are a filter inside the picker (see useLabelFilter) and the order
-  // is the one order anyone can predict.
+  // A→Z, and grouped under one collapsible heading per label inside the picker
+  // (SelectionModal's labelOptions, see groupByLabel) -- the name order is the
+  // order inside every group.
   const ids = sortTypesByName(types).map(t => t.id);
   // A type removed from the managed list stays selectable on the asset already
   // using it, so opening the form doesn't silently blank its Type. It is EXEMPT
-  // from the label filter (null) rather than unlabeled: it is not in the list at
-  // all, so filtering it away would leave the asset's own current value with no
-  // row to show it selected.
+  // from the label groups (null) rather than unlabeled: it is not in the list at
+  // all, so it renders above every group, where the asset's own current value
+  // stays visible and ticked.
   const options = ids.includes(value) || !value ? ids : [value, ...ids];
   // A <div>, NOT a <label>: the picker renders inside this wrapper, and the click
   // that chooses an option closes the picker mid-click, so a label would forward
@@ -18289,12 +18324,12 @@ function TypeManagerModal({
     }
     return out;
   }, [iconQuery, iconFavorites]);
-  // The TYPE LIST gets the same label filter the Type picker carries, from the
-  // same hook — this list grows with the inventory too, and "show me the
-  // Facilities types" is how anyone looks for one. Called here, unconditionally,
-  // rather than inside the list view: it holds state, and a hook that only runs
-  // in one of this modal's three views is a hook that runs conditionally.
-  const { options: shownTypes, bar: labelFilterBar } = useLabelFilter(types, labels, t => typeLabelIdsOf(t.id));
+  // The TYPE LIST is grouped under the same collapsible label headings the Type
+  // picker draws (groupByLabel). Which headings are open is held here,
+  // unconditionally, rather than inside the list view: a hook that only runs in
+  // one of this modal's views is a hook that runs conditionally. All start
+  // collapsed -- the headings and their counts ARE the overview.
+  const [openTypeGroups, setOpenTypeGroups] = useState([]);
   const [draft, setDraft] = useState(null); // { id, name, iconName, parentTypes, fields, newFields }
   // The new-field dialog, as ONE object rather than four parallel states —
   // label, kind, choices and its error open and close together, so grouping
@@ -19125,19 +19160,15 @@ function TypeManagerModal({
             <div style={{ fontSize: 12, color: C.empty, marginBottom: 10 }}>
               Renaming a type updates it everywhere — assets keep their type. Room, Building, Bulk Item, Campus and Electrical Panel are built into the app and can't be removed.
             </div>
-            {labelFilterBar}
-            <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
-              {/* FLAT AND A→Z. This was grouped under one heading per category
-                  until a type could carry several labels — at which point a
-                  grouped list has to print a two-label type twice, once under
-                  each heading, and stops answering "how many types are there".
-                  The labels moved to the filter bar above and onto the rows. */}
-              {sortTypesByName(shownTypes).map(t => {
+            {(() => {
+              // One row per type, drawn once per group it sits in -- a type
+              // carrying two labels appears under both headings.
+              const renderTypeRow = (t, rowKey) => {
                 const locked = isLocked ? isLocked(t.id) : false;
                 const inUse = countFor ? countFor(t.id) : 0;
                 const Ico = iconFor(t.id);
                 return (
-                  <div key={t.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 14 }}>
+                  <div key={rowKey} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 14, paddingLeft: grouped ? 26 : 0 }}>
                     {confirmId === t.id ? (
                       <>
                         <span style={{ color: C.danger, fontSize: 13 }}>
@@ -19190,11 +19221,31 @@ function TypeManagerModal({
                     )}
                   </div>
                 );
-              })}
-              {shownTypes.length === 0 && types.length > 0 && (
-                <div style={{ fontSize: 13, color: C.empty }}>No types carry that label.</div>
-              )}
-            </div>
+              };
+              const { groups } = groupByLabel(sortTypesByName(types), labels, t => typeLabelIdsOf(t.id));
+              // One heading is no grouping (everything unlabeled, say).
+              const grouped = groups.length > 1;
+              return (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
+                  {!grouped && sortTypesByName(types).map(t => renderTypeRow(t, t.id))}
+                  {grouped && groups.map(g => {
+                    const open = openTypeGroups.includes(g.id);
+                    return (
+                      <React.Fragment key={"group:" + (g.id || "__unlabeled__")}>
+                        <LabelGroupHeader
+                          name={g.name}
+                          count={g.options.length}
+                          open={open}
+                          unlabeled={!g.id}
+                          onToggle={() => setOpenTypeGroups(list => (list.includes(g.id) ? list.filter(x => x !== g.id) : [...list, g.id]))}
+                        />
+                        {open && g.options.map(t => renderTypeRow(t, (g.id || "__unlabeled__") + ":" + t.id))}
+                      </React.Fragment>
+                    );
+                  })}
+                </div>
+              );
+            })()}
 
             {canEdit && (
               <div style={{ display: "flex", gap: 6 }}>
@@ -19310,19 +19361,18 @@ function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onR
 }
 
 // A chip row that narrows a list of options by the LABELS those options carry,
-// plus the narrowed list itself. One implementation, shared by the two places
-// that pick a type — the Type field's SelectionModal and the Type column's
-// filter — because two copies of a filter is how two lists of the same thing
-// start behaving differently. It replaced the `groupForOption` both took when a
-// type had exactly one category; see TYPE LABELS for why grouping had to go.
+// plus the narrowed list itself. Its one caller now is the Type column's
+// filter (ColumnFilterModal). The Type picker, the type manager and the map's
+// pin filter moved to collapsible label GROUPS instead (groupByLabel, Eric's
+// call 2026-10-09); the column filter was not part of that ask and kept its
+// chips.
 //
 // A HOOK RATHER THAN A COMPONENT, because the bar and the filtering are one
 // piece of state and the caller still renders its own rows: a component owning
 // the list as well would have to own every row's look too.
 //
 // Returns { options, bar }, and `bar` is null — with `options` handed straight
-// back — for every caller that supplies no vocabulary, which is all of them but
-// those two (Frequency, Vendor, Breaker Type, ChildEntityTable's generic
+// back — for every caller that supplies no vocabulary (Frequency, Vendor, Breaker Type, ChildEntityTable's generic
 // selects, and the User/Status column filters render exactly as before).
 function useLabelFilter(options, labelOptions, labelsForOption) {
   const [active, setActive] = useState([]);
@@ -19378,6 +19428,30 @@ function useLabelFilter(options, labelOptions, labelsForOption) {
   return { options: visible, bar };
 }
 
+// One collapsible label heading: the Type picker, the type manager and the
+// map's pin filter all draw their groups with it, so "a label" looks and opens
+// the same way wherever types are listed. `leading` is an optional control in
+// front of the heading -- the pin filter's select-every-type-under-this-label
+// checkbox -- kept OUTSIDE the toggle button, since a button cannot hold one.
+function LabelGroupHeader({ name, count, open, onToggle, unlabeled, leading }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+      {leading}
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        className="icon-btn"
+        style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 6, padding: "8px 6px", background: "none", border: "none", borderRadius: 8, fontSize: 12, fontWeight: 700, letterSpacing: 0.4, textTransform: "uppercase", color: C.muted, textAlign: "left", fontStyle: unlabeled ? "italic" : "normal" }}
+      >
+        <ChevronRight size={14} style={{ flexShrink: 0, transform: open ? "rotate(90deg)" : "none", transition: "transform 0.15s" }} />
+        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</span>
+        <span style={{ flexShrink: 0, fontWeight: 400, fontSize: 11, color: C.empty, letterSpacing: 0 }}>{count}</span>
+      </button>
+    </div>
+  );
+}
+
 // Generic modal picker mirroring the column-filter popup's look: centered card,
 // scrollable list of option buttons, checkmark on the selected one. Used for any
 // single-select field (Type/Room/Building) that shouldn't use a native <select>.
@@ -19387,24 +19461,57 @@ function useLabelFilter(options, labelOptions, labelsForOption) {
 function SelectionModal({ title, options, value, onChange, onClose, labelForOption, emptyLabel, onManage, manageLabel, labelOptions, labelsForOption, searchable, multi }) {
   const getLabel = labelForOption || (o => o);
   const [searchQuery, setSearchQuery] = useState("");
-  // OPTIONAL label filter, absent for every caller but the Type picker — see
-  // useLabelFilter. It replaced the optional GROUPING this took while a type had
-  // exactly one category; forking this into a second, filtered picker is how the
-  // app would end up with two dropdown behaviours, which is the thing
-  // SelectionModal exists to prevent.
-  const { options: labelled, bar } = useLabelFilter(options, labelOptions, labelsForOption);
-  // OPTIONAL text search (Type picker), ANDed with the label chips: narrowing by
-  // "Equipment" and then typing "mon" means monitors carrying that label.
+  // OPTIONAL label GROUPS, absent for every caller but the Type picker: one
+  // collapsible heading per label (groupByLabel), replacing the chip filter
+  // this carried from 2026-09-11 (Eric's call, 2026-10-09). Opens with the
+  // current value's group(s) expanded, so the existing choice is visible and
+  // ticked without a click; everything else starts collapsed.
+  const grouped = !!(labelOptions && labelOptions.length && labelsForOption);
+  const [openGroups, setOpenGroups] = useState(() => {
+    if (!grouped) return [];
+    const current = multi ? (value || []) : (value ? [value] : []);
+    const { groups } = groupByLabel(options, labelOptions, labelsForOption);
+    return groups.filter(g => g.options.some(o => current.includes(o))).map(g => g.id);
+  });
+  const toggleGroup = id => setOpenGroups(list => (list.includes(id) ? list.filter(x => x !== id) : [...list, id]));
+  // OPTIONAL text search (Type picker). While a search is running every group
+  // holding a match is OPEN, since a match hidden inside a collapsed heading
+  // reads as no match at all.
   const searchNorm = searchable ? searchQuery.trim().toLowerCase() : "";
   const shown = searchNorm
-    ? labelled.filter(opt => String(getLabel(opt) ?? "").toLowerCase().includes(searchNorm))
-    : labelled;
+    ? options.filter(opt => String(getLabel(opt) ?? "").toLowerCase().includes(searchNorm))
+    : options;
+  const { exempt, groups } = grouped ? groupByLabel(shown, labelOptions, labelsForOption) : { exempt: shown, groups: [] };
+  // ONE group is no grouping: a picker whose only heading is "Unlabeled" (or
+  // one label every type carries) is a click spent revealing the whole list.
+  const flat = groups.length < 2;
+  const flatOptions = flat ? [...exempt, ...(groups[0] ? groups[0].options : [])] : exempt;
+  const renderRow = (opt, key, indent) => {
+    const isSelected = multi ? (value || []).includes(opt) : opt === (value || "");
+    return (
+      <button
+        key={key}
+        aria-pressed={multi ? isSelected : undefined}
+        onClick={() => {
+          if (multi) onChange(isSelected ? (value || []).filter(v => v !== opt) : [...(value || []), opt]);
+          else { onChange(opt); onClose(); }
+        }}
+        style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0,
+          padding: indent ? "9px 10px 9px 30px" : "9px 10px", background: isSelected ? C.hover : "transparent", border: "none",
+          borderRadius: 10, fontSize: 14, textAlign: "left", color: opt ? C.ink : C.empty, fontWeight: isSelected ? 600 : 400,
+        }}
+      >
+        {getLabel(opt)}
+        {isSelected && <Check size={15} color={C.brand} />}
+      </button>
+    );
+  };
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 40, padding: 16 }}>
       {/* A flex column that never scrolls; only the option list inside it does —
-          the shape ColumnFilterModal was already fixed into, and necessary here
-          for the same reason once a filter bar sits above the list: scrolling
-          the whole card takes the control you are filtering with off the top. */}
+          the shape ColumnFilterModal was already fixed into: scrolling the whole
+          card takes the search box off the top. */}
       <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 300, maxHeight: "70vh", display: "flex", flexDirection: "column", minHeight: 0 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexShrink: 0 }}>
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>{title}</div>
@@ -19430,37 +19537,23 @@ function SelectionModal({ title, options, value, onChange, onClose, labelForOpti
             />
           </div>
         )}
-        {bar}
         {options.length === 0 && emptyLabel && (
           <div style={{ fontSize: 13, color: C.empty, padding: "4px 2px 8px" }}>{emptyLabel}</div>
         )}
         <div style={{ display: "flex", flexDirection: "column", gap: 2, overflowY: "auto", minHeight: 0, flex: 1 }}>
-          {shown.map(opt => {
-            const isSelected = multi ? (value || []).includes(opt) : opt === (value || "");
+          {flatOptions.map(opt => renderRow(opt, opt || "__none__", false))}
+          {!flat && groups.map(g => {
+            const open = !!searchNorm || openGroups.includes(g.id);
             return (
-              <button
-                key={opt || "__none__"}
-                aria-pressed={multi ? isSelected : undefined}
-                onClick={() => {
-                  if (multi) onChange(isSelected ? (value || []).filter(v => v !== opt) : [...(value || []), opt]);
-                  else { onChange(opt); onClose(); }
-                }}
-                style={{
-                  display: "flex", alignItems: "center", justifyContent: "space-between",
-                  padding: "9px 10px", background: isSelected ? C.hover : "transparent", border: "none",
-                  borderRadius: 10, fontSize: 14, textAlign: "left", color: opt ? C.ink : C.empty, fontWeight: isSelected ? 600 : 400,
-                }}
-              >
-                {getLabel(opt)}
-                {isSelected && <Check size={15} color={C.brand} />}
-              </button>
+              <React.Fragment key={"group:" + (g.id || "__unlabeled__")}>
+                <LabelGroupHeader name={g.name} count={g.options.length} open={open} unlabeled={!g.id} onToggle={() => toggleGroup(g.id)} />
+                {open && g.options.map(opt => renderRow(opt, (g.id || "__unlabeled__") + ":" + (opt || "__none__"), true))}
+              </React.Fragment>
             );
           })}
-          {/* Says which control emptied the list. A picker that simply goes blank
-              reads as a broken picker. */}
           {shown.length === 0 && options.length > 0 && (
             <div style={{ fontSize: 13, color: C.empty, padding: "8px 2px" }}>
-              {searchNorm ? `Nothing matches "${searchQuery.trim()}".` : "Nothing carries that label."}
+              {`Nothing matches "${searchQuery.trim()}".`}
             </div>
           )}
         </div>
@@ -20828,7 +20921,7 @@ function MapOptionsOnlyMenu({ canEdit, asset, assets, menuSlot, onSaveMapOptions
 // to take "whichever asset" rather than assuming a detail page opened it
 // (see its own comment: "a Room's floor plan alongside a Building's").
 function MapTabContent({
-  canEdit, assets, typesList, scopeAsset,
+  canEdit, assets, typesList, typeLabels, scopeAsset,
   uploadBusy, uploadError, onUploadPlan, onSaveLink, onCreateRoom, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveMapOptions,
   focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onShowOnMap, onStartPlace, onFocusHandled, onOpenAsset, onOpenTask, onOpenWork, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange, listMode, onListModeChange, listFilters, onListFiltersChange, selectionMemoRef, returnScrollRef,
 }) {
@@ -20857,6 +20950,7 @@ function MapTabContent({
       selectedAsset={scopeAsset}
       assets={assets}
       typesList={typesList}
+      typeLabels={typeLabels}
       uploadBusy={uploadBusy}
       uploadError={uploadError}
       onUploadPlan={onUploadPlan}
@@ -20911,7 +21005,7 @@ function MapTabContent({
 // it was always written to take "whichever asset", never assuming a detail
 // page opened it.
 function FloorPlanTabContent({
-  canEdit, selectedAsset, assets, typesList,
+  canEdit, selectedAsset, assets, typesList, typeLabels,
   uploadBusy, uploadError, onUploadPlan,
   onSaveLink, onCreateRoom, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveMapOptions,
   focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onShowOnMap, onStartPlace, onFocusHandled, onOpenAsset, onOpenTask, onOpenWork, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange, listMode: listModeProp, onListModeChange, listFilters: listFiltersProp, onListFiltersChange, selectionMemoRef, returnScrollRef,
@@ -20997,6 +21091,7 @@ function FloorPlanTabContent({
   const [pinMode, setPinMode] = useState("none");
   const [pinTypes, setPinTypes] = useState([]);
   const [pinsOpen, setPinsOpen] = useState(false);       // Pins accordion in the menu
+  const [pinGroupsOpen, setPinGroupsOpen] = useState([]); // label headings expanded inside it
   const pinTypeShown = t => pinMode === "all" || (pinMode === "types" && pinTypes.includes(t));
   // Every change to the filter drops the info card if its pin just went away,
   // and drops the "Show on map" reveal -- choosing what to see is the user
@@ -22481,20 +22576,60 @@ function FloorPlanTabContent({
                         Only these types
                       </div>
                     )}
-                    {planTypes.map(t => {
-                      const on = pinMode === "types" && pinTypes.includes(t);
-                      return (
-                        <label key={t} className="icon-btn" style={rowStyle}>
-                          <input type="checkbox" checked={on} style={{ margin: 0 }}
-                            onChange={() => {
-                              const base = pinMode === "types" ? pinTypes : [];
-                              const next = on ? base.filter(x => x !== t) : [...base, t];
-                              applyPinFilter(next.length ? "types" : "none", next);
-                            }} />
-                          {typeNameOf(t, typesList)}
-                        </label>
-                      );
-                    })}
+                    {/* Grouped by LABEL (groupByLabel), each heading collapsible.
+                        The heading's own checkbox selects every type under that
+                        label pinned on this plan -- half-ticked when only some
+                        are -- and expanding it chooses them one at a time. A
+                        type carrying two labels sits under both, and ticking it
+                        in one ticks it in the other, since what is stored is the
+                        TYPE. One heading only (everything unlabeled) is no
+                        grouping, so that case stays the flat list it was. */}
+                    {(() => {
+                      const base = pinMode === "types" ? pinTypes : [];
+                      const setTypes = next => applyPinFilter(next.length ? "types" : "none", next);
+                      const typeRow = (t, key, indent) => {
+                        const on = base.includes(t);
+                        return (
+                          <label key={key} className="icon-btn" style={{ ...rowStyle, paddingLeft: indent ? 40 : 12 }}>
+                            <input type="checkbox" checked={on} style={{ margin: 0 }}
+                              onChange={() => setTypes(on ? base.filter(x => x !== t) : [...base, t])} />
+                            {typeNameOf(t, typesList)}
+                          </label>
+                        );
+                      };
+                      const { groups } = groupByLabel(planTypes, typeLabels, t => typeLabelIdsOf(t));
+                      if (groups.length < 2) return planTypes.map(t => typeRow(t, t, false));
+                      return groups.map(g => {
+                        const open = pinGroupsOpen.includes(g.id);
+                        const onCount = g.options.filter(t => base.includes(t)).length;
+                        const all = onCount === g.options.length;
+                        const some = onCount > 0 && !all;
+                        return (
+                          <React.Fragment key={"group:" + (g.id || "__unlabeled__")}>
+                            <LabelGroupHeader
+                              name={g.name}
+                              count={g.options.length}
+                              open={open}
+                              unlabeled={!g.id}
+                              onToggle={() => setPinGroupsOpen(list => (list.includes(g.id) ? list.filter(x => x !== g.id) : [...list, g.id]))}
+                              leading={
+                                <input
+                                  type="checkbox"
+                                  checked={all}
+                                  ref={el => { if (el) el.indeterminate = some; }}
+                                  aria-label={`All ${g.name} pins`}
+                                  style={{ margin: "0 0 0 12px", flexShrink: 0 }}
+                                  onChange={() => setTypes(all
+                                    ? base.filter(x => !g.options.includes(x))
+                                    : [...base, ...g.options.filter(x => !base.includes(x))])}
+                                />
+                              }
+                            />
+                            {open && g.options.map(t => typeRow(t, (g.id || "__unlabeled__") + ":" + t, true))}
+                          </React.Fragment>
+                        );
+                      });
+                    })()}
                     {planTypes.length === 0 && (
                       <div style={{ fontSize: 12, color: C.muted, padding: "4px 12px 8px" }}>Nothing is pinned on this plan yet.</div>
                     )}
