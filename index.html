@@ -4638,7 +4638,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-09.5";
+const APP_VERSION = "2026-10-09.6";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -20938,7 +20938,14 @@ function floorPlanIsSegmentId(id) {
 // so it means the same on a campus site plan as on a single room.
 // Runs the probe through each space's bounding box first: a plan has dozens of
 // spaces and every cell would otherwise test all of them.
-function floorPlanExteriorSegments(spaces) {
+//
+// `covers`, when given, says which OTHER spaces count as being on the far side
+// at all (see floorPlanWallCoverSet). Without it every space does, which is the
+// right reading of a building's own plan: rooms, halls and closets are all
+// indoors. A site plan is different -- 3C's campus tiles every building with
+// courtyard, sidewalk and parking shapes, and treating those as "something on
+// the far side" left no building with a single exterior edge.
+function floorPlanExteriorSegments(spaces, covers) {
   const list = (spaces || []).filter(sp => sp && sp.pts && sp.pts.length >= 3);
   if (!list.length) return [];
   const all = floorPlanBbox(list.flatMap(sp => sp.pts));
@@ -20960,7 +20967,7 @@ function floorPlanExteriorSegments(spaces) {
       for (let c = 0; c < cells; c++) {
         const t = (c + 0.5) / cells;
         const probe = [a[0] + dx * t + nx * eps, a[1] + dy * t + ny * eps];
-        exposed.push(!list.some(o => o !== sp && inBox(o.bbox || floorPlanBbox(o.pts), probe) && floorPlanPointInPoly(probe, o.pts)));
+        exposed.push(!list.some(o => o !== sp && (!covers || covers(o)) && inBox(o.bbox || floorPlanBbox(o.pts), probe) && floorPlanPointInPoly(probe, o.pts)));
       }
       const runs = [];
       for (let c = 0; c < cells;) {
@@ -20980,6 +20987,27 @@ function floorPlanExteriorSegments(spaces) {
     }
   });
   return out;
+}
+
+// Which spaces can stand on the far side of a wall, for a plan's owner. A plan
+// that IS a building, or sits inside one (a floor), returns null: every space
+// counts, exactly as before. Any other plan -- a campus or a site -- is a plan
+// of BUILDINGS on open ground, so only a space linked to a building (or to
+// something inside one) counts, and an edge facing anything else -- an unlinked
+// courtyard, a sidewalk, a parking lot -- is outside. "Is this a Building" is an
+// identity question, so comparing the type here is right (see
+// nearestAncestorOfType). Returned as a Set of shape ids so the caller can key a
+// memo on it.
+function floorPlanWallCoverSet(owner, links, assets) {
+  const inBuilding = a => !!a && (a.type === "Building" || !!nearestAncestorOfType(a, assets, "Building"));
+  if (!owner || inBuilding(owner)) return null;
+  const byId = new Map((assets || []).map(a => [a.id, a]));
+  const set = new Set();
+  (links || []).forEach(l => {
+    if (!l || !l.roomId || floorPlanIsSegmentId(l.shapeId)) return;
+    if (inBuilding(byId.get(l.roomId))) set.add(l.shapeId);
+  });
+  return set;
 }
 
 // The walls a plan carries: wall asset id -> its segment ids, from the link rows
@@ -21323,10 +21351,16 @@ function FloorPlanTabContent({
 
   // ---- walls: exterior segments derived from the spaces, and the wall assets
   // whose link rows name them. The derivation is the costly part (every edge of
-  // every space is probed), so it is memoised on the spaces and nothing else.
+  // every space is probed), so it is memoised on the spaces and on which of
+  // them count as indoors (floorPlanWallCoverSet), and nothing else.
+  const wallCoverSet = floorPlanWallCoverSet(selectedAsset, links, assets);
+  const wallCoverKey = wallCoverSet ? [...wallCoverSet].sort().join("|") : null;
   const exteriorSegs = useMemo(
-    () => (plan.status === "ready" ? floorPlanExteriorSegments(plan.spaces) : []),
-    [plan]
+    () => (plan.status === "ready"
+      ? floorPlanExteriorSegments(plan.spaces, wallCoverSet ? (sp => wallCoverSet.has(sp.gid)) : null)
+      : []),
+    // wallCoverSet is rebuilt every render; its sorted key is what changes.
+    [plan, wallCoverKey]
   );
   const segById = useMemo(() => new Map(exteriorSegs.map(sg => [sg.id, sg])), [exteriorSegs]);
   // Only rows naming a segment that STILL exists and is still exterior count; a

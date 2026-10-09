@@ -597,7 +597,7 @@ but a task; editing a work entry is not offered.
   separates tenants underneath; the function must connect as an `asset_api` login role,
   never the service role.
 - **Reads are annotated read-only; the writes are annotated as writes, and the ones that
-  overwrite or remove (save_assets, archive_assets, edit_task, delete_task, replace_floor_plan) as
+  overwrite or remove (save_assets, archive_assets, edit_task, delete_task, replace_floor_plan, set_plan_walls) as
   destructive**, so Claude asks before each one unless the person told it to always allow
   that tool. A write marked read-only would run unasked, which `test-mcp-connector.mjs`
   guards.
@@ -684,6 +684,35 @@ but a task; editing a work entry is not offered.
     host's. Places only. `dry_run` uploads nothing and lists what would be dropped.
   - Uses the same three `CLOUDINARY_*` secrets as `asset-api`'s signing, and the tenant's
     `cloudinary_folder`.
+- **`get_plan_walls` / `set_plan_walls` are the Map tab's Walls setup** (2026-10-09,
+  migration 0009), built so Claude can give each building a North/South/East/West wall by
+  sorting its outside edges by facing.
+  - **The outside-edge rule is the APP'S**: `floorPlanExteriorSegments`,
+    `floorPlanSetWallSegments` and the geometry under them (transform chain, rotation,
+    point-in-polygon, bbox) are copied verbatim into `from-app.js` and pinned, so a segment
+    id the connector offers is exactly one the Map tab draws. **Change that rule in
+    `index.html` and the test fails until it is re-copied.** `floorplan.js`'s
+    `floorPlanGeometryOf` carries points through ancestors' transforms as
+    `parseFloorPlanSvg` does (starting at the geometry's PARENT); it matched the app in
+    Chromium on all seven real plans, at rotation 0 and 1.
+  - **It also takes the app's `floorPlanWallCoverSet`** (PR #41): on a plan that is not a
+    building's own, only a space linked into a building closes off an edge. Computed from the
+    plan's links to shapes the drawing still has, exactly as the Map tab does.
+  - **Facing is the connector's own**: the outward normal as a bearing, nearest of the four,
+    with north = UP on the plan as the app shows it, after `floorPlanRotation`. The app has
+    no north, so that is the only honest reading.
+  - **Each entry is a wall's COMPLETE set of edges on that plan** (segment ids, or a space
+    plus a facing). A new wall is created through `planSaveAssets` (the import planner:
+    legal parent, `created` audit row), parented to what its space is linked to; `wall` +
+    `name` renames. An edge owned by a wall NOT in the change is refused, never taken;
+    every named wall is cleared first, so moving an edge between named walls works.
+    `remove` takes a wall off the plan and keeps the asset, as the app's unlink does.
+    `auto` (a list of spaces) expands to one new wall per facing that has edges, named
+    "<linked name> North Wall" etc. -- the building-walls case in one call.
+  - **One call to `connector_set_plan_walls`**, which runs `connector_apply` (role, the
+    revision, new walls, the app's `space_linked`/`space_unlinked` rows) and then rewrites
+    only the named walls' segment rows, refusing an edge still owned by any other row. A
+    room link on the same plan is never touched.
 - **Names are not unique, so a lookup is tiered** (id, tag, name, full path) and two
   matches is an error listing both with their locations, never the first one.
 - **The whole tenant is loaded per call.** Fine at hundreds of assets; the audit log is the

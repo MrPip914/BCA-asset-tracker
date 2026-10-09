@@ -772,7 +772,12 @@ const { floorPlanShapeMatches } = matchMod.exports;
     grabFn('floorPlanSetWallSegments'),
     grabFn('floorPlanRemapShapeIds'),
     grabFn('floorPlanRemapLinksAndGroups'),
-    'module.exports = { floorPlanSegmentId, floorPlanSegmentParts, floorPlanIsSegmentId, floorPlanExteriorSegments, floorPlanWallSegmentIds, floorPlanSetWallSegments, floorPlanRemapLinksAndGroups };',
+    'const MAX_PARENT_DEPTH = 50;',
+    grabFn('parentOf'),
+    grabFn('ancestorsOf'),
+    grabFn('nearestAncestorOfType'),
+    grabFn('floorPlanWallCoverSet'),
+    'module.exports = { floorPlanSegmentId, floorPlanSegmentParts, floorPlanIsSegmentId, floorPlanExteriorSegments, floorPlanWallSegmentIds, floorPlanSetWallSegments, floorPlanRemapLinksAndGroups, floorPlanWallCoverSet };',
   ].join('\n'))(wallMod);
   const W = wallMod.exports;
   const sq = (gid, x, y, w, h) => ({ gid, title: 'Space.' + gid, pts: [[x, y], [x + w, y], [x + w, y + h], [x, y + h]], bbox: { x, y, w, h } });
@@ -810,6 +815,36 @@ const { floorPlanShapeMatches } = matchMod.exports;
     nested.filter(sg => sg.gid === 'Bldg').length === 4, nested.filter(sg => sg.gid === 'Bldg').map(s2 => s2.id).join(','));
   check('Exterior: an interior room edge, away from the outline, is not offered',
     !nested.some(sg => sg.gid === 'Rm' && Math.abs(sg.a[0] - 100) < 1e-6 && Math.abs(sg.b[0] - 100) < 1e-6));
+
+  // A SITE plan (3C's campus): buildings tiled with courtyard and parking shapes.
+  // Only a space linked to a building stands on the far side of a wall, so a
+  // building's edge facing the courtyard is outside, while its edge against
+  // another building is not. A building's own plan keeps the old rule.
+  const siteAssets = [
+    { id: 'campus', type: 'Campus' },
+    { id: 'wc', type: 'Building', parentId: 'campus' },
+    { id: 'ceb', type: 'Building', parentId: 'campus' },
+    { id: 'rm', type: 'Room', parentId: 'wc' },
+    { id: 'lot', type: 'Other', parentId: 'campus' },
+  ];
+  const siteLinks = [
+    { shapeId: 'WC', roomId: 'wc' }, { shapeId: 'CEB', roomId: 'ceb' }, { shapeId: 'LOT', roomId: 'lot' },
+    { shapeId: 'WC#e0', roomId: 'wall-1' },
+  ];
+  const cover = W.floorPlanWallCoverSet(siteAssets[0], siteLinks, siteAssets);
+  check('Wall cover: on a campus plan only spaces linked to a building count, never a wall row or a non-building',
+    cover && [...cover].sort().join() === 'CEB,WC', cover && [...cover].join());
+  check('Wall cover: a building\'s own plan, or a room inside one, keeps every space counting',
+    W.floorPlanWallCoverSet(siteAssets[1], siteLinks, siteAssets) === null &&
+    W.floorPlanWallCoverSet(siteAssets[3], siteLinks, siteAssets) === null);
+  const site = [sq('WC', 0, 0, 100, 100), sq('CEB', 100, 0, 100, 100), sq('YARD', 0, 100, 200, 50), sq('LOT', 0, -50, 200, 50)];
+  const siteSegs = W.floorPlanExteriorSegments(site, sp => cover.has(sp.gid));
+  const wcSegs = siteSegs.filter(sg => sg.gid === 'WC').map(sg => sg.id).sort();
+  check('Exterior on a site plan: a building\'s edges facing a courtyard or a lot are outside; the one against another building is not',
+    wcSegs.join() === 'WC#e0,WC#e2,WC#e3', wcSegs.join());
+  const oldRule = W.floorPlanExteriorSegments(site).filter(sg => sg.gid === 'WC').map(sg => sg.id);
+  check('Exterior without a cover set is unchanged: the courtyard and the lot still count as neighbours',
+    oldRule.join() === 'WC#e3', oldRule.join());
 
   // The link rows.
   const links = [
