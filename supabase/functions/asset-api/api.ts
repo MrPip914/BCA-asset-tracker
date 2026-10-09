@@ -13,7 +13,7 @@ import {
   type Auth, authorizeIdentity, authorizeSession, createSession, deleteSession,
   type Identity, readSession, readUsers, verifyGoogleIdToken,
 } from "./auth.ts";
-import { readInventory } from "./inventory.ts";
+import { readAuditFull, readInventory } from "./inventory.ts";
 import { LOCK_TIMEOUT_MS, type SaveContext, saveInventory } from "./save.ts";
 
 // The backend contract version, in AssetTrackerSync.gs's series. index.html
@@ -106,6 +106,7 @@ export function createApi({ sql, verifyIdToken = verifyGoogleIdToken, now = Date
       }
       if (op === "read") return await read({ sessionId: body.sessionId }, tenantId, diag, started);
       if (op === "save") return await save(body, tenantId, diag, started);
+      if (op === "auditFull") return await auditFull(body, tenantId, diag);
       return json({ ok: false, error: `"${op}" isn't available on this backend yet.`, scriptVersion: SCRIPT_VERSION });
     } finally {
       // Stamped here so every entry carries the op and how long the request took.
@@ -162,6 +163,26 @@ export function createApi({ sql, verifyIdToken = verifyGoogleIdToken, now = Date
     } catch (err) {
       diag.push({ event: "error", detail: (err as Error)?.message });
       return json({ ok: false, error: "The server couldn't load the inventory: " + (err as Error)?.message, scriptVersion: SCRIPT_VERSION });
+    }
+  }
+
+  // handleAuditFull_: a session, any role, and the whole log.
+  async function auditFull(body: Body, tenantId: string, diag: DiagEntry[]) {
+    try {
+      const answer = await withTenant(sql, tenantId, async (tx) => {
+        const [tenant] = await tx`select owner_email from tenants`;
+        if (!tenant) return { ok: false, error: `There is no tenant "${tenantId}" on this backend.`, scriptVersion: SCRIPT_VERSION };
+        const users = await readUsers(tx, String(tenant.owner_email).toLowerCase());
+        const auth = await authorizeSession(tx, body.sessionId, users, now(), diag);
+        if (!auth.ok) {
+          return { ok: false, authFailed: true, reason: auth.reason, email: auth.email || "", error: auth.error, scriptVersion: SCRIPT_VERSION };
+        }
+        return { ok: true, ...(await readAuditFull(tx)), scriptVersion: SCRIPT_VERSION };
+      });
+      return json(answer);
+    } catch (err) {
+      diag.push({ event: "error", detail: (err as Error)?.message });
+      return json({ ok: false, error: "The server couldn't load the audit log: " + (err as Error)?.message, scriptVersion: SCRIPT_VERSION });
     }
   }
 
