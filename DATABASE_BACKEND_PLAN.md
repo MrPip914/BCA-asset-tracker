@@ -363,9 +363,42 @@ for the free tier; Pro's 7 daily backups and no-pause guarantee are what removes
 3. ~~Losing spreadsheet-style editing~~ — DECIDED 2026-10-06: acceptable. The nightly export remains the only Sheet-like artifact.
 4. ~~Paid tier from the start~~ — DECIDED: free tier for now, with the safeguards in "Running on the free tier".
 
-## Phase 2 (for later, not designed here)
+## Phase 2 (scheduled 2026-10-09, Eric's call)
 
-Per-record writes: `persist()` sends only changed records; the revision domains become
-per-record versions; conflicts shrink from "anyone saved any asset" to "someone saved THIS
-asset". Large (touches every save site) and optional once Phase 1 has removed the reliability
-problem.
+Two pieces, built on the dev tenant only, in this order. Live refresh first, because it is
+small and stands on its own; per-record writes second.
+
+### 2a. Live refresh: other people's changes appear without reloading
+
+The app picks up another user's save on its own. Built on the revision counters Phase 1
+already keeps -- nothing new has to be tracked.
+
+- **A cheap check, not a reload.** A new `op:"revisions"` answers only the per-domain
+  revision numbers (plus the session's validity), a few dozen bytes. The client compares them
+  with what it holds; only when one has moved does it run the ordinary `loadData()` read.
+- **When it checks:** every ~60s while the tab is VISIBLE, and immediately when the tab
+  becomes visible again or the window regains focus. Never while hidden, which is most of
+  the cost saved: a backgrounded tab costs nothing.
+- **Never under someone's hands.** If an edit form, a dialog or a write is in flight, a moved
+  revision is held and applied when it closes (or shown as a "New changes" pill to tap).
+  Swapping data under an open draft is the one thing this must not do -- it is the
+  conflict-reload case without the conflict.
+- **A refresh is a read, so it inherits every guard `loadData()` has**: the snapshot cache,
+  the session handling, the "Saved copy" state on failure. A failed check is silent and
+  retried next tick; it never signs anyone out (`backendPost`'s rules).
+- **Budget.** ~1,000 checks per open device per day at 60s. Fine for dev on the free tier's
+  500k function calls a month; re-measure before a school moves (see the free-tier budget
+  section). The interval is one constant.
+- **Supabase only.** Apps Script tenants keep manual refresh: the op could be added to the
+  `.gs`, but a ~1.5s round trip per check against a 90-minute daily quota is the wrong
+  trade. The client skips the check when the backend does not answer it.
+- Not Supabase Realtime: the portability rule (no Supabase-only features in the data path).
+
+### 2b. Per-record writes
+
+`persist()` sends only changed records; the revision domains become per-record versions;
+conflicts shrink from "anyone saved any asset" to "someone saved THIS asset". Large (touches
+every save site). Design it before building: which records a save names, how a per-record
+version is posted and checked, how the audit append and the managed lists ride along, and
+how a client that still sends a full snapshot keeps working during the switch. Live refresh
+(2a) makes this easier to verify, since a second browser shows the other's saves arriving.
