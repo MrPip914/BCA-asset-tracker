@@ -618,8 +618,9 @@ Nothing edits or deletes.
   - **"Today" is the site's day** (`SITE_TIME_ZONE`, America/Los_Angeles), not UTC's.
   - Covered by `db/test-connector-writes.sql` (CI, real Postgres, as the API role) and
     `test-mcp-connector.mjs` (the tools, against a fake `ctx.write`).
-  - **Until the dev app reads Supabase, a write is test data**: the app still reads the
-    Sheet, and every importer run replaces the tenant wholesale, erasing it.
+  - **The dev app reads and saves Supabase since 2026-10-09**, so a write is real dev data.
+    The Sheet importer no longer runs on a push, since it replaces the tenant wholesale;
+    it runs only from a manual `Database migrations` run with `reimport` = `replace dev`.
 - **Names are not unique, so a lookup is tiered** (id, tag, name, full path) and two
   matches is an error listing both with their locations, never the first one.
 - **The whole tenant is loaded per call.** Fine at hundreds of assets; the audit log is the
@@ -782,6 +783,13 @@ onboard one.
   allowlist answers "may they in". Holding a client id authorizes nothing, so one client
   leaks nothing between tenants, and it keeps the authorized-JavaScript-origins list to one
   entry rather than one per school.
+- **The dev tenant runs on Supabase (2026-10-09), the others on Apps Script.** Its
+  `apiUrl` in `clients.js` is the `asset-api` Edge Function (`?tenant=dev`), and its old
+  `/exec` is kept as `sheetApiUrl`. **`deploy.mjs` and the `Deploy backend` workflow still
+  deploy dev's Apps Script project, and verify against `sheetApiUrl`** — that fallback is
+  the only place a `.gs` change can be tried before a school. To drive the app against it,
+  open `/dev/?backend=sheet` (its `localStorage` keys get a `:sheet` suffix, so its
+  sessions never meet Supabase's). Everything else about block B above is unchanged.
 - **Every `localStorage` key is namespaced by tenant** (`CLIENT.storageKey()` →
   `asset-tracker-session:bca`). All tenants share one origin, so without it opening client B
   after client A hands B's backend A's session id — rejected correctly, so not a hole, but

@@ -254,9 +254,15 @@ if (!wantStatus && backendVersion !== frontendVersion) {
 // The answer to "which tenant is on which version", asked rather than remembered. Every
 // deploy-state line ever written into CLAUDE.md went stale; this cannot, and it needs no
 // sign-in because /exec reports scriptVersion even on its authFailed response.
+//
+// A tenant that has moved to Supabase keeps its Apps Script /exec as `sheetApiUrl`, and
+// that is the one asked here: this tool deploys Apps Script, so verifying against the
+// Supabase URL would report the Edge Function's version as this deploy's outcome.
+const execUrlOf = (id) => CLIENTS[id].sheetApiUrl || CLIENTS[id].apiUrl;
+
 async function liveVersionOf(id) {
   try {
-    const res = await fetch(CLIENTS[id].apiUrl, { redirect: "follow" });
+    const res = await fetch(execUrlOf(id), { redirect: "follow" });
     const body = await res.text();
     return (JSON.parse(body) || {}).scriptVersion ?? null;
   } catch {
@@ -273,7 +279,8 @@ if (wantStatus) {
     const ok = live === backendVersion;
     if (!ok) anyStale = true;
     console.log(
-      `  ${ok ? "✓" : "✗"} ${id.padEnd(width)}  ${(live || "no answer").padEnd(12)}  ${CLIENTS[id].orgName}`
+      `  ${ok ? "✓" : "✗"} ${id.padEnd(width)}  ${(live || "no answer").padEnd(12)}  ${CLIENTS[id].orgName}` +
+        (CLIENTS[id].sheetApiUrl ? "  (the app uses Supabase; this is its Apps Script fallback)" : "")
     );
   }
   console.log(
