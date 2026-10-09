@@ -370,6 +370,8 @@ small and stands on its own; per-record writes second.
 
 ### 2a. Live refresh: other people's changes appear without reloading
 
+**Built 2026-10-09** (see CLAUDE.md, "Live refresh"). What follows is the design it built.
+
 The app picks up another user's save on its own. Built on the revision counters Phase 1
 already keeps -- nothing new has to be tracked.
 

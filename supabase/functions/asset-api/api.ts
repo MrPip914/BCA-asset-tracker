@@ -1,7 +1,7 @@
 // The request handler: the same requests AssetTrackerSync.gs answers, with the
 // same answers, so index.html changes by a URL and not a rewrite
 // (DATABASE_BACKEND_PLAN.md). Ported so far: signin, read, signout, save (a
-// body with no op), auditFull, diagnostics, photoSign, floorPlanSign, the
+// body with no op), auditFull, revisions, diagnostics, photoSign, floorPlanSign, the
 // public panel read (GET ?panel=), and the bare GET.
 // Everything else answers that it is not here YET -- as JSON, never an error
 // page, which is the one thing every answer must be.
@@ -14,7 +14,7 @@ import {
   type Auth, authorizeIdentity, authorizeSession, createSession, deleteSession,
   type Identity, readSession, readUsers, verifyGoogleIdToken,
 } from "./auth.ts";
-import { readAuditFull, readInventory } from "./inventory.ts";
+import { readAuditFull, readInventory, readRevisions } from "./inventory.ts";
 import { LOCK_TIMEOUT_MS, type SaveContext, saveInventory } from "./save.ts";
 import { publicPanel } from "./panel.ts";
 import { type CloudinaryCreds, NOT_SET_UP, signFloorPlan, signPhotos } from "./sign.ts";
@@ -129,6 +129,7 @@ export function createApi({
       if (op === "read") return await read({ sessionId: body.sessionId }, tenantId, diag, started);
       if (op === "save") return await save(body, tenantId, diag, started);
       if (op === "auditFull") return await auditFull(body, tenantId, diag);
+      if (op === "revisions") return await revisions(body, tenantId, diag);
       if (op === "diagnostics") return await diagnostics(body, tenantId, diag);
       if (op === "photoSign" || op === "floorPlanSign") return await sign(op, body, tenantId, diag);
       return json({ ok: false, error: `"${op}" isn't available on this backend yet.`, scriptVersion: SCRIPT_VERSION });
@@ -207,6 +208,30 @@ export function createApi({
     } catch (err) {
       diag.push({ event: "error", detail: (err as Error)?.message });
       return json({ ok: false, error: "The server couldn't load the audit log: " + (err as Error)?.message, scriptVersion: SCRIPT_VERSION });
+    }
+  }
+
+  // The live refresh's cheap check (DATABASE_BACKEND_PLAN.md, Phase 2a): a
+  // session, any role, and the revision counters -- nothing else. The client
+  // runs a full read only when one has moved. Supabase-only on purpose: the
+  // Sheet backend has no such op, and its doPost would read an unknown op as a
+  // save, so the client never sends it there.
+  async function revisions(body: Body, tenantId: string, diag: DiagEntry[]) {
+    try {
+      const answer = await withTenant(sql, tenantId, async (tx) => {
+        const [tenant] = await tx`select owner_email from tenants`;
+        if (!tenant) return { ok: false, error: `There is no tenant "${tenantId}" on this backend.`, scriptVersion: SCRIPT_VERSION };
+        const users = await readUsers(tx, String(tenant.owner_email).toLowerCase());
+        const auth = await authorizeSession(tx, body.sessionId, users, now(), diag);
+        if (!auth.ok) {
+          return { ok: false, authFailed: true, reason: auth.reason, email: auth.email || "", error: auth.error, scriptVersion: SCRIPT_VERSION };
+        }
+        return { ok: true, revisions: await readRevisions(tx), role: auth.role, scriptVersion: SCRIPT_VERSION };
+      });
+      return json(answer);
+    } catch (err) {
+      diag.push({ event: "error", detail: (err as Error)?.message });
+      return json({ ok: false, error: "The server couldn't check for changes: " + (err as Error)?.message, scriptVersion: SCRIPT_VERSION });
     }
   }
 

@@ -224,11 +224,11 @@ eq('persist computes a photos dirty flag',
    /photos: nextPhotos !== photos/.test(src), true);
 eq('persist sends photos in the payload',
    /photos: nextPhotos,/.test(src), true);
-// Three: the sign-in and read shapes of loadData's request, and the About
-// panel's op:"diagnostics" (v42), which a pre-v42 backend would otherwise treat
-// as a rewrite-everything save.
+// Four: the sign-in and read shapes of loadData's request, the About panel's
+// op:"diagnostics" (v42), which a pre-v42 backend would otherwise treat as a
+// rewrite-everything save, and the live refresh's quiet read.
 eq('every non-save request declares photos:false, matching the _dirty read guard',
-   (src.match(/_dirty: \{ assets: false, config: false, breakerTypes: false, photos: false \}/g) || []).length, 3);
+   (src.match(/_dirty: \{ assets: false, config: false, breakerTypes: false, photos: false \}/g) || []).length, 4);
 eq('Photos is a common detail tab, not a per-type module',
    /"maintenance", "photos", "comments", "audit"/.test(src), true);
 // EXIF/GPS is dropped as a side effect of re-encoding; losing the canvas step

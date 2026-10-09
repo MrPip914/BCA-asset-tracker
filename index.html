@@ -4638,7 +4638,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-09.2";
+const APP_VERSION = "2026-10-09.3";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -4961,6 +4961,57 @@ function normalizeRevisions(raw) {
     out[d] = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
   });
   return out;
+}
+
+// --- Live refresh (DATABASE_BACKEND_PLAN.md, Phase 2a) -----------------------
+// Other people's saves appear without a reload. While the tab is VISIBLE the app
+// asks the backend for its revision counters alone (op:"revisions", a few dozen
+// bytes) every LIVE_REFRESH_INTERVAL_MS, and at once when the tab comes back or
+// the window regains focus. Only when a counter has MOVED past what this device
+// holds does it run an ordinary read, quietly, with no loading screen.
+//
+// SUPABASE ONLY, and that gate is load-bearing rather than tidy: the Apps Script
+// doPost reads an op it does not know as an ordinary SAVE, so a revisions check
+// sent there would be a write request. CLIENT.backend is "sheet" for every
+// Apps Script tenant and for /dev/?backend=sheet.
+//
+// NEVER UNDER SOMEONE'S HANDS. A refresh replaces `revisions` with the server's,
+// so a draft saved after it would no longer be refused as a conflict -- it would
+// quietly overwrite whatever the other person changed. So a moved counter is
+// HELD while a form, dialog, menu or write is open, and applied on the first
+// tick after it closes (liveRefreshHeld).
+const LIVE_REFRESH_SUPPORTED = CLIENT.backend === "supabase";
+const LIVE_REFRESH_INTERVAL_MS = 60000;
+// How often the held state is re-checked. No network call unless one is due.
+const LIVE_REFRESH_TICK_MS = 5000;
+
+// True when the server holds a newer copy of any domain than this device does.
+function revisionsMoved(server, held) {
+  const s = normalizeRevisions(server), h = normalizeRevisions(held);
+  return REVISION_DOMAINS.some(d => s[d] > h[d]);
+}
+
+// True when a fetched read is OLDER than what this device already holds in any
+// domain -- a save of this device's landed while the read was in flight, and
+// applying it would put the edit just made back the way it was.
+function revisionsBehind(server, held) {
+  const s = normalizeRevisions(server), h = normalizeRevisions(held);
+  return REVISION_DOMAINS.some(d => s[d] < h[d]);
+}
+
+// Whether to hold a refresh. `state.formOpen` and `state.writing` are the app's
+// own flags (an inline edit or add form, a write in flight). The DOM half
+// catches everything else without a list to keep in step: EVERY modal and menu
+// in this app is a `position: fixed; inset: 0` overlay, including the ones
+// inside child components with drafts of their own, and a focused text field
+// is someone typing.
+function liveRefreshHeld(state, doc) {
+  if (state && (state.formOpen || state.writing)) return true;
+  if (!doc) return false;
+  const el = doc.activeElement;
+  if (el && (el.tagName === "TEXTAREA" || el.isContentEditable
+    || (el.tagName === "INPUT" && !/^(checkbox|radio|button|submit|reset|range|file|color)$/i.test(el.type || "")))) return true;
+  return !!doc.querySelector('[style*="position: fixed"][style*="inset: 0"]');
 }
 
 // --- Asset ID (label) issuing ------------------------------------------------
@@ -7635,6 +7686,100 @@ function AssetTracker() {
     if (lastLoadedSandboxRef.current === sandboxMode) return;
     loadData();
   }, [sandboxMode, authSatisfied]);
+
+  // LIVE REFRESH -- see LIVE_REFRESH_SUPPORTED for the rules. The interval is
+  // mounted once and reads everything through refs refreshed on every render,
+  // so it always sees the current state and the current loadData/applySnapshot
+  // rather than the ones its first render closed over.
+  const liveRefreshRef = useRef({ lastCheck: 0, pending: false, inFlight: false, unsupported: false });
+  const liveRefreshLatestRef = useRef(null);
+  liveRefreshLatestRef.current = {
+    enabled: LIVE_REFRESH_SUPPORTED && !sandboxMode && !!auth && assets !== null
+      && !loading && !revalidating && !staleSnapshot && !loadError,
+    // The inline forms -- the asset edit and add forms, a half-typed comment,
+    // the Add Breaker and panel config forms -- render no overlay, so the DOM
+    // check cannot see them. A failed-save modal is an overlay, but it is also
+    // holding a draft to offer back, so it is named here as well.
+    formOpen: detailEditing || showAdd || commentDraft.trim() !== "" || !!addBreakerDraft
+      || showPanelConfig || importBusy || !!saveFailure,
+    loadData, applySnapshot,
+  };
+  useEffect(() => {
+    if (!LIVE_REFRESH_SUPPORTED) return undefined;
+    let stopped = false;
+    const r = liveRefreshRef.current;
+    const held = () => liveRefreshHeld({
+      formOpen: liveRefreshLatestRef.current.formOpen,
+      writing: pendingWritesRef.current > 0 || savingRef.current,
+    }, document);
+    const NO_RETRY = { delays: [], timeoutMs: 15000 };
+
+    async function refresh() {
+      const heldRevisions = revisionsRef.current;
+      const data = await backendPost(SHEET_API_URL, {
+        op: "read", sessionId: sessionId,
+        _dirty: { assets: false, config: false, breakerTypes: false, photos: false },
+      }, NO_RETRY);
+      const latest = liveRefreshLatestRef.current;
+      if (stopped || !latest.enabled) return;
+      if (data && data.authFailed) { r.pending = false; latest.loadData(); return; }
+      if (!data || data.ok === false || !Array.isArray(data.assets)) throw new Error((data && data.error) || "no inventory in the reply");
+      // Something started while the read was in flight: a write, a form, or a
+      // save of this device's that landed first. Stay pending and try again.
+      if (held() || revisionsRef.current !== heldRevisions || revisionsBehind(data.revisions, revisionsRef.current)) return;
+      latest.applySnapshot(data);
+      r.pending = false;
+      diagLog("live_refresh", "picked up a change saved elsewhere");
+      if (sessionId) writeSnapshotCache(sessionId, data);
+    }
+
+    async function tick(force) {
+      const latest = liveRefreshLatestRef.current;
+      if (stopped || !latest || !latest.enabled || r.unsupported || r.inFlight) return;
+      if (document.visibilityState !== "visible") return;
+      if (r.pending) {
+        if (held()) return;
+        r.inFlight = true;
+        try { await refresh(); }
+        catch (e) { r.pending = false; } // the next check finds the change again
+        finally { r.inFlight = false; }
+        return;
+      }
+      if (!force && Date.now() - r.lastCheck < LIVE_REFRESH_INTERVAL_MS) return;
+      r.lastCheck = Date.now();
+      r.inFlight = true;
+      try {
+        const data = await backendPost(SHEET_API_URL, { op: "revisions", sessionId: sessionId }, NO_RETRY);
+        if (stopped || !liveRefreshLatestRef.current.enabled) return;
+        if (data && data.authFailed) { liveRefreshLatestRef.current.loadData(); return; }
+        if (data && data.ok === false) {
+          // A backend deployed before this op answers that it is not here. Stop
+          // asking rather than asking once a minute for the rest of the session.
+          if (/isn't available/.test(data.error || "")) r.unsupported = true;
+          return;
+        }
+        if (data && revisionsMoved(data.revisions, revisionsRef.current)) r.pending = true;
+      } catch (e) {
+        // Silent: a missed check is retried on the next one, and never signs
+        // anyone out -- backendPost already refuses to read a blip as a refusal.
+      } finally {
+        r.inFlight = false;
+      }
+      if (r.pending) tick(false);
+    }
+
+    const timer = window.setInterval(() => { tick(false); }, LIVE_REFRESH_TICK_MS);
+    const onVisible = () => { if (document.visibilityState === "visible") tick(true); };
+    const onFocus = () => { tick(true); };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, []);
 
   // Consumes a shared deep link (?asset=<id or label>&tab=breakers) once, on the
   // first load where assets are actually available — jumps straight to that

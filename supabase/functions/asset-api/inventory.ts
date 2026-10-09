@@ -71,8 +71,6 @@ export async function readInventory(tx: Tx) {
 
   const cfg: Row = {};
   for (const r of config) cfg[r.key] = r.value;
-  const rev: Row = {};
-  for (const r of revisions) rev[r.domain] = r.rev;
 
   const payload: Row = {
     assets: assets.map((a: Row) => ({
@@ -93,8 +91,22 @@ export async function readInventory(tx: Tx) {
   };
   for (const k of CONFIG_KEYS) payload[k] = cfg[k] || null;
   payload.nextAssetNumber = cfg.nextAssetNumber || null;
-  payload.revisions = Object.fromEntries(REVISION_DOMAINS.map((d) => [d, Number(rev[d]) > 0 ? Math.floor(rev[d]) : 0]));
+  payload.revisions = revisionsFrom(revisions);
   return payload;
+}
+
+// Every domain named, a missing or malformed counter read as 0 -- the shape the
+// client posts back as _revisions.
+const revisionsFrom = (rows: Row[]) => {
+  const rev: Row = {};
+  for (const r of rows) rev[r.domain] = r.rev;
+  return Object.fromEntries(REVISION_DOMAINS.map((d) => [d, Number(rev[d]) > 0 ? Math.floor(rev[d]) : 0]));
+};
+
+// op:"revisions": the counters alone, for the live refresh. A few dozen bytes,
+// so a client can ask often and run a full read only when one has moved.
+export async function readRevisions(tx: Tx) {
+  return revisionsFrom(await tx`select domain, rev from revisions`);
 }
 
 // handleAuditFull_: the WHOLE log, oldest first, for the views that must never

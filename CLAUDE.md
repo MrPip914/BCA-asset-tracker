@@ -626,6 +626,40 @@ Nothing edits or deletes.
 - **The whole tenant is loaded per call.** Fine at hundreds of assets; the audit log is the
   table that will make it slow, and the fix then is filtering it in SQL.
 
+## Live refresh (Supabase tenants, 2026-10-09)
+
+Another person's save appears without a reload (`DATABASE_BACKEND_PLAN.md`, Phase 2a).
+While the tab is visible the app sends `op:"revisions"` every minute, and at once on
+focus or when the tab comes back. That answers the four revision counters and nothing
+else. Only when one has moved past this device's does it run a quiet `op:"read"` (no
+loading screen) and apply it through `applySnapshot`, the same as a load.
+
+- **Supabase only (`LIVE_REFRESH_SUPPORTED`), and the gate is load-bearing.** The Apps
+  Script `doPost` reads an op it does not know as a SAVE, so the check must never reach
+  it. Every Apps Script tenant and `/dev/?backend=sheet` keep manual refresh.
+- **HELD WHILE SOMEONE IS EDITING, because a refresh moves `revisions`.** Moving them
+  under an open draft turns the conflict that draft's save would have raised into a
+  silent overwrite of the other person's change. `liveRefreshHeld` holds on the inline
+  forms (named in `formOpen`), a write in flight, a focused text field, and ANY
+  `position: fixed; inset: 0` overlay. Every modal and menu in this app is one, which
+  covers child components' own drafts without a list to keep in step. **A new overlay
+  built some other way, or a new inline form, must join `formOpen`.** A held change is
+  applied on the first 5-second tick after the form closes.
+- **A read older than this device is discarded** (`revisionsBehind`). This covers a save
+  of this device's landing while the read was in flight. A device's own save never
+  triggers a read, since its reply already moved `revisions`.
+- One attempt per check (no retries), silent on failure. An `authFailed` goes through
+  `loadData()`, which signs out properly. A backend that answers "isn't available"
+  (deployed before this op) is not asked again that session.
+- Cost: ~1,000 checks per open device per day, against the free tier's 500k function
+  calls a month. Re-measure before a school moves.
+- Covered by `test-frontend-live-refresh.js` (helpers run for real, wiring read as
+  source, mutation-checked) and an `api_test.ts` case for the op. Driven in Chromium
+  against the real function on a local Postgres: a change elsewhere appears on focus,
+  stays held while the edit form is open and lands on Cancel; an idle check costs one
+  tiny request; the device's own save triggers no read; the Sheet backend never sees
+  the op.
+
 ## Local Sandbox mode
 
 Sandbox swaps the real Google Sheet for a local fixture (`MOCK_SNAPSHOT` in
