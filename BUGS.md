@@ -16,6 +16,16 @@ version that fixed them.
 
 ## Open
 
+### The QR sticker sheet page loads no panels
+**Found:** 2026-10-09, while moving the dev tenant to Supabase.
+**Needs a deploy:** no; frontend only, but it needs a decision (below).
+**Confirmed:** from the code, not driven in a browser. `panel-qr-sheet.html` fetches the
+bare backend URL and reads `data.assets`. Since v18 a bare GET answers only
+`authFailed` + `scriptVersion` (the read is a signed-in POST), so `assets` is always
+empty and the page has nothing to print, on every tenant and on both backends. The fix
+needs either a sign-in on that page or a new anonymous "list panels" read, and the second
+publishes the list of a school's panels to anyone, which is Eric's call.
+
 ### A save ran ~6 minutes holding the lock; everything behind it was refused as "busy"
 **Found:** 2026-09-30, from Eric's dev diagnostics export (app 2026-09-30.9, backend v47):
 `save_failed ... busy ... (43484ms)`, and the Diagnostics window's backend half refused as busy

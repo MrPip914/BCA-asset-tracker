@@ -144,7 +144,15 @@
       // is a readability loss and not a correctness one — but a screenshot from
       // dev now looks exactly like one from production.
       labelPrefix: "BCA",
-      apiUrl: "https://script.google.com/macros/s/AKfycbyMI_-SlWIYy1DxO0pjtAl31uQbWN5bFZLq9WMrTfrwHbeqNw4xfaGElEGdgT3yvUFI/exec",
+      // ON SUPABASE since 2026-10-09 (DATABASE_BACKEND_PLAN.md, rollout step 5):
+      // the asset-api Edge Function, which names the tenant in its query string.
+      apiUrl: "https://offremfwubxetpdkxtcy.supabase.co/functions/v1/asset-api?tenant=dev",
+      // The Apps Script /exec this tenant used before, KEPT and still deployable.
+      // It is the fallback, and it is the only place a change to
+      // AssetTrackerSync.gs can be tried before it reaches a school: open
+      // /dev/?backend=sheet to run the app against it. deploy.mjs deploys and
+      // verifies against this URL, never against apiUrl.
+      sheetApiUrl: "https://script.google.com/macros/s/AKfycbyMI_-SlWIYy1DxO0pjtAl31uQbWN5bFZLq9WMrTfrwHbeqNw4xfaGElEGdgT3yvUFI/exec",
 
       // NO `theme` here, deliberately, though a loud one would be the obvious
       // thing to give the dev tenant. It is the same argument as labelPrefix
@@ -300,6 +308,12 @@
     Object.keys(theme).forEach(function (key) { style.setProperty(cssVarName(key), theme[key]); });
   }
 
+  // ?backend=sheet runs a tenant that has moved to Supabase against its old
+  // Apps Script backend instead (see sheetApiUrl on the dev tenant). Ignored for
+  // a tenant that has no sheetApiUrl, i.e. one that never moved.
+  var useSheet = !!config.sheetApiUrl && (params.get("backend") || "").trim().toLowerCase() === "sheet";
+  var backend = config.sheetApiUrl && !useSheet ? "supabase" : "sheet";
+
   var theme = resolveTheme(config.theme);
   applyTheme(theme);
 
@@ -308,7 +322,9 @@
     appName: config.appName,
     orgName: config.orgName,
     labelPrefix: config.labelPrefix,
-    apiUrl: config.apiUrl,
+    apiUrl: useSheet ? config.sheetApiUrl : config.apiUrl,
+    // "sheet" (Apps Script) or "supabase": which backend apiUrl is.
+    backend: backend,
     isDefault: id === DEFAULT_CLIENT_ID,
 
     // The merged palette. index.html reads this straight into `C`; the two
@@ -340,7 +356,10 @@
      * adoptLegacyStorageKeys() there.
      */
     storageKey: function (base) {
-      return base + ":" + id;
+      // The Sheet fallback of a moved tenant gets keys of its own: its sessions
+      // mean nothing to Supabase, and sharing a key would read as a broken
+      // sign-in every time someone switched between the two.
+      return base + ":" + id + (useSheet ? ":sheet" : "");
     },
 
     /**

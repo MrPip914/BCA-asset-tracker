@@ -317,6 +317,15 @@ for the free tier; Pro's 7 daily backups and no-pause guarantee are what removes
    deletion, audit offset, public whitelist, photo signing). Mutation-check them as before.
 5. **Dev tenant cutover**: point `dev` at the new API, import, use it for a week. The old Sheet
    stays untouched and shareable with the service account as the fallback.
+   - **Done 2026-10-09.** `clients.js` gives dev `apiUrl` = the Edge Function and keeps the
+     old `/exec` as `sheetApiUrl`, which `deploy.mjs` deploys and verifies against, and which
+     `/dev/?backend=sheet` drives the app against (the only place a `.gs` change can be
+     tried before a school). `panel.html` appends `&panel=` once the URL carries a query.
+     The importer no longer runs on a push (it would erase app saves); a manual run of
+     `Database migrations` with `reimport` = `replace dev` is the only way to start it.
+   - **Switching back is a one-line `apiUrl` change, and it is lossy**: anything saved in
+     Supabase since does not reach the Sheet. The root build (`main`) still points dev at
+     the Sheet until this reaches `main`, so `assets.stama.tech/?client=dev` writes there.
 6. **First school** (ask Eric, per the client-dispatch rule): import, freeze edits for the
    few minutes the import takes (revision bump on the Sheet side so any open browser is
    refused), flip `clients.js`, keep the Sheet read-only for several weeks.
