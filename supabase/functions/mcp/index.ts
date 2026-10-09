@@ -19,7 +19,7 @@
 
 import postgres from "npm:postgres@3.4.5";
 import { handleMcp } from "./protocol.js";
-import { roleFor } from "./tools.js";
+import { roleFor, ToolError } from "./tools.js";
 import { createOAuth, makeSigner } from "./oauth.js";
 import { verifyGoogleIdToken } from "../asset-api/auth.ts";
 
@@ -48,8 +48,8 @@ const TABLE_SQL: Record<string, string> = {
 
 // Every read runs inside a transaction that first names its tenant, which is
 // what row-level security keys on, then drops to asset_api (the raw
-// connection would bypass RLS) and is declared READ ONLY, since asset_api
-// holds write grants and this connector must never use them. Same shape as
+// connection would bypass RLS) and is declared READ ONLY: asset_api holds
+// write grants, and the connector's only writes go through write() below. Same shape as
 // asset-api/db.ts's withTenant (PR #26); switch to importing that once it
 // lands, keeping the read-only line.
 function withTenant<T>(tenant: string, fn: (tx: postgres.TransactionSql) => Promise<T>): Promise<T> {
@@ -60,6 +60,42 @@ function withTenant<T>(tenant: string, fn: (tx: postgres.TransactionSql) => Prom
     await tx`set local role asset_api`;
     return fn(tx);
   }) as Promise<T>;
+}
+
+// A write: the same tenant and role setup, minus READ ONLY, and exactly one
+// statement -- a call to one of the 0006 functions, which does every check and
+// the revision bump itself. The connector never writes a table directly.
+// A record goes as TEXT cast to jsonb: postgres.js serializes a parameter it
+// infers as jsonb with JSON.stringify, so passing the string straight to
+// a jsonb cast would store a JSON string holding the record, not the record.
+const WRITE_SQL: Record<string, (tx: postgres.TransactionSql, email: string, a: unknown[]) => Promise<postgres.RowList<postgres.Row[]>>> = {
+  add_task: (tx, email, [asset, item]) =>
+    tx`select asset_tracker.connector_add_task(${email}, ${asset as string}, ${JSON.stringify(item)}::text::jsonb) as out`,
+  complete_task: (tx, email, [task, date, change]) =>
+    tx`select asset_tracker.connector_complete_task(${email}, ${task as string}, ${date as string}, ${JSON.stringify(change)}::text::jsonb) as out`,
+  log_work: (tx, email, [asset, change]) =>
+    tx`select asset_tracker.connector_log_work(${email}, ${asset as string}, ${JSON.stringify(change)}::text::jsonb) as out`,
+  add_comment: (tx, email, [asset, text]) =>
+    tx`select asset_tracker.connector_add_comment(${email}, ${asset as string}, ${text as string}) as out`,
+};
+
+async function write(tenant: string, email: string, op: string, args: unknown[]) {
+  const run = WRITE_SQL[op];
+  if (!run) throw new Error(`no writer for ${op}`);
+  try {
+    return await sql.begin(async (tx) => {
+      await tx`select set_config('app.tenant_id', ${tenant}, true)`;
+      await tx`select set_config('search_path', 'asset_tracker, public', true)`;
+      await tx`set local role asset_api`;
+      const [row] = await run(tx, email, args);
+      return row.out;
+    });
+  } catch (err) {
+    // The functions word their refusals for the person ("connector: ...").
+    const m = String((err as Error)?.message ?? "");
+    if (m.startsWith("connector: ")) throw new ToolError(m.slice("connector: ".length));
+    throw err;
+  }
 }
 
 async function load(tenant: string, table: string) {
@@ -189,6 +225,10 @@ Deno.serve(async (req) => {
       // Defence in depth: tools.js already only opens sites from `sites`.
       if (!sites.some((s) => s.id === tenant)) throw new Error("site not permitted");
       return load(tenant, table);
+    },
+    write: (tenant: string, op: string, args: unknown[]) => {
+      if (!sites.some((s) => s.id === tenant)) throw new Error("site not permitted");
+      return write(tenant, email, op, args);
     },
     log: (event: string, detail: unknown) => console.log(JSON.stringify({ event, email, detail })),
   };

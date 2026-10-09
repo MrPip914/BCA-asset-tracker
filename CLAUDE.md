@@ -555,7 +555,9 @@ failure modal and the sign-in screen both said *that* it happened and kept nothi
 
 A remote MCP server, as a Supabase Edge Function, so Claude (web, desktop, phone) can
 answer questions from the inventory. The evaluation behind it is
-`/mnt/project-files/evaluations/claude-connector.md`. **Dev tenant only, and READ-ONLY.**
+`/mnt/project-files/evaluations/claude-connector.md`. **Dev tenant only. Reads, plus four
+ADDITIVE writes (2026-10-09): add a task, log a task completion, log work, add a comment.**
+Nothing edits or deletes.
 
 - **Sign-in is OAuth whose only proof of identity is the app's Google sign-in**
   (`oauth.js`). Claude registers, `/authorize` redirects to `mcp-connect.html` on the app
@@ -591,10 +593,33 @@ answer questions from the inventory. The evaluation behind it is
   yours" are the same answer. Every read sets `app.tenant_id` first, so row-level security
   separates tenants underneath; the function must connect as an `asset_api` login role,
   never the service role.
-- **Every tool is annotated read-only.** Writes, when they come, are to be Postgres
-  functions that check the role, write, append the audit row and bump the revision in one
-  transaction, so an open browser reloads rather than overwriting the change. Never a
-  direct table write from the connector: that is `sheet.mjs`'s bypass all over again.
+- **Reads are annotated read-only; the four writes are annotated as writes**, so Claude
+  asks before each one unless the person told it to always allow that tool. A write
+  marked read-only would run unasked, which `test-mcp-connector.mjs` guards.
+- **Every write is ONE Postgres function** (`db/migrations/0006_connector_writes.sql`),
+  never a direct table write from the connector — that is `sheet.mjs`'s bypass all over
+  again. In one transaction it re-checks the role (owner or allowlisted editor, re-read),
+  **bumps the `assets` revision FIRST** (that UPDATE is the row lock every save takes, and
+  the bump is what makes an open browser reload instead of overwriting the change), checks
+  the asset is live and in this tenant, writes, and stamps `by` as "<name> (via Claude)".
+  - **It audits exactly what the app audits**: a completion writes the
+    `maintenance_completed` row (`from`/`to` in the app's "Oct 9, 2026" wording); adding a
+    task, logging work and commenting carry their own at/by and write no audit row, as in
+    the app.
+  - **JS builds the record, SQL enforces the rules that must hold whatever JS sent.**
+    `tools.js` shapes the task or work entry with the app's own code (presets and repeat
+    rules copied verbatim into `from-app.js`), resolves work types and vendors against the
+    site's managed lists (a value the list lacks is refused, not added), and finds a task
+    by id or by name — two tasks with one name is an error listing both.
+  - **A refusal meant for the person starts `connector: `** in the SQL; `index.ts` turns it
+    into the tool's answer. Anything else stays a vague failure.
+  - **A record goes to Postgres as `::text::jsonb`**: postgres.js JSON-encodes a parameter it
+    infers as jsonb, so a bare `::jsonb` stores a JSON *string*. Tested.
+  - **"Today" is the site's day** (`SITE_TIME_ZONE`, America/Los_Angeles), not UTC's.
+  - Covered by `db/test-connector-writes.sql` (CI, real Postgres, as the API role) and
+    `test-mcp-connector.mjs` (the tools, against a fake `ctx.write`).
+  - **Until the dev app reads Supabase, a write is test data**: the app still reads the
+    Sheet, and every importer run replaces the tenant wholesale, erasing it.
 - **Names are not unique, so a lookup is tiered** (id, tag, name, full path) and two
   matches is an error listing both with their locations, never the first one.
 - **The whole tenant is loaded per call.** Fine at hundreds of assets; the audit log is the

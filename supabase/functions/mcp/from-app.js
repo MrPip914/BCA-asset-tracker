@@ -143,7 +143,44 @@ function cellsLabel_(breaker) {
   }).join("/") || "—";
 }
 
+// Frequencies and repeat-rule wording, for the write tools (add_task).
+
+const MAINTENANCE_FREQUENCIES = [
+  { label: "Weekly", days: 7 },
+  { label: "Monthly", days: 30 },
+  { label: "Quarterly", days: 90 },
+  { label: "Semi-Annually", days: 182 },
+  { label: "Annually", days: 365 },
+];
+
+const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+function formatRecurrence(rule) {
+  if (!rule) return "";
+  return rule.type === "weekday"
+    ? `weekday:${rule.ordinal}:${rule.weekday}:${rule.every}`
+    : `interval:${rule.every}:${rule.unit}`;
+}
+
+function describeRecurrence(rule) {
+  if (!rule) return "";
+  if (rule.type === "weekday") {
+    const ord = (RECURRENCE_ORDINALS.find(o => Number(o.key) === rule.ordinal) || {}).label || "";
+    const day = WEEKDAY_NAMES[rule.weekday] || "";
+    return rule.every === 1 ? `${ord} ${day} of every month` : `${ord} ${day}, every ${rule.every} months`;
+  }
+  const unit = RECURRENCE_UNITS.find(u => u.key === rule.unit);
+  return rule.every === 1 ? `Every ${unit.one}` : `Every ${rule.every} ${unit.many}`;
+}
+
+function recurrenceApproxDays(rule) {
+  if (!rule) return "";
+  if (rule.type === "weekday") return 30 * rule.every;
+  return RECURRENCE_UNITS.find(u => u.key === rule.unit).days * rule.every;
+}
+
 export {
+  MAINTENANCE_FREQUENCIES, WEEKDAY_NAMES, formatRecurrence, describeRecurrence, recurrenceApproxDays,
   TASK_KIND_SCHEDULED, TASK_KIND_ONEOFF, parseRecurrence, dateOnly,
   taskKindOf, isOneOffTask, taskIsDone, taskDueDate, maintenanceStatusOf, cellsLabel_,
 };

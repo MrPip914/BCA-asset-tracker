@@ -12,11 +12,14 @@ import { TOOLS, callTool, ToolError } from "./tools.js";
 // gets the newest, which is what the spec says a server should answer.
 export const PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26"];
 
-export const SERVER_INFO = { name: "bca-asset-tracker", title: "Asset Tracker", version: "0.1.0" };
+export const SERVER_INFO = { name: "bca-asset-tracker", title: "Asset Tracker", version: "0.2.0" };
 
 const INSTRUCTIONS = [
-  "Read-only access to a facilities inventory: assets, where they are, who uses them,",
-  "maintenance tasks, logged work and costs, the change history, and electrical panels.",
+  "A facilities inventory: assets, where they are, who uses them, maintenance tasks,",
+  "logged work and costs, the change history, and electrical panels.",
+  "Editors can also add tasks, log task completions and other work, and add comments;",
+  "nothing can be edited or deleted. Each change is recorded under the person's name, marked via Claude.",
+  "Before a write, make sure the asset and the details are what the person meant.",
   "A person may have access to several sites; call list_sites when unsure which one is meant.",
   "Locations nest (campus > building > floor > room), and 'within' includes everything inside.",
   "Asset names are not unique: when a lookup says a name is ambiguous, use one of the ids it lists.",
