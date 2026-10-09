@@ -325,6 +325,9 @@
     apiUrl: useSheet ? config.sheetApiUrl : config.apiUrl,
     // "sheet" (Apps Script) or "supabase": which backend apiUrl is.
     backend: backend,
+    // True only when ?backend=sheet moved a tenant that HAS a database backend
+    // onto its Apps Script fallback. index.html badges the header with it.
+    onSheetFallback: useSheet,
     isDefault: id === DEFAULT_CLIENT_ID,
 
     // The merged palette. index.html reads this straight into `C`; the two

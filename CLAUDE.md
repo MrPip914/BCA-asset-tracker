@@ -912,6 +912,10 @@ onboard one.
   the only place a `.gs` change can be tried before a school. To drive the app against it,
   open `/dev/?backend=sheet` (its `localStorage` keys get a `:sheet` suffix, so its
   sessions never meet Supabase's). Everything else about block B above is unchanged.
+  **The header shows a `Sheet` pill beside `Dev` while on that fallback**, and the
+  diagnostics file names the backend kind after its version. `navUrl()` keeps every param,
+  so one link carrying `?backend=sheet` held a session on Apps Script with 5–7s saves and
+  nothing on screen saying so (2026-10-09).
 - **Every `localStorage` key is namespaced by tenant** (`CLIENT.storageKey()` →
   `asset-tracker-session:bca`). All tenants share one origin, so without it opening client B
   after client A hands B's backend A's session id — rejected correctly, so not a hole, but
