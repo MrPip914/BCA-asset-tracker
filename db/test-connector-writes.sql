@@ -1,4 +1,4 @@
--- Checks the Claude connector's write functions (0006) against a THROWAWAY
+-- Checks the Claude connector's write functions (0006-0009) against a THROWAWAY
 -- database after db/migrate.sh. CI runs it on every change under db/; never
 -- point it at dev.
 --
@@ -341,6 +341,56 @@ begin
   if (select count(*) from asset_tracker.audit_log) <> n + 1 or d->>'action' <> 'floor_plan_replaced'
      or d->>'to' <> 'new.svg' or d->>'by' <> 'Ed Itor (via Claude)' or d->>'assetLabel' <> 'room1' then
     raise exception 'FAIL: audit row wrong: %', d;
+  end if;
+end
+$$;
+
+-- 14. Walls on a plan (0009): a new wall gets its edges, stamped now by the
+--     person; an edge moves when its wall is taken off in the same change; a
+--     room link on the same plan is never touched.
+do $$
+declare r jsonb; before int := (pg_temp.seen()->>'assets')::int;
+begin
+  r := asset_tracker.connector_set_plan_walls('ed@cwa.test', pg_temp.seen(), 'room1',
+    '[{"op":"asset_create","id":"wallN","data":{"id":"wallN","type":"Wall","name":"North","parentId":"room1"}},
+      {"op":"audit","data":{"assetLabel":"room1","assetType":"Room","action":"space_linked","field":"2 wall segments","to":"North"}}]',
+    '[{"wallId":"wallN","segmentIds":["s1#e0","s2#e1.1"]}]', '[]');
+  if (r->>'revision')::int <> before + 1 then raise exception 'FAIL: revision not moved: %', r; end if;
+  if (select string_agg(shape_id || '>' || (data->>'roomId') || '>' || (data->>'by'), ',' order by position)
+      from asset_tracker.space_links where plan_asset_id = 'room1' and data->>'roomId' = 'wallN')
+     <> 's1#e0>wallN>Ed Itor (via Claude),s2#e1.1>wallN>Ed Itor (via Claude)' then
+    raise exception 'FAIL: wall edges not written';
+  end if;
+  r := asset_tracker.connector_set_plan_walls('ed@cwa.test', pg_temp.seen(), 'room1',
+    '[{"op":"asset_create","id":"wallS","data":{"id":"wallS","type":"Wall","name":"South","parentId":"room1"}},
+      {"op":"audit","data":{"assetLabel":"room1","assetType":"Room","action":"space_unlinked"}}]',
+    '[{"wallId":"wallS","segmentIds":["s1#e0"]}]', '["wallN"]');
+  if (select string_agg(shape_id || '>' || (data->>'roomId'), ',' order by position)
+      from asset_tracker.space_links where plan_asset_id = 'room1') <> 's1>ms1,s1#e2>room1,s1#e0>wallS' then
+    raise exception 'FAIL: edges after the move wrong: %', (select string_agg(shape_id, ',') from asset_tracker.space_links where plan_asset_id = 'room1');
+  end if;
+end
+$$;
+select pg_temp.refuses('walls as a viewer',
+  $s$ select asset_tracker.connector_set_plan_walls('view@cwa.test', pg_temp.seen(), 'room1', '[{"op":"audit","data":{"action":"x"}}]', '[]', '["wallS"]') $s$, 'view-only');
+select pg_temp.refuses('walls on a stale revision',
+  $s$ select asset_tracker.connector_set_plan_walls('ed@cwa.test', '{"assets":1}', 'room1', '[{"op":"audit","data":{"action":"x"}}]', '[]', '["wallS"]') $s$, 'inventory changed');
+select pg_temp.refuses('taking an edge another wall owns',
+  $s$ select asset_tracker.connector_set_plan_walls('ed@cwa.test', pg_temp.seen(), 'room1', '[{"op":"audit","data":{"action":"x"}}]', '[{"wallId":"wallN","segmentIds":["s1#e0"]}]', '[]') $s$, 'already belongs');
+select pg_temp.refuses('a room named as a wall',
+  $s$ select asset_tracker.connector_set_plan_walls('ed@cwa.test', pg_temp.seen(), 'room1', '[{"op":"audit","data":{"action":"x"}}]', '[]', '["room1"]') $s$, 'not a wall');
+select pg_temp.refuses('a wall edge that is not a segment id',
+  $s$ select asset_tracker.connector_set_plan_walls('ed@cwa.test', pg_temp.seen(), 'room1', '[{"op":"audit","data":{"action":"x"}}]', '[{"wallId":"wallN","segmentIds":["s9"]}]', '[]') $s$, 'malformed');
+select pg_temp.refuses('a wall with no edges',
+  $s$ select asset_tracker.connector_set_plan_walls('ed@cwa.test', pg_temp.seen(), 'room1', '[{"op":"audit","data":{"action":"x"}}]', '[{"wallId":"wallN","segmentIds":[]}]', '[]') $s$, 'no edges');
+select pg_temp.refuses('a wall change with nothing in it',
+  $s$ select asset_tracker.connector_set_plan_walls('ed@cwa.test', pg_temp.seen(), 'room1', '[{"op":"audit","data":{"action":"x"}}]', '[]', '[]') $s$, 'malformed');
+select pg_temp.refuses('walls on an archived plan',
+  $s$ select asset_tracker.connector_set_plan_walls('ed@cwa.test', pg_temp.seen(), 'old1', '[{"op":"audit","data":{"action":"x"}}]', '[]', '["wallS"]') $s$, 'archived');
+do $$
+begin
+  if (select count(*) from asset_tracker.space_links where plan_asset_id = 'room1' and data->>'roomId' = 'wallS') <> 1 then
+    raise exception 'FAIL: a refused wall change left something behind';
   end if;
 end
 $$;

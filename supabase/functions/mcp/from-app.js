@@ -1,4 +1,5 @@
-// Task due-date rules, the breaker slot label and the floor plan link carry-over, COPIED VERBATIM from
+// Task due-date rules, the breaker slot label, the floor plan link carry-over and the
+// floor plan geometry that decides which edges are exterior walls, COPIED VERBATIM from
 // index.html so the connector reports exactly what the app shows. Do not
 // edit them here: change index.html and re-copy. test-mcp-connector.mjs
 // fails if any piece below stops matching its original.
@@ -240,9 +241,118 @@ function floorPlanSegmentParts(id) {
   return m ? { gid: m[1], edge: Number(m[2]), run: m[3] ? Number(m[3]) : 0 } : null;
 }
 
+const floorPlanRound2 = n => Math.round(n * 100) / 100;
+
+function floorPlanParseTransform(attrValue) {
+  const tr = /translate\(\s*([-\d.eE]+)[ ,]+([-\d.eE]+)\s*\)/.exec(attrValue || "");
+  const ro = /rotate\(\s*([-\d.eE]+)/.exec(attrValue || "");
+  return { tx: tr ? +tr[1] : 0, ty: tr ? +tr[2] : 0, rot: ro ? +ro[1] : 0 };
+}
+
+function floorPlanApplyTransform(t, x, y) {
+  const r = (t.rot * Math.PI) / 180;
+  return [t.tx + x * Math.cos(r) - y * Math.sin(r), t.ty + x * Math.sin(r) + y * Math.cos(r)];
+}
+
+function floorPlanApplyChain(chain, x, y) {
+  let px = x, py = y;
+  for (const t of chain) { const [nx, ny] = floorPlanApplyTransform(t, px, py); px = nx; py = ny; }
+  return [px, py];
+}
+
+function floorPlanPointInPoly(p, poly) {
+  let c = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if ((yi > p[1]) !== (yj > p[1]) && p[0] < ((xj - xi) * (p[1] - yi)) / (yj - yi) + xi) c = !c;
+  }
+  return c;
+}
+
+function floorPlanBbox(pts) {
+  const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+  return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+}
+
+function floorPlanRotatePoint(x, y, turns) {
+  const t = ((turns % 4) + 4) % 4;
+  return t === 1 ? [-y, x] : t === 2 ? [-x, -y] : t === 3 ? [y, -x] : [x, y];
+}
+
+function floorPlanRotateSpaces(spaces, turns) {
+  const t = ((turns % 4) + 4) % 4;
+  if (!t) return spaces;
+  const rot = (x, y) => floorPlanRotatePoint(x, y, t);
+  return spaces.map(sp => {
+    const pts = sp.pts.map(p => rot(p[0], p[1]));
+    const [px, py] = rot(sp.pole.x, sp.pole.y);
+    return { ...sp, pts, pole: { ...sp.pole, x: px, y: py }, bbox: floorPlanBbox(pts) };
+  });
+}
+
+function floorPlanIsSegmentId(id) {
+  return !!floorPlanSegmentParts(id);
+}
+
+function floorPlanExteriorSegments(spaces) {
+  const list = (spaces || []).filter(sp => sp && sp.pts && sp.pts.length >= 3);
+  if (!list.length) return [];
+  const all = floorPlanBbox(list.flatMap(sp => sp.pts));
+  const eps = Math.max(all.w, all.h) * 0.006;
+  const inBox = (bb, p) => p[0] >= bb.x && p[0] <= bb.x + bb.w && p[1] >= bb.y && p[1] <= bb.y + bb.h;
+  const out = [];
+  list.forEach(sp => {
+    const pts = sp.pts;
+    const n = pts.length;
+    for (let i = 0; i < n; i++) {
+      const a = pts[i], b = pts[(i + 1) % n];
+      const dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy);
+      if (len < 1e-6) continue;
+      let nx = -dy / len, ny = dx / len;
+      // Outward is whichever side is NOT inside this space itself.
+      if (floorPlanPointInPoly([(a[0] + b[0]) / 2 + nx * eps, (a[1] + b[1]) / 2 + ny * eps], pts)) { nx = -nx; ny = -ny; }
+      const cells = Math.max(1, Math.min(24, Math.ceil(len / (eps * 4))));
+      const exposed = [];
+      for (let c = 0; c < cells; c++) {
+        const t = (c + 0.5) / cells;
+        const probe = [a[0] + dx * t + nx * eps, a[1] + dy * t + ny * eps];
+        exposed.push(!list.some(o => o !== sp && inBox(o.bbox || floorPlanBbox(o.pts), probe) && floorPlanPointInPoly(probe, o.pts)));
+      }
+      const runs = [];
+      for (let c = 0; c < cells;) {
+        if (!exposed[c]) { c++; continue; }
+        const start = c;
+        while (c < cells && exposed[c]) c++;
+        runs.push([start, c]);
+      }
+      runs.forEach(([s0, e0], r) => {
+        const whole = runs.length === 1 && s0 === 0 && e0 === cells;
+        out.push({
+          id: floorPlanSegmentId(sp.gid, i, whole ? 0 : r + 1), gid: sp.gid, edge: i,
+          a: [a[0] + (dx * s0) / cells, a[1] + (dy * s0) / cells],
+          b: [a[0] + (dx * e0) / cells, a[1] + (dy * e0) / cells],
+        });
+      });
+    }
+  });
+  return out;
+}
+
+function floorPlanSetWallSegments(links, wallId, segmentIds, stamp) {
+  const wanted = [...new Set(segmentIds || [])];
+  const owner = new Map();
+  (links || []).forEach(l => { if (floorPlanIsSegmentId(l.shapeId)) owner.set(l.shapeId, l.roomId); });
+  const taken = wanted.filter(id => owner.has(id) && owner.get(id) !== wallId);
+  const ok = wanted.filter(id => !taken.includes(id));
+  const kept = (links || []).filter(l => !(floorPlanIsSegmentId(l.shapeId) && l.roomId === wallId));
+  return { links: kept.concat(ok.map(shapeId => ({ shapeId, roomId: wallId, ...(stamp || {}) }))), taken };
+}
+
 export {
   MAINTENANCE_FREQUENCIES, WEEKDAY_NAMES, formatRecurrence, describeRecurrence, recurrenceApproxDays,
   TASK_KIND_SCHEDULED, TASK_KIND_ONEOFF, parseRecurrence, dateOnly,
   taskKindOf, isOneOffTask, taskIsDone, taskDueDate, maintenanceStatusOf, cellsLabel_,
   floorPlanRemapLinksAndGroups, floorPlanPathToPoints,
+  floorPlanRound2, floorPlanParseTransform, floorPlanApplyChain, floorPlanBbox, floorPlanPointInPoly, floorPlanRotateSpaces,
+  floorPlanSegmentId, floorPlanSegmentParts, floorPlanIsSegmentId, floorPlanExteriorSegments, floorPlanSetWallSegments,
 };

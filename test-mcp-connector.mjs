@@ -35,13 +35,17 @@ const eq = (name, got, want) => check(name, JSON.stringify(got) === JSON.stringi
   const arr = (n) => { const s = src.indexOf(`const ${n} =`); return src.slice(s, src.indexOf("\n];", s) + 3); };
   const line = (n) => { const s = src.indexOf(`const ${n} =`); return src.slice(s, src.indexOf("\n", s)); };
   const pieces = [
-    ...["TASK_KIND_SCHEDULED", "TASK_KIND_ONEOFF", "RECURRENCE_MAX_EVERY"].map(line),
+    ...["TASK_KIND_SCHEDULED", "TASK_KIND_ONEOFF", "RECURRENCE_MAX_EVERY", "floorPlanRound2"].map(line),
     ...["RECURRENCE_UNITS", "RECURRENCE_ORDINALS", "MAINTENANCE_FREQUENCIES"].map(arr),
     line("WEEKDAY_NAMES"),
     ...["recurrenceCount", "parseRecurrence", "addCalendarMonths", "nthWeekdayOfMonth", "nextRecurrenceDate",
       "dateOnly", "taskKindOf", "isOneOffTask", "taskIsDone", "taskDueDate", "maintenanceStatusOf", "cellsLabel_",
       "formatRecurrence", "describeRecurrence", "recurrenceApproxDays",
-      "floorPlanPathToPoints", "floorPlanRemapShapeIds", "floorPlanRemapLinksAndGroups", "floorPlanSegmentId", "floorPlanSegmentParts"].map(fn),
+      "floorPlanPathToPoints", "floorPlanRemapShapeIds", "floorPlanRemapLinksAndGroups", "floorPlanSegmentId", "floorPlanSegmentParts",
+      // The outside-wall rule, and the geometry it runs on: set_plan_walls must
+      // offer exactly the edges the Map tab draws.
+      "floorPlanParseTransform", "floorPlanApplyTransform", "floorPlanApplyChain", "floorPlanPointInPoly", "floorPlanBbox",
+      "floorPlanRotatePoint", "floorPlanRotateSpaces", "floorPlanIsSegmentId", "floorPlanExteriorSegments", "floorPlanSetWallSegments"].map(fn),
   ];
   const missing = pieces.filter((p) => !p || !copy.includes(p)).map((p) => p.split("\n")[0]);
   check("from-app.js matches index.html, piece for piece", missing.length === 0, `stale or missing: ${missing.join(" | ")}`);
@@ -167,13 +171,13 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   // Claude asks before a tool not marked read-only, so a write marked
   // read-only would run without asking. Exactly the writes are writes, and the
   // ones that overwrite or remove something say so.
-  const WRITES = ["add_comment", "add_task", "add_tasks", "archive_assets", "complete_task", "delete_task", "edit_task", "log_work", "replace_floor_plan", "save_assets"];
+  const WRITES = ["add_comment", "add_task", "add_tasks", "archive_assets", "complete_task", "delete_task", "edit_task", "log_work", "replace_floor_plan", "save_assets", "set_plan_walls"];
   eq("exactly the write tools are marked as writes",
     tools.filter((t) => t.annotations.readOnlyHint !== true).map((t) => t.name).sort(), WRITES);
   eq("the write tool list matches", [...WRITE_TOOL_NAMES].sort(), WRITES);
   eq("exactly the tools that overwrite or remove are marked destructive",
     tools.filter((t) => t.annotations.destructiveHint !== false).map((t) => t.name).sort(),
-    ["archive_assets", "delete_task", "edit_task", "replace_floor_plan", "save_assets"]);
+    ["archive_assets", "delete_task", "edit_task", "replace_floor_plan", "save_assets", "set_plan_walls"]);
   check("every tool's annotations carry its title", tools.every((t) => t.annotations.title === t.title));
   check("every tool's schema is a closed object",
     tools.every((t) => t.inputSchema.type === "object" && t.inputSchema.additionalProperties === false));
@@ -320,7 +324,7 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   const ts = fs.readFileSync(path.join(here, "supabase/functions/mcp/index.ts"), "utf8");
   check("every jsonb parameter in index.ts goes through ::text", (ts.match(/::jsonb/g) || []).length === (ts.match(/::text::jsonb/g) || []).length && /::text::jsonb/.test(ts));
   check("index.ts has a writer for every write tool",
-    ["add_task", "complete_task", "log_work", "add_comment", "apply"].every((n) => ts.includes(`connector_${n}(`)));
+    ["add_task", "complete_task", "log_work", "add_comment", "apply", "replace_floor_plan", "set_plan_walls"].every((n) => ts.includes(`connector_${n}(`)));
   check("index.ts loads the revisions a management write sends back", /revisions: "select domain, rev from asset_tracker\.revisions"/.test(ts));
   // Frequencies come out exactly as the app stores them.
   eq("a preset frequency", frequencyFrom("semi annually"), { label: "Semi-Annually", days: 182, recurrence: "" });
@@ -739,6 +743,135 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
     ctx = pctx(sites);
     r = await call("replace_floor_plan", args, ctx);
     check(`replace_floor_plan refuses ${label}, uploading and writing nothing`, r.isError && ctx.uploads.length === 0 && ctx.writes.length === 0, r.text);
+  }
+}
+
+// ---------------------------------------------------------------- plan walls
+
+{
+  // Two rooms side by side, the second drawn inside a translated group: A's
+  // right edge and B's left edge touch, so neither is outside.
+  const PLAN = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 10">` +
+    `<g id="shapeA"><title>Space.A</title><rect x="0" y="0" width="10" height="10"/></g>` +
+    `<g transform="translate(10,0)"><g id="shapeB"><title>Space.B</title><rect x="0" y="0" width="10" height="10"/></g></g></svg>`;
+  const URL = "https://res.cloudinary.com/demo/image/upload/b400.svg";
+  const dev = SITES.dev;
+  dev.assets.push(
+    A("b400", 20, "campus", { type: "Building", name: "Building 400", floorPlanUrl: URL, floorPlanFileName: "b400.svg" }),
+    A("r401", 21, "b400", { type: "Room", name: "Room 401" }),
+    A("r402", 22, "b400", { type: "Room", name: "Room 402" }),
+    A("w1", 23, "r401", { type: "Wall", name: "Room 401 north" }),
+    A("w2", 24, "r402", { type: "Wall", name: "Room 402 east" }),
+    A("w9", 25, "r401", { type: "Wall", name: "Old wall", status: "Archived" }),
+  );
+  dev.space_links.push(
+    { plan_asset_id: "b400", shape_id: "shapeA", position: 0, data: { shapeId: "shapeA", roomId: "r401" } },
+    { plan_asset_id: "b400", shape_id: "shapeB", position: 1, data: { shapeId: "shapeB", roomId: "r402" } },
+    { plan_asset_id: "b400", shape_id: "shapeA#e0", position: 2, data: { shapeId: "shapeA#e0", roomId: "w1" } },
+    { plan_asset_id: "b400", shape_id: "shapeA#e7", position: 3, data: { shapeId: "shapeA#e7", roomId: "w1" } },
+    { plan_asset_id: "b400", shape_id: "shapeB#e1", position: 4, data: { shapeId: "shapeB#e1", roomId: "w2" } },
+  );
+  const wctx = (sites = ONE, plan = PLAN) => {
+    const ctx = ctxFor(sites);
+    ctx.fetched = [];
+    ctx.fetchPlan = async (url) => { ctx.fetched.push(url); if (plan === null) throw new Error("404"); return plan; };
+    return ctx;
+  };
+
+  const { floorPlanGeometryOf } = await import("./supabase/functions/mcp/floorplan.js");
+  eq("plan geometry carries a space through its ancestors' transforms, as the app does",
+    floorPlanGeometryOf(PLAN).map((sp) => [sp.gid, sp.pts]),
+    [["shapeA", [[0, 0], [10, 0], [10, 10], [0, 10]]], ["shapeB", [[10, 0], [20, 0], [20, 10], [10, 10]]]]);
+
+  let ctx = wctx();
+  let r = await call("get_plan_walls", { asset: "Building 400" }, ctx);
+  const edges = (sp) => sp.outsideEdges.map((e) => [e.segment, e.facing, e.length, e.wall || null]);
+  eq("get_plan_walls: each space's outside edges, facing and owner; touching edges are not outside",
+    [r.isError, r.data?.spaces?.map((sp) => [sp.space, sp.linkedTo?.id, edges(sp)])],
+    [false, [
+      ["Space.A", "r401", [["shapeA#e0", "north", 10, "Room 401 north"], ["shapeA#e2", "south", 10, null], ["shapeA#e3", "west", 10, null]]],
+      ["Space.B", "r402", [["shapeB#e0", "north", 10, null], ["shapeB#e1", "east", 10, "Room 402 east"], ["shapeB#e2", "south", 10, null]]],
+    ]], r.text);
+  eq("get_plan_walls: the walls on the plan, with an edge the drawing no longer has set apart",
+    r.data?.walls?.map((w) => [w.wall.id, w.segments, w.notOnThisPlan || null]),
+    [["w1", ["shapeA#e0"], ["shapeA#e7"]], ["w2", ["shapeB#e1"], null]]);
+  check("get_plan_walls reads the plan from its stored url", ctx.fetched[0] === URL);
+  r = await call("get_plan_walls", { asset: "b400", space: "Room 402" }, wctx());
+  eq("get_plan_walls narrows to the space a room is linked to", [r.data?.spaces?.map((s) => s.space), r.data?.walls?.map((w) => w.wall.id)], [["Space.B"], ["w2"]]);
+  dev.assets.find((a) => a.id === "b400").data.floorPlanRotation = "1";
+  r = await call("get_plan_walls", { asset: "b400", space: "Space.A" }, wctx());
+  eq("facing follows the plan's rotation in the app (a quarter turn clockwise: up becomes east)",
+    r.data?.spaces?.[0]?.outsideEdges.map((e) => e.facing), ["east", "west", "north"]);
+  delete dev.assets.find((a) => a.id === "b400").data.floorPlanRotation;
+
+  // set_plan_walls
+  ctx = wctx();
+  r = await call("set_plan_walls", { asset: "b400", dry_run: true, walls: [
+    { name: "Room 401 West", space: "Room 401", facing: "west" },
+    { wall: "Room 401 north", segments: ["shapeA#e0", "shapeB#e0"] },
+  ] }, ctx);
+  eq("dry run: a new wall from a space and a facing, parented to the room the space is linked to; an existing wall's edges replaced",
+    [r.isError, r.data?.walls?.map((w) => [w.wall, w.new || false, w.segments.map((s) => s.split(" ")[0]), w.replaces || null])],
+    [false, [["Room 401 West", true, ["shapeA#e3"], null], ["Room 401 north", false, ["shapeA#e0", "shapeB#e0"], ["shapeA#e0", "shapeA#e7"]]]], r.text);
+  check("dry run writes nothing", ctx.writes.length === 0);
+
+  ctx = wctx();
+  r = await call("set_plan_walls", { asset: "b400", walls: [
+    { name: "Room 401 West", space: "Space.A", facing: "west" },
+    { wall: "w1", segments: ["shapeA#e0", "shapeB#e0"] },
+  ] }, ctx);
+  const wr = ctx.writes[0];
+  const created = wr?.args[2].find((o) => o.op === "asset_create");
+  eq("set: one write, carrying the revisions, the plan, the new Wall, its audit rows and each wall's edges",
+    [r.isError, ctx.writes.length, wr?.op, wr?.args[0], wr?.args[1], created?.data.type, created?.data.name, created?.data.parentId,
+      wr?.args[2].filter((o) => o.op === "audit").map((o) => [o.data.assetLabel === created?.id ? "new" : o.data.assetLabel, o.data.action, o.data.field || null, o.data.to || null]),
+      wr?.args[3].map((w) => [w.wallId === created?.id ? "new" : w.wallId, w.segmentIds]), wr?.args[4]],
+    [false, 1, "set_plan_walls", { assets: 7, config: 3 }, "b400", "Wall", "Room 401 West", "r401",
+      [["new", "created", null, null], ["b400", "space_linked", "1 wall segment", "Room 401 West"], ["b400", "space_linked", "2 wall segments", "Room 401 north"]],
+      [["new", ["shapeA#e3"]], ["w1", ["shapeA#e0", "shapeB#e0"]]], []], r.text);
+
+  ctx = wctx();
+  r = await call("set_plan_walls", { asset: "b400", walls: [{ name: "B East", segments: ["shapeB#e1"] }], remove: ["Room 402 east"] }, ctx);
+  eq("an edge moves to a new wall when its old wall is taken off in the same change",
+    [r.isError, ctx.writes[0]?.args[4], ctx.writes[0]?.args[2].filter((o) => o.op === "audit").map((o) => o.data.action), r.data?.removed],
+    [false, ["w2"], ["created", "space_linked", "space_unlinked"], ["Room 402 east"]], r.text);
+
+  ctx = wctx();
+  r = await call("set_plan_walls", { asset: "b400", walls: [{ wall: "w2", segments: ["shapeB#e1"] }] }, ctx);
+  check("a wall that already has exactly those edges writes nothing", !r.isError && ctx.writes.length === 0 && /Nothing to change/.test(r.data.note), r.text);
+  ctx = wctx();
+  r = await call("set_plan_walls", { asset: "b400", walls: [{ wall: "w2", name: "Room 402 East Wall", space: "Room 402", facing: "east" }] }, ctx);
+  eq("wall plus name renames it through the app's import rules",
+    [r.isError, ctx.writes[0]?.args[2].filter((o) => o.op === "asset_update").map((o) => [o.id, o.data.name])], [false, [["w2", "Room 402 East Wall"]]], r.text);
+
+  for (const [label, args, sites, plan] of [
+    ["an edge on a wall not in this change", { asset: "b400", walls: [{ name: "X", segments: ["shapeB#e1"] }] }],
+    ["an edge that is not outside", { asset: "b400", walls: [{ name: "X", segments: ["shapeA#e1"] }] }],
+    ["an edge given to two walls", { asset: "b400", walls: [{ name: "X", segments: ["shapeA#e2"] }, { name: "Y", segments: ["shapeA#e2"] }] }],
+    ["a facing the space has no edge on", { asset: "b400", walls: [{ name: "X", space: "Room 402", facing: "west" }] }],
+    ["segments and a space together", { asset: "b400", walls: [{ name: "X", space: "Room 402", segments: ["shapeB#e0"] }] }],
+    ["a wall that is not a Wall", { asset: "b400", walls: [{ wall: "Room 401", segments: ["shapeA#e2"] }] }],
+    ["an archived wall", { asset: "b400", walls: [{ wall: "Old wall", segments: ["shapeA#e2"] }] }],
+    ["a wall named twice", { asset: "b400", walls: [{ wall: "w1", segments: ["shapeA#e2"] }, { wall: "w1", segments: ["shapeA#e3"] }] }],
+    ["a wall with neither a wall nor a name", { asset: "b400", walls: [{ segments: ["shapeA#e2"] }] }],
+    ["a space that is not on the plan", { asset: "b400", walls: [{ name: "X", space: "Space.Z" }] }],
+    ["nothing to do", { asset: "b400" }],
+    ["a place with no plan", { asset: "Building 200", walls: [{ name: "X", segments: ["shapeA#e2"] }] }],
+    ["a viewer", { site: "bca", asset: "x", walls: [{ name: "X", segments: ["a#e0"] }] }, TWO],
+    ["a plan the file host will not serve", { asset: "b400", walls: [{ name: "X", segments: ["shapeA#e2"] }] }, ONE, null],
+  ]) {
+    ctx = wctx(sites, plan);
+    r = await call("set_plan_walls", args, ctx);
+    check(`set_plan_walls refuses ${label}, writing nothing`, r.isError && ctx.writes.length === 0, r.text);
+  }
+
+  // The real plans in the project folder, when present.
+  const { rotatedSpaces, exteriorWalls } = await import("./supabase/functions/mcp/walls.js");
+  for (const f of ["bca/building-100.svg", "bca/campus.svg"]) {
+    const p = path.join("/mnt/project-files/floorplans", f);
+    if (!fs.existsSync(p)) continue;
+    const e = exteriorWalls(rotatedSpaces(floorPlanGeometryOf(fs.readFileSync(p, "utf8")), 0));
+    check(`a real plan has outside walls facing all four ways: ${f}`, ["north", "east", "south", "west"].every((d) => e.some((x) => x.facing === d)));
   }
 }
 

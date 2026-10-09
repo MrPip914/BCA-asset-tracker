@@ -9,7 +9,9 @@
 // (the group's id, else its title) and title. Geometry is the browser's
 // business; the carry-over only matches ids and titles.
 
-import { floorPlanRemapLinksAndGroups, floorPlanPathToPoints } from "./from-app.js";
+import {
+  floorPlanRemapLinksAndGroups, floorPlanPathToPoints, floorPlanParseTransform, floorPlanApplyChain, floorPlanRound2, floorPlanBbox,
+} from "./from-app.js";
 
 // Same cap as the app's FLOORPLAN_MAX_BYTES would be far too generous for a
 // tool argument; real plans are tens of KB.
@@ -68,9 +70,42 @@ const first = (el, names) => {
 
 // The plan's spaces, as [{ gid, title }], in document order.
 export function floorPlanSpacesOf(svgText) {
+  return walkSpaces(svgText, false);
+}
+
+// The same spaces with the geometry the app draws them with: { gid, title,
+// pts, bbox }, every point carried through its ancestors' transforms to the
+// root as parseFloorPlanSvg does (the chain starts at the geometry element's
+// PARENT, so its own transform is ignored there too, and stops below the root
+// <svg>). This is what the exterior-wall rule runs on.
+export function floorPlanGeometryOf(svgText) {
+  return walkSpaces(svgText, true);
+}
+
+function localPoints(geom) {
+  if (local(geom) === "rect") {
+    const n = (k) => parseFloat(geom.attrs[k] || "0");
+    const x = n("x"), y = n("y"), w = n("width"), h = n("height");
+    return [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
+  }
+  return floorPlanPathToPoints(geom.attrs.d || "");
+}
+
+function walkSpaces(svgText, withGeometry) {
   const tree = readSvgTree(svgText);
   const root = first(tree, ["svg"]);
   if (!root) throw new PlanFileError("That file isn't a valid SVG.");
+  // Each element's ancestors below the root, outermost first, for the
+  // transform chain.
+  const parents = new Map();
+  (function index(el) { for (const c of el.children) { parents.set(c, el); index(c); } })(root);
+  const chainOf = (el) => {
+    const chain = [];
+    for (let cur = parents.get(el); cur && cur !== root; cur = parents.get(cur)) {
+      if (cur.attrs.transform) chain.push(floorPlanParseTransform(cur.attrs.transform));
+    }
+    return chain;
+  };
   const spaces = [];
   for (const g of descendants(root)) {
     if (local(g) !== "g") continue;
@@ -82,9 +117,15 @@ export function floorPlanSpacesOf(svgText) {
     if (!/^Space/i.test(title)) continue;
     const geom = first(g, ["path", "rect"]);
     if (!geom) continue;
-    const enough = local(geom) === "rect" || floorPlanPathToPoints(geom.attrs.d || "").length >= 3;
-    if (!enough) continue;
-    spaces.push({ gid: g.attrs.id || title, title });
+    const localPts = localPoints(geom);
+    if (localPts.length < 3) continue;
+    const space = { gid: g.attrs.id || title, title };
+    if (withGeometry) {
+      const chain = chainOf(geom);
+      space.pts = localPts.map(([x, y]) => floorPlanApplyChain(chain, x, y)).map(([x, y]) => [floorPlanRound2(x), floorPlanRound2(y)]);
+      space.bbox = floorPlanBbox(space.pts);
+    }
+    spaces.push(space);
   }
   return spaces;
 }
