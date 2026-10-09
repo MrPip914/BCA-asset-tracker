@@ -16,6 +16,18 @@ version that fixed them.
 
 ## Open
 
+### Walls disappear on a plan where every building is surrounded by other spaces
+**Found:** 2026-10-09, while putting the new 3C campus plan on dev.
+**Needs a deploy:** no; frontend only (`floorPlanExteriorSegments`), plus the connector's
+copy of the same rule if it has one.
+**Confirmed:** by running the same edge test over the new `campus.svg` (in the project's
+`floorplans/3c/`). An edge counts as a wall only when the point just beyond it lies in NO
+other space. The new 3C drawing tiles courtyard and parking shapes around every building,
+so the Worship Center, CEB and Sanctuary have zero exterior edges: their 8 wall assets stay
+linked after the replace but nothing is drawn, and no new wall can be picked on them. A
+likely fix is to treat an edge as outside when the space beyond it is not a building (or
+is not linked to one), but which rule is right is Eric's call.
+
 ### A save adopts revisions it did not earn, so a later save can overwrite someone silently
 **Found:** 2026-10-09, while building per-record saves.
 **Needs a deploy:** no; frontend only (`finishWrite`).
