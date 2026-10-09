@@ -402,6 +402,8 @@ already keeps -- nothing new has to be tracked.
 else changed THE SAME asset. Today any two saves of any assets in the same moment
 conflict. Designed 2026-10-09; Supabase tenants only, like 2a.
 
+**Built 2026-10-09** (see CLAUDE.md, "Per-record saves"). What follows is the design it built.
+
 **What a save names.** `persist()` already gets the previous and the next asset list,
 and every call site builds the next one by replacing only the objects it changed (the
 convention `_dirty` already relies on). So the client diffs by reference, per id, with

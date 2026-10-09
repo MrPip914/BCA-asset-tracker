@@ -151,7 +151,7 @@ function loadLog(storage) {
     /if \(data && data\.ok === false\) throw new Error/.test(load));
   const persist = grab('async function persist(nextAssets, overrides = {})');
   check('every save outcome is logged, from the moment the request actually starts',
-    /const started = Date\.now\(\);\s*return writeSnapshot\(/.test(persist) && /diagLogSave\(/.test(persist));
+    /const started = Date\.now\(\);(?:(?!writeQueueRef)[\s\S]){0,1200}?return writeSnapshot\(/.test(persist) && /diagLogSave\(/.test(persist));
 
   const fetchDiag = grab('async function fetchBackendDiagnostics()');
   check('the backend-log request carries the all-false _dirty guard (an older backend would treat it as a save)',

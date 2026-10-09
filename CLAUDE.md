@@ -660,6 +660,50 @@ loading screen) and apply it through `applySnapshot`, the same as a load.
   tiny request; the device's own save triggers no read; the Sheet backend never sees
   the op.
 
+## Per-record saves (Supabase tenants, 2026-10-09)
+
+A save to a Supabase tenant names only the assets it changed (`DATABASE_BACKEND_PLAN.md`,
+Phase 2b). `persist()` diffs the asset list by reference and posts
+`assetChanges: { upsert, remove }`, each asset carrying the version (`_rev`) it was read
+with. The backend refuses only when one of THOSE assets moved, so two people saving
+different assets both land. A whole-snapshot save is refused on the whole assets domain
+instead, and still is for anything that takes that path.
+
+- **Supabase only (`PER_RECORD_SAVES`), the same gate as live refresh.** An Apps Script
+  backend does not know `assetChanges` and would read the body as a save of no assets.
+- **The version lives in triggers (migration 0007), not in any writer's code.** A row
+  trigger moves `assets.rev` on a content change (not `position`), and statement triggers
+  on every child table move the owner once. So a full-snapshot save from an older build,
+  the connector's functions, the importer and a hand edit all move it, and none can be
+  overwritten silently by a per-record save that never saw them.
+- **The read carries `_rev` per asset; `applySnapshot` strips it into `assetRevsRef`**, so
+  nothing else sees or saves it. It is read at SEND time, inside the write queue, and a
+  save's new versions (`assetRevs` in the reply) are stamped in the same chain, so a
+  second save of the same asset queued behind the first posts the version the first made.
+- **What cannot be named by reference falls back to the whole snapshot**: the same
+  entries in a fresh array (`attachPhotos`' `assets.slice()`), a reorder, or an audit log
+  that is not the held one with entries appended (the full history fetched since). The
+  backend still takes that body, domain-checked as before.
+- **The body carries only what is written**: the changes, `auditAppend` (only the new
+  entries, appended as sent, since the offset a whole save uses cannot hold when two
+  saves of different assets both land), and config, breaker types or photos only when
+  dirty. The write is scoped: a row of an asset the save does not name is never deleted.
+- **A new asset must not exist yet**, which makes a retried request a conflict, not a
+  duplicate. Removing an already-removed asset is not a conflict. Removing every asset at
+  once is refused, as in a whole save.
+- **REVISIONS ARE ADOPTED ONLY WHEN THEY ARE THIS SAVE'S OWN** (`adoptSavedRevisions`): a
+  written domain moves only if the server's number is exactly one past the held one. A
+  domain someone else bumped in between keeps the held number, so live refresh fetches
+  their change and a later save of that domain is checked against it. Adopting it would
+  let that save overwrite them silently. The whole-snapshot path still adopts everything,
+  which is that bug (`BUGS.md`).
+- **What it does not fix**: two people CREATING assets at once still conflict, on the
+  config domain's `nextAssetNumber`. Photos stay one domain.
+- Covered by `test-frontend-per-record.js` (helpers run for real, wiring read as source,
+  mutation-checked), `save_test.ts`'s per-record cases, and `db/test-asset-versions.sql`.
+  Driven in Chromium against the real function on a local Postgres: two pages saving
+  different assets both land; a third, stale on the same asset, gets the not-saved modal.
+
 ## Local Sandbox mode
 
 Sandbox swaps the real Google Sheet for a local fixture (`MOCK_SNAPSHOT` in
