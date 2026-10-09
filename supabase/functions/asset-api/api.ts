@@ -1,8 +1,8 @@
 // The request handler: the same requests AssetTrackerSync.gs answers, with the
 // same answers, so index.html changes by a URL and not a rewrite
 // (DATABASE_BACKEND_PLAN.md). Ported so far: signin, read, signout, save (a
-// body with no op), auditFull, diagnostics, photoSign, floorPlanSign, and
-// the bare GET.
+// body with no op), auditFull, diagnostics, photoSign, floorPlanSign, the
+// public panel read (GET ?panel=), and the bare GET.
 // Everything else answers that it is not here YET -- as JSON, never an error
 // page, which is the one thing every answer must be.
 //
@@ -16,6 +16,7 @@ import {
 } from "./auth.ts";
 import { readAuditFull, readInventory } from "./inventory.ts";
 import { LOCK_TIMEOUT_MS, type SaveContext, saveInventory } from "./save.ts";
+import { publicPanel } from "./panel.ts";
 import { type CloudinaryCreds, NOT_SET_UP, signFloorPlan, signPhotos } from "./sign.ts";
 
 // The backend contract version, in AssetTrackerSync.gs's series. index.html
@@ -73,8 +74,21 @@ export function createApi({
     if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
 
     if (req.method === "GET") {
-      if (url.searchParams.get("panel")) {
-        return json({ ok: false, error: "The public panel page isn't on this backend yet." });
+      // The public per-panel read: anonymous by design, and structurally
+      // separate from everything authenticated (panel.ts).
+      const code = url.searchParams.get("panel");
+      if (code) {
+        const tenantId = tenantOf(url);
+        if (!tenantId) return json({ ok: false, error: "No tenant named in the request (?tenant=).", scriptVersion: SCRIPT_VERSION });
+        try {
+          return json(await withTenant(sql, tenantId, async (tx) => {
+            const [tenant] = await tx`select 1 from tenants`;
+            if (!tenant) return { ok: false, error: "Could not load that panel." };
+            return await publicPanel(tx, code, SCRIPT_VERSION);
+          }));
+        } catch (_err) {
+          return json({ ok: false, error: "Could not load that panel." });
+        }
       }
       // The bare GET: version without a token. "Backend outdated" and
       // `deploy.mjs --status` both read it, so it stays unauthenticated.

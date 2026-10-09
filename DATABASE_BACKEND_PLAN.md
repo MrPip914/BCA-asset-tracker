@@ -1,6 +1,6 @@
 # Moving the backend from Apps Script + Sheets to Postgres — Phase 1 design
 
-Status: **Rollout step 1 (schema, `db/migrations/`) applied to dev 2026-10-07; step 2 (importer, `db/import-from-sheet.mjs`) run against dev 2026-10-08; step 3 (API, `supabase/functions/asset-api/`) started 2026-10-08 with `signin`, `read` and `signout`; the save, `auditFull`, upload signing and `diagnostics` were added 2026-10-09.** Written 2026-10-06 after saves against the Google
+Status: **Rollout step 1 (schema, `db/migrations/`) applied to dev 2026-10-07; step 2 (importer, `db/import-from-sheet.mjs`) run against dev 2026-10-08; step 3 (API, `supabase/functions/asset-api/`) started 2026-10-08 with `signin`, `read` and `signout`; the save, `auditFull`, upload signing, `diagnostics` and the public panel read were added 2026-10-09, which completes the port.** Written 2026-10-06 after saves against the Google
 backend proved unreliable (see "Google's layer in front of Apps Script fails
 intermittently" in CLAUDE.md, and the v42/v49/v50 diagnostics work).
 
@@ -302,6 +302,14 @@ for the free tier; Pro's 7 daily backups and no-pause guarantee are what removes
      rows newest first, every field a string as the Sheet's `getDisplayValues` hands them
      over, plus the true count. `diag_test.ts` puts the same rows in the table and in a
      fake Diagnostics tab and requires equal answers.
+   - **The public panel read (2026-10-09)**, `GET ?panel=<code>&tenant=<id>`, is `panel.ts`:
+     anonymous, the `.gs`'s five whitelists copied and pinned, photos scoped to the panel's
+     own ids with hidden ones and documents dropped first. `panel_test.ts` runs the `.gs`'s
+     own `publicPanelPayload_` (through `getThroughSheet`) for every way into a panel, a
+     sub-panel fed from another, a room loop and codes that name no panel, and requires
+     equality. **One thing for the cutover:** `panel.html` builds its URL as
+     `SHEET_API_URL + "?panel="`, which breaks once the URL already carries `?tenant=`; it
+     must append with `&` (or `URLSearchParams`) when it moves.
 4. **Parity tests** (the important part): a **replay harness** that feeds the same recorded
    request sequence to the Apps Script backend (dev tenant) and the new API and compares the
    responses field for field. The existing `test-backend-*.js` suites, which slice `.gs`
