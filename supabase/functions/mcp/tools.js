@@ -28,7 +28,7 @@ import {
 import {
   dateOnly, taskKindOf, taskDueDate, maintenanceStatusOf, cellsLabel_, isOneOffTask, taskIsDone,
   TASK_KIND_SCHEDULED, TASK_KIND_ONEOFF, MAINTENANCE_FREQUENCIES, WEEKDAY_NAMES,
-  parseRecurrence, formatRecurrence, describeRecurrence, recurrenceApproxDays,
+  parseRecurrence, formatRecurrence, describeRecurrence, recurrenceApproxDays, floorPlanWallCoverSet,
 } from "./from-app.js";
 
 export class ToolError extends Error {}
@@ -509,9 +509,13 @@ async function openPlanWalls(ctx, rows, inv, ref, live) {
     throw new ToolError(`The floor plan on ${inv.nameOf(a)} could not be fetched from the file host, so nothing was read or changed.`);
   }
   spaces = rotatedSpaces(spaces, a.floorPlanRotation);
-  const edges = exteriorWalls(spaces);
   const links = (rows.space_links || []).filter((r) => r.plan_asset_id === a.id)
     .sort((x, y) => (x.position ?? 0) - (y.position ?? 0)).map((r) => r.data);
+  // Which spaces close off an edge is the app's call, made exactly as the Map
+  // tab makes it: from the links to shapes this drawing still has.
+  const gids = new Set(spaces.map((sp) => sp.gid));
+  const coverSet = floorPlanWallCoverSet(a, links.filter((l) => l && gids.has(l.shapeId)), [...inv.byId.values()]);
+  const edges = exteriorWalls(spaces, coverSet ? (sp) => coverSet.has(sp.gid) : null);
   const linkOf = new Map();
   for (const l of links) if (l?.roomId && !/#e\d+(\.\d+)?$/.test(l.shapeId)) linkOf.set(l.shapeId, l.roomId);
   const walls = wallsOnPlan(links, new Set(edges.map((e) => e.id)));

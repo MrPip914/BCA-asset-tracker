@@ -45,7 +45,7 @@ const eq = (name, got, want) => check(name, JSON.stringify(got) === JSON.stringi
       // The outside-wall rule, and the geometry it runs on: set_plan_walls must
       // offer exactly the edges the Map tab draws.
       "floorPlanParseTransform", "floorPlanApplyTransform", "floorPlanApplyChain", "floorPlanPointInPoly", "floorPlanBbox",
-      "floorPlanRotatePoint", "floorPlanRotateSpaces", "floorPlanIsSegmentId", "floorPlanExteriorSegments", "floorPlanSetWallSegments"].map(fn),
+      "floorPlanRotatePoint", "floorPlanRotateSpaces", "floorPlanIsSegmentId", "floorPlanExteriorSegments", "floorPlanWallCoverSet", "floorPlanSetWallSegments"].map(fn),
   ];
   const missing = pieces.filter((p) => !p || !copy.includes(p)).map((p) => p.split("\n")[0]);
   check("from-app.js matches index.html, piece for piece", missing.length === 0, `stale or missing: ${missing.join(" | ")}`);
@@ -877,6 +877,25 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
     r = await call("set_plan_walls", args, ctx);
     check(`set_plan_walls refuses ${label}, writing nothing`, r.isError && ctx.writes.length === 0, r.text);
   }
+
+  // A plan that is not a building's own (a campus): only a space linked into a
+  // building closes off an edge, so a building beside an unlinked courtyard
+  // still has its outside wall there -- the app's floorPlanWallCoverSet.
+  dev.assets.find((a) => a.id === "campus").data.floorPlanUrl = URL;
+  dev.space_links.push(
+    { plan_asset_id: "campus", shape_id: "shapeA", position: 0, data: { shapeId: "shapeA", roomId: "b400" } },
+  );
+  r = await call("get_plan_walls", { asset: "campus", space: "Space.A" }, wctx());
+  eq("get_plan_walls on a campus plan: an unlinked neighbour does not close off a building's edge",
+    r.data?.spaces?.[0]?.outsideEdges?.map((e) => e.segment), ["shapeA#e0", "shapeA#e1", "shapeA#e2", "shapeA#e3"], r.text);
+  dev.space_links.push(
+    { plan_asset_id: "campus", shape_id: "shapeB", position: 1, data: { shapeId: "shapeB", roomId: "r402" } },
+  );
+  r = await call("get_plan_walls", { asset: "campus", space: "Space.A" }, wctx());
+  eq("get_plan_walls on a campus plan: a neighbour linked inside a building does",
+    r.data?.spaces?.[0]?.outsideEdges?.map((e) => e.segment), ["shapeA#e0", "shapeA#e2", "shapeA#e3"], r.text);
+  dev.space_links = dev.space_links.filter((l) => l.plan_asset_id !== "campus");
+  delete dev.assets.find((a) => a.id === "campus").data.floorPlanUrl;
 
   // The real plans in the project folder, when present.
   const { rotatedSpaces, exteriorWalls } = await import("./supabase/functions/mcp/walls.js");

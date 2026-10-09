@@ -25,9 +25,11 @@ export function rotatedSpaces(spaces, rotation) {
 // Every outside edge, with the compass direction it faces: the outward normal
 // (away from its own space, found the way the app finds it), as a bearing in
 // degrees (0 = up/north, 90 = right/east; SVG's y runs down) and the nearest
-// of the four points. Length is in the drawing's own units.
-export function exteriorWalls(spaces) {
-  const segs = floorPlanExteriorSegments(spaces);
+// of the four points. Length is in the drawing's own units. `covers` is the
+// app's: on a plan that is not a building's own, only spaces linked into a
+// building close off an edge (floorPlanWallCoverSet); null means every space.
+export function exteriorWalls(spaces, covers) {
+  const segs = floorPlanExteriorSegments(spaces, covers);
   if (!segs.length) return [];
   const all = floorPlanBbox(spaces.flatMap((sp) => sp.pts));
   const eps = Math.max(all.w, all.h) * 0.006;

@@ -7,6 +7,8 @@
 // The server runs in UTC, so "overdue" can flip a few hours earlier or later
 // than it does in a browser in California. Accepted: the app is the authority.
 
+import { nearestAncestorOfType } from "./app-rules.js";
+
 const TASK_KIND_SCHEDULED = "scheduled";
 
 const TASK_KIND_ONEOFF = "oneoff";
@@ -294,7 +296,7 @@ function floorPlanIsSegmentId(id) {
   return !!floorPlanSegmentParts(id);
 }
 
-function floorPlanExteriorSegments(spaces) {
+function floorPlanExteriorSegments(spaces, covers) {
   const list = (spaces || []).filter(sp => sp && sp.pts && sp.pts.length >= 3);
   if (!list.length) return [];
   const all = floorPlanBbox(list.flatMap(sp => sp.pts));
@@ -316,7 +318,7 @@ function floorPlanExteriorSegments(spaces) {
       for (let c = 0; c < cells; c++) {
         const t = (c + 0.5) / cells;
         const probe = [a[0] + dx * t + nx * eps, a[1] + dy * t + ny * eps];
-        exposed.push(!list.some(o => o !== sp && inBox(o.bbox || floorPlanBbox(o.pts), probe) && floorPlanPointInPoly(probe, o.pts)));
+        exposed.push(!list.some(o => o !== sp && (!covers || covers(o)) && inBox(o.bbox || floorPlanBbox(o.pts), probe) && floorPlanPointInPoly(probe, o.pts)));
       }
       const runs = [];
       for (let c = 0; c < cells;) {
@@ -338,6 +340,18 @@ function floorPlanExteriorSegments(spaces) {
   return out;
 }
 
+function floorPlanWallCoverSet(owner, links, assets) {
+  const inBuilding = a => !!a && (a.type === "Building" || !!nearestAncestorOfType(a, assets, "Building"));
+  if (!owner || inBuilding(owner)) return null;
+  const byId = new Map((assets || []).map(a => [a.id, a]));
+  const set = new Set();
+  (links || []).forEach(l => {
+    if (!l || !l.roomId || floorPlanIsSegmentId(l.shapeId)) return;
+    if (inBuilding(byId.get(l.roomId))) set.add(l.shapeId);
+  });
+  return set;
+}
+
 function floorPlanSetWallSegments(links, wallId, segmentIds, stamp) {
   const wanted = [...new Set(segmentIds || [])];
   const owner = new Map();
@@ -354,5 +368,5 @@ export {
   taskKindOf, isOneOffTask, taskIsDone, taskDueDate, maintenanceStatusOf, cellsLabel_,
   floorPlanRemapLinksAndGroups, floorPlanPathToPoints,
   floorPlanRound2, floorPlanParseTransform, floorPlanApplyChain, floorPlanBbox, floorPlanPointInPoly, floorPlanRotateSpaces,
-  floorPlanSegmentId, floorPlanSegmentParts, floorPlanIsSegmentId, floorPlanExteriorSegments, floorPlanSetWallSegments,
+  floorPlanSegmentId, floorPlanSegmentParts, floorPlanIsSegmentId, floorPlanExteriorSegments, floorPlanWallCoverSet, floorPlanSetWallSegments,
 };

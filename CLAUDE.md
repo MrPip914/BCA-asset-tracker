@@ -695,6 +695,9 @@ but a task; editing a work entry is not offered.
     `floorPlanGeometryOf` carries points through ancestors' transforms as
     `parseFloorPlanSvg` does (starting at the geometry's PARENT); it matched the app in
     Chromium on all seven real plans, at rotation 0 and 1.
+  - **It also takes the app's `floorPlanWallCoverSet`** (PR #41): on a plan that is not a
+    building's own, only a space linked into a building closes off an edge. Computed from the
+    plan's links to shapes the drawing still has, exactly as the Map tab does.
   - **Facing is the connector's own**: the outward normal as a bearing, nearest of the four,
     with north = UP on the plan as the app shows it, after `floorPlanRotation`. The app has
     no north, so that is the only honest reading.

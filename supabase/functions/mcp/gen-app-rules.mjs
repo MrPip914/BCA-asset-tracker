@@ -111,7 +111,7 @@ const EXPORTS = [
   "fullPathOf", "parentNameFor", "relate", "dateOnly", "adoptPersonNames", "adoptLegacyNames",
   "columnDataType", "columnOptions", "validateColumnValue", "DEFAULT_COLUMNS", "RENAMED_COLUMN_KEYS",
   "RETIRED_COLUMN_KEYS", "IMPORT_KEY_HEADER", "importHeadersFor", "planAssetImport", "PATH_SEPARATOR",
-  "assetToImportRow", "resolveImportType", "isLockedType",
+  "assetToImportRow", "resolveImportType", "isLockedType", "nearestAncestorOfType",
 ];
 
 function grabber(src) {
