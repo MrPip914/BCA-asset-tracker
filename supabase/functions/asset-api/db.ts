@@ -51,3 +51,19 @@ export async function writeDiag(sql: Sql, tenantId: string, entries: DiagEntry[]
     /* never let logging break the request it describes */
   }
 }
+
+// handleDiagnostics_'s read: the newest DIAG_READ_LIMIT rows, newest first,
+// every field a string as getDisplayValues hands them over, plus the true
+// count. `at` is an ISO string, as the Sheet stores it.
+export const DIAG_READ_LIMIT = 300;
+const DIAG_FIELDS = ["at", "event", "op", "email", "reason", "detail", "ms", "scriptVersion"];
+
+export async function readDiag(tx: Tx) {
+  const rows = await tx`select at, event, op, email, reason, detail, ms, script_version as "scriptVersion"
+    from diagnostics order by seq desc limit ${DIAG_READ_LIMIT}`;
+  const [{ n }] = await tx`select count(*)::int as n from diagnostics`;
+  const text = (v: unknown) => (v === null || v === undefined ? "" : v instanceof Date ? v.toISOString() : String(v));
+  // deno-lint-ignore no-explicit-any
+  const entries = rows.map((r: any) => Object.fromEntries(DIAG_FIELDS.map((f) => [f, text(r[f])])));
+  return { entries, total: n };
+}

@@ -1,14 +1,15 @@
 // The request handler: the same requests AssetTrackerSync.gs answers, with the
 // same answers, so index.html changes by a URL and not a rewrite
 // (DATABASE_BACKEND_PLAN.md). Ported so far: signin, read, signout, save (a
-// body with no op), auditFull, photoSign, floorPlanSign, and the bare GET.
+// body with no op), auditFull, diagnostics, photoSign, floorPlanSign, and
+// the bare GET.
 // Everything else answers that it is not here YET -- as JSON, never an error
 // page, which is the one thing every answer must be.
 //
 // The tenant is named by the request (`?tenant=dev`, or the frontend's own
 // `client` / `c`). A tenant is a row in `tenants`; RLS does the rest.
 
-import { type DiagEntry, type Sql, withTenant, writeDiag } from "./db.ts";
+import { type DiagEntry, readDiag, type Sql, withTenant, writeDiag } from "./db.ts";
 import {
   type Auth, authorizeIdentity, authorizeSession, createSession, deleteSession,
   type Identity, readSession, readUsers, verifyGoogleIdToken,
@@ -114,6 +115,7 @@ export function createApi({
       if (op === "read") return await read({ sessionId: body.sessionId }, tenantId, diag, started);
       if (op === "save") return await save(body, tenantId, diag, started);
       if (op === "auditFull") return await auditFull(body, tenantId, diag);
+      if (op === "diagnostics") return await diagnostics(body, tenantId, diag);
       if (op === "photoSign" || op === "floorPlanSign") return await sign(op, body, tenantId, diag);
       return json({ ok: false, error: `"${op}" isn't available on this backend yet.`, scriptVersion: SCRIPT_VERSION });
     } finally {
@@ -191,6 +193,26 @@ export function createApi({
     } catch (err) {
       diag.push({ event: "error", detail: (err as Error)?.message });
       return json({ ok: false, error: "The server couldn't load the audit log: " + (err as Error)?.message, scriptVersion: SCRIPT_VERSION });
+    }
+  }
+
+  // handleDiagnostics_: the backend's own log, for the About panel. EDITORS
+  // ONLY, because it names other people.
+  async function diagnostics(body: Body, tenantId: string, diag: DiagEntry[]) {
+    try {
+      const answer = await withTenant(sql, tenantId, async (tx) => {
+        const [tenant] = await tx`select owner_email from tenants`;
+        if (!tenant) return { ok: false, error: `There is no tenant "${tenantId}" on this backend.`, scriptVersion: SCRIPT_VERSION };
+        const users = await readUsers(tx, String(tenant.owner_email).toLowerCase());
+        const auth = await authorizeSession(tx, body.sessionId, users, now(), diag);
+        if (!auth.ok) return { ok: false, authFailed: true, reason: auth.reason, error: auth.error, scriptVersion: SCRIPT_VERSION };
+        if (auth.role !== "editor") return { ok: false, forbidden: true, error: "Only editors can read the backend log.", scriptVersion: SCRIPT_VERSION };
+        return { ok: true, ...(await readDiag(tx)), scriptVersion: SCRIPT_VERSION };
+      });
+      return json(answer);
+    } catch (err) {
+      diag.push({ event: "error", detail: (err as Error)?.message });
+      return json({ ok: false, error: (err as Error)?.message, scriptVersion: SCRIPT_VERSION });
     }
   }
 

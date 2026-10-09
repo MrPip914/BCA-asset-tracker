@@ -143,7 +143,10 @@ export function saveThroughSheet(gasSource, grids, body, { as, props = {}, uuid,
       getDataRange() {
         const w = width();
         const n = lastRow();
-        return { getValues: () => grid.slice(0, n).map((r) => Array.from({ length: w }, (_, j) => (r[j] === undefined ? "" : r[j]))) };
+        const values = () => grid.slice(0, n).map((r) => Array.from({ length: w }, (_, j) => (r[j] === undefined ? "" : r[j])));
+        // Display values: what a cell shows, so a leading apostrophe is gone.
+        const display = () => values().map((r) => r.map((c) => String(c).replace(/^'/, "")));
+        return { getValues: values, getDisplayValues: display };
       },
       _grid: () => grid.slice(0, lastRow()),
     };
