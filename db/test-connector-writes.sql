@@ -175,6 +175,121 @@ end
 $$;
 commit;
 
+-- ------------------------------------------------------------------ 0007 connector_apply
+
+-- A helper: the expected revisions as the connector sends them.
+create function pg_temp.seen() returns jsonb language sql as $$
+  select jsonb_object_agg(domain, rev) from asset_tracker.revisions where tenant_id = 'cw_a'
+$$;
+
+begin;
+select set_config('app.tenant_id', 'cw_a', true);
+
+-- 10. Who may write, and a stale picture is refused outright.
+select pg_temp.refuses('apply as a viewer',
+  $s$ select asset_tracker.connector_apply('view@cwa.test', pg_temp.seen(), '[{"op":"audit","data":{"action":"x"}}]') $s$, 'view-only');
+select pg_temp.refuses('apply on a stale revision',
+  $s$ select asset_tracker.connector_apply('ed@cwa.test', '{"assets":1}', '[{"op":"audit","data":{"action":"x"}}]') $s$, 'inventory changed');
+select pg_temp.refuses('apply with nothing to do',
+  $s$ select asset_tracker.connector_apply('ed@cwa.test', pg_temp.seen(), '[]') $s$, 'Nothing to write');
+
+-- 11. Creating, updating, auditing and the counter in one call.
+do $$
+declare r jsonb; before int := (pg_temp.seen()->>'assets')::int; a record; d jsonb;
+begin
+  insert into asset_tracker.config (tenant_id, key, value) values ('cw_a', 'nextAssetNumber', '5');
+  r := asset_tracker.connector_apply('ed@cwa.test', pg_temp.seen(), jsonb_build_array(
+    jsonb_build_object('op', 'asset_create', 'id', 'new1', 'data', jsonb_build_object('id', 'new1', 'type', 'Computer', 'name', 'New PC', 'tag', 'BCA0009', 'parentId', 'room1', 'label', '', 'personIds', '[]'::jsonb)),
+    jsonb_build_object('op', 'asset_update', 'id', 'ms1', 'data', jsonb_build_object('id', 'ms1', 'type', 'Mini Split', 'name', 'MS One', 'tag', '', 'parentId', 'room1')),
+    jsonb_build_object('op', 'audit', 'data', jsonb_build_object('assetLabel', 'ms1', 'assetType', 'Mini Split', 'action', 'edited', 'field', 'Name', 'from', 'MS 1', 'to', 'MS One', 'by', 'spoofed', 'at', 'spoofed')),
+    jsonb_build_object('op', 'config', 'key', 'nextAssetNumber', 'value', 3),
+    jsonb_build_object('op', 'config', 'key', 'peripheralsList', 'value', '["Dock"]'::jsonb)));
+  if (r->>'revision')::int <> before + 1 or r->>'configRevision' is null then
+    raise exception 'FAIL: revisions not moved: %', r;
+  end if;
+  select * into a from asset_tracker.assets where id = 'new1';
+  if a.position <> 3 or a.tag <> 'BCA0009' or a.parent_id <> 'room1' or a.type <> 'Computer' or a.label is not null then
+    raise exception 'FAIL: created asset row wrong: % % % % %', a.position, a.tag, a.parent_id, a.type, a.label;
+  end if;
+  select * into a from asset_tracker.assets where id = 'ms1';
+  if a.parent_id <> 'room1' or a.tag is not null or a.data->>'name' <> 'MS One' then
+    raise exception 'FAIL: updated asset row wrong: %', a.data;
+  end if;
+  select data into d from asset_tracker.audit_log order by seq desc limit 1;
+  if d->>'by' <> 'Ed Itor (via Claude)' or d->>'at' = 'spoofed' or d->>'field' <> 'Name' then
+    raise exception 'FAIL: audit row not stamped: %', d;
+  end if;
+  if (select value from asset_tracker.config where tenant_id = 'cw_a' and key = 'nextAssetNumber') <> '5'::jsonb then
+    raise exception 'FAIL: the counter went backwards';
+  end if;
+  if (select value from asset_tracker.config where tenant_id = 'cw_a' and key = 'peripheralsList') <> '["Dock"]'::jsonb then
+    raise exception 'FAIL: managed list not written';
+  end if;
+end
+$$;
+
+-- 12. Tasks: insert stamps, update keeps who first entered it, delete removes.
+do $$
+declare d jsonb;
+begin
+  perform asset_tracker.connector_apply('ed@cwa.test', pg_temp.seen(), '[
+    {"op":"task_insert","id":"t1","assetId":"new1","data":{"task":"Dust","kind":"scheduled","by":"spoofed"}},
+    {"op":"task_update","id":"m1","assetId":"ms1","data":{"task":"Filter wash","frequencyLabel":"Monthly","at":"x","by":"y"}}
+  ]');
+  select data into d from asset_tracker.maintenance where id = 't1';
+  if d->>'by' <> 'Ed Itor (via Claude)' or d->>'id' <> 't1' or (select position from asset_tracker.maintenance where id = 't1') <> 0 then
+    raise exception 'FAIL: task insert wrong: %', d;
+  end if;
+  select data into d from asset_tracker.maintenance where id = 'm1';
+  if d->>'task' <> 'Filter wash' or d ? 'lastPerformed' or d->>'by' = 'y' then
+    raise exception 'FAIL: task update wrong: %', d;
+  end if;
+  perform asset_tracker.connector_apply('ed@cwa.test', pg_temp.seen(), '[{"op":"task_delete","id":"t1","assetId":"new1"}]');
+  if exists (select 1 from asset_tracker.maintenance where id = 't1') then
+    raise exception 'FAIL: task not deleted';
+  end if;
+end
+$$;
+commit;
+
+-- 13. Refusals leave nothing behind: a duplicate tag, a task on an archived
+--     asset, a task on another tenant's asset, a forbidden setting, an asset
+--     that already exists, another tenant's asset, and an unknown op.
+begin;
+select set_config('app.tenant_id', 'cw_a', true);
+select pg_temp.refuses('a tag already worn',
+  $s$ select asset_tracker.connector_apply('ed@cwa.test', pg_temp.seen(), '[{"op":"asset_create","id":"n2","data":{"id":"n2","type":"Computer","tag":"bca0009"}}]') $s$, 'two assets');
+select pg_temp.refuses('a task on an archived asset',
+  $s$ select asset_tracker.connector_apply('ed@cwa.test', pg_temp.seen(), '[{"op":"task_insert","id":"t9","assetId":"old1","data":{"task":"x"}}]') $s$, 'archived');
+select pg_temp.refuses('a task on another tenant''s asset',
+  $s$ select asset_tracker.connector_apply('ed@cwa.test', pg_temp.seen(), '[{"op":"task_insert","id":"t9","assetId":"secret","data":{"task":"x"}}]') $s$, 'No such asset');
+select pg_temp.refuses('updating another tenant''s asset',
+  $s$ select asset_tracker.connector_apply('ed@cwa.test', pg_temp.seen(), '[{"op":"asset_update","id":"secret","data":{"id":"secret","type":"Room"}}]') $s$, 'No such asset');
+select pg_temp.refuses('another tenant''s task',
+  $s$ select asset_tracker.connector_apply('ed@cwa.test', pg_temp.seen(), '[{"op":"task_delete","id":"mb","assetId":"secret"}]') $s$, 'No such task');
+select pg_temp.refuses('a setting Claude may not change',
+  $s$ select asset_tracker.connector_apply('ed@cwa.test', pg_temp.seen(), '[{"op":"config","key":"typesList","value":[]}]') $s$, 'cannot be changed');
+select pg_temp.refuses('an asset that already exists',
+  $s$ select asset_tracker.connector_apply('ed@cwa.test', pg_temp.seen(), '[{"op":"asset_create","id":"ms1","data":{"id":"ms1","type":"Room"}}]') $s$, 'already exists');
+select pg_temp.refuses('an unknown op',
+  $s$ select asset_tracker.connector_apply('ed@cwa.test', pg_temp.seen(), '[{"op":"drop_everything"}]') $s$, 'Unknown change');
+do $$
+declare before jsonb := pg_temp.seen(); n int := (select count(*) from asset_tracker.audit_log);
+begin
+  begin
+    perform asset_tracker.connector_apply('ed@cwa.test', pg_temp.seen(), '[
+      {"op":"audit","data":{"assetLabel":"ms1","action":"edited"}},
+      {"op":"asset_create","id":"n3","data":{"id":"n3","type":"Computer","tag":"BCA0009"}}]');
+  exception when others then null;
+  end;
+  if pg_temp.seen() <> before or (select count(*) from asset_tracker.audit_log) <> n
+     or exists (select 1 from asset_tracker.assets where id = 'n3') then
+    raise exception 'FAIL: a refused apply left something behind';
+  end if;
+end
+$$;
+commit;
+
 -- 9. Tenant B's revision never moved.
 reset role;
 do $$

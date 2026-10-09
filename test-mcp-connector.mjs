@@ -73,6 +73,7 @@ const SITES = {
       { key: "columns", value: [{ key: "serial", label: "Serial #" }, { key: "purchaseDate", label: "Purchased" }] },
       { key: "vendors", value: ["CoolCo", "Sparky Electric"] },
     ],
+    revisions: [{ domain: "assets", rev: 7 }, { domain: "config", rev: 3 }],
     maintenance: [
       { id: "m1", asset_id: "ms1", position: 0, data: { id: "m1", task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: day(-45) } },
       { id: "m2", asset_id: "ms1", position: 1, data: { id: "m2", task: "Coil clean", frequencyLabel: "Annually", frequencyDays: 365 } },
@@ -152,12 +153,16 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   const tools = list.body.result.tools;
   eq("tools/list names every tool", tools.map((t) => t.name), TOOLS.map((t) => t.name));
   // Claude asks before a tool not marked read-only, so a write marked
-  // read-only would run without asking. Exactly the four writes are writes.
+  // read-only would run without asking. Exactly the writes are writes, and the
+  // ones that overwrite or remove something say so.
+  const WRITES = ["add_comment", "add_task", "add_tasks", "archive_assets", "complete_task", "delete_task", "edit_task", "log_work", "save_assets"];
   eq("exactly the write tools are marked as writes",
-    tools.filter((t) => t.annotations.readOnlyHint !== true).map((t) => t.name).sort(),
-    ["add_comment", "add_task", "complete_task", "log_work"]);
-  eq("the write tool list matches", [...WRITE_TOOL_NAMES].sort(), ["add_comment", "add_task", "complete_task", "log_work"]);
-  check("no tool is marked destructive", tools.every((t) => t.annotations.destructiveHint === false));
+    tools.filter((t) => t.annotations.readOnlyHint !== true).map((t) => t.name).sort(), WRITES);
+  eq("the write tool list matches", [...WRITE_TOOL_NAMES].sort(), WRITES);
+  eq("exactly the tools that overwrite or remove are marked destructive",
+    tools.filter((t) => t.annotations.destructiveHint !== false).map((t) => t.name).sort(),
+    ["archive_assets", "delete_task", "edit_task", "save_assets"]);
+  check("every tool's annotations carry its title", tools.every((t) => t.annotations.title === t.title));
   check("every tool's schema is a closed object",
     tools.every((t) => t.inputSchema.type === "object" && t.inputSchema.additionalProperties === false));
   const nope = await handleMcp({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "delete_everything" } }, ctxFor(ONE));
@@ -302,7 +307,9 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   // index.ts: a record must reach Postgres as text cast to jsonb (see WRITE_SQL).
   const ts = fs.readFileSync(path.join(here, "supabase/functions/mcp/index.ts"), "utf8");
   check("every jsonb parameter in index.ts goes through ::text", (ts.match(/::jsonb/g) || []).length === (ts.match(/::text::jsonb/g) || []).length && /::text::jsonb/.test(ts));
-  check("index.ts has a writer for every write tool", WRITE_TOOL_NAMES.every((n) => ts.includes(`connector_${n}(`)));
+  check("index.ts has a writer for every write tool",
+    ["add_task", "complete_task", "log_work", "add_comment", "apply"].every((n) => ts.includes(`connector_${n}(`)));
+  check("index.ts loads the revisions a management write sends back", /revisions: "select domain, rev from asset_tracker\.revisions"/.test(ts));
   // Frequencies come out exactly as the app stores them.
   eq("a preset frequency", frequencyFrom("semi annually"), { label: "Semi-Annually", days: 182, recurrence: "" });
   eq("an interval frequency", frequencyFrom("Every 6 weeks"), { label: "Every 6 weeks", days: 42, recurrence: "interval:6:week" });
@@ -394,6 +401,162 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   // add_comment
   r = await w("add_comment", { asset: "BCA0042", text: "  Fan replaced  " });
   eq("add_comment trims and writes against the asset's id", r.writes[0], { tenant: "dev", op: "add_comment", args: ["pc1", "Fan replaced"] });
+}
+
+// ---------------------------------------------------------------- managing assets and tasks
+
+{
+  // app-rules.js is GENERATED from index.html; a stale copy is the app's rules
+  // drifting away from what the connector checks.
+  const { generate, OUT } = await import("./supabase/functions/mcp/gen-app-rules.mjs");
+  check("app-rules.js is up to date with index.html (run gen-app-rules.mjs)", fs.readFileSync(OUT, "utf8") === generate());
+  // Every name the sliced code calls or reads in CAPITALS is declared in it: a
+  // declaration left out of PIECES is otherwise a ReferenceError only on the
+  // one path that reaches it (a user-made type, say).
+  {
+    const src = fs.readFileSync(OUT, "utf8").replace(/\/\/.*$/gm, "").replace(/"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`|'(?:[^'\\]|\\.)*'/g, '""');
+    const declared = new Set([...src.matchAll(/(?:function|const|let|var|class)\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]));
+    const called = [...src.matchAll(/(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(/g)].map((m) => m[1]);
+    const caps = src.match(/(?<![.\w$])[A-Z][A-Z0-9_]{2,}\b/g) || [];
+    const builtin = new Set([...Object.getOwnPropertyNames(globalThis), "if", "for", "while", "switch", "return", "catch", "function", "typeof"]);
+    const missing = [...new Set([...called, ...caps])].filter((n) => !declared.has(n) && !builtin.has(n));
+    eq("app-rules.js declares everything it uses", missing, []);
+  }
+  const { ASSET_FIELDS } = await import("./supabase/functions/mcp/asset-writes.js");
+  const shape = fs.readFileSync(path.join(here, "supabase/functions/asset-api/save-shape.ts"), "utf8");
+  const lit = /export const ASSET_FIELDS = (\[[\s\S]*?\]);/.exec(shape)[1];
+  eq("asset-writes.js stores the save's own ASSET_FIELDS", ASSET_FIELDS, JSON.parse(lit.replace(/,\s*\]$/, "]")));
+
+  const writesOf = (ctx) => ctx.writes.filter((w) => w.op === "apply");
+  const opsOf = (ctx) => writesOf(ctx).flatMap((w) => w.args[1]);
+  const audits = (ctx) => opsOf(ctx).filter((o) => o.op === "audit").map((o) => o.data);
+
+  // Schema.
+  const sc = (await call("get_schema", {})).data;
+  const t = (n) => sc.types.find((x) => x.name === n);
+  check("schema: a Computer has its fields, under the site's own labels", t("Computer").fields.includes("Serial #") && t("Computer").fields.includes("Location"));
+  check("schema: a Room has no Serial, and sits in a Building or a Room", !t("Room").fields.includes("Serial #") && t("Room").canSitInside.includes("Building"));
+  check("schema: a user-made type resolves by name", !!t("Mini Split"));
+  check("schema: people are User assets on this site", /User assets/.test(sc.people));
+  eq("schema: lists the vendors", sc.lists.vendors, ["CoolCo", "Sparky Electric"]);
+
+  // A new building, a room in it and a computer in that, child FIRST.
+  const tree = [
+    { fields: { Type: "Computer", Name: "Front desk PC", Location: "Main Campus › Building 400 › Room 401", "Serial #": "NEW-1", User: "Aaron Cantrell" } },
+    { fields: { Type: "Room", Name: "Room 401", Location: "Main Campus › Building 400" } },
+    { fields: { type: "building", name: "Building 400", parent: "Main Campus" } },
+  ];
+  let ctx = ctxFor(ONE);
+  const dry = await call("save_assets", { rows: tree, dry_run: true }, ctx);
+  check("dry run: plans three new assets and writes nothing", !dry.isError && dry.data.counts.created === 3 && ctx.writes.length === 0, dry.text);
+  ctx = ctxFor(ONE);
+  const made = await call("save_assets", { rows: tree, assign_asset_ids: true }, ctx);
+  const ops = opsOf(ctx);
+  check("create: one apply call, with the revisions read", !made.isError && writesOf(ctx).length === 1 && JSON.stringify(writesOf(ctx)[0].args[0]) === JSON.stringify({ assets: 7, config: 3 }), made.text);
+  const created = ops.filter((o) => o.op === "asset_create").map((o) => o.data);
+  const pc = created.find((a) => a.name === "Front desk PC");
+  const room = created.find((a) => a.name === "Room 401");
+  const bldg = created.find((a) => a.name === "Building 400");
+  check("create: the tree hangs together", pc && room && bldg && pc.parentId === room.id && room.parentId === bldg.id && bldg.parentId === "campus");
+  eq("create: the computer gets the next Asset ID, the places none", [pc?.tag, room?.tag, bldg?.tag], ["BCA0001", "", ""]);
+  eq("create: people resolve to User ids", pc?.personIds, ["u1"]);
+  check("create: stored in the save's shape (every field, blanks as \"\")", pc && pc.brand === "" && pc.status === "Active" && "mapY" in pc);
+  eq("create: one created audit row each, naming where", audits(ctx).filter((a) => a.action === "created").map((a) => a.related).sort(),
+    ["campus:at", `${bldg?.id}:at`, `${room?.id}:at`].sort());
+  check("create: the counter moves past the new Asset ID", ops.some((o) => o.op === "config" && o.key === "nextAssetNumber" && o.value === 2));
+
+  // An update changes only what it names, and is audited per field.
+  ctx = ctxFor(ONE);
+  const up = await call("save_assets", { rows: [{ asset: "BCA0042", fields: { "Serial #": "SN-888" } }] }, ctx);
+  const u = opsOf(ctx).find((o) => o.op === "asset_update")?.data;
+  check("update: the field changes and the rest is kept", !up.isError && u && u.serial === "SN-888" && u.brand === "Dell" && u.tag === "BCA0042" && u.parentId === "closet" && u.personIds[0] === "u1", up.text);
+  eq("update: one edited row, as the app's import writes it", audits(ctx).map((a) => [a.action, a.field, a.from, a.to]), [["edited", "Serial #", "SN-777", "SN-888"]]);
+
+  ctx = ctxFor(ONE);
+  const amb = await call("save_assets", { rows: [{ asset: "pc1", fields: { Location: "Room 101" } }] }, ctx);
+  check("move: an ambiguous place is refused and nothing written", amb.isError && /more than one/.test(amb.text) && ctx.writes.length === 0, amb.text);
+  ctx = ctxFor(ONE);
+  const mv = await call("save_assets", { rows: [{ asset: "pc1", fields: { Location: "Main Campus › Building 300 › Room 101" } }] }, ctx);
+  const mvRow = audits(ctx)[0];
+  check("move: lands in both rooms' history", !mv.isError && mvRow?.field === "Location" && mvRow?.related === "closet:from,r101b:to", mv.text);
+
+  // Mixed rows: the update row keeps its own parent although another row sets one.
+  ctx = ctxFor(ONE);
+  const mix = await call("save_assets", { rows: [
+    { asset: "pc1", fields: { "Serial #": "X1" } },
+    { fields: { Type: "Computer", Name: "Spare", Location: "Main Campus › Building 200 › Room 101" } },
+  ] }, ctx);
+  eq("mixed: an update row's other columns are left as they are", audits(ctx).filter((a) => a.action === "edited").map((a) => a.field), ["Serial #"]);
+  check("mixed: ok", !mix.isError, mix.text);
+
+  ctx = ctxFor(ONE);
+  const same = await call("save_assets", { rows: [{ asset: "pc1", fields: { "Serial #": "SN-777" } }] }, ctx);
+  check("unchanged: nothing written", !same.isError && ctx.writes.length === 0 && same.data.counts.unchanged === 1, same.text);
+
+  const refused = async (label, args, re) => {
+    const c = ctxFor(ONE);
+    const r = await call("save_assets", args, c);
+    check(label, r.isError && re.test(r.text) && c.writes.length === 0, r.text);
+  };
+  await refused("refused: a field that does not exist", { rows: [{ asset: "pc1", fields: { Colour: "red" } }] }, /not a field/);
+  await refused("refused: status goes through archive_assets", { rows: [{ asset: "pc1", fields: { Status: "Archived" } }] }, /archive_assets/);
+  await refused("refused: a new asset with no type", { rows: [{ fields: { Name: "Mystery" } }] }, /needs a Type/);
+  await refused("refused: a new asset wearing a tag already in use", { rows: [{ fields: { Type: "Computer", "Asset ID": "bca0042" } }] }, /already on Teacher PC/);
+  await refused("refused: a bad row refuses the good ones too", { rows: [
+    { asset: "pc1", fields: { "Serial #": "OK" } },
+    { fields: { Type: "Computer", Location: "Nowhere › At All" } },
+  ] }, /Row 2/);
+  await refused("refused: a type that cannot sit there", { rows: [{ fields: { Type: "Building", Name: "B9", Location: "Main Campus › Building 200 › Room 101" } }] }, /Row 1/);
+  const viewer = ctxFor([{ id: "dev", name: "Development", role: "viewer" }]);
+  const vr = await call("save_assets", { rows: [{ asset: "pc1", fields: { "Serial #": "X" } }] }, viewer);
+  check("refused: a viewer", vr.isError && /view-only/.test(vr.text) && viewer.writes.length === 0);
+
+  // Archive and restore.
+  ctx = ctxFor(ONE);
+  const ar = await call("archive_assets", { assets: ["pc1", "pc2"] }, ctx);
+  check("archive: archives, and says which already were", !ar.isError && ar.data.archived.length === 1 && ar.data.alreadyThatWay.length === 1, ar.text);
+  check("archive: the status and the app's audit row", opsOf(ctx).find((o) => o.op === "asset_update")?.data.status === "Archived"
+    && audits(ctx)[0]?.action === "archived" && audits(ctx)[0]?.related === "closet:at");
+  ctx = ctxFor(ONE);
+  await call("archive_assets", { assets: ["pc2"], restore: true }, ctx);
+  check("restore: back to Active, audited", opsOf(ctx).find((o) => o.op === "asset_update")?.data.status === "Active" && audits(ctx)[0]?.action === "restored");
+
+  // Tasks.
+  ctx = ctxFor(ONE);
+  const at = await call("add_tasks", { tasks: [
+    { asset: "ms1", task: "Drain line flush", frequency: "Quarterly" },
+    { asset: "Building 300", task: "Gutter clean", kind: "one-off", due_date: "2026-11-01" },
+  ] }, ctx);
+  const ins = opsOf(ctx).filter((o) => o.op === "task_insert");
+  check("add_tasks: one insert each, in one call", !at.isError && ins.length === 2 && ins[0].assetId === "ms1" && ins[1].data.dueDate === "2026-11-01" && ins[1].data.frequencyLabel === "", at.text);
+  ctx = ctxFor(ONE);
+  const atBad = await call("add_tasks", { tasks: [{ asset: "ms1", task: "Ok", frequency: "Monthly" }, { asset: "ms1", task: "No freq" }] }, ctx);
+  check("add_tasks: one bad task adds none", atBad.isError && /Task 2/.test(atBad.text) && ctx.writes.length === 0, atBad.text);
+
+  ctx = ctxFor(ONE);
+  const ed = await call("edit_task", { task: "m1", name: "Filter wash", owner: "Facilities" }, ctx);
+  const upd = opsOf(ctx).find((o) => o.op === "task_update");
+  check("edit_task: only the given fields change", !ed.isError && upd?.data.task === "Filter wash" && upd?.data.frequencyLabel === "Monthly" && upd?.data.owner === "Facilities", ed.text);
+  eq("edit_task: audited as the app audits it", audits(ctx).map((a) => [a.action, a.field, a.from, a.to]),
+    [["maintenance_edited", "Filter clean — Task", "Filter clean", "Filter wash"], ["maintenance_edited", "Filter clean — Owner", "—", "Facilities"]]);
+  ctx = ctxFor(ONE);
+  const reopen = await call("edit_task", { task: "Replace sign", last_done: "" }, ctx);
+  check("edit_task: clearing a one-off's date reopens it, worded Completed", !reopen.isError && audits(ctx)[0]?.field === "Replace sign — Completed" && audits(ctx)[0]?.to === "—", reopen.text);
+  ctx = ctxFor(ONE);
+  const noop = await call("edit_task", { task: "m1", owner: "" }, ctx);
+  check("edit_task: no change, no write", !noop.isError && ctx.writes.length === 0, noop.text);
+  ctx = ctxFor(ONE);
+  const flip = await call("edit_task", { task: "m3", kind: "recurring" }, ctx);
+  check("edit_task: a one-off made recurring needs a frequency", flip.isError && /how often/.test(flip.text) && ctx.writes.length === 0, flip.text);
+
+  ctx = ctxFor(ONE);
+  const del = await call("delete_task", { task: "Coil clean" }, ctx);
+  check("delete_task: removes it and writes maintenance_removed", !del.isError && opsOf(ctx)[0]?.op === "task_delete" && opsOf(ctx)[0]?.id === "m2"
+    && audits(ctx)[0]?.action === "maintenance_removed" && audits(ctx)[0]?.field === "Coil clean", del.text);
+
+  // Review reads.
+  const all = (await call("search_assets", { type: "Computer", include_fields: true })).data;
+  check("search with include_fields returns every field and the users", all.assets[0].fields?.["Serial #"] === "SN-777" && all.assets[0].users?.[0] === "Aaron Cantrell");
 }
 
 // ---------------------------------------------------------------- sign-in (oauth.js)

@@ -44,6 +44,9 @@ const TABLE_SQL: Record<string, string> = {
   breakers: "select id, panel_id, position, data from asset_tracker.breakers",
   circuits: "select id, panel_id, breaker_id, position, data from asset_tracker.circuits",
   audit_log: "select seq, asset_id, data from asset_tracker.audit_log",
+  // What a management write sends back as "the inventory I planned against"
+  // (connector_apply refuses if it has moved since).
+  revisions: "select domain, rev from asset_tracker.revisions",
 };
 
 // Every read runs inside a transaction that first names its tenant, which is
@@ -63,7 +66,7 @@ function withTenant<T>(tenant: string, fn: (tx: postgres.TransactionSql) => Prom
 }
 
 // A write: the same tenant and role setup, minus READ ONLY, and exactly one
-// statement -- a call to one of the 0006 functions, which does every check and
+// statement -- a call to one of the 0006/0007 functions, which does every check and
 // the revision bump itself. The connector never writes a table directly.
 // A record goes as TEXT cast to jsonb: postgres.js serializes a parameter it
 // infers as jsonb with JSON.stringify, so passing the string straight to
@@ -77,6 +80,10 @@ const WRITE_SQL: Record<string, (tx: postgres.TransactionSql, email: string, a: 
     tx`select asset_tracker.connector_log_work(${email}, ${asset as string}, ${JSON.stringify(change)}::text::jsonb) as out`,
   add_comment: (tx, email, [asset, text]) =>
     tx`select asset_tracker.connector_add_comment(${email}, ${asset as string}, ${text as string}) as out`,
+  // Every management tool (save_assets, archive_assets, add_tasks, edit_task,
+  // delete_task): one list of ops, applied whole or not at all (0007).
+  apply: (tx, email, [expected, ops]) =>
+    tx`select asset_tracker.connector_apply(${email}, ${JSON.stringify(expected)}::text::jsonb, ${JSON.stringify(ops)}::text::jsonb) as out`,
 };
 
 async function write(tenant: string, email: string, op: string, args: unknown[]) {
