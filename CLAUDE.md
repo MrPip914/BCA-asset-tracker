@@ -555,9 +555,12 @@ failure modal and the sign-in screen both said *that* it happened and kept nothi
 
 A remote MCP server, as a Supabase Edge Function, so Claude (web, desktop, phone) can
 answer questions from the inventory. The evaluation behind it is
-`/mnt/project-files/evaluations/claude-connector.md`. **Dev tenant only. Reads, plus four
-ADDITIVE writes (2026-10-09): add a task, log a task completion, log work, add a comment.**
-Nothing edits or deletes.
+`/mnt/project-files/evaluations/claude-connector.md`. **Dev tenant only. Reads, four
+additive writes (2026-10-09: add a task, log a task completion, log work, add a comment),
+and MANAGEMENT (2026-10-09, Eric: "manage all assets and tasks… adding items in bulk and
+reviewing data to make recommendations"): create and edit assets in bulk, archive and
+restore them, add tasks in bulk, edit and delete tasks.** Nothing is permanently deleted
+but a task; editing a work entry is not offered.
 
 - **Sign-in is OAuth whose only proof of identity is the app's Google sign-in**
   (`oauth.js`). Claude registers, `/authorize` redirects to `mcp-connect.html` on the app
@@ -593,9 +596,11 @@ Nothing edits or deletes.
   yours" are the same answer. Every read sets `app.tenant_id` first, so row-level security
   separates tenants underneath; the function must connect as an `asset_api` login role,
   never the service role.
-- **Reads are annotated read-only; the four writes are annotated as writes**, so Claude
-  asks before each one unless the person told it to always allow that tool. A write
-  marked read-only would run unasked, which `test-mcp-connector.mjs` guards.
+- **Reads are annotated read-only; the writes are annotated as writes, and the ones that
+  overwrite or remove (save_assets, archive_assets, edit_task, delete_task) as
+  destructive**, so Claude asks before each one unless the person told it to always allow
+  that tool. A write marked read-only would run unasked, which `test-mcp-connector.mjs`
+  guards.
 - **Every write is ONE Postgres function** (`db/migrations/0006_connector_writes.sql`),
   never a direct table write from the connector — that is `sheet.mjs`'s bypass all over
   again. In one transaction it re-checks the role (owner or allowlisted editor, re-read),
@@ -621,6 +626,45 @@ Nothing edits or deletes.
   - **The dev app reads and saves Supabase since 2026-10-09**, so a write is real dev data.
     The Sheet importer no longer runs on a push, since it replaces the tenant wholesale;
     it runs only from a manual `Database migrations` run with `reimport` = `replace dev`.
+- **Asset writes go through the app's OWN import planner, not a copy of its rules**
+  (2026-10-09). `save_assets` builds a spreadsheet-shaped set of rows and hands it to
+  `planAssetImport`, so a row from Claude is checked exactly as an imported row is — type,
+  per-type fields, data types, tags unique across the whole inventory, parent types and
+  loops against the PROJECTED inventory, a parent created by another row in the same call,
+  people resolved only in id mode — and audited exactly as an import is (one `edited` row
+  per field, one `created` row per asset). Errors refuse the whole call.
+  - **`app-rules.js` is GENERATED** from `index.html` by `gen-app-rules.mjs` (~75 sliced
+    declarations: the type registry and settings, naming, the parent chain, data types, the
+    import planner) plus each tenant's tag prefix from `clients.js`. **Change either file,
+    re-run the generator.** `test-mcp-connector.mjs` fails on a stale copy and on any name
+    the slice uses but does not declare (that is how `DEFAULT_PARENT_TYPES` was found
+    missing: a ReferenceError only on a user-made type). CI rehearses PRs touching
+    `index.html`/`clients.js` for that reason.
+  - **`appView()` (asset-writes.js) rebuilds the inventory the way `applySnapshot` does** —
+    column migration, `applyTypeSettings`, the type list, the id/tag/personIds/name
+    adoptions, `usersAreAssets` — because the planner must see what the app sees.
+  - **The type settings are MODULE STATE, as in the app**, so everything from `appView()`
+    to the plan runs with no `await` between. Concurrent requests share an isolate.
+  - **An update row changes only the fields it names.** A spreadsheet's columns are
+    file-wide and a blank cell clears, so every other column some row sets is filled with
+    the asset's CURRENT cell (`assetToImportRow`); the parent goes as its id, which
+    resolves back to itself without needing a unique path.
+  - **Status is not settable there**: archive/restore is `archive_assets`, which writes the
+    app's `archived`/`restored` rows.
+  - Tasks: `add_tasks` (bulk, all-or-nothing), `edit_task` (only the fields given; the app's
+    `maintenance_edited` row per field, "Completed" for a one-off's date, which is also how
+    a finished one-off is reopened), `delete_task` (`maintenance_removed`).
+  - **Every management write is ONE call to `connector_apply`** (`0007_connector_manage.sql`),
+    a list of ops applied whole or not at all. **It refuses if the `assets` (and, when
+    touched, `config`) revision is not the one the tools read** — the read loads the
+    revisions FIRST — because the plan was made against that picture; then it moves them on
+    like any save. It stamps every audit row's at/by itself, keeps a task's original at/by
+    on edit, keeps `nextAssetNumber` monotonic, allows only three config keys
+    (`nextAssetNumber`, `peripheralsList`, `bulkItemTypes`), and refuses two assets ending
+    up with one tag. An asset's `data` is written whole in the save's shape (`ASSET_FIELDS`
+    pinned to `save-shape.ts` by test).
+  - `get_schema` is what Claude reads first; `search_assets` takes `include_fields` (up to
+    1000 rows) for reviews.
 - **Names are not unique, so a lookup is tiered** (id, tag, name, full path) and two
   matches is an error listing both with their locations, never the first one.
 - **The whole tenant is loaded per call.** Fine at hundreds of assets; the audit log is the

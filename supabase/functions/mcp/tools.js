@@ -1,13 +1,14 @@
 // The connector's tools. The read tools say so in their annotations, so Claude
-// never asks permission to run one. The four write tools (add_task,
-// complete_task, log_work, add_comment) are annotated as writes, so Claude asks
-// before each one unless the person has told it to always allow that tool.
+// never asks permission to run one. The write tools are annotated as writes
+// (and the ones that remove or overwrite something as destructive), so Claude
+// asks before each one unless the person has told it to always allow that tool.
 //
 // A write tool builds and checks the record HERE, with the app's own rules
-// (from-app.js), then hands it to ctx.write, which calls one Postgres function
-// (db/migrations/0006_connector_writes.sql). That function re-checks the role,
-// the asset and the task, bumps the revision and writes the audit row, all in
-// one transaction. Nothing here writes a table directly.
+// (from-app.js for tasks, app-rules.js via asset-writes.js for assets), then
+// hands it to ctx.write, which calls one Postgres function (migrations 0006 and
+// 0007). That function re-checks the role, takes the lock, bumps the revision
+// and writes the audit rows, all in one transaction. Nothing here writes a
+// table directly.
 //
 // A tool is handed a context that knows which sites (tenants) the signed-in
 // person may see and can load one site's tables. It never sees a database or a
@@ -18,6 +19,9 @@
 // separates tenants again underneath, by row-level security.
 
 import { buildInventory } from "./inventory.js";
+import {
+  appView, schemaOf, planSaveAssets, planArchive, taskEditAudit, PlanError, MAX_ROWS,
+} from "./asset-writes.js";
 import {
   dateOnly, taskKindOf, taskDueDate, maintenanceStatusOf, cellsLabel_, isOneOffTask, taskIsDone,
   TASK_KIND_SCHEDULED, TASK_KIND_ONEOFF, MAINTENANCE_FREQUENCIES, WEEKDAY_NAMES,
@@ -30,6 +34,8 @@ const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: 
 // Additive: nothing a write tool does removes or overwrites a person's data
 // (a completion moves a task's last-done date forward, which is the point).
 const WRITE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
+// Overwrites or removes something a person entered (an asset's fields, a task).
+const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
 
 const SITE = {
   type: "string",
@@ -59,10 +65,17 @@ const READ_TOOLS = [
         type: { type: "string", description: "Only this type, by name (e.g. Computer, Room, Mini Split)." },
         within: { type: "string", description: "Only assets inside this place (id, tag, name or full path)." },
         status: { type: "string", enum: ["active", "archived", "all"], description: "Default active." },
-        limit: LIMIT(200, 50),
+        include_fields: { type: "boolean", description: "Also return every field of each asset and its users, for reviewing data in bulk." },
+        limit: LIMIT(1000, 50),
       },
       additionalProperties: false,
     },
+  },
+  {
+    name: "get_schema",
+    title: "Get site schema",
+    description: "How this site's inventory is shaped: every asset type with the fields it has and what it can sit inside, every field's kind and choices, the managed lists (peripherals, sub-types, work types, vendors), and whether people are assigned as User assets. Read this before save_assets.",
+    inputSchema: { type: "object", properties: { site: SITE }, additionalProperties: false },
   },
   {
     name: "get_asset",
@@ -239,11 +252,142 @@ const WRITE_TOOLS = [
   },
 ];
 
-export const WRITE_TOOL_NAMES = WRITE_TOOLS.map((t) => t.name);
+const TASK_FIELDS = {
+  task: { type: "string", description: "What the task is, e.g. Filter clean." },
+  kind: { type: "string", enum: ["recurring", "one-off"], description: "Default recurring." },
+  frequency: {
+    type: "string",
+    description: `Recurring only. One of ${MAINTENANCE_FREQUENCIES.map((f) => f.label).join(", ")}; or "every N days/weeks/months/years"; or "first/second/third/fourth/last <weekday> of every month" (optionally "every N months").`,
+  },
+  last_done: { type: "string", description: "When it was last done, yyyy-mm-dd, if known. Due dates count from it." },
+  due_date: { type: "string", description: "One-off only: when it is due, yyyy-mm-dd." },
+  owner: { type: "string", description: "Who is responsible." },
+  notes: { type: "string" },
+};
+
+// Changing or removing what is already there. Each one is checked against the
+// app's own rules and audited as the app audits it.
+const MANAGE_TOOLS = [
+  {
+    name: "save_assets",
+    title: "Create or update assets",
+    description: "Create new assets and change existing ones, up to 500 rows in one call, checked by the app's own import rules and recorded field by field in the change history under this person, via Claude. A row with `asset` updates that asset and changes only the fields it gives; a row without one creates an asset (Type required). Field names come from get_schema; Location takes a place's full path (Building 100 › Room 101) and may name a place created by another row in the same call. If any row has a problem nothing is written and every problem is listed. Use dry_run first for anything sizeable and show the person what will change.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        site: SITE,
+        rows: {
+          type: "array",
+          maxItems: MAX_ROWS,
+          items: {
+            type: "object",
+            properties: {
+              asset: { type: "string", description: "The existing asset to update (id, tag, name or full path). Omit to create a new asset." },
+              fields: {
+                type: "object",
+                description: "Field name to value, e.g. {\"Type\": \"Computer\", \"Name\": \"Front desk PC\", \"Location\": \"Building 100 › Room 101\", \"Serial\": \"ABC123\"}. An empty string clears a field. People (User) and Peripherals take several values separated by /.",
+                additionalProperties: true,
+              },
+            },
+            required: ["fields"],
+            additionalProperties: false,
+          },
+        },
+        assign_asset_ids: { type: "boolean", description: "Give each NEW asset whose type uses an Asset ID, and that has none in its row, the next ID in sequence, as the app's Add asset does." },
+        dry_run: { type: "boolean", description: "Check everything and say exactly what would change, without writing anything." },
+      },
+      required: ["rows"],
+      additionalProperties: false,
+    },
+    annotations: DESTRUCTIVE,
+  },
+  {
+    name: "archive_assets",
+    title: "Archive or restore assets",
+    description: "Archive assets (the app's soft delete: hidden from the active lists, history kept) or restore archived ones. Nothing is ever permanently deleted. Recorded as this person, via Claude.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        site: SITE,
+        assets: { type: "array", maxItems: MAX_ROWS, items: { type: "string" }, description: "Id, tag, name or full path of each asset." },
+        restore: { type: "boolean", description: "Restore instead of archive." },
+      },
+      required: ["assets"],
+      additionalProperties: false,
+    },
+    annotations: DESTRUCTIVE,
+  },
+  {
+    name: "add_tasks",
+    title: "Add tasks in bulk",
+    description: "Add up to 500 maintenance tasks in one call, each on its own asset, e.g. a filter clean on every mini split. All or nothing: if one is wrong, none is added. Recorded as this person, via Claude.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        site: SITE,
+        tasks: {
+          type: "array",
+          maxItems: MAX_ROWS,
+          items: {
+            type: "object",
+            properties: { asset: { type: "string", description: "Id, tag, name or full path." }, ...TASK_FIELDS },
+            required: ["asset", "task"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["tasks"],
+      additionalProperties: false,
+    },
+    annotations: WRITE,
+  },
+  {
+    name: "edit_task",
+    title: "Edit task",
+    description: "Change a task's name, kind, frequency, due date, last-done date, owner or notes. Only the fields given change; an empty string clears one (clearing a finished one-off's last_done reopens it). Each change is recorded in the change history as the app records it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        site: SITE,
+        task: { type: "string", description: "The task's id (from list_tasks or get_asset), or its name." },
+        asset: { type: "string", description: "Narrows a task given by name to this asset, or to anything inside this place." },
+        name: { type: "string", description: "A new name for the task." },
+        kind: TASK_FIELDS.kind,
+        frequency: TASK_FIELDS.frequency,
+        last_done: { type: "string", description: "yyyy-mm-dd, or empty to clear." },
+        due_date: { type: "string", description: "One-off only: yyyy-mm-dd, or empty to clear." },
+        owner: TASK_FIELDS.owner,
+        notes: TASK_FIELDS.notes,
+      },
+      required: ["task"],
+      additionalProperties: false,
+    },
+    annotations: DESTRUCTIVE,
+  },
+  {
+    name: "delete_task",
+    title: "Delete task",
+    description: "Delete a task. Work already logged against it is kept. Recorded in the change history as the app records it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        site: SITE,
+        task: { type: "string", description: "The task's id, or its name." },
+        asset: { type: "string", description: "Narrows a task given by name to this asset, or to anything inside this place." },
+      },
+      required: ["task"],
+      additionalProperties: false,
+    },
+    annotations: DESTRUCTIVE,
+  },
+];
+
+export const WRITE_TOOL_NAMES = [...WRITE_TOOLS, ...MANAGE_TOOLS].map((t) => t.name);
 
 export const TOOLS = [
   ...READ_TOOLS.map((t) => ({ ...t, annotations: { title: t.title, ...READ_ONLY } })),
   ...WRITE_TOOLS.map((t) => ({ ...t, annotations: { title: t.title, ...WRITE } })),
+  ...MANAGE_TOOLS.map((t) => ({ ...t, annotations: { title: t.title, ...t.annotations } })),
 ];
 
 // ------------------------------------------------------------------ helpers
@@ -264,10 +408,33 @@ function pickSite(ctx, site) {
 
 async function openSite(ctx, args, tables) {
   const site = pickSite(ctx, args.site);
-  const want = Array.from(new Set(["assets", "config", ...tables]));
   const rows = {};
+  // The revision counters are read BEFORE everything else, so a save landing
+  // while the rest loads moves them past what this read saw, and the write
+  // that follows is refused instead of acting on a mixed picture.
+  if (tables.includes("revisions")) rows.revisions = await ctx.load(site.id, "revisions");
+  const want = Array.from(new Set(["assets", "config", ...tables])).filter((t) => t !== "revisions");
   await Promise.all(want.map(async (t) => { rows[t] = await ctx.load(site.id, t); }));
   return { site, rows, inv: buildInventory(rows) };
+}
+
+// A management write: ONE call to connector_apply with the revisions this
+// read saw, which refuses everything if the inventory has moved since.
+async function apply(ctx, site, view, ops, tool) {
+  const out = await ctx.write(site.id, "apply", [view.revisions, ops]);
+  ctx.log?.("write", { tool, site: site.id, ops: ops.length });
+  return out;
+}
+
+function planOrThrow(fn) {
+  try {
+    return fn();
+  } catch (err) {
+    if (!(err instanceof PlanError)) throw err;
+    const e = new ToolError(err.message);
+    e.detail = err.detail;
+    throw e;
+  }
 }
 
 function resolveOrThrow(inv, ref) {
@@ -389,6 +556,47 @@ function workFields(inv, args, dfltType) {
   };
 }
 
+// A new task as addMaintenanceItem builds it. Both halves are always written,
+// the unused one blank, so flipping the kind later cannot resurrect either.
+function taskItem(args) {
+  const task = String(args.task ?? "").trim();
+  if (!task) throw new ToolError("Say what the task is.");
+  const oneOff = args.kind === "one-off";
+  let freq = null;
+  if (oneOff) {
+    if (args.frequency) throw new ToolError("A one-off task has no frequency. Give a due_date instead, or make it recurring.");
+    if (args.last_done) throw new ToolError("A one-off task is added open. Add it, then use complete_task if it is already done.");
+  } else {
+    if (args.due_date) throw new ToolError("A recurring task's due date comes from its frequency and last-done date. Give last_done, or make it one-off.");
+    freq = frequencyOrThrow(args.frequency);
+  }
+  return {
+    kind: oneOff ? TASK_KIND_ONEOFF : TASK_KIND_SCHEDULED,
+    task,
+    notes: String(args.notes ?? "").trim(),
+    frequencyLabel: oneOff ? "" : freq.label,
+    frequencyDays: oneOff ? "" : freq.days,
+    recurrence: oneOff ? "" : freq.recurrence,
+    dueDate: oneOff ? realDate(args.due_date, "due_date") : "",
+    lastPerformed: oneOff ? "" : realDate(args.last_done, "last_done"),
+    owner: String(args.owner ?? "").trim(),
+  };
+}
+
+function frequencyOrThrow(text) {
+  if (!text) throw new ToolError(`Say how often: ${MAINTENANCE_FREQUENCIES.map((f) => f.label).join(", ")}, or e.g. "every 6 weeks".`);
+  const freq = frequencyFrom(text);
+  if (!freq) throw new ToolError(`"${text}" is not a frequency the app understands. Use ${MAINTENANCE_FREQUENCIES.map((f) => f.label).join(", ")}, "every N days/weeks/months/years", or "first Monday of every month".`);
+  return freq;
+}
+
+// The revisions a read saw, for a write that needs no asset rules.
+const appViewRevisions = (rows) => {
+  const out = { assets: 0, config: 0 };
+  for (const r of rows.revisions || []) if (r.domain in out) out[r.domain] = Number(r.rev) || 0;
+  return { revisions: out };
+};
+
 // A task by id, or by name within an optional asset or place. Two tasks with
 // one name is a question for the person, never the first one.
 function findTask(inv, rows, ref, within) {
@@ -434,7 +642,28 @@ const handlers = {
       site: site.id,
       total: hits.length,
       truncated: hits.length > limit || undefined,
-      assets: hits.slice(0, limit).map(inv.summary),
+      assets: hits.slice(0, limit).map((a) => (args.include_fields
+        ? { ...inv.summary(a), users: inv.personNames(a).length ? inv.personNames(a) : undefined, fields: inv.fieldsOf(a) }
+        : inv.summary(a))),
+    };
+  },
+
+  async get_schema(args, ctx) {
+    const { site, rows, inv } = await openSite(ctx, args, []);
+    const view = appView(rows, site.id);
+    return {
+      site: site.id,
+      ...schemaOf(view),
+      lists: {
+        peripherals: view.peripheralsList,
+        subTypes: view.bulkItemTypes,
+        workTypes: changeTypesOf(inv),
+        vendors: Array.isArray(inv.cfg.vendors) ? inv.cfg.vendors : [],
+      },
+      people: view.usersAreAssets
+        ? "People are User assets: the User field takes their names, and a new person is created as a User asset first."
+        : "People are plain names in the User field (this site has not converted them to User assets).",
+      nextAssetId: view.tagPrefix ? view.tagPrefix + String(view.nextAssetNumber).padStart(4, "0") : undefined,
     };
   },
 
@@ -612,31 +841,7 @@ const handlers = {
     const { site, inv } = await openSite(ctx, args, []);
     requireEditor(site);
     const a = liveAsset(inv, args.asset);
-    const task = String(args.task ?? "").trim();
-    if (!task) throw new ToolError("Say what the task is.");
-    const oneOff = args.kind === "one-off";
-    let freq = null;
-    if (oneOff) {
-      if (args.frequency) throw new ToolError("A one-off task has no frequency. Give a due_date instead, or make it recurring.");
-      if (args.last_done) throw new ToolError("A one-off task is added open. Add it, then use complete_task if it is already done.");
-    } else {
-      if (args.due_date) throw new ToolError("A recurring task's due date comes from its frequency and last-done date. Give last_done, or make it one-off.");
-      if (!args.frequency) throw new ToolError(`Say how often: ${MAINTENANCE_FREQUENCIES.map((f) => f.label).join(", ")}, or e.g. "every 6 weeks".`);
-      freq = frequencyFrom(args.frequency);
-      if (!freq) throw new ToolError(`"${args.frequency}" is not a frequency the app understands. Use ${MAINTENANCE_FREQUENCIES.map((f) => f.label).join(", ")}, "every N days/weeks/months/years", or "first Monday of every month".`);
-    }
-    // Both halves always written, the unused one blank, as addMaintenanceItem does.
-    const item = {
-      kind: oneOff ? TASK_KIND_ONEOFF : TASK_KIND_SCHEDULED,
-      task,
-      notes: String(args.notes ?? "").trim(),
-      frequencyLabel: oneOff ? "" : freq.label,
-      frequencyDays: oneOff ? "" : freq.days,
-      recurrence: oneOff ? "" : freq.recurrence,
-      dueDate: oneOff ? realDate(args.due_date, "due_date") : "",
-      lastPerformed: oneOff ? "" : realDate(args.last_done, "last_done"),
-      owner: String(args.owner ?? "").trim(),
-    };
+    const item = taskItem(args);
     const out = await ctx.write(site.id, "add_task", [a.id, item]);
     ctx.log?.("write", { tool: "add_task", site: site.id, asset: a.id, id: out.id });
     return { site: site.id, added: taskRow(inv, a, { ...item, id: out.id }) };
@@ -685,6 +890,131 @@ const handlers = {
         note: work.note || undefined, task: task ? task.data.task : undefined, asset: inv.summary(a),
       },
     };
+  },
+
+  // ---------------------------------------------------------------- managing
+
+  async save_assets(args, ctx) {
+    const { site, rows, inv } = await openSite(ctx, args, ["revisions"]);
+    requireEditor(site);
+    const list = Array.isArray(args.rows) ? args.rows : [];
+    // Which existing asset each update row names, by the connector's usual
+    // lookup. Done first, since the view below must not be split by an await.
+    const resolved = list.map((r, i) => {
+      if (!r || !r.asset) return { ...r, asset: "" };
+      const hit = inv.resolve(r.asset);
+      if (hit.asset) return { ...r, asset: hit.asset.id };
+      const err = new ToolError(`Row ${i + 1}: ${hit.error}`);
+      err.detail = hit.matches;
+      throw err;
+    });
+    const view = appView(rows, site.id);
+    const { ops, summary } = planOrThrow(() => planSaveAssets(view, resolved, { assignTags: !!args.assign_asset_ids }));
+    const counts = { updated: summary.updated.length, created: summary.created.length, unchanged: summary.unchanged };
+    if (args.dry_run) return { site: site.id, dryRun: true, wouldWrite: !!ops.length, counts, ...summary };
+    if (!ops.length) return { site: site.id, counts, note: "Nothing to change: every row already matches.", ...summary };
+    await apply(ctx, site, view, ops, "save_assets");
+    return { site: site.id, counts, ...summary };
+  },
+
+  async archive_assets(args, ctx) {
+    const { site, rows, inv } = await openSite(ctx, args, ["revisions"]);
+    requireEditor(site);
+    const refs = Array.isArray(args.assets) ? args.assets : [];
+    if (!refs.length) throw new ToolError("Name at least one asset.");
+    const ids = [...new Set(refs.map((r) => resolveOrThrow(inv, r).id))];
+    const view = appView(rows, site.id);
+    const { ops, changed, skipped } = planArchive(view, ids, !!args.restore);
+    if (ops.length) await apply(ctx, site, view, ops, "archive_assets");
+    return {
+      site: site.id,
+      [args.restore ? "restored" : "archived"]: changed,
+      alreadyThatWay: skipped.length ? skipped : undefined,
+    };
+  },
+
+  async add_tasks(args, ctx) {
+    const { site, rows, inv } = await openSite(ctx, args, ["revisions"]);
+    requireEditor(site);
+    const list = Array.isArray(args.tasks) ? args.tasks : [];
+    if (!list.length) throw new ToolError("Give at least one task.");
+    if (list.length > MAX_ROWS) throw new ToolError(`At most ${MAX_ROWS} tasks at a time.`);
+    const problems = [];
+    const added = [];
+    const ops = [];
+    list.forEach((t, i) => {
+      try {
+        const a = liveAsset(inv, t.asset);
+        const item = taskItem(t);
+        const id = crypto.randomUUID();
+        ops.push({ op: "task_insert", id, assetId: a.id, data: item });
+        added.push(taskRow(inv, a, { ...item, id }));
+      } catch (err) {
+        if (!(err instanceof ToolError)) throw err;
+        problems.push(`Task ${i + 1}: ${err.message}`);
+      }
+    });
+    if (problems.length) {
+      const err = new ToolError("Nothing was added: fix these and send the whole set again.");
+      err.detail = problems.slice(0, 50);
+      throw err;
+    }
+    await apply(ctx, site, appViewRevisions(rows), ops, "add_tasks");
+    return { site: site.id, added: added.length, tasks: added };
+  },
+
+  async edit_task(args, ctx) {
+    const { site, rows, inv } = await openSite(ctx, args, ["maintenance", "revisions"]);
+    requireEditor(site);
+    const r = findTask(inv, rows.maintenance, String(args.task ?? "").trim(), args.asset);
+    const a = inv.byId.get(r.asset_id);
+    const orig = r.data;
+    const given = (k) => args[k] !== undefined && args[k] !== null;
+    const oneOff = given("kind") ? args.kind === "one-off" : taskKindOf(orig) === TASK_KIND_ONEOFF;
+    let freq = { label: orig.frequencyLabel || "", days: orig.frequencyDays ?? "", recurrence: orig.recurrence || "" };
+    if (oneOff) {
+      if (given("frequency") && args.frequency !== "") throw new ToolError("A one-off task has no frequency. Give a due_date, or make it recurring.");
+    } else {
+      if (given("due_date") && args.due_date !== "") throw new ToolError("A recurring task's due date comes from its frequency and last-done date.");
+      if (given("frequency") || taskKindOf(orig) === TASK_KIND_ONEOFF) freq = frequencyOrThrow(args.frequency);
+    }
+    const name = given("name") ? String(args.name).trim() : orig.task;
+    if (!name) throw new ToolError("A task needs a name.");
+    const updated = {
+      ...orig,
+      kind: oneOff ? TASK_KIND_ONEOFF : TASK_KIND_SCHEDULED,
+      task: name,
+      notes: given("notes") ? String(args.notes).trim() : (orig.notes || ""),
+      frequencyLabel: oneOff ? "" : freq.label,
+      frequencyDays: oneOff ? "" : freq.days,
+      recurrence: oneOff ? "" : freq.recurrence,
+      dueDate: oneOff ? (given("due_date") ? realDate(args.due_date, "due_date") : (orig.dueDate || "")) : "",
+      lastPerformed: given("last_done") ? realDate(args.last_done, "last_done") : (orig.lastPerformed || ""),
+      owner: given("owner") ? String(args.owner).trim() : (orig.owner || ""),
+    };
+    const audit = taskEditAudit(a, orig, updated, taskKindOf);
+    if (!audit.length) return { site: site.id, unchanged: taskRow(inv, a, orig), note: "Nothing to change." };
+    await apply(ctx, site, appViewRevisions(rows), [
+      { op: "task_update", id: r.id, assetId: a.id, data: updated },
+      ...audit.map((data) => ({ op: "audit", data })),
+    ], "edit_task");
+    return {
+      site: site.id,
+      edited: taskRow(inv, a, updated),
+      changes: audit.map((e) => ({ field: e.field.slice(orig.task.length + 3), from: e.from, to: e.to })),
+    };
+  },
+
+  async delete_task(args, ctx) {
+    const { site, rows, inv } = await openSite(ctx, args, ["maintenance", "revisions"]);
+    requireEditor(site);
+    const r = findTask(inv, rows.maintenance, String(args.task ?? "").trim(), args.asset);
+    const a = inv.byId.get(r.asset_id);
+    await apply(ctx, site, appViewRevisions(rows), [
+      { op: "task_delete", id: r.id, assetId: a.id },
+      { op: "audit", data: { assetLabel: a.id, assetType: a.type, action: "maintenance_removed", field: r.data.task || "" } },
+    ], "delete_task");
+    return { site: site.id, deleted: taskRow(inv, a, r.data) };
   },
 
   async add_comment(args, ctx) {
