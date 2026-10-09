@@ -108,7 +108,10 @@ export function snapshotFromGrids(gasSource, grids, { fullAudit = true } = {}) {
 //   Utilities         -- MD5 for the tab hashes, from node:crypto.
 // Only the Sheet calls doPost makes exist: clear, getRange().setValues/
 // setNumberFormat, getLastRow/getLastColumn, getDataRange().getValues.
-export function saveThroughSheet(gasSource, grids, body, { as } = {}) {
+//   PropertiesService -- Script Properties from `props` (the upload signers).
+//   Utilities.getUuid, Date.now -- from `uuid` and `now` when given, so a
+//                        signature can be compared byte for byte.
+export function saveThroughSheet(gasSource, grids, body, { as, props = {}, uuid, now } = {}) {
   const sheets = {};
   const sheetFor = (name) => {
     if (sheets[name]) return sheets[name];
@@ -140,7 +143,10 @@ export function saveThroughSheet(gasSource, grids, body, { as } = {}) {
       getDataRange() {
         const w = width();
         const n = lastRow();
-        return { getValues: () => grid.slice(0, n).map((r) => Array.from({ length: w }, (_, j) => (r[j] === undefined ? "" : r[j]))) };
+        const values = () => grid.slice(0, n).map((r) => Array.from({ length: w }, (_, j) => (r[j] === undefined ? "" : r[j])));
+        // Display values: what a cell shows, so a leading apostrophe is gone.
+        const display = () => values().map((r) => r.map((c) => String(c).replace(/^'/, "")));
+        return { getValues: values, getDisplayValues: display };
       },
       _grid: () => grid.slice(0, lastRow()),
     };
@@ -154,11 +160,16 @@ export function saveThroughSheet(gasSource, grids, body, { as } = {}) {
       getActiveSpreadsheet: () => ({ getSheetByName: sheetFor, insertSheet: sheetFor }),
     },
     Utilities: {
-      DigestAlgorithm: { MD5: "md5" },
+      DigestAlgorithm: { MD5: "md5", SHA_1: "sha1" },
       Charset: { UTF_8: "utf8" },
-      computeDigest: (_alg, text) => Array.from(nodeCrypto.createHash("md5").update(String(text), "utf8").digest()).map((b) => (b > 127 ? b - 256 : b)),
+      computeDigest: (alg, text) => Array.from(nodeCrypto.createHash(alg).update(String(text), "utf8").digest()).map((b) => (b > 127 ? b - 256 : b)),
+      getUuid: uuid || (() => nodeCrypto.randomUUID()),
+    },
+    PropertiesService: {
+      getScriptProperties: () => ({ getProperty: (k) => (k in props ? props[k] : null) }),
     },
     __as: as || null,
+    __now: now ?? null,
   };
   vm.createContext(ctx);
   new vm.Script(gasSource + "\n" + OVERRIDES + `
@@ -167,6 +178,7 @@ export function saveThroughSheet(gasSource, grids, body, { as } = {}) {
       const who = globalThis.__as || { email: OWNER_EMAIL, role: ROLE_EDITOR };
       return { ok: true, email: who.email, name: "", role: who.role, users: [] };
     };
+    if (globalThis.__now !== null) Date.now = function () { return globalThis.__now; };
     globalThis.__save = function (contents) { return doPost({ postData: { contents: contents } }); };
   `, { filename: "AssetTrackerSync.gs" }).runInContext(ctx);
 

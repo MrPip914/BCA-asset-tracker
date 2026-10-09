@@ -1,6 +1,6 @@
 # Moving the backend from Apps Script + Sheets to Postgres — Phase 1 design
 
-Status: **Rollout step 1 (schema, `db/migrations/`) applied to dev 2026-10-07; step 2 (importer, `db/import-from-sheet.mjs`) run against dev 2026-10-08; step 3 (API, `supabase/functions/asset-api/`) started 2026-10-08 with `signin`, `read` and `signout`; the save was added 2026-10-09.** Written 2026-10-06 after saves against the Google
+Status: **Rollout step 1 (schema, `db/migrations/`) applied to dev 2026-10-07; step 2 (importer, `db/import-from-sheet.mjs`) run against dev 2026-10-08; step 3 (API, `supabase/functions/asset-api/`) started 2026-10-08 with `signin`, `read` and `signout`; the save, `auditFull`, upload signing and `diagnostics` were added 2026-10-09.** Written 2026-10-06 after saves against the Google
 backend proved unreliable (see "Google's layer in front of Apps Script fails
 intermittently" in CLAUDE.md, and the v42/v49/v50 diagnostics work).
 
@@ -284,6 +284,24 @@ for the free tier; Pro's 7 daily backups and no-pause guarantee are what removes
        rewrite of its tab did.
      - The lock is `FOR UPDATE` on the tenant's four revision rows, taken by every save
        (an audit-only save included), with a 10s `lock_timeout` answered as `busy`.
+   - **`auditFull` (2026-10-09)** is `readAuditFull` in `inventory.ts`: the whole log in
+     `seq` order, any signed-in role, no lock (one transaction is one instant). The `.gs`
+     answers it through `pickPublic_`, which names every audit field and writes `""` for a
+     blank, while the ordinary read leaves blanks out, so the blanks are put back. Its
+     parity test runs the `.gs` handler through `saveThroughSheet` and requires equality.
+   - **Upload signing (2026-10-09)**, `photoSign` and `floorPlanSign`, is `sign.ts`: editor
+     only, the folder and object name chosen server-side, a photo's allowed formats signed,
+     a floor plan's not (v51). The Cloudinary account is shared by every tenant, so its three
+     credentials are Edge Function secrets (`CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`,
+     `CLOUDINARY_API_SECRET`, under Supabase > Edge Functions > Secrets); the per-tenant folder
+     is `tenants.cloudinary_folder`, falling back to `"assets"` as `CLOUDINARY_FOLDER` does.
+     **Until those secrets are set the ops answer by naming them**, which is harmless before
+     the cutover and a blocker at it. `sign_test.ts` runs the `.gs` handlers with the same
+     clock, ids and credentials and requires byte-identical answers.
+   - **`diagnostics` (2026-10-09)** is `readDiag` in `db.ts`: editors only, the newest 300
+     rows newest first, every field a string as the Sheet's `getDisplayValues` hands them
+     over, plus the true count. `diag_test.ts` puts the same rows in the table and in a
+     fake Diagnostics tab and requires equal answers.
 4. **Parity tests** (the important part): a **replay harness** that feeds the same recorded
    request sequence to the Apps Script backend (dev tenant) and the new API and compares the
    responses field for field. The existing `test-backend-*.js` suites, which slice `.gs`

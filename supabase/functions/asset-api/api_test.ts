@@ -11,7 +11,7 @@
 
 import postgres from "npm:postgres@3.4.5";
 import { assert, assertEquals, assertMatch, assertNotEquals } from "jsr:@std/assert@1";
-import { snapshotFromGrids } from "../../../db/sheet-snapshot.mjs";
+import { saveThroughSheet, snapshotFromGrids } from "../../../db/sheet-snapshot.mjs";
 import { snapshotToRows } from "../../../db/snapshot-rows.mjs";
 import { loadSql } from "../../../db/load-sql.mjs";
 import { AUDIT_ROWS, grids } from "../../../db/fixture-grids.mjs";
@@ -131,6 +131,29 @@ if (!DATABASE_URL) {
     assertMatch(r.auth.sessionId, /^[0-9a-f]{64}$/);
   });
 
+  Deno.test("the whole audit log answers what the Sheet backend's auditFull answers", async () => {
+    const { auth } = await signIn("school_a", OWNER);
+    const r = await post("school_a", { op: "auditFull", sessionId: auth.sessionId });
+    const sheet = saveThroughSheet(gas, grids, { op: "auditFull", sessionId: "x" }).response;
+    assertEquals(r, sheet);
+    assertEquals([r.auditLog.length, r.auditTotal], [AUDIT_ROWS, AUDIT_ROWS]);
+    // Oldest first: the window an ordinary read sends is this list's tail.
+    const { auditLog } = await post("school_a", { op: "read", sessionId: auth.sessionId });
+    const at = (rows: { at: string }[]) => rows.map((e) => e.at);
+    assertEquals(at(r.auditLog.slice(-2000)), at(auditLog));
+  });
+
+  Deno.test("a viewer gets the whole log; no session, or another tenant's, gets nothing", async () => {
+    const viewer = await signIn("school_a", "jane@school.test");
+    assertEquals((await post("school_a", { op: "auditFull", sessionId: viewer.auth.sessionId })).auditTotal, AUDIT_ROWS);
+    for (const [tenant, sessionId] of [["school_a", undefined], ["school_b", viewer.auth.sessionId]]) {
+      const r = await post(tenant, { op: "auditFull", sessionId });
+      assertEquals([r.ok, r.authFailed, r.reason, r.auditLog], [false, true, "signin", undefined]);
+    }
+    const [last] = (await diagRows("school_a")).slice(-1);
+    assertEquals([last.event, last.op, last.detail], ["auth_failed", "auditFull", "session none"]);
+  });
+
   Deno.test("the allowlist keeps its stored order, and the owner is always an editor", async () => {
     const r = await signIn("school_b", OWNER);
     assertEquals(r.auth.role, "editor");
@@ -248,7 +271,7 @@ if (!DATABASE_URL) {
     const res = await api(new Request("https://api.test/asset-api", { method: "POST", body: '{"op":"read"}' }));
     assertMatch((await res.json()).error, /No tenant named/);
     assertEquals(await post("school_a", "{not json"), { ok: false, error: "Malformed request body." });
-    assertMatch((await post("school_a", { op: "auditFull" })).error, /"auditFull" isn't available/);
+    assertMatch((await post("school_a", { op: "noSuchOp" })).error, /"noSuchOp" isn't available/);
   });
 
   Deno.test("the bare GET reports the version without a token", async () => {

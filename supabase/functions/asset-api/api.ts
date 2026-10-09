@@ -1,20 +1,22 @@
 // The request handler: the same requests AssetTrackerSync.gs answers, with the
 // same answers, so index.html changes by a URL and not a rewrite
 // (DATABASE_BACKEND_PLAN.md). Ported so far: signin, read, signout, save (a
-// body with no op), and the bare GET. Everything else answers that it is not
-// here YET -- as JSON, never an error page, which is the one thing every answer
-// must be.
+// body with no op), auditFull, diagnostics, photoSign, floorPlanSign, and
+// the bare GET.
+// Everything else answers that it is not here YET -- as JSON, never an error
+// page, which is the one thing every answer must be.
 //
 // The tenant is named by the request (`?tenant=dev`, or the frontend's own
 // `client` / `c`). A tenant is a row in `tenants`; RLS does the rest.
 
-import { type DiagEntry, type Sql, withTenant, writeDiag } from "./db.ts";
+import { type DiagEntry, readDiag, type Sql, withTenant, writeDiag } from "./db.ts";
 import {
   type Auth, authorizeIdentity, authorizeSession, createSession, deleteSession,
   type Identity, readSession, readUsers, verifyGoogleIdToken,
 } from "./auth.ts";
-import { readInventory } from "./inventory.ts";
+import { readAuditFull, readInventory } from "./inventory.ts";
 import { LOCK_TIMEOUT_MS, type SaveContext, saveInventory } from "./save.ts";
+import { type CloudinaryCreds, NOT_SET_UP, signFloorPlan, signPhotos } from "./sign.ts";
 
 // The backend contract version, in AssetTrackerSync.gs's series. index.html
 // compares it to FRONTEND_SCRIPT_VERSION and shows "Backend outdated" when they
@@ -45,6 +47,10 @@ export type ApiOptions = {
   // How long a save waits for another tenant save's lock (save.ts). Tests
   // shorten it; the deployed function keeps acquireLock_'s ten seconds.
   lockTimeoutMs?: number;
+  // The Cloudinary account upload signatures are made with (sign.ts); null
+  // when the secrets are not set, which the sign ops answer by naming them.
+  cloudinary?: CloudinaryCreds | null;
+  uuid?: () => string;
 };
 
 const CORS = {
@@ -59,7 +65,9 @@ const json = (payload: unknown, status = 200) =>
 const tenantOf = (url: URL) =>
   (url.searchParams.get("tenant") || url.searchParams.get("client") || url.searchParams.get("c") || "").trim();
 
-export function createApi({ sql, verifyIdToken = verifyGoogleIdToken, now = Date.now, lockTimeoutMs }: ApiOptions) {
+export function createApi({
+  sql, verifyIdToken = verifyGoogleIdToken, now = Date.now, lockTimeoutMs, cloudinary = null, uuid = () => crypto.randomUUID(),
+}: ApiOptions) {
   return async function handle(req: Request): Promise<Response> {
     const url = new URL(req.url);
     if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
@@ -106,6 +114,9 @@ export function createApi({ sql, verifyIdToken = verifyGoogleIdToken, now = Date
       }
       if (op === "read") return await read({ sessionId: body.sessionId }, tenantId, diag, started);
       if (op === "save") return await save(body, tenantId, diag, started);
+      if (op === "auditFull") return await auditFull(body, tenantId, diag);
+      if (op === "diagnostics") return await diagnostics(body, tenantId, diag);
+      if (op === "photoSign" || op === "floorPlanSign") return await sign(op, body, tenantId, diag);
       return json({ ok: false, error: `"${op}" isn't available on this backend yet.`, scriptVersion: SCRIPT_VERSION });
     } finally {
       // Stamped here so every entry carries the op and how long the request took.
@@ -162,6 +173,75 @@ export function createApi({ sql, verifyIdToken = verifyGoogleIdToken, now = Date
     } catch (err) {
       diag.push({ event: "error", detail: (err as Error)?.message });
       return json({ ok: false, error: "The server couldn't load the inventory: " + (err as Error)?.message, scriptVersion: SCRIPT_VERSION });
+    }
+  }
+
+  // handleAuditFull_: a session, any role, and the whole log.
+  async function auditFull(body: Body, tenantId: string, diag: DiagEntry[]) {
+    try {
+      const answer = await withTenant(sql, tenantId, async (tx) => {
+        const [tenant] = await tx`select owner_email from tenants`;
+        if (!tenant) return { ok: false, error: `There is no tenant "${tenantId}" on this backend.`, scriptVersion: SCRIPT_VERSION };
+        const users = await readUsers(tx, String(tenant.owner_email).toLowerCase());
+        const auth = await authorizeSession(tx, body.sessionId, users, now(), diag);
+        if (!auth.ok) {
+          return { ok: false, authFailed: true, reason: auth.reason, email: auth.email || "", error: auth.error, scriptVersion: SCRIPT_VERSION };
+        }
+        return { ok: true, ...(await readAuditFull(tx)), scriptVersion: SCRIPT_VERSION };
+      });
+      return json(answer);
+    } catch (err) {
+      diag.push({ event: "error", detail: (err as Error)?.message });
+      return json({ ok: false, error: "The server couldn't load the audit log: " + (err as Error)?.message, scriptVersion: SCRIPT_VERSION });
+    }
+  }
+
+  // handleDiagnostics_: the backend's own log, for the About panel. EDITORS
+  // ONLY, because it names other people.
+  async function diagnostics(body: Body, tenantId: string, diag: DiagEntry[]) {
+    try {
+      const answer = await withTenant(sql, tenantId, async (tx) => {
+        const [tenant] = await tx`select owner_email from tenants`;
+        if (!tenant) return { ok: false, error: `There is no tenant "${tenantId}" on this backend.`, scriptVersion: SCRIPT_VERSION };
+        const users = await readUsers(tx, String(tenant.owner_email).toLowerCase());
+        const auth = await authorizeSession(tx, body.sessionId, users, now(), diag);
+        if (!auth.ok) return { ok: false, authFailed: true, reason: auth.reason, error: auth.error, scriptVersion: SCRIPT_VERSION };
+        if (auth.role !== "editor") return { ok: false, forbidden: true, error: "Only editors can read the backend log.", scriptVersion: SCRIPT_VERSION };
+        return { ok: true, ...(await readDiag(tx)), scriptVersion: SCRIPT_VERSION };
+      });
+      return json(answer);
+    } catch (err) {
+      diag.push({ event: "error", detail: (err as Error)?.message });
+      return json({ ok: false, error: (err as Error)?.message, scriptVersion: SCRIPT_VERSION });
+    }
+  }
+
+  // handlePhotoSign_ / handleFloorPlanSign_: an editor's session, then a
+  // signature. Writes nothing and takes no lock.
+  async function sign(op: string, body: Body, tenantId: string, diag: DiagEntry[]) {
+    try {
+      const answer = await withTenant(sql, tenantId, async (tx) => {
+        const [tenant] = await tx`select owner_email, cloudinary_folder from tenants`;
+        if (!tenant) return { ok: false, error: `There is no tenant "${tenantId}" on this backend.`, scriptVersion: SCRIPT_VERSION };
+        const users = await readUsers(tx, String(tenant.owner_email).toLowerCase());
+        const auth = await authorizeSession(tx, body.sessionId, users, now(), diag);
+        if (!auth.ok) return { ok: false, authFailed: true, reason: auth.reason, email: auth.email || "", error: auth.error };
+        if (auth.role !== "editor") {
+          return {
+            ok: false, authFailed: true, reason: "readonly",
+            error: op === "photoSign"
+              ? "Your access is view-only, so files can't be uploaded."
+              : "Your access is view-only, so a floor plan can't be uploaded.",
+          };
+        }
+        if (!cloudinary) return { ok: false, error: NOT_SET_UP };
+        const input = { creds: cloudinary, folder: tenant.cloudinary_folder, now: now(), uuid };
+        return op === "photoSign" ? await signPhotos(body.count, input) : await signFloorPlan(input);
+      });
+      return json(answer);
+    } catch (err) {
+      diag.push({ event: "error", detail: (err as Error)?.message });
+      return json({ ok: false, error: (err as Error)?.message, scriptVersion: SCRIPT_VERSION });
     }
   }
 

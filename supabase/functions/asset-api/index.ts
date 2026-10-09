@@ -8,9 +8,12 @@
 
 import postgres from "npm:postgres@3.4.5";
 import { createApi } from "./api.ts";
+import { credsFromEnv } from "./sign.ts";
 
 // prepare:false because the URL may point at the transaction pooler, which
 // cannot hold prepared statements across transactions.
 const sql = postgres(Deno.env.get("SUPABASE_DB_URL")!, { prepare: false, max: 3, idle_timeout: 20 });
 
-Deno.serve(createApi({ sql }));
+// Upload signing needs the shared Cloudinary account's three secrets
+// (Supabase > Edge Functions > Secrets); without them it says what is missing.
+Deno.serve(createApi({ sql, cloudinary: credsFromEnv((k) => Deno.env.get(k)) }));

@@ -8,6 +8,7 @@
 // output for the same Sheet.
 
 import type { Tx } from "./db.ts";
+import { AUDIT_FIELDS } from "./save-shape.ts";
 
 // An ordinary read returns the newest AUDIT_READ_LIMIT rows, and auditTotal
 // says how many there are; op:"auditFull" is how a view asks for the rest.
@@ -94,4 +95,18 @@ export async function readInventory(tx: Tx) {
   payload.nextAssetNumber = cfg.nextAssetNumber || null;
   payload.revisions = Object.fromEntries(REVISION_DOMAINS.map((d) => [d, Number(rev[d]) > 0 ? Math.floor(rev[d]) : 0]));
   return payload;
+}
+
+// handleAuditFull_: the WHOLE log, oldest first, for the views that must never
+// quietly drop rows (an asset's own history, the master Audit tab, the export).
+// No lock, unlike the Sheet's: a transaction already reads one instant.
+//
+// The Sheet answers this op through pickPublic_, which names EVERY audit field
+// and writes "" for a blank, where the ordinary read leaves a blank field out.
+// Rows are stored in the read's shape, so the blanks are put back here.
+export async function readAuditFull(tx: Tx) {
+  const rows = await tx`select data from audit_log order by seq`;
+  const auditLog = rows.map((r: Row) =>
+    Object.fromEntries(AUDIT_FIELDS.map((f) => [f, r.data[f] === undefined || r.data[f] === null ? "" : r.data[f]])));
+  return { auditLog, auditTotal: rows.length };
 }
