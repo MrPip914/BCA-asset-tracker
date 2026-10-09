@@ -11,7 +11,7 @@ import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { handleMcp, PROTOCOL_VERSIONS } from "./supabase/functions/mcp/protocol.js";
-import { TOOLS, roleFor } from "./supabase/functions/mcp/tools.js";
+import { TOOLS, WRITE_TOOL_NAMES, roleFor, frequencyFrom, todayIn } from "./supabase/functions/mcp/tools.js";
 import { createOAuth, makeSigner, redirectAllowed, sha256b64url, ACCESS_TTL_MS } from "./supabase/functions/mcp/oauth.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -36,9 +36,11 @@ const eq = (name, got, want) => check(name, JSON.stringify(got) === JSON.stringi
   const line = (n) => { const s = src.indexOf(`const ${n} =`); return src.slice(s, src.indexOf("\n", s)); };
   const pieces = [
     ...["TASK_KIND_SCHEDULED", "TASK_KIND_ONEOFF", "RECURRENCE_MAX_EVERY"].map(line),
-    ...["RECURRENCE_UNITS", "RECURRENCE_ORDINALS"].map(arr),
+    ...["RECURRENCE_UNITS", "RECURRENCE_ORDINALS", "MAINTENANCE_FREQUENCIES"].map(arr),
+    line("WEEKDAY_NAMES"),
     ...["recurrenceCount", "parseRecurrence", "addCalendarMonths", "nthWeekdayOfMonth", "nextRecurrenceDate",
-      "dateOnly", "taskKindOf", "isOneOffTask", "taskIsDone", "taskDueDate", "maintenanceStatusOf", "cellsLabel_"].map(fn),
+      "dateOnly", "taskKindOf", "isOneOffTask", "taskIsDone", "taskDueDate", "maintenanceStatusOf", "cellsLabel_",
+      "formatRecurrence", "describeRecurrence", "recurrenceApproxDays"].map(fn),
   ];
   const missing = pieces.filter((p) => !p || !copy.includes(p)).map((p) => p.split("\n")[0]);
   check("from-app.js matches index.html, piece for piece", missing.length === 0, `stale or missing: ${missing.join(" | ")}`);
@@ -69,6 +71,7 @@ const SITES = {
     config: [
       { key: "typesList", value: ["Campus", "Building", "Room", "Computer", "User", "Electrical Panel", { id: "uuid-ms", name: "Mini Split" }] },
       { key: "columns", value: [{ key: "serial", label: "Serial #" }, { key: "purchaseDate", label: "Purchased" }] },
+      { key: "vendors", value: ["CoolCo", "Sparky Electric"] },
     ],
     maintenance: [
       { id: "m1", asset_id: "ms1", position: 0, data: { id: "m1", task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: day(-45) } },
@@ -112,6 +115,14 @@ const ctxFor = (sites) => ({
   },
   logged: [],
   log(event, detail) { this.logged.push({ event, detail }); },
+  // Stands in for index.ts's call to the 0006 Postgres function, which
+  // db/test-connector-writes.sql covers against a real database.
+  writes: [],
+  async write(tenant, op, args) {
+    if (!sites.some((s) => s.id === tenant)) throw new Error("site not permitted");
+    this.writes.push({ tenant, op, args });
+    return { id: `new-${this.writes.length}`, revision: 99 };
+  },
 });
 const ONE = [{ id: "dev", name: "Development", role: "editor" }];
 const TWO = [...ONE, { id: "bca", name: "Brookside", role: "viewer" }];
@@ -140,8 +151,13 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   const list = await handleMcp({ jsonrpc: "2.0", id: 4, method: "tools/list" }, ctxFor(ONE));
   const tools = list.body.result.tools;
   eq("tools/list names every tool", tools.map((t) => t.name), TOOLS.map((t) => t.name));
-  check("every tool is marked read-only and not destructive",
-    tools.every((t) => t.annotations.readOnlyHint === true && t.annotations.destructiveHint === false));
+  // Claude asks before a tool not marked read-only, so a write marked
+  // read-only would run without asking. Exactly the four writes are writes.
+  eq("exactly the write tools are marked as writes",
+    tools.filter((t) => t.annotations.readOnlyHint !== true).map((t) => t.name).sort(),
+    ["add_comment", "add_task", "complete_task", "log_work"]);
+  eq("the write tool list matches", [...WRITE_TOOL_NAMES].sort(), ["add_comment", "add_task", "complete_task", "log_work"]);
+  check("no tool is marked destructive", tools.every((t) => t.annotations.destructiveHint === false));
   check("every tool's schema is a closed object",
     tools.every((t) => t.inputSchema.type === "object" && t.inputSchema.additionalProperties === false));
   const nope = await handleMcp({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "delete_everything" } }, ctxFor(ONE));
@@ -278,6 +294,106 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   check("panel and room together is refused", both.isError);
   const nothing = (await call("panel_lookup", { room: "Building 300" })).data;
   eq("a place no circuit serves says so", nothing.circuits, []);
+}
+
+// ---------------------------------------------------------------- writes
+
+{
+  // index.ts: a record must reach Postgres as text cast to jsonb (see WRITE_SQL).
+  const ts = fs.readFileSync(path.join(here, "supabase/functions/mcp/index.ts"), "utf8");
+  check("every jsonb parameter in index.ts goes through ::text", (ts.match(/::jsonb/g) || []).length === (ts.match(/::text::jsonb/g) || []).length && /::text::jsonb/.test(ts));
+  check("index.ts has a writer for every write tool", WRITE_TOOL_NAMES.every((n) => ts.includes(`connector_${n}(`)));
+  // Frequencies come out exactly as the app stores them.
+  eq("a preset frequency", frequencyFrom("semi annually"), { label: "Semi-Annually", days: 182, recurrence: "" });
+  eq("an interval frequency", frequencyFrom("Every 6 weeks"), { label: "Every 6 weeks", days: 42, recurrence: "interval:6:week" });
+  eq("every month is a calendar month, not the 30-day preset", frequencyFrom("every month").recurrence, "interval:1:month");
+  eq("a weekday frequency", frequencyFrom("first Monday of every month"), { label: "First Monday of every month", days: 30, recurrence: "weekday:1:1:1" });
+  eq("a weekday frequency every N months", frequencyFrom("last Friday, every 2 months").recurrence, "weekday:-1:5:2");
+  eq("an unknown frequency is null", [frequencyFrom("biweekly"), frequencyFrom("first Funday"), frequencyFrom("")], [null, null, null]);
+  // 2026-10-09 04:00 UTC is still the 8th in California.
+  eq("today is the site's day, not UTC's", todayIn(undefined, new Date("2026-10-09T04:00:00Z")), "2026-10-08");
+
+  const w = async (name, args, sites = ONE) => { const ctx = ctxFor(sites); const r = await call(name, args, ctx); return { ...r, writes: ctx.writes }; };
+
+  // add_task
+  let r = await w("add_task", { asset: "Mini Split 1", task: "Drain check", frequency: "Quarterly", last_done: "2026-09-01", owner: " Jim " });
+  eq("add_task writes the app's record shape", r.writes, [{ tenant: "dev", op: "add_task", args: ["ms1", {
+    kind: "scheduled", task: "Drain check", notes: "", frequencyLabel: "Quarterly", frequencyDays: 90, recurrence: "",
+    dueDate: "", lastPerformed: "2026-09-01", owner: "Jim" }] }]);
+  eq("add_task answers with the new task's status", [r.data.added.id, r.data.added.due, r.data.added.status], ["new-1", "2026-11-30", "ok"]);
+  r = await w("add_task", { asset: "b300", task: "Gutters", kind: "one-off", due_date: "2026-11-01" });
+  eq("a one-off keeps its due date and blanks the schedule half",
+    [r.writes[0].args[1].kind, r.writes[0].args[1].dueDate, r.writes[0].args[1].frequencyLabel, r.writes[0].args[1].frequencyDays], ["oneoff", "2026-11-01", "", ""]);
+  for (const [label, args] of [
+    ["a recurring task with no frequency", { asset: "ms1", task: "X" }],
+    ["an unknown frequency", { asset: "ms1", task: "X", frequency: "fortnightly-ish" }],
+    ["a recurring task given a due date", { asset: "ms1", task: "X", frequency: "Weekly", due_date: "2026-11-01" }],
+    ["a one-off given a frequency", { asset: "ms1", task: "X", kind: "one-off", frequency: "Weekly" }],
+    ["an impossible date", { asset: "ms1", task: "X", kind: "one-off", due_date: "2026-02-30" }],
+    ["an archived asset", { asset: "Lab PC", task: "X", frequency: "Weekly" }],
+    ["an ambiguous asset", { asset: "Room 101", task: "X", frequency: "Weekly" }],
+    ["a blank task", { asset: "ms1", task: "  ", frequency: "Weekly" }],
+  ]) {
+    r = await w("add_task", args);
+    check(`add_task refuses ${label}, writing nothing`, r.isError && r.writes.length === 0, r.text);
+  }
+
+  // A viewer is refused before anything is written, on every write tool.
+  const VIEWER = [{ id: "dev", name: "Development", role: "viewer" }];
+  for (const [tool, args] of [
+    ["add_task", { asset: "ms1", task: "X", frequency: "Weekly" }],
+    ["complete_task", { task: "m1" }],
+    ["log_work", { asset: "ms1", work_type: "Repair" }],
+    ["add_comment", { asset: "ms1", text: "hi" }],
+  ]) {
+    r = await w(tool, args, VIEWER);
+    check(`${tool} refuses a viewer, writing nothing`, r.isError && r.writes.length === 0 && /view-only/.test(r.text), r.text);
+  }
+  r = await w("add_comment", { site: "bca", asset: "x", text: "hi" }, TWO);
+  check("a write on a site where this person is a viewer is refused", r.isError && r.writes.length === 0, r.text);
+
+  // complete_task
+  r = await w("complete_task", { task: "filter clean", date: "2026-10-05", vendor: "coolco", cost: "$120", note: "dusty" });
+  eq("complete_task by name defaults to Maintenance and spells the vendor as the list does", r.writes[0], { tenant: "dev", op: "complete_task",
+    args: ["m1", "2026-10-05", { changeType: "Maintenance", vendor: "CoolCo", cost: "$120", note: "dusty" }] });
+  eq("complete_task reports the task as done and when it was last done before",
+    [r.data.completed.status, r.data.completed.lastDone, r.data.previouslyDone], ["ok", "2026-10-05", day(-45)]);
+  r = await w("complete_task", { task: "m3" });
+  eq("a completion with no date is today, in the site's zone", r.writes[0].args[1], todayIn());
+  for (const [label, args] of [
+    ["a finished one-off", { task: "Replace sign" }],
+    ["a task on an archived asset", { task: "m6" }],
+    ["a task that does not exist", { task: "Polish the moon" }],
+    ["a vendor not on the list", { task: "m1", vendor: "Some Guy" }],
+    ["a work type not on the list", { task: "m1", work_type: "Magic" }],
+    ["a cost that is not an amount", { task: "m1", cost: "a lot" }],
+    ["a name outside the asset given", { task: "Filter clean", asset: "Building 300" }],
+  ]) {
+    r = await w("complete_task", args);
+    check(`complete_task refuses ${label}, writing nothing`, r.isError && r.writes.length === 0, r.text);
+  }
+  {
+    // Two tasks sharing a name is a question, never the first one.
+    SITES.dev.maintenance.push({ id: "m7", asset_id: "b300", position: 2, data: { id: "m7", task: "Filter clean", frequencyDays: 30 } });
+    r = await w("complete_task", { task: "Filter clean" });
+    check("two tasks with one name are refused, listing both", r.isError && r.writes.length === 0 && /2 tasks/.test(r.text) && /m7/.test(r.text) && /m1/.test(r.text), r.text);
+    r = await w("complete_task", { task: "Filter clean", asset: "Building 300" });
+    eq("naming the place picks the one inside it", r.writes[0]?.args[0], "m7");
+    SITES.dev.maintenance.pop();
+  }
+
+  // log_work
+  r = await w("log_work", { asset: "Teacher PC", work_type: "repair", date: "2026-10-01", cost: "80", task: "nonexistent" });
+  check("log_work refuses a task that is not on the asset", r.isError && r.writes.length === 0, r.text);
+  r = await w("log_work", { asset: "Mini Split 1", work_type: "repair", date: "2026-10-01", task: "Coil clean" });
+  eq("log_work links a task on the asset without completing it", r.writes[0], { tenant: "dev", op: "log_work",
+    args: ["ms1", { changeType: "Repair", vendor: "", cost: "", note: "", performedOn: "2026-10-01", maintenanceId: "m2" }] });
+  r = await w("log_work", { asset: "ms1" });
+  check("log_work needs a work type", r.isError && r.writes.length === 0, r.text);
+
+  // add_comment
+  r = await w("add_comment", { asset: "BCA0042", text: "  Fan replaced  " });
+  eq("add_comment trims and writes against the asset's id", r.writes[0], { tenant: "dev", op: "add_comment", args: ["pc1", "Fan replaced"] });
 }
 
 // ---------------------------------------------------------------- sign-in (oauth.js)
