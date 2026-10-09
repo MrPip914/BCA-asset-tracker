@@ -597,7 +597,7 @@ but a task; editing a work entry is not offered.
   separates tenants underneath; the function must connect as an `asset_api` login role,
   never the service role.
 - **Reads are annotated read-only; the writes are annotated as writes, and the ones that
-  overwrite or remove (save_assets, archive_assets, edit_task, delete_task) as
+  overwrite or remove (save_assets, archive_assets, edit_task, delete_task, replace_floor_plan) as
   destructive**, so Claude asks before each one unless the person told it to always allow
   that tool. A write marked read-only would run unasked, which `test-mcp-connector.mjs`
   guards.
@@ -665,6 +665,25 @@ but a task; editing a work entry is not offered.
     pinned to `save-shape.ts` by test).
   - `get_schema` is what Claude reads first; `search_assets` takes `include_fields` (up to
     1000 rows) for reviews.
+- **`replace_floor_plan` is the Map tab's Replace** (2026-10-09, migration 0008). Claude
+  sends the whole SVG as text; the tool reads its spaces, carries every link and group onto
+  the new plan's shapes with the app's own `floorPlanRemapLinksAndGroups` (copied verbatim
+  into `from-app.js`, so by id, then by `Space.N` title; a wall segment rides on its
+  space), uploads the file to Cloudinary from the Edge Function, then makes ONE call to
+  `connector_replace_floor_plan`, which sets the three plan fields, rewrites the asset's
+  `space_links`/`space_groups`, and writes the app's `floor_plan_replaced` row.
+  - **There is no DOMParser in an Edge Function**, so `floorplan.js` is a small tag reader
+    answering only what a replace asks: which groups are spaces (own `<title>` starting
+    "Space", a path or rect with three points) and their gid/title. Checked against the
+    app's `parseFloorPlanSvg` in Chromium on all eight real plans when written; the test
+    pins the one subtle case (a nested title ahead of the group's own).
+  - **The old plan is fetched to learn its titles, only from `res.cloudinary.com`** — the
+    url comes from a stored row, which is not a licence to fetch anything. Unreadable is a
+    note, not a refusal: only unchanged ids carry over, as in the app.
+  - Bytes first, row second (the app's order); the SQL refuses any url that is not the
+    host's. Places only. `dry_run` uploads nothing and lists what would be dropped.
+  - Uses the same three `CLOUDINARY_*` secrets as `asset-api`'s signing, and the tenant's
+    `cloudinary_folder`.
 - **Names are not unique, so a lookup is tiered** (id, tag, name, full path) and two
   matches is an error listing both with their locations, never the first one.
 - **The whole tenant is loaded per call.** Fine at hundreds of assets; the audit log is the

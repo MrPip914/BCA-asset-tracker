@@ -1,4 +1,4 @@
-// Task due-date rules and the breaker slot label, COPIED VERBATIM from
+// Task due-date rules, the breaker slot label and the floor plan link carry-over, COPIED VERBATIM from
 // index.html so the connector reports exactly what the app shows. Do not
 // edit them here: change index.html and re-copy. test-mcp-connector.mjs
 // fails if any piece below stops matching its original.
@@ -179,8 +179,70 @@ function recurrenceApproxDays(rule) {
   return RECURRENCE_UNITS.find(u => u.key === rule.unit).days * rule.every;
 }
 
+// A floor plan replace carries links and groups onto the new plan's shapes
+// by the app's own rule (replace_floor_plan).
+
+function floorPlanPathToPoints(d) {
+  const tokens = (d || "").match(/[MLAZ][^MLAZ]*/gi) || [];
+  const pts = [];
+  for (const tok of tokens) {
+    const cmd = tok[0];
+    const nums = (tok.slice(1).match(/-?\d*\.?\d+(?:[eE]-?\d+)?/g) || []).map(Number);
+    if (cmd === "M" || cmd === "L") {
+      for (let i = 0; i + 1 < nums.length; i += 2) pts.push([nums[i], nums[i + 1]]);
+    } else if (cmd === "A") {
+      for (let i = 0; i + 6 < nums.length; i += 7) pts.push([nums[i + 5], nums[i + 6]]);
+    }
+  }
+  return pts;
+}
+
+function floorPlanRemapShapeIds(oldSpaces, newSpaces) {
+  const newGids = new Set((newSpaces || []).map(s => s.gid));
+  const newTitleToGid = new Map();
+  (newSpaces || []).forEach(s => { if (!newTitleToGid.has(s.title)) newTitleToGid.set(s.title, s.gid); });
+  const oldGidToTitle = new Map((oldSpaces || []).map(s => [s.gid, s.title]));
+  return oldGid => {
+    if (newGids.has(oldGid)) return oldGid;
+    const title = oldGidToTitle.get(oldGid);
+    return title && newTitleToGid.has(title) ? newTitleToGid.get(title) : undefined;
+  };
+}
+
+function floorPlanRemapLinksAndGroups(links, groups, oldSpaces, newSpaces) {
+  const remap = floorPlanRemapShapeIds(oldSpaces, newSpaces);
+  // A wall's segment id is its SPACE's id plus a suffix (see floorPlanSegmentId):
+  // the space survives the replace by the same rule a room link does, and the
+  // suffix rides along. Whether that edge still exists, and still lies on the
+  // outside, is geometry and is re-checked when the plan is drawn -- a segment
+  // that no longer exists simply is not drawn, rather than the link being guessed at.
+  const remapId = id => {
+    const seg = floorPlanSegmentParts(id);
+    if (!seg) return remap(id);
+    const base = remap(seg.gid);
+    return base ? floorPlanSegmentId(base, seg.edge, seg.run) : undefined;
+  };
+  const nextLinks = (links || [])
+    .map(l => ({ ...l, shapeId: remapId(l.shapeId) }))
+    .filter(l => l.shapeId);
+  const nextGroups = (groups || [])
+    .map(g => ({ ...g, memberShapeIds: (g.memberShapeIds || []).map(remap).filter(Boolean) }))
+    .filter(g => g.memberShapeIds.length >= 2);
+  return { links: nextLinks, groups: nextGroups };
+}
+
+function floorPlanSegmentId(gid, edge, run) {
+  return gid + "#e" + edge + (run ? "." + run : "");
+}
+
+function floorPlanSegmentParts(id) {
+  const m = /^(.*)#e(\d+)(?:\.(\d+))?$/.exec(String(id || ""));
+  return m ? { gid: m[1], edge: Number(m[2]), run: m[3] ? Number(m[3]) : 0 } : null;
+}
+
 export {
   MAINTENANCE_FREQUENCIES, WEEKDAY_NAMES, formatRecurrence, describeRecurrence, recurrenceApproxDays,
   TASK_KIND_SCHEDULED, TASK_KIND_ONEOFF, parseRecurrence, dateOnly,
   taskKindOf, isOneOffTask, taskIsDone, taskDueDate, maintenanceStatusOf, cellsLabel_,
+  floorPlanRemapLinksAndGroups, floorPlanPathToPoints,
 };

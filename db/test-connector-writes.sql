@@ -290,6 +290,62 @@ end
 $$;
 commit;
 
+-- ------------------------------------------------------------------ 0008 connector_replace_floor_plan
+
+begin;
+select set_config('app.tenant_id', 'cw_a', true);
+reset role;
+insert into asset_tracker.space_links (tenant_id, plan_asset_id, shape_id, position, data)
+  values ('cw_a', 'room1', 'old-1', 0, '{"shapeId":"old-1","roomId":"ms1"}');
+insert into asset_tracker.space_groups (tenant_id, id, plan_asset_id, position, data)
+  values ('cw_a', 'oldgrp', 'room1', 0, '{"id":"oldgrp","memberShapeIds":["old-1","old-2"]}');
+set role test_cw_login;
+
+select pg_temp.refuses('replace a plan as a viewer',
+  $s$ select asset_tracker.connector_replace_floor_plan('view@cwa.test', pg_temp.seen(), 'room1', '{"url":"https://res.cloudinary.com/x/a.svg","fileName":"a.svg"}', '[]', '[]') $s$, 'view-only');
+select pg_temp.refuses('replace a plan on a stale revision',
+  $s$ select asset_tracker.connector_replace_floor_plan('ed@cwa.test', '{"assets":1}', 'room1', '{"url":"https://res.cloudinary.com/x/a.svg","fileName":"a.svg"}', '[]', '[]') $s$, 'inventory changed');
+select pg_temp.refuses('replace a plan with a url that is not the host',
+  $s$ select asset_tracker.connector_replace_floor_plan('ed@cwa.test', pg_temp.seen(), 'room1', '{"url":"https://evil.test/a.svg","fileName":"a.svg"}', '[]', '[]') $s$, 'malformed');
+select pg_temp.refuses('replace the plan of an archived asset',
+  $s$ select asset_tracker.connector_replace_floor_plan('ed@cwa.test', pg_temp.seen(), 'old1', '{"url":"https://res.cloudinary.com/x/a.svg","fileName":"a.svg"}', '[]', '[]') $s$, 'archived');
+select pg_temp.refuses('replace a plan with two links on one shape',
+  $s$ select asset_tracker.connector_replace_floor_plan('ed@cwa.test', pg_temp.seen(), 'room1', '{"url":"https://res.cloudinary.com/x/a.svg","fileName":"a.svg"}',
+      '[{"shapeId":"s1","roomId":"ms1"},{"shapeId":"s1","roomId":"room1"}]', '[]') $s$, 'same shape');
+select pg_temp.refuses('replace a plan with a one-member group',
+  $s$ select asset_tracker.connector_replace_floor_plan('ed@cwa.test', pg_temp.seen(), 'room1', '{"url":"https://res.cloudinary.com/x/a.svg","fileName":"a.svg"}',
+      '[]', '[{"id":"g","memberShapeIds":["s1"]}]') $s$, 'group was malformed');
+
+-- 13. A replace rewrites the plan fields, the links and the groups, and audits once.
+do $$
+declare r jsonb; before int := (pg_temp.seen()->>'assets')::int; d jsonb; n int := (select count(*) from asset_tracker.audit_log);
+begin
+  r := asset_tracker.connector_replace_floor_plan('ed@cwa.test', pg_temp.seen(), 'room1',
+    '{"url":"https://res.cloudinary.com/x/new.svg","storageKey":"assets/new","fileName":"new.svg"}',
+    '[{"shapeId":"s1","roomId":"ms1","by":"Eric"},{"shapeId":"s1#e2","roomId":"room1"}]',
+    '[{"id":"g1","name":"Wing","memberShapeIds":["s1","s2"]}]');
+  if (r->>'revision')::int <> before + 1 then raise exception 'FAIL: revision not moved: %', r; end if;
+  select data into d from asset_tracker.assets where id = 'room1';
+  if d->>'floorPlanUrl' <> 'https://res.cloudinary.com/x/new.svg' or d->>'floorPlanStorageKey' <> 'assets/new'
+     or d->>'floorPlanFileName' <> 'new.svg' or d->>'name' <> 'Room 1' then
+    raise exception 'FAIL: plan fields wrong: %', d;
+  end if;
+  if (select string_agg(shape_id, ',' order by position) from asset_tracker.space_links where plan_asset_id = 'room1') <> 's1,s1#e2'
+     or (select data->>'by' from asset_tracker.space_links where shape_id = 's1') <> 'Eric' then
+    raise exception 'FAIL: links not replaced';
+  end if;
+  if (select string_agg(id, ',') from asset_tracker.space_groups where plan_asset_id = 'room1') <> 'g1' then
+    raise exception 'FAIL: groups not replaced';
+  end if;
+  select data into d from asset_tracker.audit_log order by seq desc limit 1;
+  if (select count(*) from asset_tracker.audit_log) <> n + 1 or d->>'action' <> 'floor_plan_replaced'
+     or d->>'to' <> 'new.svg' or d->>'by' <> 'Ed Itor (via Claude)' or d->>'assetLabel' <> 'room1' then
+    raise exception 'FAIL: audit row wrong: %', d;
+  end if;
+end
+$$;
+commit;
+
 -- 9. Tenant B's revision never moved.
 reset role;
 do $$
