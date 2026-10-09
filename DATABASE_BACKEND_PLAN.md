@@ -1,6 +1,6 @@
 # Moving the backend from Apps Script + Sheets to Postgres — Phase 1 design
 
-Status: **Rollout step 1 (schema, `db/migrations/`) applied to dev 2026-10-07; step 2 (importer, `db/import-from-sheet.mjs`) run against dev 2026-10-08; step 3 (API, `supabase/functions/asset-api/`) started 2026-10-08 with `signin`, `read` and `signout`.** Written 2026-10-06 after saves against the Google
+Status: **Rollout step 1 (schema, `db/migrations/`) applied to dev 2026-10-07; step 2 (importer, `db/import-from-sheet.mjs`) run against dev 2026-10-08; step 3 (API, `supabase/functions/asset-api/`) started 2026-10-08 with `signin`, `read` and `signout`; the save was added 2026-10-09.** Written 2026-10-06 after saves against the Google
 backend proved unreliable (see "Google's layer in front of Apps Script fails
 intermittently" in CLAUDE.md, and the v42/v49/v50 diagnostics work).
 
@@ -262,6 +262,28 @@ for the free tier; Pro's 7 daily backups and no-pause guarantee are what removes
      equal it, except for the two differences the import makes on purpose (a duplicate
      asset id keeps its first row; a blank work-entry id gets a stable minted one).
    - The allowlist gained a `position` (migration 0004) so the Access screen keeps its order.
+   - **The save (2026-10-09)** is `save.ts`, in the transaction shape above. Three things
+     about it worth knowing before touching it:
+     - **What it stores is shaped by the `.gs`'s own write and read, not by a field list.**
+       `save-shape.ts` runs each record through doPost's projection, the Sheet's cell rule
+       (a missing or null value is `""`) and handleAuthenticatedRead_'s mapping, so a field
+       doPost drops is dropped here too, and the stored `data` is exactly what the `.gs` read
+       would answer next. `ASSET_FIELDS` and `AUDIT_FIELDS` are copies, pinned to the `.gs`.
+     - **The rows come from the importer's own `snapshotToRows`**, which moved to
+       `supabase/functions/_shared/` so a deploy bundles it (`db/snapshot-rows.mjs`
+       re-exports it). An import and a save cannot store a record differently.
+     - **Parity is tested for the save too**: `save_test.ts` posts the same body through
+       this API and through the `.gs` doPost running against a writable fake Sheet
+       (`saveThroughSheet` in `db/sheet-snapshot.mjs`), and requires the two answers and the
+       two reads afterwards to agree.
+     - Deliberate differences from the `.gs`: a config save KEEPS stored config keys it does
+       not restate (the `.gs` rewrote the tab and dropped them; nothing read them); a posted
+       duplicate id keeps its first record and logs `save_adjusted`; only rows that differ
+       are written, so an unchanged save touches no row. The first save after an import
+       rewrites every asset once, widening it to the full column list, as the Sheet's first
+       rewrite of its tab did.
+     - The lock is `FOR UPDATE` on the tenant's four revision rows, taken by every save
+       (an audit-only save included), with a 10s `lock_timeout` answered as `busy`.
 4. **Parity tests** (the important part): a **replay harness** that feeds the same recorded
    request sequence to the Apps Script backend (dev tenant) and the new API and compares the
    responses field for field. The existing `test-backend-*.js` suites, which slice `.gs`

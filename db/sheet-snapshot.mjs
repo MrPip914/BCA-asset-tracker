@@ -12,6 +12,7 @@
 // Pure: grids in, snapshot out. No network, which is what lets
 // db/test-import.mjs cover it against fixtures.
 
+import nodeCrypto from "node:crypto";
 import vm from "node:vm";
 
 // What the sandbox replaces, and why each is safe for a READ:
@@ -92,4 +93,85 @@ export function snapshotFromGrids(gasSource, grids, { fullAudit = true } = {}) {
     throw new Error("The backend's read refused: " + (out.payload.error || out.payload.reason || "unknown"));
   }
   return out;
+}
+
+// A SAVE through the .gs's own doPost, against a fake Sheet that can be
+// written. Grids in, { response, grids } out -- feed the grids back to
+// snapshotFromGrids to see what the app would read next. This is the other
+// half of the API's save parity test: the same body posted to both backends
+// must read back the same.
+//
+// What the sandbox replaces, beyond the read's list:
+//   authorizeSession_ -- always the owner as an editor (`as` overrides it);
+//                        the session rules are the API's own tests' business.
+//   jsonOut_          -- the object, not a ContentService.
+//   Utilities         -- MD5 for the tab hashes, from node:crypto.
+// Only the Sheet calls doPost makes exist: clear, getRange().setValues/
+// setNumberFormat, getLastRow/getLastColumn, getDataRange().getValues.
+export function saveThroughSheet(gasSource, grids, body, { as } = {}) {
+  const sheets = {};
+  const sheetFor = (name) => {
+    if (sheets[name]) return sheets[name];
+    let grid = (grids[name] || []).map((r) => r.slice());
+    const lastRow = () => {
+      for (let i = grid.length - 1; i >= 0; i--) if ((grid[i] || []).some((c) => c !== "" && c !== null && c !== undefined)) return i + 1;
+      return 0;
+    };
+    const width = () => grid.reduce((w, r) => {
+      for (let j = (r || []).length - 1; j >= 0; j--) if (r[j] !== "" && r[j] !== null && r[j] !== undefined) return Math.max(w, j + 1);
+      return w;
+    }, 0);
+    const sheet = {
+      clear() { grid = []; },
+      getLastRow: lastRow,
+      getLastColumn: width,
+      getRange(row, col) {
+        return {
+          setNumberFormat() {},
+          setValues(vals) {
+            vals.forEach((v, i) => {
+              const r = row - 1 + i;
+              while (grid.length <= r) grid.push([]);
+              v.forEach((cell, j) => { grid[r][col - 1 + j] = cell; });
+            });
+          },
+        };
+      },
+      getDataRange() {
+        const w = width();
+        const n = lastRow();
+        return { getValues: () => grid.slice(0, n).map((r) => Array.from({ length: w }, (_, j) => (r[j] === undefined ? "" : r[j]))) };
+      },
+      _grid: () => grid.slice(0, lastRow()),
+    };
+    sheets[name] = sheet;
+    return sheet;
+  };
+
+  const ctx = {
+    console: { log() {}, warn() {}, error() {} },
+    SpreadsheetApp: {
+      getActiveSpreadsheet: () => ({ getSheetByName: sheetFor, insertSheet: sheetFor }),
+    },
+    Utilities: {
+      DigestAlgorithm: { MD5: "md5" },
+      Charset: { UTF_8: "utf8" },
+      computeDigest: (_alg, text) => Array.from(nodeCrypto.createHash("md5").update(String(text), "utf8").digest()).map((b) => (b > 127 ? b - 256 : b)),
+    },
+    __as: as || null,
+  };
+  vm.createContext(ctx);
+  new vm.Script(gasSource + "\n" + OVERRIDES + `
+    jsonOut_ = function (obj) { return obj; };
+    authorizeSession_ = function () {
+      const who = globalThis.__as || { email: OWNER_EMAIL, role: ROLE_EDITOR };
+      return { ok: true, email: who.email, name: "", role: who.role, users: [] };
+    };
+    globalThis.__save = function (contents) { return doPost({ postData: { contents: contents } }); };
+  `, { filename: "AssetTrackerSync.gs" }).runInContext(ctx);
+
+  const response = JSON.parse(JSON.stringify(ctx.__save(JSON.stringify(body))));
+  const out = {};
+  for (const name of new Set([...Object.keys(grids), ...Object.keys(sheets)])) out[name] = sheets[name] ? sheets[name]._grid() : grids[name];
+  return { response, grids: out };
 }

@@ -249,7 +249,6 @@ if (!DATABASE_URL) {
     assertMatch((await res.json()).error, /No tenant named/);
     assertEquals(await post("school_a", "{not json"), { ok: false, error: "Malformed request body." });
     assertMatch((await post("school_a", { op: "auditFull" })).error, /"auditFull" isn't available/);
-    assertMatch((await post("school_a", { assets: [] })).error, /Saving isn't available.*Nothing was changed/);
   });
 
   Deno.test("the bare GET reports the version without a token", async () => {

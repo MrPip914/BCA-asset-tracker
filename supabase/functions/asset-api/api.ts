@@ -1,8 +1,9 @@
 // The request handler: the same requests AssetTrackerSync.gs answers, with the
 // same answers, so index.html changes by a URL and not a rewrite
-// (DATABASE_BACKEND_PLAN.md). Ported so far: signin, read, signout, and the
-// bare GET. Everything else answers that it is not here YET -- as JSON, never
-// an error page, which is the one thing every answer must be.
+// (DATABASE_BACKEND_PLAN.md). Ported so far: signin, read, signout, save (a
+// body with no op), and the bare GET. Everything else answers that it is not
+// here YET -- as JSON, never an error page, which is the one thing every answer
+// must be.
 //
 // The tenant is named by the request (`?tenant=dev`, or the frontend's own
 // `client` / `c`). A tenant is a row in `tenants`; RLS does the rest.
@@ -13,14 +14,26 @@ import {
   type Identity, readSession, readUsers, verifyGoogleIdToken,
 } from "./auth.ts";
 import { readInventory } from "./inventory.ts";
+import { LOCK_TIMEOUT_MS, type SaveContext, saveInventory } from "./save.ts";
 
 // The backend contract version, in AssetTrackerSync.gs's series. index.html
 // compares it to FRONTEND_SCRIPT_VERSION and shows "Backend outdated" when they
 // differ. api_test.ts fails if this and SCRIPT_VERSION drift apart.
 export const SCRIPT_VERSION = "v52";
 
-// A read slower than this is logged as slow_read, as DIAG_SLOW_READ_MS does.
+// A read or save slower than this is logged as slow_read / slow_save, as
+// DIAG_SLOW_READ_MS and DIAG_SLOW_MS do.
 const DIAG_SLOW_READ_MS = 8000;
+const DIAG_SLOW_MS = 8000;
+
+// busyResponse_: the save queued behind others past the lock timeout. Nothing
+// was read or written, so the client treats it as any other failed save.
+const BUSY = {
+  ok: false,
+  busy: true,
+  error: "The tracker was busy with other saves and couldn't take this one. Nothing was changed -- try again.",
+  scriptVersion: SCRIPT_VERSION,
+};
 
 // deno-lint-ignore no-explicit-any
 type Body = Record<string, any>;
@@ -29,6 +42,9 @@ export type ApiOptions = {
   sql: Sql;
   verifyIdToken?: (token: unknown) => Promise<Identity>;
   now?: () => number;
+  // How long a save waits for another tenant save's lock (save.ts). Tests
+  // shorten it; the deployed function keeps acquireLock_'s ten seconds.
+  lockTimeoutMs?: number;
 };
 
 const CORS = {
@@ -43,7 +59,7 @@ const json = (payload: unknown, status = 200) =>
 const tenantOf = (url: URL) =>
   (url.searchParams.get("tenant") || url.searchParams.get("client") || url.searchParams.get("c") || "").trim();
 
-export function createApi({ sql, verifyIdToken = verifyGoogleIdToken, now = Date.now }: ApiOptions) {
+export function createApi({ sql, verifyIdToken = verifyGoogleIdToken, now = Date.now, lockTimeoutMs }: ApiOptions) {
   return async function handle(req: Request): Promise<Response> {
     const url = new URL(req.url);
     if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
@@ -89,13 +105,8 @@ export function createApi({ sql, verifyIdToken = verifyGoogleIdToken, now = Date
         return await read({ identity }, tenantId, diag, started);
       }
       if (op === "read") return await read({ sessionId: body.sessionId }, tenantId, diag, started);
-      return json({
-        ok: false,
-        error: op === "save"
-          ? "Saving isn't available on this backend yet. Nothing was changed."
-          : `"${op}" isn't available on this backend yet.`,
-        scriptVersion: SCRIPT_VERSION,
-      });
+      if (op === "save") return await save(body, tenantId, diag, started);
+      return json({ ok: false, error: `"${op}" isn't available on this backend yet.`, scriptVersion: SCRIPT_VERSION });
     } finally {
       // Stamped here so every entry carries the op and how long the request took.
       for (const e of diag) { e.op ??= op; e.ms ??= now() - started; }
@@ -151,6 +162,35 @@ export function createApi({ sql, verifyIdToken = verifyGoogleIdToken, now = Date
     } catch (err) {
       diag.push({ event: "error", detail: (err as Error)?.message });
       return json({ ok: false, error: "The server couldn't load the inventory: " + (err as Error)?.message, scriptVersion: SCRIPT_VERSION });
+    }
+  }
+
+  // doPost's write path. Everything happens in ONE transaction, so a refusal,
+  // a conflict or a failure part-way leaves the inventory exactly as it was.
+  async function save(body: Body, tenantId: string, diag: DiagEntry[], started: number) {
+    const stages: string[] = [];
+    try {
+      // The diagnostics of a save that throws part-way are kept: they are
+      // pushed to `diag`, which is written after, in a transaction of its own.
+      const ctx: SaveContext = { tenantId, ownerEmail: "", now: now(), diag, stages, lockTimeoutMs };
+      const answer = await withTenant(sql, tenantId, async (tx) => {
+        const [tenant] = await tx`select owner_email from tenants`;
+        if (!tenant) return { ok: false, error: `There is no tenant "${tenantId}" on this backend.`, scriptVersion: SCRIPT_VERSION };
+        ctx.ownerEmail = String(tenant.owner_email).toLowerCase();
+        return await saveInventory(tx, body, ctx);
+      });
+      const took = now() - started;
+      if (answer.ok && took > DIAG_SLOW_MS) diag.push({ event: "slow_save", email: ctx.email, ms: took, detail: stages.join("; ") });
+      return json(answer);
+    } catch (err) {
+      // 55P03 lock_not_available: someone else's save held the lock past the
+      // timeout. An answer, not a crash (v42).
+      if ((err as { code?: string })?.code === "55P03") {
+        diag.push({ event: "busy", detail: `lock not acquired in ${lockTimeoutMs ?? LOCK_TIMEOUT_MS}ms` });
+        return json(BUSY);
+      }
+      diag.push({ event: "error", detail: (err as Error)?.message + " | after: " + stages.join("; ") });
+      return json({ ok: false, error: (err as Error)?.message });
     }
   }
 
