@@ -197,6 +197,26 @@ jobs:
           # The Claude connector. It imports asset-api's Google check, so the
           # two always deploy together from the same commit.
           supabase functions deploy mcp --project-ref "$ref" --no-verify-jwt
+      # Upload signing (sign.ts) needs the shared Cloudinary account's three
+      # secrets. Only their NAMES are checked; the listing, which also carries
+      # a digest of each value, is never printed. A warning, not a failure:
+      # nothing uses signing until the app is pointed at this backend.
+      - name: Check the Cloudinary secrets are set
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          names=$(supabase secrets list --project-ref "$PROJECT_REF" -o json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).map(x=>x.name).join(" ")))') \
+            || { echo "::warning::Could not list the Supabase Edge Function secrets, so the Cloudinary check was skipped."; exit 0; }
+          missing=""
+          for k in CLOUDINARY_CLOUD_NAME CLOUDINARY_API_KEY CLOUDINARY_API_SECRET; do
+            case " $names " in *" $k "*) ;; *) missing="$missing $k" ;; esac
+          done
+          if [ -n "$missing" ]; then
+            echo "::warning::Upload signing will answer 'not set up' until these Supabase Edge Function secrets are added:$missing"
+          else
+            echo "✓ All three Cloudinary secrets are set."
+          fi
       - name: Ask the deployed function two questions
         run: |
           set -euo pipefail
@@ -227,6 +247,11 @@ jobs:
           dlog=$(curl -sS --max-time 30 -H "Content-Type: text/plain" -d '{"op":"diagnostics"}' "$url?tenant=dev")
           echo "DIAG -> $dlog"
           node -e 'const r=JSON.parse(process.argv[1]); if(!(r.authFailed && r.reason==="signin")) process.exit(1)' "$dlog"
+          # 2f. The anonymous panel read: routed, reaches the tenant, and says
+          #     nothing about a code that names no panel.
+          pnl=$(curl -sS --max-time 30 "$url?tenant=dev&panel=no-such-panel")
+          echo "PANEL -> $pnl"
+          node -e 'const r=JSON.parse(process.argv[1]); if(r.error!=="No electrical panel found for that code.") process.exit(1)' "$pnl"
           echo "✓ asset-api is up on dev and reaches the database."
           # 3. The connector: a question with no token must be refused with a
           #    pointer to its sign-in metadata, and that metadata must load.

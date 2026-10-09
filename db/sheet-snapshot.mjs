@@ -95,6 +95,11 @@ export function snapshotFromGrids(gasSource, grids, { fullAudit = true } = {}) {
   return out;
 }
 
+// A GET through the .gs's own doGet (the public panel read), on the same fake Sheet.
+export function getThroughSheet(gasSource, grids, parameter) {
+  return saveThroughSheet(gasSource, grids, null, { get: parameter }).response;
+}
+
 // A SAVE through the .gs's own doPost, against a fake Sheet that can be
 // written. Grids in, { response, grids } out -- feed the grids back to
 // snapshotFromGrids to see what the app would read next. This is the other
@@ -111,7 +116,7 @@ export function snapshotFromGrids(gasSource, grids, { fullAudit = true } = {}) {
 //   PropertiesService -- Script Properties from `props` (the upload signers).
 //   Utilities.getUuid, Date.now -- from `uuid` and `now` when given, so a
 //                        signature can be compared byte for byte.
-export function saveThroughSheet(gasSource, grids, body, { as, props = {}, uuid, now } = {}) {
+export function saveThroughSheet(gasSource, grids, body, { as, props = {}, uuid, now, get } = {}) {
   const sheets = {};
   const sheetFor = (name) => {
     if (sheets[name]) return sheets[name];
@@ -165,6 +170,7 @@ export function saveThroughSheet(gasSource, grids, body, { as, props = {}, uuid,
       computeDigest: (alg, text) => Array.from(nodeCrypto.createHash(alg).update(String(text), "utf8").digest()).map((b) => (b > 127 ? b - 256 : b)),
       getUuid: uuid || (() => nodeCrypto.randomUUID()),
     },
+    LockService: { getScriptLock: () => ({ waitLock() {}, tryLock: () => true, releaseLock() {} }) },
     PropertiesService: {
       getScriptProperties: () => ({ getProperty: (k) => (k in props ? props[k] : null) }),
     },
@@ -180,9 +186,10 @@ export function saveThroughSheet(gasSource, grids, body, { as, props = {}, uuid,
     };
     if (globalThis.__now !== null) Date.now = function () { return globalThis.__now; };
     globalThis.__save = function (contents) { return doPost({ postData: { contents: contents } }); };
+    globalThis.__get = function (parameter) { return doGet({ parameter: parameter }); };
   `, { filename: "AssetTrackerSync.gs" }).runInContext(ctx);
 
-  const response = JSON.parse(JSON.stringify(ctx.__save(JSON.stringify(body))));
+  const response = JSON.parse(JSON.stringify(get ? ctx.__get(get) : ctx.__save(JSON.stringify(body))));
   const out = {};
   for (const name of new Set([...Object.keys(grids), ...Object.keys(sheets)])) out[name] = sheets[name] ? sheets[name]._grid() : grids[name];
   return { response, grids: out };
