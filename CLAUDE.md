@@ -1562,6 +1562,18 @@ label ids; the vocabulary is `[{ id, name }]` with **array order as display orde
   being answerable by counting. So the Type picker, the Type column filter and the type
   manager all list every type alphabetically and offer the labels as a chip row that narrows
   the list. Same information, no double-counting.
+- **GROUPING CAME BACK, AS COLLAPSIBLE HEADINGS** (2026-10-09, Eric's call). The Type
+  picker, the type manager and the map's Pins filter list types under one expandable
+  heading per label (`groupByLabel` + `LabelGroupHeader`), in the vocabulary's order, with
+  **Unlabeled** last. A two-label type IS listed under both headings — the double-count
+  above, accepted because collapsed headings are how someone narrows to "the Facilities
+  types". One heading only (say, everything unlabeled) renders flat, since a lone heading
+  is a click spent revealing the whole list. The picker opens with the current value's
+  group expanded, and a search opens every group holding a match. **In the Pins filter a
+  heading has its own checkbox** that ticks every type under that label pinned on the plan
+  (half-ticked when only some are); what is stored is still the TYPE, so ticking a shared
+  type in one group ticks it in the other. **The Type COLUMN filter keeps its chip row**
+  (`useLabelFilter`) — it was not part of the ask. Frontend only.
 - **THE CONFIG KEY IS STILL `typeCategories`, AND THAT IS DELIBERATE.** The per-type array
   rides `typeSettings`, a blob the backend stringifies whole, so this whole change cost **no
   backend version and no deploy** — but the vocabulary lives under a key of its own, and
