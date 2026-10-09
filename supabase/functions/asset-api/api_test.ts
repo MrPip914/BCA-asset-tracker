@@ -113,7 +113,8 @@ if (!DATABASE_URL) {
   };
   const comparable = (payload: Record<string, unknown>) => {
     const p = structuredClone(payload);
-    for (const a of p.assets as { changes: { id: string }[] }[]) {
+    for (const a of p.assets as { changes: { id: string }[]; _rev?: number }[]) {
+      delete a._rev; // a database version; the Sheet has none
       for (const c of a.changes) if (c.id.startsWith("imp-")) c.id = "";
     }
     delete p.auth;
@@ -152,6 +153,29 @@ if (!DATABASE_URL) {
     }
     const [last] = (await diagRows("school_a")).slice(-1);
     assertEquals([last.event, last.op, last.detail], ["auth_failed", "auditFull", "session none"]);
+  });
+
+  Deno.test("the revisions check answers the read's counters, follows a bump, and needs a session", async () => {
+    const owner = await signIn("school_a", OWNER);
+    const sessionId = owner.auth.sessionId;
+    const r = await post("school_a", { op: "revisions", sessionId });
+    assertEquals([r.ok, r.role, r.scriptVersion], [true, "editor", SCRIPT_VERSION]);
+    assertEquals(r.revisions, owner.revisions);
+    assertEquals(Object.keys(r), ["ok", "revisions", "role", "scriptVersion"]);
+    assert(JSON.stringify(r).length < 200, "the check must stay a few bytes, not a payload");
+
+    await withTenant(sql, "school_a", (tx) => tx`update revisions set rev = rev + 1 where domain = 'photos'`);
+    const after = await post("school_a", { op: "revisions", sessionId });
+    assertEquals(after.revisions, { ...owner.revisions, photos: owner.revisions.photos + 1 });
+    // Put it back: the parity checks below compare against the Sheet's counters.
+    await withTenant(sql, "school_a", (tx) => tx`update revisions set rev = rev - 1 where domain = 'photos'`);
+
+    const viewer = await signIn("school_a", "jane@school.test");
+    assertEquals((await post("school_a", { op: "revisions", sessionId: viewer.auth.sessionId })).role, "viewer");
+    for (const [tenant, sid] of [["school_a", undefined], ["school_b", sessionId]]) {
+      const refused = await post(tenant, { op: "revisions", sessionId: sid });
+      assertEquals([refused.ok, refused.authFailed, refused.revisions], [false, true, undefined]);
+    }
   });
 
   Deno.test("the allowlist keeps its stored order, and the owner is always an editor", async () => {

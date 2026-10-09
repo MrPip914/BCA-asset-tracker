@@ -626,6 +626,84 @@ Nothing edits or deletes.
 - **The whole tenant is loaded per call.** Fine at hundreds of assets; the audit log is the
   table that will make it slow, and the fix then is filtering it in SQL.
 
+## Live refresh (Supabase tenants, 2026-10-09)
+
+Another person's save appears without a reload (`DATABASE_BACKEND_PLAN.md`, Phase 2a).
+While the tab is visible the app sends `op:"revisions"` every minute, and at once on
+focus or when the tab comes back. That answers the four revision counters and nothing
+else. Only when one has moved past this device's does it run a quiet `op:"read"` (no
+loading screen) and apply it through `applySnapshot`, the same as a load.
+
+- **Supabase only (`LIVE_REFRESH_SUPPORTED`), and the gate is load-bearing.** The Apps
+  Script `doPost` reads an op it does not know as a SAVE, so the check must never reach
+  it. Every Apps Script tenant and `/dev/?backend=sheet` keep manual refresh.
+- **HELD WHILE SOMEONE IS EDITING, because a refresh moves `revisions`.** Moving them
+  under an open draft turns the conflict that draft's save would have raised into a
+  silent overwrite of the other person's change. `liveRefreshHeld` holds on the inline
+  forms (named in `formOpen`), a write in flight, a focused text field, and ANY
+  `position: fixed; inset: 0` overlay. Every modal and menu in this app is one, which
+  covers child components' own drafts without a list to keep in step. **A new overlay
+  built some other way, or a new inline form, must join `formOpen`.** A held change is
+  applied on the first 5-second tick after the form closes.
+- **A read older than this device is discarded** (`revisionsBehind`). This covers a save
+  of this device's landing while the read was in flight. A device's own save never
+  triggers a read, since its reply already moved `revisions`.
+- One attempt per check (no retries), silent on failure. An `authFailed` goes through
+  `loadData()`, which signs out properly. A backend that answers "isn't available"
+  (deployed before this op) is not asked again that session.
+- Cost: ~1,000 checks per open device per day, against the free tier's 500k function
+  calls a month. Re-measure before a school moves.
+- Covered by `test-frontend-live-refresh.js` (helpers run for real, wiring read as
+  source, mutation-checked) and an `api_test.ts` case for the op. Driven in Chromium
+  against the real function on a local Postgres: a change elsewhere appears on focus,
+  stays held while the edit form is open and lands on Cancel; an idle check costs one
+  tiny request; the device's own save triggers no read; the Sheet backend never sees
+  the op.
+
+## Per-record saves (Supabase tenants, 2026-10-09)
+
+A save to a Supabase tenant names only the assets it changed (`DATABASE_BACKEND_PLAN.md`,
+Phase 2b). `persist()` diffs the asset list by reference and posts
+`assetChanges: { upsert, remove }`, each asset carrying the version (`_rev`) it was read
+with. The backend refuses only when one of THOSE assets moved, so two people saving
+different assets both land. A whole-snapshot save is refused on the whole assets domain
+instead, and still is for anything that takes that path.
+
+- **Supabase only (`PER_RECORD_SAVES`), the same gate as live refresh.** An Apps Script
+  backend does not know `assetChanges` and would read the body as a save of no assets.
+- **The version lives in triggers (migration 0007), not in any writer's code.** A row
+  trigger moves `assets.rev` on a content change (not `position`), and statement triggers
+  on every child table move the owner once. So a full-snapshot save from an older build,
+  the connector's functions, the importer and a hand edit all move it, and none can be
+  overwritten silently by a per-record save that never saw them.
+- **The read carries `_rev` per asset; `applySnapshot` strips it into `assetRevsRef`**, so
+  nothing else sees or saves it. It is read at SEND time, inside the write queue, and a
+  save's new versions (`assetRevs` in the reply) are stamped in the same chain, so a
+  second save of the same asset queued behind the first posts the version the first made.
+- **What cannot be named by reference falls back to the whole snapshot**: the same
+  entries in a fresh array (`attachPhotos`' `assets.slice()`), a reorder, or an audit log
+  that is not the held one with entries appended (the full history fetched since). The
+  backend still takes that body, domain-checked as before.
+- **The body carries only what is written**: the changes, `auditAppend` (only the new
+  entries, appended as sent, since the offset a whole save uses cannot hold when two
+  saves of different assets both land), and config, breaker types or photos only when
+  dirty. The write is scoped: a row of an asset the save does not name is never deleted.
+- **A new asset must not exist yet**, which makes a retried request a conflict, not a
+  duplicate. Removing an already-removed asset is not a conflict. Removing every asset at
+  once is refused, as in a whole save.
+- **REVISIONS ARE ADOPTED ONLY WHEN THEY ARE THIS SAVE'S OWN** (`adoptSavedRevisions`): a
+  written domain moves only if the server's number is exactly one past the held one. A
+  domain someone else bumped in between keeps the held number, so live refresh fetches
+  their change and a later save of that domain is checked against it. Adopting it would
+  let that save overwrite them silently. The whole-snapshot path still adopts everything,
+  which is that bug (`BUGS.md`).
+- **What it does not fix**: two people CREATING assets at once still conflict, on the
+  config domain's `nextAssetNumber`. Photos stay one domain.
+- Covered by `test-frontend-per-record.js` (helpers run for real, wiring read as source,
+  mutation-checked), `save_test.ts`'s per-record cases, and `db/test-asset-versions.sql`.
+  Driven in Chromium against the real function on a local Postgres: two pages saving
+  different assets both land; a third, stale on the same asset, gets the not-saved modal.
+
 ## Local Sandbox mode
 
 Sandbox swaps the real Google Sheet for a local fixture (`MOCK_SNAPSHOT` in

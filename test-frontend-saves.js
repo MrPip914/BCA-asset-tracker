@@ -35,7 +35,7 @@ function body(decl) {
 }
 
 const persistBody = body('async function persist(nextAssets, overrides = {})');
-const finishBody = body('async function finishWrite(result, err, saveContext)');
+const finishBody = body('async function finishWrite(result, err, saveContext, perRecordDirty)');
 const restoreBody = body('function restoreFailedSave()');
 
 // --- the write is enqueued, not awaited -------------------------------------

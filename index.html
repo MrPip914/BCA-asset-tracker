@@ -4638,7 +4638,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-09.2";
+const APP_VERSION = "2026-10-09.4";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -4961,6 +4961,126 @@ function normalizeRevisions(raw) {
     out[d] = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
   });
   return out;
+}
+
+// --- Live refresh (DATABASE_BACKEND_PLAN.md, Phase 2a) -----------------------
+// Other people's saves appear without a reload. While the tab is VISIBLE the app
+// asks the backend for its revision counters alone (op:"revisions", a few dozen
+// bytes) every LIVE_REFRESH_INTERVAL_MS, and at once when the tab comes back or
+// the window regains focus. Only when a counter has MOVED past what this device
+// holds does it run an ordinary read, quietly, with no loading screen.
+//
+// SUPABASE ONLY, and that gate is load-bearing rather than tidy: the Apps Script
+// doPost reads an op it does not know as an ordinary SAVE, so a revisions check
+// sent there would be a write request. CLIENT.backend is "sheet" for every
+// Apps Script tenant and for /dev/?backend=sheet.
+//
+// NEVER UNDER SOMEONE'S HANDS. A refresh replaces `revisions` with the server's,
+// so a draft saved after it would no longer be refused as a conflict -- it would
+// quietly overwrite whatever the other person changed. So a moved counter is
+// HELD while a form, dialog, menu or write is open, and applied on the first
+// tick after it closes (liveRefreshHeld).
+const LIVE_REFRESH_SUPPORTED = CLIENT.backend === "supabase";
+const LIVE_REFRESH_INTERVAL_MS = 60000;
+// How often the held state is re-checked. No network call unless one is due.
+const LIVE_REFRESH_TICK_MS = 5000;
+
+// --- Per-record saves (DATABASE_BACKEND_PLAN.md, Phase 2b) -------------------
+// A save to a Supabase tenant names only the assets it changed, each with the
+// version (`_rev`) it was read with, and is refused only when one of THOSE
+// moved -- so two people saving different assets both land, where the whole
+// snapshot is refused as a conflict on the whole assets domain. Same gate as
+// live refresh: an Apps Script backend does not know `assetChanges` and would
+// read the body as a save of NO assets.
+const PER_RECORD_SAVES = CLIENT.backend === "supabase";
+
+// What changed between two asset lists, by REFERENCE -- the same convention
+// persist()'s domain test rests on: every call site either passes an asset
+// through untouched or builds a new object for it. Null when nothing can be
+// named that way (the same entries, perhaps reordered, perhaps a fresh array
+// made to force a write), which sends the whole snapshot as before.
+function assetChangesBetween(prev, next) {
+  const key = a => a.id || a.label;
+  const before = new Map((prev || []).map(a => [key(a), a]));
+  const upsert = [];
+  const kept = new Set();
+  for (const a of next || []) {
+    const id = key(a);
+    kept.add(id);
+    if (before.get(id) !== a) upsert.push(a);
+  }
+  const remove = [];
+  for (const id of before.keys()) if (!kept.has(id)) remove.push(id);
+  return upsert.length || remove.length ? { upsert, remove } : null;
+}
+
+// The audit entries a save ADDED, or null when `next` is not `prev` with
+// entries appended (the whole log fetched since, say) -- the save then sends
+// the log and its offset, as before.
+function auditAppendOf(prev, next) {
+  if (!Array.isArray(prev) || !Array.isArray(next) || next.length < prev.length) return null;
+  if (prev.length && next[prev.length - 1] !== prev[prev.length - 1]) return null;
+  return next.slice(prev.length);
+}
+
+// The revisions to hold after a save lands. A domain this save wrote moves to
+// the server's number only when that is EXACTLY one past what was held, i.e.
+// nobody else wrote it in between. Otherwise the held number stays: adopting
+// someone else's revision without their data would let this device's next save
+// of that domain pass the check and silently overwrite them -- and keeping it
+// is what makes live refresh notice and fetch their change.
+// The body a per-record save posts, from the whole-snapshot payload persist()
+// built: the asset changes in place of the asset list, the appended audit
+// entries in place of the log, and each other domain only when it is written.
+// The `_rev`s are added at send time, not here.
+const CONFIG_PAYLOAD_KEYS = ["columns", "changeTypes", "vendors", "peripheralsList", "usersList", "bulkItemTypes",
+  "typesList", "typeSettings", "typeCategories", "nextAssetNumber", "authUsers"];
+function perRecordBody(payload, dirty, assetChanges, appended) {
+  const body = {
+    _dirty: { ...dirty, assets: !!assetChanges },
+    auditAppend: appended,
+  };
+  if (assetChanges) body.assetChanges = assetChanges;
+  if (dirty.config) CONFIG_PAYLOAD_KEYS.forEach(k => { if (k in payload) body[k] = payload[k]; });
+  if (dirty.breakerTypes) body.breakerTypes = payload.breakerTypes;
+  if (dirty.photos) body.photos = payload.photos;
+  return body;
+}
+
+function adoptSavedRevisions(held, server, written) {
+  const h = normalizeRevisions(held), s = normalizeRevisions(server);
+  const out = {};
+  REVISION_DOMAINS.forEach(d => { out[d] = written && written[d] && s[d] === h[d] + 1 ? s[d] : h[d]; });
+  return out;
+}
+
+// True when the server holds a newer copy of any domain than this device does.
+function revisionsMoved(server, held) {
+  const s = normalizeRevisions(server), h = normalizeRevisions(held);
+  return REVISION_DOMAINS.some(d => s[d] > h[d]);
+}
+
+// True when a fetched read is OLDER than what this device already holds in any
+// domain -- a save of this device's landed while the read was in flight, and
+// applying it would put the edit just made back the way it was.
+function revisionsBehind(server, held) {
+  const s = normalizeRevisions(server), h = normalizeRevisions(held);
+  return REVISION_DOMAINS.some(d => s[d] < h[d]);
+}
+
+// Whether to hold a refresh. `state.formOpen` and `state.writing` are the app's
+// own flags (an inline edit or add form, a write in flight). The DOM half
+// catches everything else without a list to keep in step: EVERY modal and menu
+// in this app is a `position: fixed; inset: 0` overlay, including the ones
+// inside child components with drafts of their own, and a focused text field
+// is someone typing.
+function liveRefreshHeld(state, doc) {
+  if (state && (state.formOpen || state.writing)) return true;
+  if (!doc) return false;
+  const el = doc.activeElement;
+  if (el && (el.tagName === "TEXTAREA" || el.isContentEditable
+    || (el.tagName === "INPUT" && !/^(checkbox|radio|button|submit|reset|range|file|color)$/i.test(el.type || "")))) return true;
+  return !!doc.querySelector('[style*="position: fixed"][style*="inset: 0"]');
 }
 
 // --- Asset ID (label) issuing ------------------------------------------------
@@ -6610,6 +6730,10 @@ function AssetTracker() {
   // back with — otherwise it would post the pre-bump numbers and be rejected as
   // a conflict with this very client's own write.
   const revisionsRef = useRef(EMPTY_REVISIONS);
+  // Each asset's version as the backend last reported it (Supabase only), read
+  // at SEND time by a per-record save -- after any earlier queued save of the
+  // same asset has stamped its new one.
+  const assetRevsRef = useRef(new Map());
   // Serializes the POSTs themselves so only one is ever in flight. Needed for
   // the above, and independently correct: two overlapping full-snapshot writes
   // could already land out of order and let the older one win.
@@ -7253,8 +7377,14 @@ function AssetTracker() {
       Array.isArray(data.typesList) && data.typesList.length ? data.typesList : DEFAULT_TYPES
     ));
 
+    // A Supabase read carries each asset's version; it lives in assetRevsRef,
+    // never on the asset, so nothing else ever sees or saves it.
+    const readRevs = new Map();
     const parented = data.assets
-      .map(a => ({ comments: [], changes: [], allocations: [], status: "Active", subType: "", purchaseDate: "", warrantyUntil: "", ...a }))
+      .map(({ _rev, ...a }) => {
+        if (_rev !== undefined) readRevs.set(a.id || a.label, _rev);
+        return { comments: [], changes: [], allocations: [], status: "Active", subType: "", purchaseDate: "", warrantyUntil: "", ...a };
+      })
       // THE asset key, adopted before anything else reads one. An asset written
       // before v31 has no `id`, so its LABEL is its id -- which is what makes
       // this whole change need no migration: every reference already stored in
@@ -7338,6 +7468,7 @@ function AssetTracker() {
     // "fill in a blank name" pass, and there is no window in which a person
     // could pick up a generated "User BCA0090".
     const loadedAssets = adoptLegacyNames(adoptPersonNames(parented), loadedTypes);
+    assetRevsRef.current = readRevs;
     setAssets(loadedAssets);
     // No scriptVersion at all means an old backend that predates this check entirely —
     // still a real mismatch, not a "nothing to compare" case. In sandbox mode the
@@ -7635,6 +7766,100 @@ function AssetTracker() {
     if (lastLoadedSandboxRef.current === sandboxMode) return;
     loadData();
   }, [sandboxMode, authSatisfied]);
+
+  // LIVE REFRESH -- see LIVE_REFRESH_SUPPORTED for the rules. The interval is
+  // mounted once and reads everything through refs refreshed on every render,
+  // so it always sees the current state and the current loadData/applySnapshot
+  // rather than the ones its first render closed over.
+  const liveRefreshRef = useRef({ lastCheck: 0, pending: false, inFlight: false, unsupported: false });
+  const liveRefreshLatestRef = useRef(null);
+  liveRefreshLatestRef.current = {
+    enabled: LIVE_REFRESH_SUPPORTED && !sandboxMode && !!auth && assets !== null
+      && !loading && !revalidating && !staleSnapshot && !loadError,
+    // The inline forms -- the asset edit and add forms, a half-typed comment,
+    // the Add Breaker and panel config forms -- render no overlay, so the DOM
+    // check cannot see them. A failed-save modal is an overlay, but it is also
+    // holding a draft to offer back, so it is named here as well.
+    formOpen: detailEditing || showAdd || commentDraft.trim() !== "" || !!addBreakerDraft
+      || showPanelConfig || importBusy || !!saveFailure,
+    loadData, applySnapshot,
+  };
+  useEffect(() => {
+    if (!LIVE_REFRESH_SUPPORTED) return undefined;
+    let stopped = false;
+    const r = liveRefreshRef.current;
+    const held = () => liveRefreshHeld({
+      formOpen: liveRefreshLatestRef.current.formOpen,
+      writing: pendingWritesRef.current > 0 || savingRef.current,
+    }, document);
+    const NO_RETRY = { delays: [], timeoutMs: 15000 };
+
+    async function refresh() {
+      const heldRevisions = revisionsRef.current;
+      const data = await backendPost(SHEET_API_URL, {
+        op: "read", sessionId: sessionId,
+        _dirty: { assets: false, config: false, breakerTypes: false, photos: false },
+      }, NO_RETRY);
+      const latest = liveRefreshLatestRef.current;
+      if (stopped || !latest.enabled) return;
+      if (data && data.authFailed) { r.pending = false; latest.loadData(); return; }
+      if (!data || data.ok === false || !Array.isArray(data.assets)) throw new Error((data && data.error) || "no inventory in the reply");
+      // Something started while the read was in flight: a write, a form, or a
+      // save of this device's that landed first. Stay pending and try again.
+      if (held() || revisionsRef.current !== heldRevisions || revisionsBehind(data.revisions, revisionsRef.current)) return;
+      latest.applySnapshot(data);
+      r.pending = false;
+      diagLog("live_refresh", "picked up a change saved elsewhere");
+      if (sessionId) writeSnapshotCache(sessionId, data);
+    }
+
+    async function tick(force) {
+      const latest = liveRefreshLatestRef.current;
+      if (stopped || !latest || !latest.enabled || r.unsupported || r.inFlight) return;
+      if (document.visibilityState !== "visible") return;
+      if (r.pending) {
+        if (held()) return;
+        r.inFlight = true;
+        try { await refresh(); }
+        catch (e) { r.pending = false; } // the next check finds the change again
+        finally { r.inFlight = false; }
+        return;
+      }
+      if (!force && Date.now() - r.lastCheck < LIVE_REFRESH_INTERVAL_MS) return;
+      r.lastCheck = Date.now();
+      r.inFlight = true;
+      try {
+        const data = await backendPost(SHEET_API_URL, { op: "revisions", sessionId: sessionId }, NO_RETRY);
+        if (stopped || !liveRefreshLatestRef.current.enabled) return;
+        if (data && data.authFailed) { liveRefreshLatestRef.current.loadData(); return; }
+        if (data && data.ok === false) {
+          // A backend deployed before this op answers that it is not here. Stop
+          // asking rather than asking once a minute for the rest of the session.
+          if (/isn't available/.test(data.error || "")) r.unsupported = true;
+          return;
+        }
+        if (data && revisionsMoved(data.revisions, revisionsRef.current)) r.pending = true;
+      } catch (e) {
+        // Silent: a missed check is retried on the next one, and never signs
+        // anyone out -- backendPost already refuses to read a blip as a refusal.
+      } finally {
+        r.inFlight = false;
+      }
+      if (r.pending) tick(false);
+    }
+
+    const timer = window.setInterval(() => { tick(false); }, LIVE_REFRESH_TICK_MS);
+    const onVisible = () => { if (document.visibilityState === "visible") tick(true); };
+    const onFocus = () => { tick(true); };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, []);
 
   // Consumes a shared deep link (?asset=<id or label>&tab=breakers) once, on the
   // first load where assets are actually available — jumps straight to that
@@ -7976,6 +8201,15 @@ function AssetTracker() {
         }
         return;
       }
+      // PER RECORD (Supabase only, see PER_RECORD_SAVES): the assets that
+      // changed instead of all of them, and only the other domains this save
+      // touches. Whatever cannot be expressed that way -- no asset named by
+      // reference, a log that is not this one with entries appended -- falls
+      // back to the whole snapshot, which the backend still takes.
+      const assetChanges = PER_RECORD_SAVES && dirty.assets ? assetChangesBetween(assets, nextAssets) : null;
+      const appended = PER_RECORD_SAVES ? auditAppendOf(auditLog, nextAuditLog) : null;
+      const perRecord = PER_RECORD_SAVES && (!dirty.assets || assetChanges) && appended !== null;
+      const body = perRecord ? perRecordBody(payload, dirty, assetChanges, appended) : payload;
       // ENQUEUED, NOT AWAITED — this is what makes a save feel instant. The
       // optimistic setState above has already painted the change, writeQueueRef
       // already serializes the POSTs, and the revision check already refuses a
@@ -7995,8 +8229,26 @@ function AssetTracker() {
         // Timed from when THIS request actually starts, not from when it was
         // queued, so a save stuck behind another reads as its own duration.
         const started = Date.now();
-        return writeSnapshot({ ...payload, _revisions: revisionsRef.current }).then(
-          (result) => { diagLogSave(result, null, Date.now() - started); return result; },
+        const sent = { ...body, _revisions: revisionsRef.current };
+        // The version of each asset, as of NOW: a save of the same asset
+        // queued ahead of this one has stamped its new version by the time
+        // this runs (below, inside the chain, before the next save starts).
+        if (sent.assetChanges) {
+          const revOf = id => assetRevsRef.current.get(id);
+          sent.assetChanges = {
+            upsert: sent.assetChanges.upsert.map(a => ({ ...a, _rev: revOf(a.id || a.label) })),
+            remove: sent.assetChanges.remove.map(id => ({ id, _rev: revOf(id) })),
+          };
+        }
+        return writeSnapshot(sent).then(
+          (result) => {
+            diagLogSave(result, null, Date.now() - started);
+            if (result && result.ok && sent.assetChanges) {
+              for (const [id, rev] of Object.entries(result.assetRevs || {})) assetRevsRef.current.set(id, rev);
+              for (const r of sent.assetChanges.remove) assetRevsRef.current.delete(r.id);
+            }
+            return result;
+          },
           (err) => { diagLogSave(null, err, Date.now() - started); throw err; }
         );
       });
@@ -8004,7 +8256,7 @@ function AssetTracker() {
       pendingWritesRef.current += 1;
       setIsSaving(true);
       send.then(
-        (result) => finishWrite(result, null, saveContext),
+        (result) => finishWrite(result, null, saveContext, perRecord ? body._dirty : null),
         (err) => finishWrite(null, err, saveContext)
       );
     }
@@ -8014,7 +8266,9 @@ function AssetTracker() {
   // The outcome of a backgrounded write. Split out of persist() because it now
   // runs long after persist() returned, and because both the resolved and the
   // rejected path have the same bookkeeping to do.
-  async function finishWrite(result, err, saveContext) {
+  // `perRecordDirty` is the domains a per-record save wrote; see
+  // adoptSavedRevisions for why that save adopts revisions differently.
+  async function finishWrite(result, err, saveContext, perRecordDirty) {
     pendingWritesRef.current = Math.max(0, pendingWritesRef.current - 1);
     if (pendingWritesRef.current === 0) setIsSaving(false);
 
@@ -8079,7 +8333,14 @@ function AssetTracker() {
     }
     // A v11-or-older backend reports no revisions; leaving them as-is keeps
     // posting the same (all-zero) numbers, which it ignores anyway.
-    if (result && result.revisions) rememberRevisions(result.revisions);
+    if (result && result.revisions) {
+      if (perRecordDirty) {
+        const adopted = adoptSavedRevisions(revisionsRef.current, result.revisions, perRecordDirty);
+        if (REVISION_DOMAINS.some(d => adopted[d] !== revisionsRef.current[d])) rememberRevisions(adopted);
+      } else {
+        rememberRevisions(result.revisions);
+      }
+    }
     setSaveError(false);
   }
 

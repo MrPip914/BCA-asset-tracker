@@ -16,6 +16,18 @@ version that fixed them.
 
 ## Open
 
+### A save adopts revisions it did not earn, so a later save can overwrite someone silently
+**Found:** 2026-10-09, while building per-record saves.
+**Needs a deploy:** no; frontend only (`finishWrite`).
+**Confirmed:** from the code, not reproduced. After a successful save `finishWrite` adopts
+EVERY revision the backend returns, including domains this save did not write and domains
+someone else bumped while it was in flight. Say this device saves an asset while another
+person saves the managed lists: this device now holds their config revision without their
+data, so its next config save passes the check and writes its old lists over theirs. Fixed
+on the Supabase per-record path (`adoptSavedRevisions`, which adopts a written domain only
+when it moved by exactly one). Still open on the whole-snapshot path, which every Apps
+Script tenant uses. Applying the same rule there is a small change.
+
 ### The QR sticker sheet page loads no panels
 **Found:** 2026-10-09, while moving the dev tenant to Supabase.
 **Needs a deploy:** no; frontend only, but it needs a decision (below).
