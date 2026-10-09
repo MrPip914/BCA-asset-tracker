@@ -457,6 +457,15 @@ say when a sign-in attempt fails for a transport reason rather than an auth one.
 
 ## Fixed
 
+### Walls disappear on a plan where every building is surrounded by other spaces — fixed 2026-10-09
+**Found:** 2026-10-09, while putting the new 3C campus plan on dev. The new drawing tiles
+courtyard and parking shapes around every building, and an edge counted as a wall only when
+the point just beyond it lay in no other space, so the Worship Center, CEB and Sanctuary had
+zero exterior edges and their 8 wall assets drew nothing.
+**Fixed:** 2026-10-09, PR #41 (frontend, `floorPlanExteriorSegments`): on a site plan only a
+building counts as the far side of a wall. The connector's `set_plan_walls` (PR #42) uses the
+same building-cover rule.
+
 ### Choosing a type in the Add asset form also opens "Manage asset types" — fixed 2026-10-07
 **Found:** 2026-09-28, while adding search to the Type picker.
 **Fixed:** 2026-10-07. `TypeField`'s wrapper is a `div` now, so the closing click has no label to
