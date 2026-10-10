@@ -3058,12 +3058,10 @@ function RelationshipQueryEditor({ initialQueries, builtIn, initialActiveId, new
 
   const updateActive = patch => setQueries(list => list.map(q => (q.id === effectiveActiveId ? { ...q, ...patch } : q)));
   const updateStep = (i, patch) => updateActive({ steps: active.steps.map((s, j) => (j === i ? { ...s, ...patch } : s)) });
-  const addQuery = () => { const q = newRelationshipQuery(newTypeIds); setQueries(list => [...list, q]); setActiveId(q.id); setError(""); };
-  const removeQuery = id => {
-    const rest = queries.filter(q => q.id !== id);
-    setQueries(rest);
-    if (effectiveActiveId === id) setActiveId(rest[0] ? rest[0].id : (builtIn ? builtIn.id : null));
-  };
+  // One query is open at a time, so deleting it saves the list without it and
+  // closes. Two taps, since there is no Cancel afterwards.
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const removeQuery = id => onDone(queries.filter(q => q.id !== id).map(q => ({ ...q, name: q.name.trim() })));
   // Refuses rather than saving something that would run differently from what
   // the screen shows: an unnamed query, one that applies to no type (it would
   // be stored nowhere and vanish), a field step with no field, or a "nearest"
@@ -3089,29 +3087,14 @@ function RelationshipQueryEditor({ initialQueries, builtIn, initialActiveId, new
 
   return (
     <div onClick={onCancel} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }}>
-      <div onClick={e => e.stopPropagation()} role="dialog" aria-label="Relationship queries"
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-label="Relationship query"
         style={{ background: C.surface, borderRadius: 14, width: "100%", maxWidth: 560, maxHeight: "90vh", display: "flex", flexDirection: "column", boxShadow: "0 12px 40px rgba(42,52,57,0.25)" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 18px", borderBottom: `1px solid ${C.border}` }}>
-          <div style={{ fontWeight: 700, fontSize: 15, color: C.brandDark }}>Relationship queries</div>
+          <div style={{ fontWeight: 700, fontSize: 15, color: C.brandDark }}>{active ? (active.name.trim() || "New query") : "Relationship query"}</div>
           <button type="button" onClick={onCancel} className="icon-btn" aria-label="Close" style={{ background: "none", border: "none", padding: 4, borderRadius: 6, display: "flex" }}><X size={16} color={C.muted} /></button>
         </div>
         <div style={{ padding: 18, overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
-            {[...(builtIn ? [builtIn] : []), ...queries].map(q => (
-              <button key={q.id} type="button" onClick={() => { setActiveId(q.id); setError(""); }}
-                style={{ padding: "5px 11px", borderRadius: 999, fontSize: 13, fontWeight: 600, border: `1.5px solid ${q.id === effectiveActiveId ? C.brand : C.border}`,
-                  background: q.id === effectiveActiveId ? C.brand : C.surface, color: q.id === effectiveActiveId ? "#fff" : C.ink }}>
-                {q.name.trim() || "Untitled"}
-              </button>
-            ))}
-            {!readOnly && (
-              <button type="button" onClick={addQuery}
-                style={{ display: "flex", alignItems: "center", gap: 4, padding: "5px 11px", borderRadius: 999, fontSize: 13, fontWeight: 600, border: `1.5px dashed ${C.border}`, background: "none", color: C.brandDark }}>
-                <Plus size={13} /> Add query
-              </button>
-            )}
-          </div>
-          {!active && <div style={{ fontSize: 13, color: C.empty }}>No queries yet. Add one, then choose the types it applies to.</div>}
+          {!active && <div style={{ fontSize: 13, color: C.empty }}>Nothing to show.</div>}
           {active && isBuiltIn && (
             <div style={{ fontSize: 12, color: C.empty }}>Built in. Every type that can hold things gets this query, listed first. It cannot be changed.</div>
           )}
@@ -3205,7 +3188,7 @@ function RelationshipQueryEditor({ initialQueries, builtIn, initialActiveId, new
                 <span style={RELATIONSHIP_HEADING}>Preview</span>
                 {previewOptions.length === 0
                   ? <div style={{ fontSize: 12, color: C.empty }}>{(active.typeIds || []).length ? "No asset of those types to try it on yet." : "Pick a type to try it on."}</div>
-                  : <PickerField hideLabel label="Preview on" title="Preview on which asset" value={previewAsset ? previewAsset.id : ""}
+                  : <PickerField hideLabel searchable label="Preview on" title="Preview on which asset" value={previewAsset ? previewAsset.id : ""}
                       options={previewOptions.map(a => a.id)} labelForOption={id => { const a = previewOptions.find(x => x.id === id); return a ? `${nameOf(a, typesList)} (${typeNameOf(a.type, typesList)})` : id; }}
                       onChange={setPreviewId} />}
                 {preview && (preview.count === 0
@@ -3213,9 +3196,9 @@ function RelationshipQueryEditor({ initialQueries, builtIn, initialActiveId, new
                   : <RelationshipTree nodes={preview.nodes} typesList={typesList} onOpen={() => {}} />)}
               </div>
               {!locked && (
-                <button type="button" onClick={() => removeQuery(active.id)}
+                <button type="button" onClick={() => (confirmDelete ? removeQuery(active.id) : setConfirmDelete(true))}
                   style={{ alignSelf: "flex-start", display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", background: "none", border: "none", color: C.danger, fontSize: 13, fontWeight: 600 }}>
-                  <Trash2 size={14} /> Delete this query
+                  <Trash2 size={14} /> {confirmDelete ? "Tap again to delete (saves now)" : "Delete this query"}
                 </button>
               )}
             </>
@@ -5300,7 +5283,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-10.4";
+const APP_VERSION = "2026-10-10.5";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -19324,7 +19307,7 @@ function ParentField({ value, onChange, childType, childId, assets, error, note 
 // so every single-select field in the app looks and behaves the same way. To allow
 // clearing back to unselected, the caller prepends "" to `options` itself (see
 // BulkTypeField below) and maps it to a placeholder like "Select…" via labelForOption.
-function PickerField({ label, value, onChange, options, placeholder = "Select…", labelForOption, onManage, manageLabel, title, emptyLabel, wide, hideLabel, required, error, multi }) {
+function PickerField({ label, value, onChange, options, placeholder = "Select…", labelForOption, onManage, manageLabel, title, emptyLabel, wide, hideLabel, required, error, multi, searchable }) {
   const [open, setOpen] = useState(false);
   const getLabel = labelForOption || (o => o);
   // `multi`: value is an array, the modal stays open and toggles, Done closes.
@@ -19357,6 +19340,7 @@ function PickerField({ label, value, onChange, options, placeholder = "Select…
           onManage={onManage}
           manageLabel={manageLabel}
           multi={multi}
+          searchable={searchable}
         />
       )}
     </Wrapper>
@@ -19595,7 +19579,7 @@ function TypeManagerModal({
   const [newFieldDraft, setNewFieldDraft] = useState(null);
   // The relationship query builder, opened from the editor's Relationships
   // row. A dialog nested inside this modal's tree, like the new-field dialog.
-  const [editingQueries, setEditingQueries] = useState(false);
+  const [editingQueries, setEditingQueries] = useState(null);
 
   // Seeds the form from the type's EFFECTIVE settings (shipped defaults with any
   // override already applied), so the boxes show what's actually in force rather
@@ -19641,7 +19625,7 @@ function TypeManagerModal({
       newFields: [],
     });
     setNewFieldDraft(null);
-    setEditingQueries(false);
+    setEditingQueries(null);
     setConfirmId(null);
     setEditingLabels(false);
     // Reseeded on OPEN as well as on close, the rule the work dialog and breaker
@@ -20198,25 +20182,32 @@ function TypeManagerModal({
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                   <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Relationships</span>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                    <span style={{ fontSize: 13, color: C.ink }}>
-                      {qs.length ? qs.map(q => q.name).join(", ") : "No queries"}
-                    </span>
-                    <button type="button" onClick={() => setEditingQueries(true)}
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {qs.length === 0 && <span style={{ fontSize: 13, color: C.ink }}>No queries</span>}
+                      {qs.map(q => (
+                        <button key={q.id} type="button" onClick={() => setEditingQueries(q.id)}
+                          style={{ padding: "4px 10px", background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 999, fontSize: 12, fontWeight: 600, color: C.brandDark }}>
+                          {q.name}
+                        </button>
+                      ))}
+                    </div>
+                    <button type="button" onClick={() => setEditingQueries("new")}
                       style={{ flexShrink: 0, padding: "5px 10px", background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 8, fontSize: 12, fontWeight: 600, color: C.brandDark }}>
-                      Edit queries
+                      Add query
                     </button>
                   </div>
                   <div style={{ fontSize: 12, color: C.empty }}>
-                    Queries list related assets on a Relationships tab. One query can apply to several types, so they are edited together; saving there takes effect at once.
+                    Queries list related assets on a Relationships tab. One query can apply to several types; saving a query takes effect at once.
                   </div>
                   {editingQueries && (
                     <RelationshipQueryEditor
                       initialQueries={allRelationshipQueries(allIds)}
                       builtIn={builtInContentsQueryFor(allIds)}
+                      initialActiveId={editingQueries}
                       newTypeIds={[draft.id]}
                       assets={assets} columns={columns} typesList={types}
-                      onDone={next => { onSaveRelationshipQueries(next); setEditingQueries(false); }}
-                      onCancel={() => setEditingQueries(false)}
+                      onDone={next => { onSaveRelationshipQueries(next); setEditingQueries(null); }}
+                      onCancel={() => setEditingQueries(null)}
                     />
                   )}
                 </div>
