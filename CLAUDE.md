@@ -796,6 +796,69 @@ instead, and still is for anything that takes that path.
   Driven in Chromium against the real function on a local Postgres: two pages saving
   different assets both land; a third, stale on the same asset, gets the not-saved modal.
 
+## Relationships tab (2026-10-10)
+
+Each asset can show a **Relationships** tab listing assets related to it by named
+queries its TYPE defines ("HVAC" on a Room: the units inside it, then whatever
+points at each unit through a Controls field). The plan behind it is
+`/mnt/project-files/plans/relationships-tab.md`. **Frontend only: no backend
+change, no version bump, no deploy.**
+
+- **Queries live in `typeSettings[id].relationshipQueries`**, a property on an
+  existing Config blob, so it cost no release (Supabase stores Config as a blob
+  too). Shape: `{ id, name, steps: [{ follow, typeIds, fieldKey, show }],
+  includeArchived, hideWhenEmpty }`.
+- **One chain of 1-3 steps, no branching** (Eric took the recommended defaults).
+  A step follows one of `RELATIONSHIP_FOLLOWS`: children, anywhere inside,
+  parent, the nearest ancestor of a type, forward or REVERSE through a Reference
+  field, a device's users, or what a person uses. `typeIds` narrows a step,
+  except on "nearest", where it IS the target type. **A hidden step is walked
+  through**: what the next step finds is lifted to where it would have been. The
+  builder forces the last step shown, since a hidden last step shows nothing.
+- **`runRelationshipQuery` is pure** and builds one index per run (children by
+  parent, who points at whom per Reference field, who uses whom). Three rules:
+  an asset already shown is not shown again (under the first parent that reached
+  it); the asset itself and anything already on the path are never results,
+  which cuts every loop a reference can make; and "anywhere inside" nests its
+  results by containment, so the tree reads like the hierarchy.
+- **Contents is a BUILT-IN query on every place type** (`BUILT_IN_CONTENTS_QUERY`,
+  never stored), listed first. The old Contents tab stays beside it in v1; the
+  query does not list bulk-item allocations (not parent links), so its count can
+  be lower than the Contents tab's. Replacing Contents is step two.
+- **The tab appears when the type has a query to run** (its own, or Contents on a
+  place) — `availableTabsFor`.
+- **The builder (`RelationshipQueryEditor`) is reached two ways**: "Edit <Type>
+  queries" on the tab (saves at once through `saveRelationshipQueries`, MERGING
+  into the stored override, with that asset as the live preview), and the type
+  editor's Relationships row (folds into the editor's draft, so the editor's Save
+  stays one commit). Editors only.
+  - **`saveTypeSettings` rebuilds the whole settings object, so it CARRIES the
+    stored queries** when the draft did not touch them. Leaving that out would
+    delete every query on any unrelated type edit. Tested.
+  - **"Reset to default" keeps a type's queries** — none ship, so they are not a
+    default to reset to.
+- **A field step only offers Reference fields that can match**
+  (`relationshipFieldOptions`): forward, fields the step's source types carry;
+  reverse, fields that can point AT them. The source types are the owner type
+  for step 1, else the previous step's type filter, else a forward field's target.
+  `referenceTargetTypes` reads `referenceTypes` (a list) as well as
+  `referenceType`, ahead of Reference fields allowing several types.
+- **A stored query is cleaned on read** (`relationshipQueriesFor`): an unknown
+  follow or a field step with no field is dropped rather than run as something
+  else, and at most three steps run.
+- `MOCK_SNAPSHOT` carries a `Thermostat` type with a `controls` Reference field
+  (-> Mini Split), a thermostat in Room 102 pointing at its mini split, a Room
+  "HVAC" query (down, then back along the field) and a Mini Split "Controlled by"
+  query. Room's override holds ONLY queries, so the location fallback for a
+  settings object with nothing else in it is exercised.
+- Covered by `test-frontend-relationships.js` (the real runner against a fixture
+  with a parent loop, an archived unit and a two-type reference field),
+  mutation-checked (dedupe, the hidden-step lift, the loop cut, the `referenceTypes`
+  read). The tab, both builder entry points, saving and a reload were driven in
+  Chromium against Sandbox.
+- The connector does not know about queries yet; it is queued in
+  `/mnt/project-files/connector-queue.md`.
+
 ## Local Sandbox mode
 
 Sandbox swaps the real Google Sheet for a local fixture (`MOCK_SNAPSHOT` in

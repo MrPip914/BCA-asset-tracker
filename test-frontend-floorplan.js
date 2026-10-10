@@ -65,6 +65,8 @@ try {
     grabFn('typeHasFloorPlan'),
     grabFn('isPlaceType'),
     grabFn('modulesFor'),
+    // Its Relationships entry is tested in test-frontend-relationships.js.
+    'const relationshipQueriesShownFor = () => [];',
     grabFn('availableTabsFor'),
     // setTypeSettings lets a test swap in an override without re-evaluating
     // the whole module for each case.
