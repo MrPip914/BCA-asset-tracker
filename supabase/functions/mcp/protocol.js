@@ -12,7 +12,7 @@ import { TOOLS, callTool, ToolError } from "./tools.js";
 // gets the newest, which is what the spec says a server should answer.
 export const PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26"];
 
-export const SERVER_INFO = { name: "bca-asset-tracker", title: "Asset Tracker", version: "0.3.0" };
+export const SERVER_INFO = { name: "bca-asset-tracker", title: "Asset Tracker", version: "0.4.0" };
 
 const INSTRUCTIONS = [
   "A facilities inventory: assets, where they are, who uses them, maintenance tasks,",
@@ -20,6 +20,8 @@ const INSTRUCTIONS = [
   "Editors can also manage the inventory: create and edit assets in bulk (save_assets, checked by the app's own import rules),",
   "archive and restore them, add, edit, complete and delete tasks, log work, add comments, and replace a place's floor plan (keeping its room links), and attach Wall assets to a plan's outside edges (get_plan_walls, then set_plan_walls). Nothing is ever permanently deleted",
   "except a task the person asks to delete. Each change is recorded in the change history under the person's name, marked via Claude.",
+  "Every bulk change takes a backup of the records it touches first and returns its number as `backup`; tell the person the number.",
+  "list_backups lists them and undo_change puts one back (dry_run first).",
   "Read get_schema before creating or editing assets. For anything more than a few rows, run save_assets with dry_run first",
   "and show the person what will change before writing. Before any write, make sure the assets and details are what the person meant.",
   "A person may have access to several sites; call list_sites when unsure which one is meant.",

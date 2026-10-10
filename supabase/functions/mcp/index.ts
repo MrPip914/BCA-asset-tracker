@@ -50,6 +50,8 @@ const TABLE_SQL: Record<string, string> = {
   // What a management write sends back as "the inventory I planned against"
   // (connector_apply refuses if it has moved since).
   revisions: "select domain, rev from asset_tracker.revisions",
+  // list_backups: what each backup covers, not its contents (0010 keeps 200).
+  connector_backups: 'select id, taken_at, "by", tool, scope, restored_at, restored_by from asset_tracker.connector_backups',
 };
 
 // Every read runs inside a transaction that first names its tenant, which is
@@ -96,24 +98,47 @@ const WRITE_SQL: Record<string, (tx: postgres.TransactionSql, email: string, a: 
   set_plan_walls: (tx, email, [expected, asset, ops, walls, removes]) =>
     tx`select asset_tracker.connector_set_plan_walls(${email}, ${JSON.stringify(expected)}::text::jsonb, ${asset as string},
       ${JSON.stringify(ops)}::text::jsonb, ${JSON.stringify(walls)}::text::jsonb, ${JSON.stringify(removes)}::text::jsonb) as out`,
+  // undo_change (0010): put one backup's records back.
+  restore_backup: (tx, email, [expected, id, overwrite]) =>
+    tx`select asset_tracker.connector_restore_backup(${email}, ${JSON.stringify(expected)}::text::jsonb, ${Number(id)}::bigint, ${!!overwrite}) as out`,
 };
 
-async function write(tenant: string, email: string, op: string, args: unknown[]) {
+// The functions word their refusals for the person ("connector: ...").
+function personal(err: unknown): never {
+  const m = String((err as Error)?.message ?? "");
+  if (m.startsWith("connector: ")) throw new ToolError(m.slice("connector: ".length));
+  throw err;
+}
+
+// `tool` names the backup the write takes (0010); connector_apply serves five
+// tools, so it reads the name from this transaction setting.
+async function write(tenant: string, email: string, op: string, args: unknown[], tool?: string) {
   const run = WRITE_SQL[op];
   if (!run) throw new Error(`no writer for ${op}`);
   try {
     return await sql.begin(async (tx) => {
       await tx`select set_config('app.tenant_id', ${tenant}, true)`;
       await tx`select set_config('search_path', 'asset_tracker, public', true)`;
+      await tx`select set_config('connector.tool', ${tool || op}, true)`;
       await tx`set local role asset_api`;
       const [row] = await run(tx, email, args);
       return row.out;
     });
   } catch (err) {
-    // The functions word their refusals for the person ("connector: ...").
-    const m = String((err as Error)?.message ?? "");
-    if (m.startsWith("connector: ")) throw new ToolError(m.slice("connector: ".length));
-    throw err;
+    personal(err);
+  }
+}
+
+// One backup with every record's before, after and current state (0010), read
+// only, for undo_change to show what it would put back.
+async function backupPreview(tenant: string, id: number) {
+  try {
+    return await withTenant(tenant, async (tx) => {
+      const [row] = await tx`select asset_tracker.connector_backup_preview(${Number(id)}::bigint) as out`;
+      return row.out;
+    });
+  } catch (err) {
+    personal(err);
   }
 }
 
@@ -287,9 +312,13 @@ Deno.serve(async (req) => {
       if (!sites.some((s) => s.id === tenant)) throw new Error("site not permitted");
       return load(tenant, table);
     },
-    write: (tenant: string, op: string, args: unknown[]) => {
+    write: (tenant: string, op: string, args: unknown[], tool?: string) => {
       if (!sites.some((s) => s.id === tenant)) throw new Error("site not permitted");
-      return write(tenant, email, op, args);
+      return write(tenant, email, op, args, tool);
+    },
+    backup: (tenant: string, id: number) => {
+      if (!sites.some((s) => s.id === tenant)) throw new Error("site not permitted");
+      return backupPreview(tenant, id);
     },
     fetchPlan,
     uploadPlan: (tenant: string, svg: string, fileName: string) => {
