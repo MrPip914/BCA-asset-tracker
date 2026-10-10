@@ -1570,10 +1570,12 @@ const RETIRED_COLUMN_KEYS = new Set(["campus", "building", "room"]);
 // a generic multiselect column would be a fourth thing that looks like them and
 // behaves differently.
 // `reference` is the one kind here that names something ELSE about the field
-// besides how to render it: which asset TYPE it may point at (`col.referenceType`,
-// set once at creation exactly like a select column's `options`). It holds ONE
-// asset id, never several (Eric's call) — a room wanting two would get a second
-// reference field, the same workaround a choice list with two answers would need.
+// besides how to render it: which asset TYPES it may point at
+// (`col.referenceTypes`, set once at creation exactly like a select column's
+// `options`; read through columnReferenceTypes). Several types are allowed
+// (2026-10-10) — "the device this is mounted on" can be a TV or a Monitor — but
+// the VALUE is still ONE asset id, never several (Eric's call) — a room wanting
+// two would get a second reference field.
 const COLUMN_DATA_TYPES = [
   { value: "text", label: "Text" },
   { value: "textarea", label: "Long text" },
@@ -1634,6 +1636,23 @@ function columnDataType(col) {
 // three-value dropdown should cost neither.
 function columnOptions(col) {
   return Array.isArray(col?.options) ? col.options.filter(o => String(o).trim() !== "") : [];
+}
+
+// The asset types a `reference` column may point at. `referenceTypes` (an
+// array, 2026-10-10) wins; a field created before then carries only the single
+// `referenceType` string and reads as a list of one, so nothing is migrated.
+// applyFieldKind still writes `referenceType` as the FIRST type, so a build from
+// before this change offers that one type rather than none.
+function columnReferenceTypes(col) {
+  if (Array.isArray(col?.referenceTypes)) return col.referenceTypes.filter(Boolean);
+  return col?.referenceType ? [col.referenceType] : [];
+}
+
+// "Thermostat", "TV or Monitor", "Room, Wall or Door".
+function joinTypeNames(ids, typesList) {
+  const names = (ids || []).map(id => typeNameOf(id, typesList));
+  return names.length <= 1 ? (names[0] || "")
+    : names.slice(0, -1).join(", ") + " or " + names[names.length - 1];
 }
 
 // ---------- REQUIRED FIELDS ----------
@@ -4638,7 +4657,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-09.6";
+const APP_VERSION = "2026-10-10.1";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -11583,8 +11602,8 @@ function AssetTracker() {
   //
   // Choices are dropped entirely unless the field is actually a choice list, so
   // switching a column to Text and back doesn't quietly resurrect a stale list.
-  // referenceType follows the same rule for a reference field's target type.
-  function applyFieldKind(col, kind, choicesText, referenceType) {
+  // referenceTypes follows the same rule for a reference field's target types.
+  function applyFieldKind(col, kind, choicesText, referenceTypes) {
     const shipped = DEFAULT_COLUMN_DATA_TYPES[col.key] || "text";
     const chosen = COLUMN_DATA_TYPE_VALUES.has(kind) ? kind : shipped;
     if (chosen === shipped) delete col.dataType;
@@ -11598,8 +11617,12 @@ function AssetTracker() {
       delete col.options;
     }
     if (chosen === "reference") {
-      col.referenceType = referenceType || "";
+      const list = [...new Set((Array.isArray(referenceTypes) ? referenceTypes : [referenceTypes]).filter(Boolean))];
+      col.referenceTypes = list;
+      // Kept for builds that predate referenceTypes; see columnReferenceTypes.
+      col.referenceType = list[0] || "";
     } else {
+      delete col.referenceTypes;
       delete col.referenceType;
     }
   }
@@ -13607,7 +13630,7 @@ function AssetTracker() {
                     onChange={v => setDraft({ ...draft, [c.key]: v, ...clearedError(draft, c.key) })}
                     dataType={columnDataType(c)}
                     options={columnOptions(c)}
-                    referenceType={c.referenceType}
+                    referenceTypes={columnReferenceTypes(c)}
                     assets={assets}
                     typesList={typesList}
                     excludeId={draft.id}
@@ -14686,7 +14709,7 @@ function AssetTracker() {
                       onChange={v => setDraft({ ...draft, [c.key]: v, ...clearedError(draft, c.key) })}
                       dataType={columnDataType(c)}
                       options={columnOptions(c)}
-                      referenceType={c.referenceType}
+                      referenceTypes={columnReferenceTypes(c)}
                       assets={assets}
                       typesList={typesList}
                       excludeId={selectedAsset.id}
@@ -17346,7 +17369,7 @@ function FieldError({ message }) {
 // FORM-level one, repeated here (see fieldErrorFor) rather than a second copy —
 // a save is refused once, for one reason, and saying it twice in two wordings is
 // how the two drift.
-function Field({ label, value, onChange, placeholder, wide, dataType, options, error, invalid, required, referenceType, assets, typesList, excludeId }) {
+function Field({ label, value, onChange, placeholder, wide, dataType, options, error, invalid, required, referenceTypes, assets, typesList, excludeId }) {
   const kind = dataType || "text";
   // A long-text field always takes the full row: a textarea in a 180px grid cell
   // is narrower than the text it holds. `wide` stays an explicit override for a
@@ -17385,13 +17408,16 @@ function Field({ label, value, onChange, placeholder, wide, dataType, options, e
   }
   if (kind === "reference") {
     // The options are ASSETS, not a fixed list — every non-archived asset of
-    // the field's configured referenceType, minus the asset being edited
+    // any of the field's configured referenceTypes, minus the asset being edited
     // itself (pointing at its own row is never useful). Flat, not a
     // drill-down: the sub-panel feed picker already made this call for the
     // same reason — nothing here is organized as a tree of its own, so
     // there's nothing to browse into, just a list to search.
-    const candidates = (assets || []).filter(a => a.type === referenceType && (a.status || "Active") !== "Archived" && a.id !== excludeId);
-    const targetTypeName = referenceType ? typeNameOf(referenceType, typesList) : "";
+    const targetTypes = referenceTypes || [];
+    const candidates = (assets || []).filter(a => targetTypes.includes(a.type) && (a.status || "Active") !== "Archived" && a.id !== excludeId);
+    // With more than one target type a row says which it is, or a Wall and a
+    // Door both called "North" read identically.
+    const showType = targetTypes.length > 1;
     return (
       <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: fullWidth ? "1 / -1" : undefined }}>
         {head}
@@ -17409,12 +17435,13 @@ function Field({ label, value, onChange, placeholder, wide, dataType, options, e
             const a = (assets || []).find(x => x.id === id);
             if (!a) return "(deleted asset)";
             const where = pathOf(a, assets);
-            return where ? `${nameOf(a, typesList)} — ${where}` : nameOf(a, typesList);
+            const name = showType ? `${nameOf(a, typesList)} (${typeNameOf(a.type, typesList)})` : nameOf(a, typesList);
+            return where ? `${name} — ${where}` : name;
           }}
           title={`Select ${label}`}
           emptyLabel={
-            !referenceType ? "No target type configured for this field yet."
-            : `No ${targetTypeName} assets exist yet.`
+            !targetTypes.length ? "No target type configured for this field yet."
+            : `No ${joinTypeNames(targetTypes, typesList)} assets exist yet.`
           }
         />
         {foot}
@@ -18332,10 +18359,12 @@ function ParentField({ value, onChange, childType, childId, assets, error, note 
 // so every single-select field in the app looks and behaves the same way. To allow
 // clearing back to unselected, the caller prepends "" to `options` itself (see
 // BulkTypeField below) and maps it to a placeholder like "Select…" via labelForOption.
-function PickerField({ label, value, onChange, options, placeholder = "Select…", labelForOption, onManage, manageLabel, title, emptyLabel, wide, hideLabel, required, error }) {
+function PickerField({ label, value, onChange, options, placeholder = "Select…", labelForOption, onManage, manageLabel, title, emptyLabel, wide, hideLabel, required, error, multi }) {
   const [open, setOpen] = useState(false);
   const getLabel = labelForOption || (o => o);
-  const displayValue = value !== "" && value != null ? getLabel(value) : "";
+  // `multi`: value is an array, the modal stays open and toggles, Done closes.
+  const displayValue = multi ? (value || []).map(getLabel).join(", ")
+    : value !== "" && value != null ? getLabel(value) : "";
   const Wrapper = hideLabel ? "div" : "label";
   return (
     <Wrapper style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: wide ? "1 / -1" : undefined }}>
@@ -18355,13 +18384,14 @@ function PickerField({ label, value, onChange, options, placeholder = "Select…
         <SelectionModal
           title={title || `Select ${label}`}
           options={options}
-          value={value ?? ""}
+          value={multi ? (value || []) : (value ?? "")}
           onChange={onChange}
           onClose={() => setOpen(false)}
           labelForOption={labelForOption}
           emptyLabel={emptyLabel}
           onManage={onManage}
           manageLabel={manageLabel}
+          multi={multi}
         />
       )}
     </Wrapper>
@@ -18639,7 +18669,7 @@ function TypeManagerModal({
       // Same shape, for a reference field's target type — shown for every field,
       // editable on none but a pending one, for the reason above: which type it
       // points at is part of what the field IS.
-      fieldReferenceTypes: Object.fromEntries(fieldOptions.map(f => [f.key, f.referenceType || ""])),
+      fieldReferenceTypes: Object.fromEntries(fieldOptions.map(f => [f.key, columnReferenceTypes(f)])),
       newFields: [],
     });
     setNewFieldDraft(null);
@@ -18712,7 +18742,7 @@ function TypeManagerModal({
       newFields: [...(draft.newFields || []), { tempId, label }],
       fieldTypes: { ...(draft.fieldTypes || {}), [tempId]: newFieldDraft.kind || "text" },
       fieldChoices: { ...(draft.fieldChoices || {}), [tempId]: newFieldDraft.choices || "" },
-      fieldReferenceTypes: { ...(draft.fieldReferenceTypes || {}), [tempId]: newFieldDraft.referenceType || "" },
+      fieldReferenceTypes: { ...(draft.fieldReferenceTypes || {}), [tempId]: newFieldDraft.referenceTypes || [] },
     });
     setNewFieldDraft(null);
   };
@@ -18837,8 +18867,8 @@ function TypeManagerModal({
         )}
         {kind === "reference" && on && (
           <div style={{ marginLeft: 24, fontSize: 12, color: C.empty }}>
-            {(draft.fieldReferenceTypes || {})[key]
-              ? `Points at a ${typeNameOf((draft.fieldReferenceTypes || {})[key], types)}`
+            {(draft.fieldReferenceTypes || {})[key]?.length
+              ? `Points at: ${joinTypeNames((draft.fieldReferenceTypes || {})[key], types)}`
               : "No target type configured."}
           </div>
         )}
@@ -19265,7 +19295,7 @@ function TypeManagerModal({
               <div style={{ display: "flex", marginTop: 2 }}>
                 <button
                   type="button"
-                  onClick={() => setNewFieldDraft({ label: "", kind: "text", choices: "", referenceType: "", error: "" })}
+                  onClick={() => setNewFieldDraft({ label: "", kind: "text", choices: "", referenceTypes: [], error: "" })}
                   style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 10px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12, color: C.ink, fontWeight: 600 }}
                 >
                   <Plus size={13} /> Add field
@@ -19351,23 +19381,27 @@ function TypeManagerModal({
                       exists (see applyFieldKind). Picking one asset of that
                       type is the whole feature — "which Thermostat serves this
                       Room" — so the target has to be a type, not a fixed list. */}
+                  {/* A div, not a <label>: a picker inside a label re-opens
+                      after a choice (BUGS.md), and this one stays open to take
+                      several. */}
                   {newFieldDraft.kind === "reference" && (
-                    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Points at</span>
                       <PickerField
                         label="Points at"
                         hideLabel
-                        value={newFieldDraft.referenceType || ""}
-                        onChange={v => setNewFieldDraft({ ...newFieldDraft, referenceType: v })}
+                        multi
+                        value={newFieldDraft.referenceTypes || []}
+                        onChange={v => setNewFieldDraft({ ...newFieldDraft, referenceTypes: v })}
                         options={types.map(t => t.id)}
                         labelForOption={id => typeNameOf(id, types)}
                         title="Points at"
-                        placeholder="Select a type…"
+                        placeholder="Select one or more types…"
                       />
                       <span style={{ fontSize: 12, color: C.empty }}>
-                        The field will let you pick one asset of this type — e.g. which Thermostat serves this Room.
+                        The field will let you pick one asset of any of these types — e.g. which Thermostat serves this Room, or which TV or Monitor a mount holds.
                       </span>
-                    </label>
+                    </div>
                   )}
 
                   {newFieldDraft.error && (
