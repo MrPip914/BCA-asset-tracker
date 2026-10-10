@@ -131,6 +131,7 @@ export function buildInventory({ assets = [], config = [] }) {
   // Custom columns are real fields too, so they come through the same way.
   const columns = Array.isArray(cfg.columns) ? cfg.columns : [];
   const labelFor = (key) => columns.find((c) => c?.key === key)?.label || key;
+  const refKeys = new Set(columns.filter((c) => c?.key && c.dataType === "reference").map((c) => c.key));
   const HIDDEN = new Set([
     "id", "label", "tag", "name", "type", "parentId", "parent", "status",
     "personIds", "person", "firstName", "lastName", "room", "building", "campus",
@@ -141,6 +142,8 @@ export function buildInventory({ assets = [], config = [] }) {
     for (const [k, v] of Object.entries(a)) {
       if (HIDDEN.has(k) || v === null || v === undefined || v === "") continue;
       if (typeof v === "object") continue;
+      // A Reference field stores an asset id; say which asset it is.
+      if (refKeys.has(k) && byId.has(v)) { out[labelFor(k)] = `${nameOf(byId.get(v))} (${v})`; continue; }
       out[labelFor(k)] = /date|until/i.test(k) ? dateOnly(v) : v;
     }
     return out;

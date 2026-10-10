@@ -19,11 +19,11 @@
 // separates tenants again underneath, by row-level security.
 
 import { buildInventory } from "./inventory.js";
-import { isPlaceType } from "./app-rules.js";
+import { isPlaceType, referenceColumns, relationshipQueriesShownFor, runRelationshipQuery } from "./app-rules.js";
 import { floorPlanSpacesOf, floorPlanGeometryOf, planFloorPlanReplace, PlanFileError, FLOORPLAN_TOOL_MAX_BYTES } from "./floorplan.js";
 import { rotatedSpaces, exteriorWalls, wallsOnPlan, planWallChanges, WallPlanError, FACINGS } from "./walls.js";
 import {
-  appView, schemaOf, planSaveAssets, planArchive, taskEditAudit, PlanError, MAX_ROWS,
+  appView, schemaOf, planSaveAssets, planArchive, taskEditAudit, PlanError, MAX_ROWS, describe,
 } from "./asset-writes.js";
 import {
   dateOnly, taskKindOf, taskDueDate, maintenanceStatusOf, cellsLabel_, isOneOffTask, taskIsDone,
@@ -69,6 +69,8 @@ const READ_TOOLS = [
         within: { type: "string", description: "Only assets inside this place (id, tag, name or full path)." },
         status: { type: "string", enum: ["active", "archived", "all"], description: "Default active." },
         include_fields: { type: "boolean", description: "Also return every field of each asset and its users, for reviewing data in bulk." },
+        points_to: { type: "string", description: "Only assets whose Reference field points at this asset (id, tag, name or full path): a Reference followed in reverse, e.g. which thermostats control this mini split." },
+        through_field: { type: "string", description: "With points_to: only through this Reference field (its name from get_schema). Default: any Reference field." },
         limit: LIMIT(1000, 50),
       },
       additionalProperties: false,
@@ -87,6 +89,21 @@ const READ_TOOLS = [
     inputSchema: {
       type: "object",
       properties: { site: SITE, asset: { type: "string", description: "Id, tag, name or full path." } },
+      required: ["asset"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "get_relationships",
+    title: "Get relationships",
+    description: "Run an asset's relationship queries (the app's Relationships tab) and return each one's results as a tree: e.g. a Room's \"HVAC\" query lists the mini splits in the room and, under each, the thermostat that controls it. Places also get the built-in Contents query. get_schema lists each type's queries.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        site: SITE,
+        asset: { type: "string", description: "Id, tag, name or full path." },
+        query: { type: "string", description: "Only the query with this name. Default: every query the asset's type has." },
+      },
       required: ["asset"],
       additionalProperties: false,
     },
@@ -730,8 +747,23 @@ const handlers = {
   },
 
   async search_assets(args, ctx) {
-    const { site, inv } = await openSite(ctx, args, []);
+    const { site, rows, inv } = await openSite(ctx, args, []);
     const scope = args.within ? resolveOrThrow(inv, args.within) : null;
+    if (args.through_field && !args.points_to) throw new ToolError("through_field needs points_to: the asset the field points at.");
+    let pointsVia = null;
+    if (args.points_to) {
+      const target = resolveOrThrow(inv, args.points_to);
+      const refCols = referenceColumns(appView(rows, site.id).columns);
+      let cols = refCols;
+      if (args.through_field) {
+        const f = norm(args.through_field);
+        cols = refCols.filter((c) => norm(c.label) === f || norm(c.key) === f);
+        if (!cols.length) {
+          throw new ToolError(`"${args.through_field}" is not a Reference field here.${refCols.length ? ` The Reference fields are: ${refCols.map((c) => c.label || c.key).join(", ")}.` : " This site has none."}`);
+        }
+      }
+      pointsVia = (a) => cols.some((c) => a[c.key] === target.id);
+    }
     const status = args.status || "active";
     const words = String(args.query || "").toLowerCase().split(/\s+/).filter(Boolean);
     const type = String(args.type || "").trim().toLowerCase();
@@ -740,6 +772,7 @@ const handlers = {
       if (status === "archived" && !inv.isArchived(a)) return false;
       if (type && inv.typeName(a.type).toLowerCase() !== type && String(a.type).toLowerCase() !== type) return false;
       if (scope && !inv.inScope(a, scope.id)) return false;
+      if (pointsVia && !pointsVia(a)) return false;
       if (!words.length) return true;
       const hay = [
         inv.nameOf(a), inv.typeName(a.type), inv.pathOf(a), ...inv.personNames(a),
@@ -800,6 +833,34 @@ const handlers = {
       comments: own("comments").slice(-10).map((c) => ({ at: c.at, by: c.by, text: c.text })),
       files: rows.photos.filter((p) => p.owner_type === "asset" && p.owner_id === a.id).length || undefined,
     };
+  },
+
+  async get_relationships(args, ctx) {
+    const { site, rows, inv } = await openSite(ctx, args, []);
+    const a = resolveOrThrow(inv, args.asset);
+    // appView sets the app's type settings, which the queries read; nothing
+    // below awaits, so another request's settings cannot be in force.
+    const view = appView(rows, site.id);
+    const asset = view.byId.get(a.id);
+    const all = relationshipQueriesShownFor(asset.type);
+    const typeName = inv.typeName(asset.type);
+    if (!all.length) return { site: site.id, asset: inv.summary(a), queries: [], note: `${typeName} has no relationship queries. They are set up in the app, on the type's Relationships tab.` };
+    let picked = all;
+    if (args.query) {
+      picked = all.filter((q) => norm(q.name) === norm(args.query));
+      if (!picked.length) throw new ToolError(`${typeName} has no query called "${args.query}". Its queries: ${all.map((q) => q.name).join(", ")}.`);
+    }
+    const node = (n) => ({
+      ...describe(view, n.asset),
+      ...(n.children.length ? { children: n.children.map(node) } : {}),
+    });
+    const queries = [];
+    for (const q of picked) {
+      const r = runRelationshipQuery(asset, q, view.assets, view.columns, view.typesList);
+      if (q.hideWhenEmpty && r.count === 0 && !args.query) continue;
+      queries.push({ name: q.name, builtIn: q.builtIn || undefined, count: r.count, results: r.nodes.map(node) });
+    }
+    return { site: site.id, asset: inv.summary(a), queries };
   },
 
   async browse_location(args, ctx) {
