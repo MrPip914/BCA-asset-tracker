@@ -303,7 +303,9 @@ check('a stale favorite is not offered as a section entry',
 
 // ---- the fixture exercises both halves of the row ----
 const mockStart = src.indexOf('  typeSettings: {');
-const mock = src.slice(mockStart, mockStart + 1400);
+// To the block's own end, not a fixed width: the block grows (relationship
+// queries joined it) and a fixed window silently drops the entries past it.
+const mock = src.slice(mockStart, src.indexOf('\n  },\n', mockStart));
 const mockIcons = [...mock.matchAll(/iconName: "(\w+)"/g)].map(m => m[1]);
 check('the sandbox fixture names at least two icons',
       mockIcons.length >= 2,
