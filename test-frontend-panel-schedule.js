@@ -263,8 +263,8 @@ check('an unknown breaker type is a warning, not a refusal',
 
 // --- the menu (source) ---------------------------------------------------------
 const diagram = src.slice(src.indexOf('function PanelDiagram('), src.indexOf('function PanelDiagram(') + 40000);
-check('the panel header carries ONE menu, and the four bare icons are gone',
-  /aria-label="Panel actions"/.test(diagram) && !/aria-label="Reconfigure panel layout"/.test(diagram)
+check('panel actions are rows in the header menu, and the four bare icons are gone',
+  /<AppMenuScreenRows title=\{`Panel /.test(diagram) && !/aria-label="Panel actions"/.test(diagram) && !/aria-label="Reconfigure panel layout"/.test(diagram)
   && !/aria-label="Copy link to this panel"/.test(diagram) && !/aria-label="Print a QR sticker for this panel"/.test(diagram));
 check('import is an editor-only row; export is not',
   /canEdit && onImportSchedule &&/.test(diagram) && /onExportSchedule && \{ key: "export"/.test(diagram));

@@ -59,7 +59,7 @@
 import ReactDOM from "react-dom/client";
 import { createPortal } from "react-dom";
 
-import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useContext } from "react";
 // NOTE: `xlsx` is deliberately NOT imported here. It is 175KB over the wire and
 // ~433KB to parse, it is used by exactly one function (exportToExcel), and most
 // sessions never press Export — so it is loaded on demand with a dynamic
@@ -5187,7 +5187,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-10.1";
+const APP_VERSION = "2026-10-10.2";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -7505,7 +7505,21 @@ function AssetTracker() {
   // The header's one account dropdown (identity, Access, About, Sign out) and the
   // About panel it opens. Two flags rather than one object because they aren't
   // opened or closed together — About outlives the menu that launched it.
-  const [showAccountMenu, setShowAccountMenu] = useState(false);
+  // The header's one menu (see AppMenuContext). `appMenuSlot` is the element a
+  // screen's own rows portal into; it exists only while the menu is open.
+  const [showAppMenu, setShowAppMenu] = useState(false);
+  const [appMenuSlot, setAppMenuSlot] = useState(null);
+  const appMenuContext = useMemo(() => ({ slot: appMenuSlot, close: () => setShowAppMenu(false) }), [appMenuSlot]);
+  // The Settings page: null = closed, "" = open on its section list (a phone's
+  // first screen), otherwise the open section. Mirrored in `?settings=`.
+  const [settingsSection, setSettingsSection] = useState(readInitialSettingsSection);
+  const settingsPushedRef = useRef(false);
+  // The popstate handler is bound once per `assets`, so it reads this ref
+  // rather than closing over a stale settingsSection.
+  const settingsOpenRef = useRef(false);
+  settingsOpenRef.current = settingsSection !== null;
+  // Settings > Relationships: the type whose queries are being edited.
+  const [relationshipsEditType, setRelationshipsEditType] = useState(null);
   // On a phone the app header scrolls away with the page and only returns when
   // the list is back at the top; the tab row (and a table's header) then pin to
   // the top of the screen instead of sitting under it.
@@ -7520,7 +7534,6 @@ function AssetTracker() {
   }, []);
   const listTabsTop = isPhone ? 0 : APP_HEADER_PX;
   const listTableHeaderTop = LIST_TABLE_HEADER_TOP - (APP_HEADER_PX - listTabsTop);
-  const [showAbout, setShowAbout] = useState(false);
   // The Diagnostics window, opened from About. The window and the two log
   // choices persist across openings within a session; `diagResult` is what View
   // last produced ({ loading, entries, notes }) and is cleared on every open, so
@@ -7634,12 +7647,6 @@ function AssetTracker() {
   // inventory -- see floorPlanShapeMatches's own comment on why this is a
   // deliberately separate, smaller match than the Assets tab's search.
   const [mapQuery, setMapQuery] = useState("");
-  // The DOM node in the header row where the Map tab's actions menu is drawn --
-  // see FloorPlanTabContent, which portals into it.
-  const [mapMenuSlot, setMapMenuSlot] = useState(null);
-  // Where the asset's own Floor Plan tab draws its actions menu -- the same
-  // portal-target arrangement mapMenuSlot gives the Map tab's header row.
-  const [floorPlanTabMenuSlot, setFloorPlanTabMenuSlot] = useState(null);
   const [maintenanceStatusFilter, setMaintenanceStatusFilter] = useState(MAINTENANCE_STATUS_OPEN);
   const [maintenanceKindFilter, setMaintenanceKindFilter] = useState("All kinds");
   const [maintenanceFrequencyFilter, setMaintenanceFrequencyFilter] = useState("All frequencies");
@@ -7671,7 +7678,6 @@ function AssetTracker() {
   const [reassignTarget, setReassignTarget] = useState("");
   const [moveTarget, setMoveTarget] = useState("");
   const [activeFilterCol, setActiveFilterCol] = useState(null);
-  const [showToolbarMenu, setShowToolbarMenu] = useState(false);
   const [showMapAddMenu, setShowMapAddMenu] = useState(false);
   // WHAT AN IMPORT WOULD DO, held between choosing a file and saying yes to it.
   // `null` when no file is being reviewed; otherwise the whole plan
@@ -8475,6 +8481,18 @@ function AssetTracker() {
   useEffect(() => {
     function onPopState(e) {
       const st = e.state || {};
+      // Opening Settings pushes an entry of its own. Moving onto it opens
+      // Settings, moving off it closes Settings -- and nothing else, since the
+      // entry underneath is the screen that was already showing (re-opening
+      // it would throw away a half-typed form).
+      if (st.settings || settingsOpenRef.current) {
+        settingsPushedRef.current = !!st.settings;
+        let section = "";
+        try { section = new URLSearchParams(window.location.search).get("settings") || ""; } catch (err) { /* no window */ }
+        setSettingsSection(st.settings ? section : null);
+        if (!st.settings) setRelationshipsEditType(null);
+        return;
+      }
       // The map's drill-downs push entries (setMapScope), so the entry landed
       // on names the scope to show. Read from its URL; the setter bypasses
       // setMapScope so restoring never pushes another entry.
@@ -11934,6 +11952,12 @@ function AssetTracker() {
     }
   }
 
+  // Settings > Personal: back to the shipped shortcut row.
+  function resetIconFavorites() {
+    setIconFavorites(DEFAULT_ICON_FAVORITES);
+    try { localStorage.removeItem(ICON_FAVORITES_STORAGE_KEY); } catch (e) { /* non-fatal */ }
+  }
+
   function toggleColumnVisible(key) {
     const col = columns.find(c => c.key === key);
     if (col && col.locked) return;
@@ -12994,6 +13018,15 @@ function AssetTracker() {
       button:active { transform: translateY(0.5px); }
       .icon-btn { transition: background-color 0.15s ease; }
       .icon-btn:hover { background: ${C.hover} !important; }
+      /* The Settings page: a sidebar and a panel side by side on a laptop; on a
+         phone, the section list OR the open section, never both. */
+      .settings-nav { flex: 0 0 230px; border-right: 1px solid ${C.border}; }
+      @media (max-width: 719px) {
+        .settings-nav { flex: 1 1 auto; border-right: none; }
+        .settings-page[data-open="1"] .settings-nav { display: none; }
+        .settings-page[data-open="0"] .settings-panel { display: none; }
+      }
+      @media (min-width: 720px) { .settings-back, .settings-nav-chevron { display: none !important; } }
       input, select, textarea { transition: border-color 0.15s ease, box-shadow 0.15s ease; }
       input:hover, select:hover, textarea:hover { border-color: ${C.brand} !important; }
       input:focus, select:focus, textarea:focus {
@@ -13334,14 +13367,13 @@ function AssetTracker() {
     </div>
   );
 
-  const aboutModal = showAbout && (
-    <div
-      onClick={() => setShowAbout(false)}
-      style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", zIndex: 70, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
-    >
+  // The About card, drawn in Settings > About & diagnostics (it was a modal
+  // of its own until 2026-10-10). Diagnostics renders beside it, inside the
+  // Settings page, and its backdrop still stops the click.
+  const aboutCard = () => (
       <div
         onClick={e => e.stopPropagation()}
-        style={{ background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 12, width: "100%", maxWidth: 460, maxHeight: "86vh", overflowY: "auto", padding: 22, boxShadow: "0 8px 28px rgba(42,52,57,0.28)" }}
+        style={{ background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 12, width: "100%", maxWidth: 460, padding: 22 }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
           <Info size={17} style={{ color: C.brand }} />
@@ -13386,48 +13418,49 @@ function AssetTracker() {
           >
             Diagnostics…
           </button>
-          <button
-            onClick={() => setShowAbout(false)}
-            style={{ background: C.brand, color: "#fff", border: "none", borderRadius: 8, padding: "8px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
-          >
-            Close
-          </button>
         </div>
       </div>
-      {diagnosticsModal}
-    </div>
   );
 
-  // One trigger for both modes: signed in it shows the server-resolved identity,
-  // in Sandbox the typed name tag (which has no sign-in but still authors audit
-  // rows). Sandbox's "Set name" therefore lives in here too, rather than leaving
-  // a second person-shaped button in the corner.
-  const accountLabel = sandboxMode ? (currentUser || "Set name") : (auth ? (auth.name || auth.email) : "");
-  const accountMenu = (sandboxMode || auth) && (
+  // THE ONE MENU (2026-10-10). One ☰ in the header, on every screen, replacing
+  // both the account button and the per-tab menus. Top to bottom: what THIS
+  // screen offers (rows a screen portals into appMenuSlot -- see
+  // AppMenuContext), Settings, then you. The identity block, Set name
+  // (Sandbox), Name format, Enter sandbox, About and Sign out are what the
+  // account menu held; Access moved into Settings with the other settings.
+  const appMenu = (sandboxMode || auth) && (
     <div style={{ position: "relative", flexShrink: 0 }}>
       <button
-        onClick={() => setShowAccountMenu(v => !v)}
+        onClick={() => setShowAppMenu(v => !v)}
         aria-haspopup="menu"
-        aria-expanded={showAccountMenu}
-        title={sandboxMode ? "Sandbox identity and app info" : `Signed in as ${auth.email}\nAccess: ${canEdit ? "editor" : "view-only"}`}
-        style={{
-          display: "flex", alignItems: "center", gap: 5, background: showAccountMenu ? C.hover : "none",
-          border: "none", padding: "4px 6px", borderRadius: 8, cursor: "pointer",
-          fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: C.muted, maxWidth: 200,
-        }}
+        aria-expanded={showAppMenu}
+        aria-label="Menu"
+        title={sandboxMode ? "Menu" : `Menu\nSigned in as ${auth.email}\nAccess: ${canEdit ? "editor" : "view-only"}`}
+        className="icon-btn"
+        style={{ display: "flex", alignItems: "center", background: showAppMenu ? C.hover : "none", border: "none", padding: 6, borderRadius: 8, color: C.brandDark }}
       >
-        <UserCircle size={14} style={{ color: C.brand, flexShrink: 0 }} />
-        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{accountLabel}</span>
-        <ChevronDown size={12} style={{ flexShrink: 0 }} />
+        <Menu size={20} />
       </button>
-      {showAccountMenu && (
+      {showAppMenu && (
         <>
-          <div onClick={() => setShowAccountMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
+          <div onClick={() => setShowAppMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
           <div
             role="menu"
-            style={{ position: "absolute", right: 0, top: "100%", marginTop: 6, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, minWidth: 210, overflow: "hidden", padding: 4 }}
+            style={{ position: "absolute", right: 0, top: "100%", marginTop: 6, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, width: 270, maxWidth: "calc(100vw - 24px)", maxHeight: "calc(100vh - 80px)", overflowY: "auto", padding: 4 }}
           >
-            <div style={{ padding: "8px 12px 10px", borderBottom: `1px solid ${C.border}`, marginBottom: 4 }}>
+            {/* This screen's rows land here, each block under its own heading. */}
+            <div ref={setAppMenuSlot} />
+
+            <button
+              onClick={() => openSettings(canEdit ? "types" : "personal")}
+              className="icon-btn"
+              style={APP_MENU_ROW}
+            >
+              <Settings size={15} /> Settings
+            </button>
+
+            <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 4, paddingTop: 4 }}>
+            <div style={{ padding: "8px 12px 6px" }}>
               <div style={{ fontSize: 13, fontWeight: 600, color: C.ink, overflow: "hidden", textOverflow: "ellipsis" }}>
                 {sandboxMode ? (currentUser || "No name set") : (auth.name || auth.email)}
               </div>
@@ -13441,30 +13474,38 @@ function AssetTracker() {
 
             {sandboxMode && (
               <button
-                onClick={() => { setShowAccountMenu(false); setNameInput(currentUser || ""); setShowNamePrompt(true); }}
+                onClick={() => { setShowAppMenu(false); setNameInput(currentUser || ""); setShowNamePrompt(true); }}
                 className="icon-btn"
-                style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
+                style={APP_MENU_ROW}
               >
                 <UserCircle size={15} /> Set name
               </button>
             )}
-            {!sandboxMode && canEdit && (
+            {/* The way INTO Sandbox, and the only one once signed in — the
+                header pill is now the way out and exists only while it is on.
+                Offered to VIEWERS too, deliberately: Sandbox makes no network
+                call at all, so it grants nothing on the real Sheet — a viewer
+                experimenting locally is exactly what it is for. */}
+            {!sandboxMode && (
+              <div style={{ display: "flex", alignItems: "center", paddingRight: 8 }}>
               <button
-                onClick={() => { setShowAccountMenu(false); setShowAccessManager(true); }}
+                onClick={() => { setShowAppMenu(false); toggleSandboxMode(); }}
                 className="icon-btn"
-                style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
+                style={{ ...APP_MENU_ROW, flex: 1, minWidth: 0, width: undefined }}
               >
-                <Users size={15} /> Access
+                <FlaskConical size={15} /> Enter sandbox
               </button>
+              <HelpTip label="About Sandbox" text="Local fixture data, safe to experiment on. Nothing is saved to the Google Sheet." />
+              </div>
             )}
             {/* Offered to VIEWERS too, and in Sandbox: it changes nothing that is
                 stored, only how this browser reads what is already there. Shows
                 the current choice on the row, so the menu answers "which way am
                 I reading?" without being opened twice. */}
             <button
-              onClick={() => { setShowAccountMenu(false); setShowNameOrderPicker(true); }}
+              onClick={() => { setShowAppMenu(false); setShowNameOrderPicker(true); }}
               className="icon-btn"
-              style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
+              style={APP_MENU_ROW}
             >
               <ArrowLeftRight size={15} />
               <span style={{ flex: 1 }}>Name format</span>
@@ -13472,44 +13513,23 @@ function AssetTracker() {
                 {(NAME_ORDER_OPTIONS.find(o => o.value === personNameOrder) || NAME_ORDER_OPTIONS[0]).label}
               </span>
             </button>
-            {/* The way INTO Sandbox, and the only one once signed in — the
-                header pill is now the way out and exists only while it is on.
-                Sits directly above About because About is the row that REPORTS
-                which data source you are on ("Sandbox — local fixture data" vs
-                "Google Sheet (live)"), so the control and the readout are
-                together.
-
-                Offered to VIEWERS too, deliberately: Sandbox makes no network
-                call at all, so it grants nothing on the real Sheet — a viewer
-                experimenting locally is exactly what it is for. */}
-            {!sandboxMode && (
-              <div style={{ display: "flex", alignItems: "center", paddingRight: 8 }}>
-              <button
-                onClick={() => { setShowAccountMenu(false); toggleSandboxMode(); }}
-                className="icon-btn"
-                style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0, padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
-              >
-                <FlaskConical size={15} /> Enter sandbox
-              </button>
-              <HelpTip label="About Sandbox" text="Local fixture data, safe to experiment on. Nothing is saved to the Google Sheet." />
-              </div>
-            )}
             <button
-              onClick={() => { setShowAccountMenu(false); setShowDiagnostics(false); setShowAbout(true); }}
+              onClick={() => openSettings("about")}
               className="icon-btn"
-              style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
+              style={APP_MENU_ROW}
             >
               <Info size={15} /> About
             </button>
             {!sandboxMode && auth && (
               <button
-                onClick={() => { setShowAccountMenu(false); endSession(null, true); }}
+                onClick={() => { setShowAppMenu(false); endSession(null, true); }}
                 className="icon-btn"
-                style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
+                style={APP_MENU_ROW}
               >
                 <LogOut size={15} /> Sign out
               </button>
             )}
+            </div>
           </div>
         </>
       )}
@@ -13682,9 +13702,10 @@ function AssetTracker() {
     </div>
   );
 
-  const peripheralsManagerModal = showPeripheralsManager && (
+  const renderPeripheralsManager = embedded => (
     <ListManagerModal
-      title="Manage peripherals"
+      embedded={embedded}
+      title={embedded ? "Peripherals" : "Manage peripherals"}
       items={peripheralsList}
       newValue={newPeripheralName}
       onNewValueChange={setNewPeripheralName}
@@ -13694,6 +13715,7 @@ function AssetTracker() {
       placeholder="New peripheral name"
     />
   );
+  const peripheralsManagerModal = showPeripheralsManager && renderPeripheralsManager(false);
 
   // --- Access management -------------------------------------------------------
   // Every one of these routes through persist({ authUsers }), so the allowlist
@@ -13742,15 +13764,10 @@ function AssetTracker() {
     persist(assets, { authUsers: accessUsers.map(u => (u.email === email ? { ...u, role } : u)) });
   }
 
-  const accessManagerModal = showAccessManager && (
-    <div
-      onClick={() => { setShowAccessManager(false); setAccessDraft({ email: "", name: "", role: "editor", error: "" }); }}
-      style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", zIndex: 70, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
-    >
-      <div
-        onClick={e => e.stopPropagation()}
-        style={{ background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 12, width: "100%", maxWidth: 560, maxHeight: "86vh", overflowY: "auto", padding: 22, boxShadow: "0 8px 28px rgba(42,52,57,0.28)" }}
-      >
+  function renderAccessManager(embedded) {
+    const closeAccess = () => { setShowAccessManager(false); setAccessDraft({ email: "", name: "", role: "editor", error: "" }); };
+    return (
+    <ManagerFrame embedded={embedded} onClose={closeAccess} zIndex={70} cardStyle={{ border: `1.5px solid ${C.border}`, borderRadius: 12, maxWidth: 560, maxHeight: "86vh", padding: 22, boxShadow: "0 8px 28px rgba(42,52,57,0.28)" }}>
         <div style={{ fontWeight: 700, fontSize: 16, color: C.ink, marginBottom: 4 }}>Who can use this app</div>
         <div style={{ fontSize: 13, color: C.muted, marginBottom: 18, lineHeight: 1.5 }}>
           Anyone listed here can sign in with that Google account. Editors can make
@@ -13846,20 +13863,24 @@ function AssetTracker() {
           >
             Add
           </button>
+          {!embedded && (
           <button
-            onClick={() => { setShowAccessManager(false); setAccessDraft({ email: "", name: "", role: "editor", error: "" }); }}
+            onClick={closeAccess}
             style={{ padding: "8px 16px", background: "transparent", border: `1.5px solid ${C.brandDark}`, fontWeight: 600, fontSize: 13, borderRadius: 10, color: C.ink, cursor: "pointer" }}
           >
             Done
           </button>
+          )}
         </div>
-      </div>
-    </div>
-  );
+    </ManagerFrame>
+    );
+  }
+  const accessManagerModal = showAccessManager && renderAccessManager(false);
 
-  const usersManagerModal = showUsersManager && (
+  const renderUsersManager = embedded => (
     <ListManagerModal
-      title="Manage users"
+      embedded={embedded}
+      title={embedded ? "Users" : "Manage users"}
       items={usersAreAssets ? userNames : usersList}
       readOnly={usersAreAssets}
       note={usersAreAssets
@@ -13878,10 +13899,12 @@ function AssetTracker() {
       placeholder="New user's name"
     />
   );
+  const usersManagerModal = showUsersManager && renderUsersManager(false);
 
-  const bulkItemTypesManagerModal = showBulkItemTypesManager && (
+  const renderBulkItemTypesManager = embedded => (
     <ListManagerModal
-      title="Manage bulk item sub-types"
+      embedded={embedded}
+      title={embedded ? "Bulk item sub-types" : "Manage bulk item sub-types"}
       items={bulkItemTypes}
       newValue={newBulkItemTypeName}
       onNewValueChange={setNewBulkItemTypeName}
@@ -13891,13 +13914,15 @@ function AssetTracker() {
       placeholder="New sub-type, e.g. Folding Chair"
     />
   );
+  const bulkItemTypesManagerModal = showBulkItemTypesManager && renderBulkItemTypesManager(false);
 
   // Not ListManagerModal: that one manages a list of plain strings, where the
   // string IS the item, so there is nothing to rename — editing an entry would
   // mean deleting one value and adding another. A type is an id with a name
   // attached, and renaming it is the whole point of giving types ids.
-  const typesManagerModal = showTypesManager && (
+  const renderTypesManager = embedded => (
     <TypeManagerModal
+      embedded={embedded}
       types={typesList}
       newValue={newTypeName}
       onNewValueChange={setNewTypeName}
@@ -13920,31 +13945,33 @@ function AssetTracker() {
       columns={columns}
     />
   );
+  const typesManagerModal = showTypesManager && renderTypesManager(false);
 
   // Bespoke (not ListManagerModal) since a BreakerType needs a richer editor —
   // a visual half-cell grid to build each member's footprint — than a flat
   // list of strings can express. List view and the add/edit form share one
   // modal, toggled by whether breakerTypeDraft is set.
-  const breakerTypesManagerModal = showBreakerTypesManager && (
+  // Drawn as a modal from the panel's own entry points, or embedded in the
+  // Settings page's Electrical section (ManagerFrame).
+  function renderBreakerTypesManager(embedded) {
+    const closeManager = () => { setShowBreakerTypesManager(false); cancelBreakerTypeDraft(); setConfirmDeleteTypeId(null); };
+    return (
     // zIndex 50, above SelectionModal's 40 — same reasoning as ListManagerModal.
-    <div
-      onClick={() => { setShowBreakerTypesManager(false); cancelBreakerTypeDraft(); setConfirmDeleteTypeId(null); }}
-      style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }}
-    >
-      <div
-        onClick={e => e.stopPropagation()}
-        style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: breakerTypeDraft ? 480 : 380, maxHeight: "80vh", overflowY: "auto" }}
-      >
+    <ManagerFrame embedded={embedded} onClose={closeManager} zIndex={50} cardStyle={{ borderRadius: 14, padding: 20, maxWidth: breakerTypeDraft ? 480 : 380, maxHeight: "80vh" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>
-            {breakerTypeDraft ? (breakerTypeDraft.id ? "Edit Breaker Type" : "New Breaker Type") : "Manage Breaker Types"}
+            {breakerTypeDraft ? (breakerTypeDraft.id ? "Edit Breaker Type" : "New Breaker Type") : embedded ? "Breaker types" : "Manage Breaker Types"}
           </div>
+          {/* Embedded, the X only backs out of an open draft; the list itself
+              has nothing to close. */}
+          {!(embedded && !breakerTypeDraft) && (
           <button
-            onClick={() => { setShowBreakerTypesManager(false); cancelBreakerTypeDraft(); setConfirmDeleteTypeId(null); }}
+            onClick={embedded ? () => { cancelBreakerTypeDraft(); setConfirmDeleteTypeId(null); } : closeManager}
             className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}
           >
             <X size={18} />
           </button>
+          )}
         </div>
 
         {breakerTypeError && <div style={{ fontSize: 13, color: C.danger, marginBottom: 12 }}>{breakerTypeError}</div>}
@@ -14120,9 +14147,320 @@ function AssetTracker() {
             </div>
           </div>
         )}
+    </ManagerFrame>
+    );
+  }
+  const breakerTypesManagerModal = showBreakerTypesManager && renderBreakerTypesManager(false);
+  // Asked from Settings > Types & fields, which opens over either view, so it
+  // renders in both.
+  const deleteColumnModal = confirmDeleteCol && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30 }}>
+          <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 360 }}>
+            <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Remove "{columns.find(c => c.key === confirmDeleteCol)?.label}" column?</div>
+            <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>This deletes that field's data from every asset. This can't be undone.</div>
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button onClick={() => setConfirmDeleteCol(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+              <button onClick={() => removeColumn(confirmDeleteCol)} style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>{"Remove"}</button>
+            </div>
+          </div>
+        </div>
+      );
+
+  // ---------- THE SETTINGS PAGE (2026-10-10) ----------
+  // Every setting in one place, reached from the menu's Settings row (and
+  // `?settings=<section>`). Each section draws the SAME manager a field's gear
+  // opens, embedded (ManagerFrame), so there is one editor per setting however
+  // it is reached. A full-screen overlay rather than a third view: it opens
+  // over whatever you were doing and closing it puts you back exactly there,
+  // a half-typed form included.
+  function openSettings(section) {
+    setShowAppMenu(false);
+    const key = section || "";
+    try {
+      if (settingsSection === null) {
+        // A history entry of its own, so the phone's Back gesture closes
+        // Settings instead of leaving the screen underneath.
+        window.history.pushState({ ...(window.history.state || {}), settings: true }, "", settingsUrl(key));
+        settingsPushedRef.current = true;
+      } else {
+        window.history.replaceState(window.history.state, "", settingsUrl(key));
+      }
+    } catch (e) { /* no history API — Settings still opens */ }
+    setSettingsSection(key);
+  }
+  function selectSettingsSection(key) {
+    setRelationshipsEditType(null);
+    try { window.history.replaceState(window.history.state, "", settingsUrl(key)); } catch (e) { /* no history API */ }
+    setSettingsSection(key);
+  }
+  function closeSettings() {
+    setRelationshipsEditType(null);
+    // Pushed by openSettings: popping it is what closes (see the popstate
+    // handler). Arrived on a ?settings= link instead: strip the param in place.
+    if (settingsPushedRef.current) { settingsPushedRef.current = false; window.history.back(); return; }
+    try { window.history.replaceState(window.history.state, "", settingsUrl(null)); } catch (e) { /* no history API */ }
+    setSettingsSection(null);
+  }
+
+  const settingsCardStyle = { background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, width: "100%", maxWidth: 460 };
+  const settingsHeadingStyle = { display: "flex", alignItems: "center", gap: 6, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginBottom: 12 };
+
+  function renderSettingsSection(key) {
+    if (key === "types") {
+      const customCols = columns.filter(c => c.custom);
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+          {renderTypesManager(true)}
+          {/* Adding or deleting a column changes the shape of every asset for
+              everyone, so it lives here. Which columns are SHOWN is a per-device
+              reading choice and stays in the Assets screen's Columns. */}
+          <div style={settingsCardStyle}>
+            <div style={settingsHeadingStyle}>
+              Custom columns
+              <HelpTip label="About custom columns" text="A custom column adds a field to every asset. Which columns are shown is chosen on each device, from the menu's Columns on the Assets screen." />
+            </div>
+            {customCols.length === 0 && <div style={{ fontSize: 13, color: C.empty, marginBottom: 12 }}>No custom columns yet.</div>}
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+              {customCols.map(c => (
+                <div key={c.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 14 }}>
+                  <span>
+                    {c.label}
+                    <span style={{ fontSize: 12, color: C.muted, marginLeft: 8 }}>{(COLUMN_DATA_TYPES.find(t => t.value === columnDataType(c)) || {}).label || ""}</span>
+                  </span>
+                  <button onClick={() => setConfirmDeleteCol(c.key)} className="icon-btn" aria-label={`Remove ${c.label}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}>
+                    <Trash2 size={14} color={C.danger} />
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 14, display: "flex", gap: 6 }}>
+              <input
+                value={newColName}
+                onChange={e => setNewColName(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && addColumn()}
+                placeholder="New column name"
+                style={{ flex: 1, minWidth: 0, padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+              />
+              {/* The kind is chosen HERE, where the column is born. Reference is
+                  left out: with no target type to pick it would read as broken;
+                  the type editor's own Add field dialog asks for one. */}
+              <div style={{ width: 120, flexShrink: 0 }}>
+                <PickerField
+                  label="New column kind"
+                  hideLabel
+                  value={newColType}
+                  onChange={setNewColType}
+                  options={COLUMN_DATA_TYPES.filter(t => t.value !== "reference").map(t => t.value)}
+                  labelForOption={v => (COLUMN_DATA_TYPES.find(t => t.value === v) || {}).label || v}
+                  title="Kind of value"
+                />
+              </div>
+              <button onClick={addColumn} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600, flexShrink: 0 }}>Add</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    if (key === "relationships") {
+      const ids = (typesList || []).map(t => t.id).sort((x, y) => typeNameOf(x, typesList).localeCompare(typeNameOf(y, typesList)));
+      return (
+        <div style={settingsCardStyle}>
+          <div style={settingsHeadingStyle}>
+            Queries by type
+            <HelpTip label="About relationship queries" text="Each type can list related assets on a Relationships tab: what is inside it, what points at it through a reference field, and so on. Place types also get a built-in Contents query." />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            {ids.map((id, i) => {
+              const n = relationshipQueriesFor(id).length;
+              return (
+                <div key={id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderTop: i === 0 ? "none" : `1px solid ${C.border}` }}>
+                  <span style={{ flex: 1, minWidth: 0, fontSize: 14, color: C.ink }}>{typeNameOf(id, typesList)}</span>
+                  <span style={{ fontSize: 12, color: C.muted }}>{n === 0 ? "None" : `${n} quer${n === 1 ? "y" : "ies"}`}</span>
+                  <button onClick={() => setRelationshipsEditType(id)} className="icon-btn" aria-label={`Edit ${typeNameOf(id, typesList)} queries`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}>
+                    <Pencil size={14} color={C.muted} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+          {relationshipsEditType && (
+            <RelationshipQueryEditor
+              ownerType={relationshipsEditType}
+              initialQueries={relationshipQueriesFor(relationshipsEditType)}
+              assets={assets} columns={columns} typesList={typesList}
+              onDone={qs => { saveRelationshipQueries(relationshipsEditType, qs); setRelationshipsEditType(null); }}
+              onCancel={() => setRelationshipsEditType(null)}
+              doneLabel="Save"
+            />
+          )}
+        </div>
+      );
+    }
+    if (key === "lists") {
+      return (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 16, alignItems: "start" }}>
+          <ListManagerModal
+            embedded
+            title="Work types"
+            items={changeTypes}
+            newValue={newChangeTypeName}
+            onNewValueChange={setNewChangeTypeName}
+            onAdd={addChangeType}
+            onRemove={removeChangeType}
+            placeholder="New work type"
+          />
+          <ListManagerModal
+            embedded
+            title="Vendors"
+            items={vendors}
+            newValue={newVendorName}
+            onNewValueChange={setNewVendorName}
+            onAdd={addVendor}
+            onRemove={removeVendor}
+            placeholder="New vendor name"
+          />
+          {renderPeripheralsManager(true)}
+          {renderBulkItemTypesManager(true)}
+          {renderUsersManager(true)}
+        </div>
+      );
+    }
+    if (key === "electrical") return renderBreakerTypesManager(true);
+    if (key === "access") return renderAccessManager(true);
+    if (key === "personal") {
+      const choiceStyle = on => ({ display: "flex", alignItems: "center", gap: 10, width: "100%", padding: "9px 10px", background: on ? C.hover : "none", border: `1.5px solid ${on ? C.brand : C.border}`, borderRadius: 10, fontSize: 14, color: C.ink, textAlign: "left" });
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+          <div style={settingsCardStyle}>
+            <div style={settingsHeadingStyle}>
+              Name format
+              <HelpTip label="About name format" text="How people's names read everywhere in the app on this device. It changes nothing that is stored." />
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {NAME_ORDER_OPTIONS.map(o => (
+                <button key={o.value} type="button" onClick={() => chooseNameOrder(o.value)} aria-pressed={personNameOrder === o.value} style={choiceStyle(personNameOrder === o.value)}>
+                  <span style={{ width: 15, display: "inline-flex" }}>{personNameOrder === o.value && <Check size={15} color={C.brand} />}</span>
+                  <span style={{ flex: 1 }}>{o.label}</span>
+                  <span style={{ fontSize: 12, color: C.muted }}>{o.example}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div style={settingsCardStyle}>
+            <div style={settingsHeadingStyle}>
+              Icon shortcuts
+              <HelpTip label="About icon shortcuts" text="The row of icons the type editor offers first, on this device. Star more from the type editor's More… browser." />
+            </div>
+            {iconFavorites.length === 0 && <div style={{ fontSize: 13, color: C.empty, marginBottom: 12 }}>No shortcuts. Every icon is still in the type editor's More… browser.</div>}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14 }}>
+              {iconFavorites.map(k => {
+                const IconC = TYPE_ICON_CHOICES[k];
+                if (!IconC) return null;
+                return (
+                  <span key={k} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "4px 4px 4px 8px", border: `1px solid ${C.border}`, borderRadius: 8 }} title={k}>
+                    <IconC size={16} color={C.brandDark} />
+                    <button type="button" onClick={() => toggleIconFavorite(k)} aria-label={`Remove ${k} from shortcuts`} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4, display: "flex" }}>
+                      <X size={12} color={C.muted} />
+                    </button>
+                  </span>
+                );
+              })}
+            </div>
+            <button type="button" onClick={resetIconFavorites} style={{ padding: "7px 12px", background: "transparent", border: `1.5px solid ${C.border}`, borderRadius: 10, fontSize: 13, fontWeight: 600, color: C.ink }}>
+              Reset to default
+            </button>
+          </div>
+          <div style={settingsCardStyle}>
+            <div style={settingsHeadingStyle}>
+              Sandbox
+              <HelpTip label="About Sandbox" text="Local fixture data, safe to experiment on. Nothing is saved to the Google Sheet." />
+            </div>
+            {/* The way in, mirroring the menu's row; in Sandbox the header pill
+                is the one way out, so this only says where it is. */}
+            {sandboxMode ? (
+              <div style={{ fontSize: 13, color: C.muted }}>On. Leave with the SANDBOX pill in the header.</div>
+            ) : (
+              <button type="button" onClick={() => { closeSettings(); toggleSandboxMode(); }} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", background: "transparent", border: `1.5px solid ${C.border}`, borderRadius: 10, fontSize: 13, fontWeight: 600, color: C.ink }}>
+                <FlaskConical size={14} /> Enter sandbox
+              </button>
+            )}
+          </div>
+        </div>
+      );
+    }
+    if (key === "about") {
+      return (
+        <>
+          {aboutCard()}
+          {diagnosticsModal}
+        </>
+      );
+    }
+    return null;
+  }
+
+  const settingsPage = settingsSection !== null && (() => {
+    const sections = settingsSectionsFor(canEdit, sandboxMode);
+    const open = sections.find(s => s.key === settingsSection) || null;
+    const shown = open || sections[0];
+    return (
+      // zIndex 25: above the sticky headers and the menu (20/21); below every
+      // dialog a section can open at the app's top level (the column delete
+      // confirm at 30, pickers at 40), which therefore still paint over it.
+      <div
+        className="settings-page"
+        data-open={open ? "1" : "0"}
+        role="dialog"
+        aria-label="Settings"
+        style={{ position: "fixed", inset: 0, zIndex: 25, background: C.bg, display: "flex", flexDirection: "column", fontFamily: "'IBM Plex Sans', sans-serif", color: C.ink }}
+      >
+        <div style={{ borderBottom: `2px solid ${C.brand}`, padding: "10px 20px", display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+          <Settings size={18} style={{ color: C.brand }} />
+          <div style={{ fontSize: 17, fontWeight: 700, color: C.brandDark, flex: 1 }}>Settings</div>
+          <button onClick={closeSettings} className="icon-btn" aria-label="Close settings" style={{ background: "none", border: "none", padding: 6, borderRadius: 8, color: C.ink, display: "flex" }}>
+            <X size={20} />
+          </button>
+        </div>
+        <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+          <nav className="settings-nav" style={{ overflowY: "auto", padding: 10 }}>
+            {sections.map(sec => {
+              const Icon = sec.icon;
+              const on = shown && sec.key === shown.key;
+              return (
+                <button
+                  key={sec.key}
+                  onClick={() => selectSettingsSection(sec.key)}
+                  aria-current={on ? "page" : undefined}
+                  className="icon-btn"
+                  style={{ ...APP_MENU_ROW, padding: "10px 12px", marginBottom: 2, fontWeight: on ? 700 : 500, color: on ? C.brandDark : C.ink, background: on ? C.hover : "none" }}
+                >
+                  <Icon size={16} color={on ? C.brand : C.muted} />
+                  <span style={{ flex: 1 }}>{sec.label}</span>
+                  <ChevronRight size={15} color={C.muted} className="settings-nav-chevron" />
+                </button>
+              );
+            })}
+            {!canEdit && (
+              <div style={{ fontSize: 12, color: C.muted, padding: "10px 12px", lineHeight: 1.5 }}>
+                Types, lists and access are managed by editors.
+              </div>
+            )}
+          </nav>
+          <div className="settings-panel" style={{ flex: 1, minWidth: 0, overflowY: "auto", padding: "16px 20px 60px" }}>
+            <button className="settings-back" onClick={() => selectSettingsSection("")} style={{ display: "flex", alignItems: "center", gap: 4, background: "none", border: "none", padding: "4px 0", marginBottom: 8, fontSize: 13, fontWeight: 600, color: C.brandDark }}>
+              <ArrowLeft size={15} /> All settings
+            </button>
+            {shown && (
+              <>
+                <h2 style={{ margin: "0 0 14px", fontSize: 18, fontWeight: 700, color: C.brandDark }}>{shown.label}</h2>
+                {renderSettingsSection(shown.key)}
+              </>
+            )}
+          </div>
+        </div>
       </div>
-    </div>
-  );
+    );
+  })();
 
   // Fields to render in a form for the given type: common fields always,
   // type-restricted fields (hostname, screenSize) only when they apply.
@@ -15017,6 +15355,7 @@ function AssetTracker() {
     const { contentsCount } = contentsOf(selectedAsset, assets);
 
     return (
+      <AppMenuContext.Provider value={appMenuContext}>
       <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'IBM Plex Sans', sans-serif", color: C.ink }}>
         {globalStyle}
         {conflictModal}
@@ -15025,7 +15364,6 @@ function AssetTracker() {
         {peripheralsManagerModal}
         {usersManagerModal}
         {accessManagerModal}
-        {aboutModal}
         {bulkItemTypesManagerModal}
         {typesManagerModal}
         {breakerTypesManagerModal}
@@ -15076,7 +15414,10 @@ function AssetTracker() {
           <Icon size={17} style={{ color: C.brand, flexShrink: 0 }} />
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, fontWeight: 600, color: C.accent }}>{selectedAsset.tag}</div>
           <div style={{ fontSize: 15, fontWeight: 600, color: C.brandDark, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{titleText}</div>
-          {saveStatusPill && <div style={{ marginLeft: "auto", display: "flex" }}>{saveStatusPill}</div>}
+          <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+            {saveStatusPill}
+            {appMenu}
+          </div>
         </div>
 
         <div style={{ display: "flex", gap: 4, padding: "0 20px", borderBottom: `1.5px solid ${C.border}`, position: "sticky", top: 53, background: C.bg, zIndex: 9, overflowX: "auto" }}>
@@ -15425,7 +15766,6 @@ function AssetTracker() {
 
           {detailTab === "floorPlan" && typeHasFloorPlan(selectedAsset.type) && (
             <>
-              <div ref={setFloorPlanTabMenuSlot} style={{ display: "flex", justifyContent: "flex-end", marginBottom: 6 }} />
               <FloorPlanTabContent
                 canEdit={canEdit}
                 selectedAsset={selectedAsset}
@@ -15445,7 +15785,7 @@ function AssetTracker() {
                 onSaveMapOptions={(mode, ids) => saveMapSelectOptions(selectedAsset.id, mode, ids)}
                 onOpenAsset={openDetail}
                 onNavigateToPlan={navigateFloorPlanTo}
-                menuSlot={floorPlanTabMenuSlot}
+                menuTitle="Floor plan"
               />
               {showAdd && pendingSpaceLink && (
                 <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20, padding: 16 }}>
@@ -16568,7 +16908,10 @@ function AssetTracker() {
         )}
 
         {renderWorkDialogs()}
+        {settingsPage}
+        {deleteColumnModal}
       </div>
+      </AppMenuContext.Provider>
     );
   }
 
@@ -16577,6 +16920,7 @@ function AssetTracker() {
   const addFormColumns = formColumnsFor(draft.type);
 
   return (
+    <AppMenuContext.Provider value={appMenuContext}>
     <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'IBM Plex Sans', 'Helvetica Neue', sans-serif", color: C.ink }}>
       {globalStyle}
       {conflictModal}
@@ -16585,7 +16929,6 @@ function AssetTracker() {
       {peripheralsManagerModal}
       {usersManagerModal}
         {accessManagerModal}
-        {aboutModal}
       {bulkItemTypesManagerModal}
       {typesManagerModal}
       {breakerTypesManagerModal}
@@ -16772,7 +17115,7 @@ function AssetTracker() {
             </>
           )}
           {saveStatusPill}
-          {/* Identity, Access, About and Sign out are one dropdown (accountMenu,
+          {/* Identity, Settings, About and Sign out are in the one menu (appMenu,
               defined above) rather than four controls strung across the corner.
               The View-only badge stays OUTSIDE it on purpose: it explains why the
               edit controls a viewer expects aren't there, and an explanation that
@@ -16785,7 +17128,7 @@ function AssetTracker() {
               View only
             </span>
           )}
-          {accountMenu}
+          {appMenu}
           {backendScriptVersion && backendScriptVersion !== FRONTEND_SCRIPT_VERSION && (
             <span
               style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.danger }}
@@ -16887,84 +17230,62 @@ function AssetTracker() {
               </button>
             )}
 
-            <div style={{ position: "relative", flexShrink: 0 }}>
+            {/* This screen's rows in the header's one menu (2026-10-10); they
+                were a ☰ at the end of this row. Columns and Export stay
+                available to viewers: Columns is per-device visibility (never
+                persisted) and Export is a read. Import writes the inventory, so
+                it is gated like every other write, directly under the export
+                whose file it reads. */}
+            <AppMenuScreenRows title="Assets">
               <button
-                onClick={() => setShowToolbarMenu(v => !v)}
-                aria-label="More actions"
+                onClick={() => { setShowAppMenu(false); setShowColManager(true); }}
                 className="icon-btn"
-                style={{ background: "none", border: "none", padding: 8, borderRadius: 8, color: C.brandDark, display: "flex" }}
+                style={APP_MENU_ROW}
               >
-                <Menu size={18} />
+                <Columns3 size={15} /> Columns
               </button>
-              {showToolbarMenu && (
-                <>
-                  <div onClick={() => setShowToolbarMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
-                  <div style={{ position: "absolute", right: 0, top: "100%", marginTop: 6, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, minWidth: 170, overflow: "hidden", padding: 4 }}>
-                    <button
-                      onClick={() => { setShowToolbarMenu(false); setShowColManager(true); }}
-                      className="icon-btn"
-                      style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
-                    >
-                      <Columns3 size={15} /> Columns
-                    </button>
-                    {/* WHAT IS ON SCREEN, not the whole inventory, and one
-                        sheet rather than the workbook — because this is the
-                        file Import reads back. The Maintenance and Audit tabs
-                        still export the full workbook; see exportAssetsSheet
-                        for why the two cannot be the same file. */}
-                    <div style={{ display: "flex", alignItems: "center", paddingRight: 8 }}>
-                    <button
-                      onClick={() => { setShowToolbarMenu(false); exportAssetsSheet(); }}
-                      className="icon-btn"
-                      style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0, padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
-                    >
-                      <Download size={15} /> Export shown
-                    </button>
-                    <HelpTip label="About Export shown" text={`Exports the ${filtered.length} asset${filtered.length === 1 ? "" : "s"} shown, in a file you can edit and import back.`} />
-                    </div>
-                    {/* Columns and Export stay available to viewers: Columns is
-                        mostly per-device visibility (never persisted), and Export
-                        is a read. Import is not — it writes the inventory, so it
-                        is gated like every other write, and it sits directly
-                        under the export whose file it reads.
-                        Add asset used to sit here and is now a button of its own
-                        below the breadcrumb, matching Maintenance's Add task /
-                        Log work. */}
-                    {canEdit && (
-                    <div style={{ display: "flex", alignItems: "center", paddingRight: 8 }}>
-                    <button
-                      onClick={() => { setShowToolbarMenu(false); if (importInputRef.current) importInputRef.current.click(); }}
-                      disabled={importBusy}
-                      className="icon-btn"
-                      style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0, padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: importBusy ? C.muted : C.ink, textAlign: "left", borderRadius: 6 }}
-                    >
-                      <Upload size={15} /> {importBusy ? "Reading\u2026" : "Import\u2026"}
-                    </button>
-                    <HelpTip label="About Import" text="Reads an exported sheet back in: rows update the assets they name, rows that match nothing are created. You see what it would do before anything is saved." />
-                    </div>
-                    )}
-                    {/* The one-time users conversion. It lived only behind the
-                        gear on the User field, which is inside the EDIT form —
-                        so a setup action nobody had a reason to open an asset to
-                        find. Shown here only while there is something to convert,
-                        so it surfaces itself once and then disappears rather than
-                        becoming permanent clutter. */}
-                    {canEdit && unconvertedUserNames.length > 0 && (
-                    <div style={{ display: "flex", alignItems: "center", paddingRight: 8, borderTop: `1px solid ${C.border}`, marginTop: 4 }}>
-                    <button
-                      onClick={() => { setShowToolbarMenu(false); convertUsersToAssets(); }}
-                      className="icon-btn"
-                      style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0, padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
-                    >
-                      <UserCircle size={15} /> Convert {unconvertedUserNames.length} user{unconvertedUserNames.length === 1 ? "" : "s"} to records
-                    </button>
-                    <HelpTip label="About converting users" text="Gives each person their own page and history. Assignments keep working either way." />
-                    </div>
-                    )}
-                  </div>
-                </>
+              {/* WHAT IS ON SCREEN, not the whole inventory, and one sheet
+                  rather than the workbook — because this is the file Import
+                  reads back. See exportAssetsSheet. */}
+              <div style={{ display: "flex", alignItems: "center", paddingRight: 8 }}>
+              <button
+                onClick={() => { setShowAppMenu(false); exportAssetsSheet(); }}
+                className="icon-btn"
+                style={{ ...APP_MENU_ROW, flex: 1, minWidth: 0, width: undefined }}
+              >
+                <Download size={15} /> Export shown
+              </button>
+              <HelpTip label="About Export shown" text={`Exports the ${filtered.length} asset${filtered.length === 1 ? "" : "s"} shown, in a file you can edit and import back.`} />
+              </div>
+              {canEdit && (
+              <div style={{ display: "flex", alignItems: "center", paddingRight: 8 }}>
+              <button
+                onClick={() => { setShowAppMenu(false); if (importInputRef.current) importInputRef.current.click(); }}
+                disabled={importBusy}
+                className="icon-btn"
+                style={{ ...APP_MENU_ROW, flex: 1, minWidth: 0, width: undefined, color: importBusy ? C.muted : C.ink }}
+              >
+                <Upload size={15} /> {importBusy ? "Reading\u2026" : "Import\u2026"}
+              </button>
+              <HelpTip label="About Import" text="Reads an exported sheet back in: rows update the assets they name, rows that match nothing are created. You see what it would do before anything is saved." />
+              </div>
               )}
-            </div>
+              {/* The one-time users conversion, shown only while there is
+                  something to convert, so it surfaces itself once and then
+                  disappears rather than becoming permanent clutter. */}
+              {canEdit && unconvertedUserNames.length > 0 && (
+              <div style={{ display: "flex", alignItems: "center", paddingRight: 8 }}>
+              <button
+                onClick={() => { setShowAppMenu(false); convertUsersToAssets(); }}
+                className="icon-btn"
+                style={{ ...APP_MENU_ROW, flex: 1, minWidth: 0, width: undefined }}
+              >
+                <UserCircle size={15} /> Convert {unconvertedUserNames.length} user{unconvertedUserNames.length === 1 ? "" : "s"} to records
+              </button>
+              <HelpTip label="About converting users" text="Gives each person their own page and history. Assignments keep working either way." />
+              </div>
+              )}
+            </AppMenuScreenRows>
           </div>
         )}
 
@@ -17003,38 +17324,21 @@ function AssetTracker() {
               </button>
             )}
 
-            <div style={{ position: "relative", flexShrink: 0 }}>
+            {/* This screen's row in the header's one menu: the full workbook. */}
+            <AppMenuScreenRows title="Tasks">
               <button
-                onClick={() => setShowToolbarMenu(v => !v)}
-                aria-label="More actions"
+                onClick={() => { setShowAppMenu(false); exportToExcel(); }}
                 className="icon-btn"
-                style={{ background: "none", border: "none", padding: 8, borderRadius: 8, color: C.brandDark, display: "flex" }}
+                style={APP_MENU_ROW}
               >
-                <Menu size={18} />
+                <Download size={15} /> Export
               </button>
-              {showToolbarMenu && (
-                <>
-                  <div onClick={() => setShowToolbarMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
-                  <div style={{ position: "absolute", right: 0, top: "100%", marginTop: 6, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, minWidth: 170, overflow: "hidden", padding: 4 }}>
-                    <button
-                      onClick={() => { setShowToolbarMenu(false); exportToExcel(); }}
-                      className="icon-btn"
-                      style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
-                    >
-                      <Download size={15} /> Export
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
+            </AppMenuScreenRows>
           </div>
         )}
 
-        {/* The Map tab's actions menu (Link & group spaces / Free zoom /
-            Replace) is the hamburger at the right end of this row, like the
-            other tabs'. Its state lives in FloorPlanTabContent, which draws it
-            INTO mapMenuSlot with a portal rather than having setupTab,
-            freeZoom and the file input threaded up through here. */}
+        {/* The Map tab's actions (Configure, Free zoom, Pins) are rows in the
+            header's one menu, drawn there by FloorPlanTabContent itself. */}
         {mainTab === "map" && (
           <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
             {searchOpen || mapQuery ? (
@@ -17069,7 +17373,6 @@ function AssetTracker() {
                 <Search size={18} />
               </button>
             )}
-            <div ref={setMapMenuSlot} style={{ display: "flex" }} />
           </div>
         )}
 
@@ -17108,36 +17411,18 @@ function AssetTracker() {
               </button>
             )}
 
-            <div style={{ position: "relative", flexShrink: 0 }}>
+            {/* The workbook's own Audit Log sheet, which carries every entry.
+                NOT the filtered view: an export that quietly dropped rows to
+                match a filter would be the worst thing an audit trail can do. */}
+            <AppMenuScreenRows title="Audit">
               <button
-                onClick={() => setShowToolbarMenu(v => !v)}
-                aria-label="More actions"
+                onClick={() => { setShowAppMenu(false); exportToExcel(); }}
                 className="icon-btn"
-                style={{ background: "none", border: "none", padding: 8, borderRadius: 8, color: C.brandDark, display: "flex" }}
+                style={APP_MENU_ROW}
               >
-                <Menu size={18} />
+                <Download size={15} /> Export
               </button>
-              {showToolbarMenu && (
-                <>
-                  <div onClick={() => setShowToolbarMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
-                  <div style={{ position: "absolute", right: 0, top: "100%", marginTop: 6, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, minWidth: 170, overflow: "hidden", padding: 4 }}>
-                    {/* The workbook's own Audit Log sheet, which has always
-                        carried every entry -- so this is the existing export,
-                        offered where someone asking an audit question is
-                        standing. It is NOT the filtered view: an export that
-                        quietly dropped rows to match a filter would be the
-                        worst possible thing for an audit trail to do. */}
-                    <button
-                      onClick={() => { setShowToolbarMenu(false); exportToExcel(); }}
-                      className="icon-btn"
-                      style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
-                    >
-                      <Download size={15} /> Export
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
+            </AppMenuScreenRows>
           </div>
         )}
       </div>
@@ -17628,7 +17913,7 @@ function AssetTracker() {
           onOpenWork={openFromMap((ch, a) => openDetail(a, "changes"))}
           onNavigateToPlan={navigateFloorPlanTo}
           query={mapQuery}
-          menuSlot={mapMenuSlot}
+          menuTitle="Map"
           onSelectedPlaceChange={setMapSelectedPlaceId}
           listMode={mapListMode}
           onListModeChange={setMapListMode}
@@ -17862,70 +18147,30 @@ function AssetTracker() {
                     <input type="checkbox" checked={isColumnVisible(c)} disabled={c.locked} onChange={() => toggleColumnVisible(c.key)} />
                     {c.label} {c.locked && <Lock size={11} />}
                   </label>
-                  {c.custom && canEdit && (
-                    <button onClick={() => setConfirmDeleteCol(c.key)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}>
-                      <Trash2 size={14} color={C.danger} />
-                    </button>
-                  )}
                 </div>
               ))}
             </div>
-            {/* Show/hide checkboxes above are per-device and never persisted, so
-                a viewer keeps them. Adding or removing a COLUMN changes the shape
-                of every asset for everyone, so that half goes. */}
+            {/* Which columns are SHOWN is per-device and never persisted, so
+                it stays here, on the screen it changes. Adding or deleting a
+                column changes every asset for everyone, so that moved to
+                Settings > Types & fields (2026-10-10). */}
             {canEdit && (
-            <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 14, display: "flex", gap: 6 }}>
-              <input
-                value={newColName}
-                onChange={e => setNewColName(e.target.value)}
-                onKeyDown={e => e.key === "Enter" && addColumn()}
-                placeholder="New column name"
-                style={{ flex: 1, minWidth: 0, padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-              />
-              {/* The kind is chosen HERE, where the column is born, rather than
-                  only in the type editor. A column created as Text and corrected
-                  afterwards is a column whose first few values were typed into
-                  the wrong kind of box. A choice list still has to go to the type
-                  editor for its choices — this is the one control that fits.
-                  Reference is left OUT of this list for the same reason: it has
-                  no options here either (no target type to pick), but unlike an
-                  empty choice list a reference field with nothing to point at
-                  reads as flatly broken rather than merely unfinished. It's only
-                  offered from the type editor's own Add Field dialog, which asks
-                  for the target type before the field exists at all. */}
-              <div style={{ width: 120, flexShrink: 0 }}>
-                <PickerField
-                  label="New column kind"
-                  hideLabel
-                  value={newColType}
-                  onChange={setNewColType}
-                  options={COLUMN_DATA_TYPES.filter(t => t.value !== "reference").map(t => t.value)}
-                  labelForOption={v => (COLUMN_DATA_TYPES.find(t => t.value === v) || {}).label || v}
-                  title="Kind of value"
-                />
-              </div>
-              <button onClick={addColumn} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600, flexShrink: 0 }}>{"Add"}</button>
-            </div>
+              <button
+                onClick={() => { setShowColManager(false); openSettings("types"); }}
+                style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", padding: "12px 0 0", background: "none", border: "none", borderTop: `1px solid ${C.border}`, fontSize: 13, fontWeight: 600, color: C.brandDark, textAlign: "left" }}
+              >
+                <Settings size={14} /> Add or remove columns in Settings
+              </button>
             )}
           </div>
         </div>
       )}
 
-      {/* Delete column confirm */}
-      {confirmDeleteCol && (
-        <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30 }}>
-          <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 360 }}>
-            <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Remove "{columns.find(c => c.key === confirmDeleteCol)?.label}" column?</div>
-            <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>This deletes that field's data from every asset. This can't be undone.</div>
-            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-              <button onClick={() => setConfirmDeleteCol(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
-              <button onClick={() => removeColumn(confirmDeleteCol)} style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>{"Remove"}</button>
-            </div>
-          </div>
-        </div>
-      )}
       {renderWorkDialogs()}
+      {settingsPage}
+      {deleteColumnModal}
     </div>
+    </AppMenuContext.Provider>
   );
 }
 
@@ -19148,7 +19393,7 @@ function Detail({ label, value, wide, italic }) {
 function TypeManagerModal({
   types, newValue, onNewValueChange, onAdd, onSave, onReset, onRemove, onClose,
   canEdit, isLocked, nameTaken, countFor, fieldOptions, hasOverrides,
-  labels, onSaveLabels, iconFavorites, onToggleIconFavorite, assets, columns,
+  labels, onSaveLabels, iconFavorites, onToggleIconFavorite, assets, columns, embedded,
 }) {
   const [confirmId, setConfirmId] = useState(null);
   // The label manager is a THIRD view of this modal, alongside the type list and
@@ -19488,22 +19733,26 @@ function TypeManagerModal({
   return (
     // zIndex 50, above SelectionModal's 40 — opened via the "manage" gear from
     // inside the Type picker, so it must stack above it.
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }}>
-      <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 460, maxHeight: "80vh", overflowY: "auto" }}>
+    <ManagerFrame embedded={embedded} onClose={onClose} zIndex={50} cardStyle={{ borderRadius: 14, padding: 20, maxWidth: 460, maxHeight: "80vh" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>
-            {browsingIcons ? "Choose an icon" : editingLabels ? "Labels" : draft ? `Edit type` : "Manage asset types"}
+            {browsingIcons ? "Choose an icon" : editingLabels ? "Labels" : draft ? `Edit type` : embedded ? "Asset types" : "Manage asset types"}
             {browsingIcons && draft
               ? <HelpTip label="About choosing an icon" text="Tap an icon to use it for this type. The star puts one in the type editor's own row — that row is per-device, like which columns you show, so starring here changes nothing for anyone else." />
               : editingLabels
                 ? <HelpTip label="About labels" text="Labels tag your asset types — a type can carry as many as it needs. The Type picker lists every type A→Z and offers these as a filter. The order here is the order they appear in." />
                 : !draft && <HelpTip label="About asset types" text="Renaming a type updates it everywhere — assets keep their type. Room, Building, Bulk Item, Campus and Electrical Panel are built into the app and can't be removed." />}
           </div>
+          {/* Embedded on the Settings page there is nothing to close at the
+              top level -- the page is the frame -- so only the inner views'
+              own way back is offered. */}
+          {!(embedded && !browsingIcons && !editingLabels && !draft) && (
           <button
             onClick={browsingIcons ? () => setBrowsingIcons(false) : editingLabels ? () => setEditingLabels(false) : draft ? cancelEdit : onClose}
             className="icon-btn"
             style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}
           ><X size={18} /></button>
+          )}
         </div>
 
         {browsingIcons && draft ? (
@@ -20160,8 +20409,7 @@ function TypeManagerModal({
             )}
           </>
         )}
-      </div>
-    </div>
+    </ManagerFrame>
   );
 }
 
@@ -20170,6 +20418,75 @@ function TypeManagerModal({
 // archive live on the asset itself. `action` is an optional one-shot button --
 // the users conversion, which belongs here because this is where someone goes
 // looking for the user list.
+// THE ONE MENU (2026-10-10). The header's ☰ is the app's only menu: what the
+// screen you are on offers, then Settings, then you. A screen whose rows need
+// its own state (the map's setup tabs and file input, a panel's print
+// measuring) no longer draws a menu of its own: it portals its rows into
+// `slot`, which exists only while the menu is open, and calls `close()` after
+// acting. That is the arrangement the map's header slot already had,
+// generalised so every screen's actions land in the one place.
+const AppMenuContext = React.createContext({ slot: null, close: () => {} });
+
+const APP_MENU_ROW = { display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6, cursor: "pointer" };
+
+function AppMenuHeading({ children }) {
+  return (
+    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.6, textTransform: "uppercase", color: C.muted, padding: "8px 12px 4px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+      {children}
+    </div>
+  );
+}
+
+// A screen's rows, drawn into the open menu under a heading naming the screen.
+// Nothing at all while the menu is closed.
+function AppMenuScreenRows({ title, children }) {
+  const { slot } = useContext(AppMenuContext);
+  if (!slot) return null;
+  return createPortal(
+    <div style={{ borderBottom: `1px solid ${C.border}`, paddingBottom: 4, marginBottom: 4 }}>
+      <AppMenuHeading>{title}</AppMenuHeading>
+      {children}
+    </div>,
+    slot
+  );
+}
+
+// The Settings page's sections, in order. `editor` sections are hidden from a
+// viewer rather than shown greyed out (Eric's call): a viewer's Settings is
+// Personal and About. Access also needs a real backend, since Sandbox has no
+// allowlist to edit.
+const SETTINGS_SECTIONS = [
+  { key: "types", label: "Types & fields", icon: Layers, editor: true },
+  { key: "relationships", label: "Relationships", icon: ArrowLeftRight, editor: true },
+  { key: "lists", label: "Lists", icon: FileText, editor: true },
+  { key: "electrical", label: "Electrical", icon: Zap, editor: true },
+  { key: "access", label: "Access", icon: Users, editor: true, live: true },
+  { key: "personal", label: "Personal", icon: UserCircle },
+  { key: "about", label: "About & diagnostics", icon: Info },
+];
+
+function settingsSectionsFor(canEdit, sandboxMode) {
+  return SETTINGS_SECTIONS.filter(s => (!s.editor || canEdit) && (!s.live || !sandboxMode));
+}
+
+// `?settings=<section>` opens Settings on load, so a setting can be linked. An
+// unknown value still opens Settings, on its first section.
+function readInitialSettingsSection() {
+  try {
+    const v = new URLSearchParams(window.location.search).get("settings");
+    if (v === null) return null;
+    return SETTINGS_SECTIONS.some(s => s.key === v) ? v : "";
+  } catch (e) { return null; }
+}
+
+function settingsUrl(section) {
+  const params = new URLSearchParams(window.location.search);
+  if (section === null) params.delete("settings");
+  else params.set("settings", section);
+  const q = params.toString();
+  return window.location.pathname + (q ? "?" + q : "") + window.location.hash;
+}
+
 // A "?" that opens a short piece of help (2026-10-10). The app's explanations
 // used to sit in menus and forms as grey sentences — read once, then in the way
 // on every visit — or as title= tooltips, which a phone never shows. They live
@@ -20245,19 +20562,36 @@ function HelpTip({ text, label = "Help", size = 14 }) {
   );
 }
 
-function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onRemove, onClose, placeholder, isLocked, hint, readOnly, note, action }) {
+// The frame every settings manager is drawn in: a centred card over a dimmed
+// backdrop when opened from a field's gear, or -- `embedded`, on the Settings
+// page -- just the card, flush in its section, with no backdrop and no height
+// cap (the page scrolls instead). One component, so a manager's body is the
+// same code wherever it is reached from.
+function ManagerFrame({ embedded, onClose, zIndex, cardStyle, children }) {
+  const card = { background: C.surface, border: `1px solid ${C.border}`, width: "100%", overflowY: "auto", boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", ...cardStyle };
+  if (embedded) {
+    return <div style={{ ...card, maxHeight: "none", overflowY: "visible", boxShadow: "none" }}>{children}</div>;
+  }
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex, padding: 16 }}>
+      <div onClick={e => e.stopPropagation()} style={card}>{children}</div>
+    </div>
+  );
+}
+
+function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onRemove, onClose, placeholder, isLocked, hint, readOnly, note, action, embedded }) {
   const [confirmItem, setConfirmItem] = useState(null);
   return (
     // zIndex 50, above SelectionModal's 40 — this modal is frequently opened via the
     // "manage" gear from inside an open SelectionModal (e.g. Type field -> manage asset
     // types), so it must stack above that picker rather than being hidden behind it.
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }}>
-      <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth:320, maxHeight: "70vh", overflowY: "auto" }}>
+    // `embedded` draws only the card, inside a Settings section (ManagerFrame).
+    <ManagerFrame embedded={embedded} onClose={onClose} zIndex={50} cardStyle={{ borderRadius: 14, padding: 20, maxWidth: 320, maxHeight: "70vh" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>
             {title}{hint && <HelpTip text={hint} label={`About ${title}`} />}
           </div>
-          <button onClick={onClose} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+          {!embedded && <button onClick={onClose} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>}
         </div>
         {note && <div style={{ fontSize: 12, color: C.empty, marginBottom: 10 }}>{note}</div>}
         {action && (
@@ -20325,8 +20659,7 @@ function ListManagerModal({ title, items, newValue, onNewValueChange, onAdd, onR
           <button onClick={onAdd} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600 }}>{"Add"}</button>
         </div>
         )}
-      </div>
-    </div>
+    </ManagerFrame>
   );
 }
 
@@ -21904,31 +22237,17 @@ function MapOptionsDialog({ asset, assets, onSave, onClose }) {
 // The menu for a location that has no plan to configure (its type carries none,
 // or none is uploaded yet): Options is available for EVERY location, so it
 // cannot live only inside the full plan menu.
-function MapOptionsOnlyMenu({ canEdit, asset, assets, menuSlot, onSaveMapOptions }) {
-  const [menuOpen, setMenuOpen] = useState(false);
+function MapOptionsOnlyMenu({ canEdit, asset, assets, typesList, title, onSaveMapOptions }) {
+  const appMenu = useContext(AppMenuContext);
   const [dialog, setDialog] = useState(false);
-  if (!menuSlot || !canEdit || !onSaveMapOptions) return null;
+  if (!canEdit || !onSaveMapOptions) return null;
   return (
     <>
-      {createPortal(
-        <div style={{ position: "relative", flexShrink: 0 }}>
-          <button type="button" onClick={() => setMenuOpen(v => !v)} aria-label="Map actions" className="icon-btn"
-            style={{ background: "none", border: "none", padding: 8, borderRadius: 8, color: C.brandDark, display: "flex" }}>
-            <Menu size={18} />
-          </button>
-          {menuOpen && (
-            <>
-              <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
-              <div style={{ position: "absolute", right: 0, top: "100%", marginTop: 6, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, minWidth: 190, overflow: "hidden", padding: 4 }}>
-                <button type="button" onClick={() => { setMenuOpen(false); setDialog(true); }} className="icon-btn"
-                  style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}>
-                  <Settings size={15} /> Options…
-                </button>
-              </div>
-            </>
-          )}
-        </div>,
-        menuSlot)}
+      <AppMenuScreenRows title={`${title || "Map"} · ${nameOf(asset, typesList)}`}>
+        <button type="button" onClick={() => { appMenu.close(); setDialog(true); }} className="icon-btn" style={APP_MENU_ROW}>
+          <Settings size={15} /> Options…
+        </button>
+      </AppMenuScreenRows>
       {dialog && <MapOptionsDialog asset={asset} assets={assets} onSave={(m, ids) => onSaveMapOptions(m, ids)} onClose={() => setDialog(false)} />}
     </>
   );
@@ -21944,7 +22263,7 @@ function MapOptionsOnlyMenu({ canEdit, asset, assets, menuSlot, onSaveMapOptions
 function MapTabContent({
   canEdit, assets, typesList, typeLabels, scopeAsset,
   uploadBusy, uploadError, onUploadPlan, onSaveLink, onCreateRoom, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveMapOptions,
-  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onShowOnMap, onStartPlace, onFocusHandled, onOpenAsset, onOpenTask, onOpenWork, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange, listMode, onListModeChange, listFilters, onListFiltersChange, selectionMemoRef, returnScrollRef,
+  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onShowOnMap, onStartPlace, onFocusHandled, onOpenAsset, onOpenTask, onOpenWork, onNavigateToPlan, query, menuTitle, onSelectedPlaceChange, listMode, onListModeChange, listFilters, onListFiltersChange, selectionMemoRef, returnScrollRef,
 }) {
   if (!scopeAsset) {
     return (
@@ -21961,7 +22280,7 @@ function MapTabContent({
         <p style={{ margin: 0, fontSize: 14, color: C.empty }}>
           {typeNameOf(scopeAsset.type, typesList)} assets don't carry a floor plan. Open a place that does from the Assets tab, then use its "Show on map" button.
         </p>
-        <MapOptionsOnlyMenu canEdit={canEdit} asset={scopeAsset} assets={assets} menuSlot={menuSlot} onSaveMapOptions={onSaveMapOptions} />
+        <MapOptionsOnlyMenu canEdit={canEdit} asset={scopeAsset} assets={assets} typesList={typesList} title={menuTitle} onSaveMapOptions={onSaveMapOptions} />
       </div>
     );
   }
@@ -21998,7 +22317,7 @@ function MapTabContent({
       onOpenWork={onOpenWork}
       onNavigateToPlan={onNavigateToPlan}
       query={query}
-      menuSlot={menuSlot}
+      menuTitle={menuTitle}
       onSelectedPlaceChange={onSelectedPlaceChange}
       listMode={listMode}
       onListModeChange={onListModeChange}
@@ -22029,7 +22348,7 @@ function FloorPlanTabContent({
   canEdit, selectedAsset, assets, typesList, typeLabels,
   uploadBusy, uploadError, onUploadPlan,
   onSaveLink, onCreateRoom, onSaveGroup, onDeleteGroup, onSaveWall, onUnlinkWall, onRotate, onSaveMapOptions,
-  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onShowOnMap, onStartPlace, onFocusHandled, onOpenAsset, onOpenTask, onOpenWork, onNavigateToPlan, query, menuSlot, onSelectedPlaceChange, listMode: listModeProp, onListModeChange, listFilters: listFiltersProp, onListFiltersChange, selectionMemoRef, returnScrollRef,
+  focusShapeId, selectShapeId, onSelectHandled, focusPinId, placing, onPlace, onClearPin, onShowOnMap, onStartPlace, onFocusHandled, onOpenAsset, onOpenTask, onOpenWork, onNavigateToPlan, query, menuTitle, onSelectedPlaceChange, listMode: listModeProp, onListModeChange, listFilters: listFiltersProp, onListFiltersChange, selectionMemoRef, returnScrollRef,
 }) {
   const rawPlan = useFloorPlanSvg(selectedAsset.floorPlanUrl);
   // Rotation is stored on the asset (floorPlanRotation, quarter turns, blank = 0)
@@ -22101,16 +22420,11 @@ function FloorPlanTabContent({
   const [freeZoom, setFreeZoom] = useState(false);
   const fittedForRef = useRef(null); // which plan's spaces this has already auto-fitted to
   // Link & group / Free zoom / Replace used to be three always-visible
-  // buttons below the map -- chrome paid on every visit for actions most
-  // visits don't need, the exact complaint the Assets/Maintenance/Audit
-  // hamburgers were built to answer. Folded into the identical menu pattern
-  // (Menu icon, absolute dropdown, click-outside overlay) rather than lifted
-  // into that SHARED showToolbarMenu state: this component owns setupTab,
-  // freeZoom and the file input already, and threading three more callbacks
-  // up through AssetTracker to drive a menu that only ever opens THIS
-  // component's own state would be the prop-drilling BreakersTabContent's
-  // extraction was meant to avoid, not a step toward it.
-  const [menuOpen, setMenuOpen] = useState(false);
+  // buttons below the map. They are rows in the header's one menu now, drawn
+  // there from HERE (AppMenuScreenRows) because this component owns setupTab,
+  // freeZoom and the file input -- threading them up through AssetTracker
+  // would be the prop-drilling BreakersTabContent's extraction avoided.
+  const appMenu = useContext(AppMenuContext);
   const [configOpen, setConfigOpen] = useState(false);   // Configure accordion in the menu
   // Which pins are drawn: "none", "all", or "types" (only the asset types in
   // pinTypes). View only, never saved -- the same footing the old Show/Hide
@@ -22118,6 +22432,8 @@ function FloorPlanTabContent({
   const [pinMode, setPinMode] = useState("none");
   const [pinTypes, setPinTypes] = useState([]);
   const [pinsOpen, setPinsOpen] = useState(false);       // Pins accordion in the menu
+  // The menu opens folded every time, as it did when it was this component's own.
+  useEffect(() => { if (!appMenu.slot) { setConfigOpen(false); setPinsOpen(false); } }, [appMenu.slot]);
   const [pinGroupsOpen, setPinGroupsOpen] = useState([]); // label headings expanded inside it
   const pinTypeShown = t => pinMode === "all" || (pinMode === "types" && pinTypes.includes(t));
   // Every change to the filter drops the info card if its pin just went away,
@@ -22875,7 +23191,7 @@ function FloorPlanTabContent({
   if (!selectedAsset.floorPlanUrl) {
     return (
       <div className="card" style={{ padding: 18 }}>
-        <MapOptionsOnlyMenu canEdit={canEdit} asset={selectedAsset} assets={assets} menuSlot={menuSlot} onSaveMapOptions={onSaveMapOptions} />
+        <MapOptionsOnlyMenu canEdit={canEdit} asset={selectedAsset} assets={assets} typesList={typesList} title={menuTitle} onSaveMapOptions={onSaveMapOptions} />
         <p style={{ margin: "0 0 10px", fontSize: 14, color: C.ink }}>No floor plan uploaded yet.</p>
         <p style={{ margin: "0 0 14px", fontSize: 13, color: C.empty }}>
           Upload an SVG export (from Visio or similar) with its rooms drawn as named Space shapes,
@@ -23463,26 +23779,11 @@ function FloorPlanTabContent({
         </svg>
       </div>
 
-      {/* ---------- actions menu: drawn into the header row (menuSlot),
-          beside the search icon, the way Assets/Tasks/Audit carry theirs.
-          It used to sit below the map at the lower left. Portalled so its
-          state (setupTab, freeZoom, the file input) stays in this component.
-          ---------- */}
-      {menuSlot && createPortal(
-      <div style={{ position: "relative", flexShrink: 0 }}>
-        <button
-          type="button"
-          onClick={() => setMenuOpen(v => !v)}
-          aria-label="Floor plan actions"
-          className="icon-btn"
-          style={{ background: "none", border: "none", padding: 8, borderRadius: 8, color: C.brandDark, display: "flex" }}
-        >
-          <Menu size={18} />
-        </button>
-        {menuOpen && (
-          <>
-            <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
-            <div style={{ position: "absolute", right: 0, top: "100%", marginTop: 6, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, minWidth: 190, overflow: "hidden", padding: 4 }}>
+      {/* ---------- this screen's rows in the header's one menu
+          (AppMenuContext). Portalled so their state (setupTab, freeZoom, the
+          file input) stays in this component; they were a ☰ of their own in
+          the tab row until 2026-10-10. ---------- */}
+      <AppMenuScreenRows title={`${menuTitle || "Floor plan"} · ${nameOf(selectedAsset, typesList)}`}>
               {/* Configure holds the setup actions, opened in place beneath it
                   (an accordion, like the panel menu -- a flyout has nowhere
                   to go on a phone). Link & group is hidden while already in
@@ -23504,7 +23805,7 @@ function FloorPlanTabContent({
                       {!setupTab && (
                         <button
                           type="button"
-                          onClick={() => { setMenuOpen(false); setConfigOpen(false); setSetupTab("link"); }}
+                          onClick={() => { appMenu.close(); setConfigOpen(false); setSetupTab("link"); }}
                           className="icon-btn"
                           style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
                         >
@@ -23514,7 +23815,7 @@ function FloorPlanTabContent({
                       {!setupTab && (
                         <button
                           type="button"
-                          onClick={() => { setMenuOpen(false); setConfigOpen(false); setSetupTab("wall"); }}
+                          onClick={() => { appMenu.close(); setConfigOpen(false); setSetupTab("wall"); }}
                           className="icon-btn"
                           style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
                         >
@@ -23524,7 +23825,7 @@ function FloorPlanTabContent({
                       {onSaveMapOptions && (
                         <button
                           type="button"
-                          onClick={() => { setMenuOpen(false); setConfigOpen(false); setOptionsOpen(true); }}
+                          onClick={() => { appMenu.close(); setConfigOpen(false); setOptionsOpen(true); }}
                           className="icon-btn"
                           style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
                         >
@@ -23534,7 +23835,7 @@ function FloorPlanTabContent({
                       {onRotate && (
                         <button
                           type="button"
-                          onClick={() => { setMenuOpen(false); setConfigOpen(false); onRotate(); }}
+                          onClick={() => { appMenu.close(); setConfigOpen(false); onRotate(); }}
                           className="icon-btn"
                           style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
                         >
@@ -23544,7 +23845,7 @@ function FloorPlanTabContent({
                       <button
                         type="button"
                         disabled={uploadBusy}
-                        onClick={() => { setMenuOpen(false); setConfigOpen(false); fileInputRef.current && fileInputRef.current.click(); }}
+                        onClick={() => { appMenu.close(); setConfigOpen(false); fileInputRef.current && fileInputRef.current.click(); }}
                         className="icon-btn"
                         style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6, opacity: uploadBusy ? 0.6 : 1 }}
                       >
@@ -23556,7 +23857,7 @@ function FloorPlanTabContent({
               )}
               <button
                 type="button"
-                onClick={() => { setMenuOpen(false); setFreeZoom(z => !z); }}
+                onClick={() => { appMenu.close(); setFreeZoom(z => !z); }}
                 className="icon-btn"
                 style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 }}
               >
@@ -23591,11 +23892,11 @@ function FloorPlanTabContent({
                 return (
                   <div style={{ paddingLeft: 14 }}>
                     <button type="button" className="icon-btn" style={rowStyle}
-                      onClick={() => { setMenuOpen(false); setPinsOpen(false); applyPinFilter("all", []); }}>
+                      onClick={() => { appMenu.close(); setPinsOpen(false); applyPinFilter("all", []); }}>
                       {tick(pinMode === "all")} All pins
                     </button>
                     <button type="button" className="icon-btn" style={rowStyle}
-                      onClick={() => { setMenuOpen(false); setPinsOpen(false); applyPinFilter("none", []); }}>
+                      onClick={() => { appMenu.close(); setPinsOpen(false); applyPinFilter("none", []); }}>
                       {tick(pinMode === "none")} No pins
                     </button>
                     {planTypes.length > 0 && (
@@ -23663,11 +23964,7 @@ function FloorPlanTabContent({
                   </div>
                 );
               })()}
-            </div>
-          </>
-        )}
-      </div>
-      , menuSlot)}
+      </AppMenuScreenRows>
       {optionsOpen && (
         <MapOptionsDialog asset={selectedAsset} assets={assets}
           onSave={(m, ids) => onSaveMapOptions(m, ids)} onClose={() => setOptionsOpen(false)} />
@@ -24731,7 +25028,7 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
   // rAF doesn't fire while the page isn't compositing, so a user who clicked and
   // immediately switched tabs would get no print dialog at all until they came
   // back. A timer fires either way.
-  const [panelMenuOpen, setPanelMenuOpen] = useState(false);
+  const appMenu = useContext(AppMenuContext);
   // Which group of the actions menu is expanded ("print" | "io"), reset every
   // time the menu opens so it always opens folded.
   const [panelSubmenu, setPanelSubmenu] = useState(null);
@@ -24761,15 +25058,15 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
     el.classList.remove("measuring");
     setPrintPageHeightIn(h);
   }
-  function togglePanelMenu() {
+  // The header menu opening is what measures the card (and folds the groups),
+  // so the print rows quote the size that will actually print.
+  useEffect(() => {
+    if (!appMenu.slot) return;
     setPanelSubmenu(null);
-    setPanelMenuOpen(open => {
-      if (!open) measureCard();
-      return !open;
-    });
-  }
+    measureCard();
+  }, [appMenu.slot]);
   function runPrint(mode) {
-    setPanelMenuOpen(false);
+    appMenu.close();
     measureCard();
     setPrintMode(mode);
     setPrintRequest(n => n + 1);
@@ -24924,90 +25221,74 @@ function PanelDiagram({ slotCount, layout, breakers, unassignedCircuits, allAsse
             </button>
           ))}
         </div>
-        {/* EVERY panel action lives in this one menu (2026-09-29): configure,
-            copy link, QR sticker, the two door-card prints, and the schedule
-            export/import. They used to be four bare icons beside the title,
-            which on a phone wrapped under it and read as decoration. Reads
-            (link, sticker, print, export) are offered to viewers — someone
-            standing at the panel is exactly who needs them; the two writes are
-            not. The print rows keep their geometry hints (behind a help icon), and opening the menu
-            measures the card so the quoted size is the size that prints. */}
-        <div style={{ position: "relative", display: "flex" }}>
-          <button onClick={togglePanelMenu} className="icon-btn" style={{ background: "none", border: "none", padding: 5, borderRadius: 6, display: "flex", alignItems: "center", color: C.ink }} aria-label="Panel actions" aria-expanded={panelMenuOpen}>
-            <Menu size={18} />
-          </button>
-          {panelMenuOpen && (
-            <>
-              <div onClick={() => setPanelMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
-              <div style={{ position: "absolute", top: "100%", right: 0, marginTop: 4, zIndex: 41, background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 10, boxShadow: "0 4px 12px rgba(42,52,57,0.15)", minWidth: 260, overflow: "hidden" }}>
-                {(() => {
-                  // Two levels: the top rows are single words with no hints, and
-                  // Print and Import/Export open their options IN PLACE beneath
-                  // them (an accordion, not a flyout — a flyout has nowhere to go
-                  // on a phone). A group left with one option for this user — a
-                  // viewer's Import/Export is only Export — is shown as that option
-                  // rather than as a group, since a tap that reveals one row is a
-                  // wasted tap.
-                  const groups = [
-                    canEdit && { key: "configure", icon: Settings, title: "Configure panel", run: onReconfigure },
-                    // The catalog is shared by every panel, and was only reachable
-                    // from inside the Add Breaker form -- i.e. by starting to add a
-                    // breaker you did not want, to fix a type you did.
-                    canEdit && onManageBreakerTypes && { key: "types", icon: Zap, title: "Manage breaker types", run: onManageBreakerTypes },
-                    { key: "link", icon: Copy, title: "Copy link", run: copyPanelLink },
-                    { key: "print", icon: Printer, title: "Print", children: [
-                      { key: "qr", title: "QR sticker", run: openPanelQrSheet },
-                      { key: "exact", title: "Directory at panel size", hint: `${LEGEND_WIDTH_IN}" × ${Math.max(slotCount * LEGEND_ROW_IN + LEGEND_BAND_IN * 2, printPageHeightIn || 0).toFixed(1)}", one page. Save as PDF.`, run: () => runPrint("exact") },
-                      { key: "tiled", title: "Directory on letter pages", hint: "Cut and tape end-to-end.", run: () => runPrint("tiled") },
-                    ] },
-                    { key: "io", icon: FileText, title: "Import / Export", children: [
-                      onExportSchedule && { key: "export", icon: Download, title: "Export schedule", run: onExportSchedule },
-                      canEdit && onImportSchedule && { key: "import", icon: Upload, title: "Import schedule…", hint: "Replaces this panel's layout.", run: onImportSchedule },
-                    ].filter(Boolean) },
-                  ].filter(Boolean)
-                    .map(g => (g.children && g.children.length === 1 ? { ...g.children[0], icon: g.children[0].icon || g.icon, hint: undefined } : g))
-                    .filter(g => !g.children || g.children.length);
-                  const rowStyle = (i, indent) => ({
-                    display: "flex", gap: 10, alignItems: "center", width: "100%", textAlign: "left",
-                    padding: indent ? "8px 12px 8px 37px" : "10px 12px", background: indent ? C.bg : "none",
-                    border: "none", borderTop: i > 0 ? `1px solid ${C.border}` : "none",
-                  });
-                  const rows = [];
-                  groups.forEach(g => {
-                    const Icon = g.icon;
-                    const open = panelSubmenu === g.key;
-                    rows.push(
-                      <button
-                        key={g.key} type="button" aria-expanded={g.children ? open : undefined}
-                        onClick={() => {
-                          if (g.children) { setPanelSubmenu(open ? null : g.key); return; }
-                          setPanelMenuOpen(false); g.run();
-                        }}
-                        style={rowStyle(rows.length, false)}
-                      >
-                        <Icon size={15} color={C.muted} style={{ flexShrink: 0 }} />
-                        <span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: C.ink }}>{g.title}</span>
-                        {g.children && (open ? <ChevronDown size={15} color={C.muted} /> : <ChevronRight size={15} color={C.muted} />)}
-                      </button>
-                    );
-                    if (g.children && open) {
-                      g.children.forEach(c => rows.push(
-                        <div key={c.key} style={{ ...rowStyle(rows.length, true), padding: 0 }}>
-                          <button type="button" onClick={() => { setPanelMenuOpen(false); c.run(); }}
-                            style={{ flex: 1, minWidth: 0, textAlign: "left", padding: "8px 12px 8px 37px", background: "none", border: "none", fontSize: 13, color: C.ink }}>
-                            {c.title}
-                          </button>
-                          {c.hint && <span style={{ paddingRight: 12, display: "flex" }}><HelpTip label={`About ${c.title}`} text={c.hint} /></span>}
-                        </div>
-                      ));
-                    }
-                  });
-                  return rows;
-                })()}
-              </div>
-            </>
-          )}
-        </div>
+        {/* EVERY panel action is a row in the header's one menu (2026-10-10;
+            it was this panel's own ☰ until then): configure, breaker types,
+            copy link, print, and the schedule export/import. Reads (link,
+            sticker, print, export) are offered to viewers — someone standing
+            at the panel is exactly who needs them; the writes are not. Print
+            and Import / Export open their options IN PLACE (an accordion; a
+            flyout has nowhere to go on a phone), and a group left with one
+            option for this user is shown as that option. The menu opening is
+            what measures the card, so the quoted size is the size that prints. */}
+        {(() => {
+          const groups = [
+            canEdit && { key: "configure", icon: Settings, title: "Configure panel", run: onReconfigure },
+            // The catalog is shared by every panel, and was only reachable
+            // from inside the Add Breaker form -- i.e. by starting to add a
+            // breaker you did not want, to fix a type you did.
+            canEdit && onManageBreakerTypes && { key: "types", icon: Zap, title: "Manage breaker types", run: onManageBreakerTypes },
+            { key: "link", icon: Copy, title: "Copy link", run: copyPanelLink },
+            { key: "print", icon: Printer, title: "Print", children: [
+              { key: "qr", title: "QR sticker", run: openPanelQrSheet },
+              { key: "exact", title: "Directory at panel size", hint: `${LEGEND_WIDTH_IN}" × ${Math.max(slotCount * LEGEND_ROW_IN + LEGEND_BAND_IN * 2, printPageHeightIn || 0).toFixed(1)}", one page. Save as PDF.`, run: () => runPrint("exact") },
+              { key: "tiled", title: "Directory on letter pages", hint: "Cut and tape end-to-end.", run: () => runPrint("tiled") },
+            ] },
+            { key: "io", icon: FileText, title: "Import / Export", children: [
+              onExportSchedule && { key: "export", icon: Download, title: "Export schedule", run: onExportSchedule },
+              canEdit && onImportSchedule && { key: "import", icon: Upload, title: "Import schedule…", hint: "Replaces this panel's layout.", run: onImportSchedule },
+            ].filter(Boolean) },
+          ].filter(Boolean)
+            .map(g => (g.children && g.children.length === 1 ? { ...g.children[0], icon: g.children[0].icon || g.icon, hint: undefined } : g))
+            .filter(g => !g.children || g.children.length);
+          return (
+            <AppMenuScreenRows title={`Panel ${panelAsset ? nameOf(panelAsset) : panelLabel}`}>
+              {groups.map(g => {
+                const Icon = g.icon;
+                const open = panelSubmenu === g.key;
+                return (
+                  <React.Fragment key={g.key}>
+                    <button
+                      type="button" aria-expanded={g.children ? open : undefined}
+                      onClick={() => {
+                        if (g.children) { setPanelSubmenu(open ? null : g.key); return; }
+                        appMenu.close(); g.run();
+                      }}
+                      className="icon-btn"
+                      style={APP_MENU_ROW}
+                    >
+                      <Icon size={15} style={{ flexShrink: 0 }} />
+                      <span style={{ flex: 1 }}>{g.title}</span>
+                      {g.children && <ChevronDown size={14} style={{ transform: open ? "rotate(180deg)" : "none" }} />}
+                    </button>
+                    {g.children && open && (
+                      <div style={{ paddingLeft: 14 }}>
+                        {g.children.map(c => (
+                          <div key={c.key} style={{ display: "flex", alignItems: "center", paddingRight: 8 }}>
+                            <button type="button" onClick={() => { appMenu.close(); c.run(); }} className="icon-btn"
+                              style={{ ...APP_MENU_ROW, flex: 1, minWidth: 0, width: undefined }}>
+                              {c.title}
+                            </button>
+                            {c.hint && <HelpTip label={`About ${c.title}`} text={c.hint} />}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </React.Fragment>
+                );
+              })}
+            </AppMenuScreenRows>
+          );
+        })()}
         </div>
       </div>
       {parityWarnings.length > 0 && (

@@ -1676,6 +1676,37 @@ onboard one.
   the one thing that lived there besides the count (clearing an active sort) moved to a small ×
   chip next to the sort arrow on the sorted column's own header; on Maintenance, the overdue
   count that lived there is now a standalone badge above the table.
+- **ONE MENU, top right, and one Settings page** (2026-10-10; plan at
+  `/mnt/project-files/plans/single-menu.md`). The header ☰ replaced the account button,
+  the tab row's ☰ and the panel Layout's ☰. Several passages below describe those older
+  menus; their reasoning still holds, but this is where the controls now live.
+  - **The menu is three parts: this screen's rows, Settings, then You** (identity, Set
+    name, Enter sandbox, Name format, About, Sign out). A screen contributes its rows by
+    portalling them into a slot the menu card renders: `AppMenuContext` holds `{ slot,
+    close }` and `AppMenuScreenRows` portals a titled section into it. That is the map's
+    old shared-slot pattern, generalised — so the map, the floor plan tab and the panel
+    Layout tab keep their own state and handlers and only their rows moved. A screen with
+    nothing to offer renders nothing, and the heading disappears with it.
+  - **Settings is a full-screen overlay** (zIndex 25: above the headers and the menu,
+    below every dialog, so a manager's own pickers still stack over it), with sections
+    from `SETTINGS_SECTIONS`: Types & fields, Relationships, Lists, Electrical, Access,
+    Personal, About & diagnostics. Editors see all of them; viewers see Personal and
+    About only, the editor sections HIDDEN rather than greyed out.
+  - **It is in the address bar** (`?settings=<section>`, a PUSHED history entry carrying
+    `settings: true`), so a setting can be linked and phone Back closes it. The popstate
+    handler checks it FIRST, before any asset navigation. An unknown section opens the
+    section list rather than refusing.
+  - **Each section reuses the existing manager's body**, through `ManagerFrame` — a modal
+    when opened from a field's gear, an embedded card on the Settings page. **The field
+    gears were kept as shortcuts** and open the same code in place, mid-form, which is
+    when someone needs to add a vendor.
+  - **Columns is split.** Which columns are SHOWN (per-device) stays in the Assets screen
+    rows; adding or deleting a custom column changes data and moved to Types & fields.
+    The delete confirmation (`deleteColumnModal`) renders from both views for that reason.
+  - **The panel menu's door-card measurement now runs when the header menu opens** on the
+    Layout tab, so the quoted size is still the size that prints.
+  - Live refresh is held while Settings is open (it is a fixed inset overlay), which is
+    correct: a manager is a draft.
 - **The header's account controls are one dropdown, and About is where the app names its
   own version** (2026-08-26). The top-right used to carry four separate controls beside the
   Sandbox pill — the name/identity tag, an `Access` link, a `View only` badge, `Sign out`.
