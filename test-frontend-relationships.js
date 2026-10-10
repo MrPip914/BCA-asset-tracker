@@ -53,7 +53,7 @@ new Function('module', [
   grabFn('ancestorsOf'),
   grabBlock('// ---------- RELATIONSHIP QUERIES ----------', "// The Rooms/Devices/Bulk-Items listing"),
   grabFn('availableTabsFor').replace(/\.\.\.\(typeHasFloorPlan[^\n]*\n/, '').replace(/\.\.\.modulesFor\(type\),/, ''),
-  'module.exports = { runRelationshipQuery, relationshipQueriesFor, relationshipQueriesShownFor, relationshipFieldOptions, relationshipStepSourceTypes, referenceTargetTypes, availableTabsFor, setTypeSettings: s => { TYPE_SETTINGS = s; } };',
+  'module.exports = { runRelationshipQuery, relationshipQueriesFor, relationshipQueriesShownFor, relationshipFieldOptions, relationshipStepSourceTypes, allRelationshipQueries, relationshipQueriesToTypeSettings, builtInContentsQueryFor, referenceTargetTypes, availableTabsFor, setTypeSettings: s => { TYPE_SETTINGS = s; } };',
 ].join('\n'))(mod);
 const R = mod.exports;
 
@@ -154,14 +154,36 @@ check('…and not for a type with neither', !R.availableTabsFor('Monitor').inclu
 // --- wiring (read as source) ----------------------------------------------------------
 const saveSrc = grabFn('saveTypeSettings');
 check('the type editor\'s save CARRIES the stored queries (it rebuilds the whole settings object)',
-  /relationshipQueries:\s*draft\.relationshipQueries\s*\|\|\s*\(typeSettings\[id\]\s*\|\|\s*\{\}\)\.relationshipQueries/.test(saveSrc));
+  /relationshipQueries:\s*\(typeSettings\[id\]\s*\|\|\s*\{\}\)\.relationshipQueries/.test(saveSrc) && !/draft\.relationshipQueries/.test(saveSrc));
 check('reset keeps a type\'s queries', /keptQueries/.test(grabFn('resetTypeSettings')));
-check('the tab\'s own save merges into the stored override',
-  /\.\.\.\(typeSettings\[id\] \|\| \{\}\), relationshipQueries: queries/.test(grabFn('saveRelationshipQueries')));
+check('the settings save writes through the per-type mirror (not a new Config key)',
+  /relationshipQueriesToTypeSettings\(typeSettings, queries/.test(grabFn('saveRelationshipQueries')));
 const mockStart = src.indexOf('const MOCK_SNAPSHOT = {');
 const mock = src.slice(mockStart, src.indexOf('\n};', mockStart));
 check('the Sandbox fixture carries a reverse-field query and the field it follows',
   /follow: "refIn"[^}]*fieldKey: "controls"/.test(mock) && /key: "controls"[^}]*dataType: "reference"/.test(mock) && /controls: "BCA0086"/.test(mock));
+
+// --- queries listed first, types assigned (2026-10-10) --------------------------------
+const shared = { id: 'shared', name: 'Shared', steps: [S('children')], includeArchived: false, hideWhenEmpty: false };
+R.setTypeSettings({
+  Computer: { relationshipQueries: [shared, { id: 'only', name: 'Only', steps: [S('parent')] }] },
+  Monitor: { relationshipQueries: [{ ...shared, name: 'Hand-edited copy' }], iconName: 'X' },
+});
+const all = R.allRelationshipQueries(['Computer', 'Monitor', 'Room']);
+check('one query stored under two types is ONE query naming both',
+  all.length === 2 && JSON.stringify(all.find(q => q.id === 'shared').typeIds) === JSON.stringify(['Computer', 'Monitor']));
+check('the first copy is the definition when copies disagree', all.find(q => q.id === 'shared').name === 'Shared');
+const wrote = R.relationshipQueriesToTypeSettings(
+  { Computer: { relationshipQueries: [shared] }, Monitor: { relationshipQueries: [shared], iconName: 'X' }, Room: { iconName: 'R' } },
+  [{ ...shared, typeIds: ['Monitor', 'Room'] }], ['Computer', 'Monitor', 'Room']);
+check('reassigning writes the query under each named type',
+  wrote.Monitor.relationshipQueries[0].id === 'shared' && wrote.Room.relationshipQueries[0].id === 'shared');
+check('…and takes it off a type no longer named, deleting an override that held only it', !('Computer' in wrote));
+check('…keeping the rest of a type\'s override', wrote.Monitor.iconName === 'X' && wrote.Room.iconName === 'R');
+check('the stored copy carries no typeIds (the connector\'s shape is unchanged)', !('typeIds' in wrote.Monitor.relationshipQueries[0]));
+check('Contents lists the place types it applies to', JSON.stringify(R.builtInContentsQueryFor(['Computer', 'Room', 'Building']).typeIds) === JSON.stringify(['Room', 'Building']));
+check('a step\'s source types accept a list of owner types',
+  JSON.stringify(R.relationshipStepSourceTypes(['Room', 'Building'], [S('children')], 0, columns)) === JSON.stringify(['Room', 'Building']));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
