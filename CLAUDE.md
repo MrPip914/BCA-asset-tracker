@@ -3835,6 +3835,10 @@ SEGMENTS of a plan space's outline, selected on the map as ONE thing the way a R
   segments on it in the wall colour — tapping one opens that
   wall while nothing has been changed. While a wall is being worked on the spaces are inert (no
   hover, no tap) and a tap on empty map does nothing.
+- **Tapping a wall that is already on screen leaves the view alone** (2026-10-10). Re-framing
+  a long thin wall zoomed OUT, and selections then framed differently depending on the view
+  they started from. `zoomToBbox` now measures "keep the current zoom" against the whole-plan
+  fit when the current view is wider than it, so the same space always lands the same way.
 - **Filing assets under a wall needs the type to allow it**: the type editor's "Can sit
   inside" must name Wall. Only `Other` ships doing so; the rest are the school's to tick.
 - **The Floor Plan count badge excludes segment rows** (`floorPlanIsSegmentId`) so walls do not
