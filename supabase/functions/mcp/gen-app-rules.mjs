@@ -81,6 +81,7 @@ const PIECES = [
   ["const DEFAULT_COLUMN_DATA_TYPES = {", "\n};"],
   "columnDataType",
   "columnOptions",
+  "columnReferenceTypes",
   "validateColumnValue",
   ["const DEFAULT_COLUMNS = [", "custom: false }));"],
   ["const RENAMED_COLUMN_KEYS", ";"],
@@ -102,6 +103,18 @@ const PIECES = [
   "splitImportPeople",
   "describeImportAsset",
   "planAssetImport",
+  // Relationship queries (the Relationships tab), run by get_relationships.
+  ["const RELATIONSHIP_MAX_STEPS", ";"],
+  ["const RELATIONSHIP_FOLLOWS = [", "\n];"],
+  "relationshipFollowMeta",
+  ["const BUILT_IN_CONTENTS_QUERY = {", "\n};"],
+  "referenceTargetTypes",
+  "referenceColumns",
+  "relationshipQueriesFor",
+  "relationshipQueriesShownFor",
+  "relationshipIndex",
+  "relationshipStepTargets",
+  "runRelationshipQuery",
 ];
 
 const EXPORTS = [
@@ -112,6 +125,8 @@ const EXPORTS = [
   "columnDataType", "columnOptions", "validateColumnValue", "DEFAULT_COLUMNS", "RENAMED_COLUMN_KEYS",
   "RETIRED_COLUMN_KEYS", "IMPORT_KEY_HEADER", "importHeadersFor", "planAssetImport", "PATH_SEPARATOR",
   "assetToImportRow", "resolveImportType", "isLockedType", "nearestAncestorOfType",
+  "columnReferenceTypes", "referenceColumns", "RELATIONSHIP_FOLLOWS", "relationshipFollowMeta",
+  "relationshipQueriesFor", "relationshipQueriesShownFor", "runRelationshipQuery",
 ];
 
 function grabber(src) {

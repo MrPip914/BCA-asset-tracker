@@ -531,6 +531,11 @@ function columnOptions(col) {
   return Array.isArray(col?.options) ? col.options.filter(o => String(o).trim() !== "") : [];
 }
 
+function columnReferenceTypes(col) {
+  if (Array.isArray(col?.referenceTypes)) return col.referenceTypes.filter(Boolean);
+  return col?.referenceType ? [col.referenceType] : [];
+}
+
 function validateColumnValue(col, raw) {
   const value = typeof raw === "string" ? raw.trim() : raw;
   if (value === "" || value === null || value === undefined) return "";
@@ -1148,7 +1153,177 @@ function planAssetImport(parsed, ctx) {
   return plan;
 }
 
+const RELATIONSHIP_MAX_STEPS = 3;
+
+const RELATIONSHIP_FOLLOWS = [
+  { value: "children", label: "Directly inside it" },
+  { value: "descendants", label: "Anywhere inside it" },
+  { value: "parent", label: "What it sits in" },
+  { value: "nearest", label: "The nearest … above it", needsType: true },
+  { value: "refOut", label: "What its field points to", field: true },
+  { value: "refIn", label: "What points to it through a field", field: true },
+  { value: "users", label: "Its users" },
+  { value: "usedBy", label: "What this person uses" },
+];
+
+function relationshipFollowMeta(follow) {
+  return RELATIONSHIP_FOLLOWS.find(f => f.value === follow) || RELATIONSHIP_FOLLOWS[0];
+}
+
+const BUILT_IN_CONTENTS_QUERY = {
+  id: "builtin-contents", name: "Contents", builtIn: true,
+  steps: [{ follow: "descendants", typeIds: [], fieldKey: "", show: true }],
+  includeArchived: false, hideWhenEmpty: false,
+};
+
+function referenceTargetTypes(col) {
+  if (!col) return [];
+  if (Array.isArray(col.referenceTypes) && col.referenceTypes.length) return col.referenceTypes.filter(Boolean);
+  return col.referenceType ? [col.referenceType] : [];
+}
+
+function referenceColumns(columns) {
+  return (columns || []).filter(c => c && c.key && columnDataType(c) === "reference");
+}
+
+function relationshipQueriesFor(type) {
+  const raw = (typeEntryFor(type) || {}).relationshipQueries;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(q => q && q.id).map(q => ({
+    id: q.id,
+    name: String(q.name || "").trim() || "Untitled",
+    steps: (Array.isArray(q.steps) ? q.steps : []).filter(s => s && RELATIONSHIP_FOLLOWS.some(f => f.value === s.follow)
+      && (!relationshipFollowMeta(s.follow).field || s.fieldKey)).slice(0, RELATIONSHIP_MAX_STEPS)
+      .map(s => ({ follow: s.follow, typeIds: Array.isArray(s.typeIds) ? s.typeIds.filter(Boolean) : [], fieldKey: s.fieldKey || "", show: s.show !== false })),
+    includeArchived: !!q.includeArchived,
+    hideWhenEmpty: !!q.hideWhenEmpty,
+  })).filter(q => q.steps.length > 0);
+}
+
+function relationshipQueriesShownFor(type) {
+  return [...(isPlaceType(type) ? [BUILT_IN_CONTENTS_QUERY] : []), ...relationshipQueriesFor(type)];
+}
+
+function relationshipIndex(assets, columns) {
+  const byId = new Map();
+  const children = new Map();
+  (assets || []).forEach(a => { if (a && a.id) byId.set(a.id, a); });
+  (assets || []).forEach(a => {
+    if (!a || !a.parentId) return;
+    if (!children.has(a.parentId)) children.set(a.parentId, []);
+    children.get(a.parentId).push(a);
+  });
+  const pointedAtBy = new Map(); // fieldKey -> (target id -> [assets])
+  const usedBy = new Map(); // person id -> [assets]
+  const refCols = referenceColumns(columns);
+  (assets || []).forEach(a => {
+    if (!a) return;
+    refCols.forEach(c => {
+      const v = a[c.key];
+      if (!v) return;
+      if (!pointedAtBy.has(c.key)) pointedAtBy.set(c.key, new Map());
+      const m = pointedAtBy.get(c.key);
+      if (!m.has(v)) m.set(v, []);
+      m.get(v).push(a);
+    });
+    personLabelsOf(a).forEach(pid => {
+      if (!usedBy.has(pid)) usedBy.set(pid, []);
+      usedBy.get(pid).push(a);
+    });
+  });
+  return { byId, children, pointedAtBy, usedBy };
+}
+
+function relationshipStepTargets(source, step, assets, index) {
+  switch (step.follow) {
+    case "children": return index.children.get(source.id) || [];
+    case "descendants": {
+      const out = [];
+      const seen = new Set([source.id]);
+      const queue = [...(index.children.get(source.id) || [])];
+      while (queue.length) {
+        const a = queue.shift();
+        if (seen.has(a.id)) continue;
+        seen.add(a.id);
+        out.push(a);
+        queue.push(...(index.children.get(a.id) || []));
+      }
+      return out;
+    }
+    case "parent": { const p = source.parentId ? index.byId.get(source.parentId) : null; return p ? [p] : []; }
+    case "nearest": {
+      const wanted = new Set(step.typeIds || []);
+      const found = ancestorsOf(source, assets).find(a => wanted.has(a.type));
+      return found ? [found] : [];
+    }
+    case "refOut": { const t = source[step.fieldKey] ? index.byId.get(source[step.fieldKey]) : null; return t ? [t] : []; }
+    case "refIn": return (index.pointedAtBy.get(step.fieldKey) || new Map()).get(source.id) || [];
+    case "users": return personLabelsOf(source).map(id => index.byId.get(id)).filter(Boolean);
+    case "usedBy": return index.usedBy.get(source.id) || [];
+    default: return [];
+  }
+}
+
+function runRelationshipQuery(asset, query, assets, columns, typesList) {
+  if (!asset || !query || !Array.isArray(query.steps) || !query.steps.length) return { nodes: [], count: 0 };
+  const index = relationshipIndex(assets, columns);
+  const shown = new Set();
+  const live = a => query.includeArchived || (a.status || "Active") !== "Archived";
+  const byName = (x, y) => nameOf(x, typesList).localeCompare(nameOf(y, typesList), undefined, { numeric: true, sensitivity: "base" });
+
+  // The children for `sources` from step `i` on, with `path` the ids above.
+  function expand(sources, i, path) {
+    if (i >= query.steps.length) return [];
+    const step = query.steps[i];
+    const filterTypes = step.follow === "nearest" ? null : new Set(step.typeIds || []);
+    const reached = [];
+    const reachedIds = new Set();
+    sources.forEach(src => {
+      relationshipStepTargets(src, step, assets, index).forEach(t => {
+        if (!t || reachedIds.has(t.id) || path.has(t.id) || t.id === asset.id) return;
+        if (filterTypes && filterTypes.size && !filterTypes.has(t.type)) return;
+        if (!live(t)) return;
+        reachedIds.add(t.id);
+        reached.push(t);
+      });
+    });
+    reached.sort(byName);
+    // A hidden step: walk through it, lifting what the next step finds.
+    if (!step.show) {
+      const lifted = [];
+      reached.forEach(t => {
+        const next = new Set(path); next.add(t.id);
+        expand([t], i + 1, next).forEach(n => lifted.push(n));
+      });
+      return lifted;
+    }
+    const fresh = reached.filter(t => !shown.has(t.id));
+    fresh.forEach(t => shown.add(t.id));
+    const nodeFor = t => {
+      const next = new Set(path); next.add(t.id);
+      return { asset: t, children: expand([t], i + 1, next) };
+    };
+    if (step.follow !== "descendants") return fresh.map(nodeFor);
+    // Nest by containment: a result goes under the nearest ancestor that is
+    // itself a result, else at the top.
+    const ids = new Set(fresh.map(t => t.id));
+    const nodes = new Map(fresh.map(t => [t.id, nodeFor(t)]));
+    const top = [];
+    fresh.forEach(t => {
+      const holder = ancestorsOf(t, assets).find(p => ids.has(p.id));
+      if (holder) nodes.get(holder.id).children.push(nodes.get(t.id));
+      else top.push(nodes.get(t.id));
+    });
+    // Nested results first, in name order; then what the next step found.
+    nodes.forEach(n => n.children.sort((x, y) => byName(x.asset, y.asset)));
+    return top;
+  }
+
+  const nodes = expand([asset], 0, new Set([asset.id]));
+  return { nodes, count: shown.size };
+}
+
 // Each tenant's asset-ID prefix, from clients.js.
 export const TENANT_LABEL_PREFIX = {"3c":"3C","bca":"BCA","dev":"BCA"};
 
-export { TYPE_REGISTRY, DEFAULT_TYPES, applyTypeSettings, adoptLegacyTypesList, ensureLockedTypes, typeNameOf, typeTakesParent, parentTypesFor, isPlaceType, fieldAppliesTo, isPersonType, personMatchKey, nameOf, personLabelsOf, personNamesOf, UNASSIGNED_LABEL, pathOf, fullPathOf, parentNameFor, relate, dateOnly, adoptPersonNames, adoptLegacyNames, columnDataType, columnOptions, validateColumnValue, DEFAULT_COLUMNS, RENAMED_COLUMN_KEYS, RETIRED_COLUMN_KEYS, IMPORT_KEY_HEADER, importHeadersFor, planAssetImport, PATH_SEPARATOR, assetToImportRow, resolveImportType, isLockedType, nearestAncestorOfType };
+export { TYPE_REGISTRY, DEFAULT_TYPES, applyTypeSettings, adoptLegacyTypesList, ensureLockedTypes, typeNameOf, typeTakesParent, parentTypesFor, isPlaceType, fieldAppliesTo, isPersonType, personMatchKey, nameOf, personLabelsOf, personNamesOf, UNASSIGNED_LABEL, pathOf, fullPathOf, parentNameFor, relate, dateOnly, adoptPersonNames, adoptLegacyNames, columnDataType, columnOptions, validateColumnValue, DEFAULT_COLUMNS, RENAMED_COLUMN_KEYS, RETIRED_COLUMN_KEYS, IMPORT_KEY_HEADER, importHeadersFor, planAssetImport, PATH_SEPARATOR, assetToImportRow, resolveImportType, isLockedType, nearestAncestorOfType, columnReferenceTypes, referenceColumns, RELATIONSHIP_FOLLOWS, relationshipFollowMeta, relationshipQueriesFor, relationshipQueriesShownFor, runRelationshipQuery };

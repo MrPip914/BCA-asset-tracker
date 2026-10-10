@@ -907,5 +907,127 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   }
 }
 
+// ---------------------------------------------------------------- reference fields and relationship queries
+
+{
+  // A site of its own, so the counts the tests above rely on stay put. A
+  // Thermostat's Controls field points at a Mini Split; a Mount's Holds field
+  // points at a TV OR a Monitor (referenceTypes); a Room has an "HVAC" query:
+  // the units in the room, then what controls each one.
+  SITES.rel = {
+    assets: [
+      A("bld", 0, null, { type: "Building", name: "Building 1" }),
+      A("rm", 1, "bld", { type: "Room", name: "Room 1" }),
+      A("rm2", 2, "bld", { type: "Room", name: "Room 2" }),
+      A("msA", 3, "rm", { type: "uuid-ms", name: "Unit A" }),
+      A("msB", 4, "rm", { type: "uuid-ms", name: "Unit B" }),
+      A("msC", 5, "rm2", { type: "uuid-ms", name: "Unit C" }),
+      A("msOld", 6, "rm2", { type: "uuid-ms", name: "Old unit", status: "Archived" }),
+      A("tA", 7, "rm", { type: "uuid-th", name: "Thermostat A", controls: "msA" }),
+      A("tB", 8, "rm", { type: "uuid-th", name: "Thermostat B", controls: "msB" }),
+      A("tv1", 9, "rm", { type: "TV", name: "Lobby TV" }),
+      A("mon1", 10, "rm", { type: "Monitor", name: "Desk Monitor" }),
+      A("mount1", 11, "rm", { type: "uuid-mount", name: "Wall mount" }),
+    ],
+    config: [
+      { key: "typesList", value: ["Building", "Room", "TV", "Monitor", { id: "uuid-ms", name: "Mini Split" }, { id: "uuid-th", name: "Thermostat" }, { id: "uuid-mount", name: "Mount" }] },
+      { key: "columns", value: [
+        { key: "controls", label: "Controls", custom: true, restricted: true, dataType: "reference", referenceType: "uuid-ms" },
+        { key: "holds", label: "Holds", custom: true, restricted: true, dataType: "reference", referenceTypes: ["TV", "Monitor"], referenceType: "TV" },
+      ] },
+      { key: "typeSettings", value: {
+        "uuid-th": { onlyFields: ["controls"], parentTypes: ["Room"] },
+        "uuid-mount": { onlyFields: ["holds"], parentTypes: ["Room"] },
+        Room: { relationshipQueries: [
+          { id: "q1", name: "HVAC", steps: [
+            { follow: "descendants", typeIds: ["uuid-ms"], show: true },
+            { follow: "refIn", fieldKey: "controls", typeIds: [], show: true },
+          ] },
+          { id: "q2", name: "Empty one", hideWhenEmpty: true, steps: [{ follow: "children", typeIds: ["Building"], show: true }] },
+        ] },
+      } },
+    ],
+    revisions: [{ domain: "assets", rev: 1 }, { domain: "config", rev: 1 }],
+  };
+  const REL = [{ id: "rel", name: "Relationships", role: "editor" }];
+  const rc = () => ctxFor(REL);
+
+  // Schema.
+  const sc = (await call("get_schema", {}, rc())).data;
+  const f = (n) => sc.fields.find((x) => x.field === n);
+  eq("schema: a Reference field says what it points at (old single referenceType)", f("Controls")?.pointsAt, ["Mini Split"]);
+  eq("schema: a Reference field allowed several types lists them all", f("Holds")?.pointsAt, ["TV", "Monitor"]);
+  check("schema: a field that is not a Reference carries no pointsAt", sc.fields.every((x) => x.field === "Controls" || x.field === "Holds" || x.pointsAt === undefined));
+  const room = sc.types.find((t) => t.name === "Room");
+  eq("schema: a place lists the built-in Contents query first, then its own",
+    room.relationshipQueries?.map((q) => q.name), ["Contents", "HVAC", "Empty one"]);
+  eq("schema: a query's steps are worded for reading, with the field and types named",
+    room.relationshipQueries?.[1]?.steps, [{ follow: "Anywhere inside it", types: ["Mini Split"] }, { follow: "What points to it through a field", field: "Controls" }]);
+  check("schema: a type with no queries says nothing about them", sc.types.find((t) => t.name === "Thermostat").relationshipQueries === undefined);
+
+  // get_relationships.
+  let r = await call("get_relationships", { asset: "Room 1", query: "HVAC" }, rc());
+  eq("get_relationships: units in the room, each with what controls it, as a tree",
+    r.data?.queries?.[0]?.results?.map((n) => [n.name, (n.children || []).map((c) => c.name)]),
+    [["Unit A", ["Thermostat A"]], ["Unit B", ["Thermostat B"]]]);
+  eq("get_relationships: counts every asset the tree shows", r.data?.queries?.[0]?.count, 4);
+  r = await call("get_relationships", { asset: "Room 1" }, rc());
+  eq("get_relationships: every query, and one that is empty and marked hide-when-empty is left out",
+    r.data?.queries?.map((q) => q.name), ["Contents", "HVAC"]);
+  r = await call("get_relationships", { asset: "Room 2", query: "HVAC" }, rc());
+  eq("get_relationships: an archived unit is not a result", r.data?.queries?.[0]?.results?.map((n) => n.name), ["Unit C"]);
+  r = await call("get_relationships", { asset: "Room 1", query: "Plumbing" }, rc());
+  check("get_relationships: an unknown query names the ones there are", r.isError && /HVAC/.test(r.text), r.text);
+  r = await call("get_relationships", { asset: "Thermostat A" }, rc());
+  check("get_relationships: a type with no queries says so", !r.isError && r.data.queries.length === 0 && /no relationship queries/.test(r.data.note), r.text);
+
+  // search_assets following a Reference in reverse.
+  r = await call("search_assets", { points_to: "Unit A" }, rc());
+  eq("search_assets points_to: what points at an asset through any Reference", r.data?.assets?.map((a) => a.name), ["Thermostat A"]);
+  r = await call("search_assets", { points_to: "Unit B", through_field: "controls" }, rc());
+  eq("search_assets points_to + through_field (by key)", r.data?.assets?.map((a) => a.name), ["Thermostat B"]);
+  r = await call("search_assets", { points_to: "Unit B", through_field: "Holds" }, rc());
+  eq("search_assets: a different field finds nothing", r.data?.total, 0);
+  r = await call("search_assets", { points_to: "Unit B", through_field: "Serial" }, rc());
+  check("search_assets: a field that is not a Reference is refused, naming the ones there are", r.isError && /Controls, Holds/.test(r.text), r.text);
+  r = await call("search_assets", { through_field: "Controls" }, rc());
+  check("search_assets: through_field alone is refused", r.isError);
+
+  // get_asset names the asset a Reference field holds.
+  r = await call("get_asset", { asset: "Thermostat A" }, rc());
+  eq("get_asset: a Reference field shows the asset's name and id", r.data?.fields?.Controls, "Unit A (msA)");
+
+  // save_assets: a Reference must name ONE asset of a type it points at.
+  let ctx = rc();
+  r = await call("save_assets", { rows: [{ asset: "tA", fields: { Controls: "Unit C" } }] }, ctx);
+  const op = ctx.writes.flatMap((w) => w.args[1]).find((o) => o.op === "asset_update");
+  check("save_assets: a Reference given by name is stored as the asset's id", !r.isError && op?.data?.controls === "msC", r.text);
+  ctx = rc();
+  r = await call("save_assets", { rows: [{ asset: "mount1", fields: { Holds: "Desk Monitor" } }] }, ctx);
+  check("save_assets: a field allowed several types accepts any of them", !r.isError && ctx.writes.length === 1, r.text);
+  ctx = rc();
+  r = await call("save_assets", { rows: [{ asset: "mount1", fields: { Holds: "tv1" } }] }, ctx);
+  check("save_assets: ... by id too", !r.isError && ctx.writes.length === 1, r.text);
+  for (const [why, fields, re] of [
+    ["the wrong type", { Holds: "Unit A" }, /must be a TV or Monitor; Unit A is a Mini Split/],
+    ["an archived asset", { Controls: "msOld" }, /archived/],
+    ["nothing that matches", { Controls: "Unit Z" }, /no Mini Split matches/],
+  ]) {
+    ctx = rc();
+    const asset = "Holds" in fields ? "mount1" : "tB";
+    r = await call("save_assets", { rows: [{ asset, fields }] }, ctx);
+    check(`save_assets: a Reference naming ${why} is refused and nothing is written`, r.isError && re.test(JSON.stringify(r.data ?? r.text)) && ctx.writes.length === 0, r.text);
+  }
+  SITES.rel.assets.push(A("msA2", 12, "rm2", { type: "uuid-ms", name: "Unit A" }));
+  ctx = rc();
+  r = await call("save_assets", { rows: [{ asset: "tB", fields: { Controls: "Unit A" } }] }, ctx);
+  check("save_assets: a name two assets share is refused, listing their ids", r.isError && /msA, msA2/.test(JSON.stringify(r.data ?? r.text)) && ctx.writes.length === 0, r.text);
+  SITES.rel.assets.pop();
+  ctx = rc();
+  r = await call("save_assets", { rows: [{ asset: "tB", fields: { Controls: "" } }] }, ctx);
+  check("save_assets: a blank Reference clears it", !r.isError && ctx.writes.flatMap((w) => w.args[1]).find((o) => o.op === "asset_update")?.data?.controls === "", r.text);
+  delete SITES.rel;
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
