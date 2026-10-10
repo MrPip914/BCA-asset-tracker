@@ -2659,6 +2659,57 @@ function relationshipQueriesShownFor(type) {
   return [...(isPlaceType(type) ? [BUILT_IN_CONTENTS_QUERY] : []), ...relationshipQueriesFor(type)];
 }
 
+// QUERIES ARE LISTED FIRST, TYPES ASSIGNED TO THEM (2026-10-10). A query is one
+// definition that can apply to many types. It is still STORED per type -- the
+// same query, same id, written under each type it applies to -- so nothing was
+// migrated, the Config shape did not move, and anything that reads a type's
+// `relationshipQueries` (the Claude connector) keeps working. The list below is
+// derived by grouping those copies on id; `typeIds` is where the copies are.
+// The first copy found is the definition, so a hand edit that makes two copies
+// disagree reads as one query rather than as two.
+function allRelationshipQueries(typeIds) {
+  const byId = new Map();
+  [...new Set([...(typeIds || []), ...Object.keys(TYPE_SETTINGS)])].forEach(t => {
+    relationshipQueriesFor(t).forEach(q => {
+      if (!byId.has(q.id)) byId.set(q.id, { ...q, typeIds: [] });
+      byId.get(q.id).typeIds.push(t);
+    });
+  });
+  return [...byId.values()];
+}
+// Contents as the list shows it: the built-in query plus the types it applies
+// to (every type that can hold things).
+function builtInContentsQueryFor(typeIds) {
+  return { ...BUILT_IN_CONTENTS_QUERY, typeIds: (typeIds || []).filter(t => isPlaceType(t)) };
+}
+// Writes a query list back to where it is stored: each type gets exactly the
+// queries naming it, and a type left with none loses the key (and its override
+// altogether if that was all it held).
+function relationshipQueriesToTypeSettings(typeSettings, queries, typeIds) {
+  const next = { ...typeSettings };
+  [...new Set([...(typeIds || []), ...Object.keys(typeSettings || {})])].forEach(t => {
+    const mine = (queries || []).filter(q => (q.typeIds || []).includes(t))
+      .map(q => ({ id: q.id, name: q.name, steps: q.steps, includeArchived: !!q.includeArchived, hideWhenEmpty: !!q.hideWhenEmpty }));
+    const entry = { ...(next[t] || {}) };
+    if (mine.length) entry.relationshipQueries = mine; else delete entry.relationshipQueries;
+    if (Object.keys(entry).length) next[t] = entry; else delete next[t];
+  });
+  return next;
+}
+// One step as a phrase, for read-only views and the settings list.
+function describeRelationshipStep(step, typesList, columns) {
+  const meta = relationshipFollowMeta(step.follow);
+  let text = meta.label;
+  if (meta.field) {
+    const col = referenceColumns(columns).find(c => c.key === step.fieldKey);
+    text = meta.value === "refOut" ? `What its ${col ? col.label : "field"} points to` : `What points to it through ${col ? col.label : "a field"}`;
+  }
+  const names = (step.typeIds || []).map(t => typeNameOf(t, typesList));
+  if (meta.needsType) text = `The nearest ${names.join(" or ") || "…"} above it`;
+  else if (names.length) text += `, only ${names.join(", ")}`;
+  return text;
+}
+
 // The lookups a run needs, built once per run rather than per step: children
 // by parent, and for each Reference field, who points at whom.
 function relationshipIndex(assets, columns) {
@@ -2812,7 +2863,10 @@ function relationshipFieldOptions(follow, sourceTypes, columns, allTypeIds) {
 // the previous step's type filter (empty = anything). A forward field step
 // narrows further: it can only land on that field's target types.
 function relationshipStepSourceTypes(ownerType, steps, i, columns) {
-  if (i === 0) return [ownerType];
+  if (i === 0) {
+    const own = (Array.isArray(ownerType) ? ownerType : [ownerType]).filter(Boolean);
+    return own.length ? own : null;
+  }
   const prev = steps[i - 1] || {};
   if (prev.typeIds && prev.typeIds.length) return prev.typeIds;
   if (prev.follow === "refOut" && prev.fieldKey) {
@@ -2881,49 +2935,56 @@ function RelationshipTreeRow({ node, typesList, onOpen, depth }) {
   );
 }
 
-// The Relationships tab body: every query for the asset's type, each as a
-// heading and its tree. Editors get "Edit queries", which opens the builder with
-// this asset as its preview -- the natural "chosen asset" to try a query on.
-function RelationshipsTabContent({ asset, assets, columns, typesList, onOpen, canEdit, onSaveQueries }) {
-  const [editing, setEditing] = useState(false);
+// The Relationships tab body: every query that applies to the asset's type,
+// each as a heading and its tree. The heading IS the link to how the query
+// works: an editor goes to its configuration in Settings, a viewer (who has no
+// Settings section for it) gets the same definition read-only in a dialog.
+function RelationshipsTabContent({ asset, assets, columns, typesList, onOpen, canEdit, onOpenConfig }) {
+  const [viewing, setViewing] = useState(null);
   const queries = relationshipQueriesShownFor(asset.type);
   const results = queries.map(q => ({ q, r: runRelationshipQuery(asset, q, assets, columns, typesList) }));
   const visible = results.filter(({ q, r }) => !(q.hideWhenEmpty && r.count === 0));
   const typeName = typeNameOf(asset.type, typesList);
+  const openConfig = id => { if (canEdit) onOpenConfig(id); else setViewing(id); };
+  const allTypeIds = (typesList || []).map(t => t.id);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-      {canEdit && (
-        <div style={{ display: "flex", justifyContent: "flex-end" }}>
-          <button type="button" onClick={() => setEditing(true)}
-            style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 12px", background: C.surface, color: C.brandDark, border: `1.5px solid ${C.border}`, borderRadius: 10, fontWeight: 600, fontSize: 13 }}>
-            <Settings size={14} /> Edit {typeName} queries
-          </button>
-        </div>
-      )}
       {visible.length === 0 && (
         <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>
           {queries.length === 0 ? `No relationship queries for ${typeName} yet.` : "Nothing related to show."}
+          {canEdit && (
+            <div style={{ marginTop: 8 }}>
+              <button type="button" onClick={() => onOpenConfig(queries.length ? null : "new")}
+                style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px", background: C.surface, color: C.brandDark, border: `1.5px solid ${C.border}`, borderRadius: 10, fontWeight: 600, fontSize: 13 }}>
+                <Settings size={14} /> {queries.length ? "Relationship settings" : "Add a query"}
+              </button>
+            </div>
+          )}
         </div>
       )}
       {visible.map(({ q, r }) => (
         <div key={q.id}>
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginBottom: 8 }}>
-            {q.name} ({r.count})
-          </div>
+          <button type="button" onClick={() => openConfig(q.id)} aria-label={`${q.name}: how this query works`}
+            title="How this query works"
+            style={{ display: "flex", alignItems: "center", gap: 4, background: "none", border: "none", padding: 0, marginBottom: 8, cursor: "pointer",
+              fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, textDecoration: "underline", textAlign: "left" }}>
+            {q.name} ({r.count}) <ChevronRight size={12} />
+          </button>
           {r.count === 0
             ? <div style={{ fontSize: 13, color: C.empty, padding: "4px 0" }}>Nothing found.</div>
             : <RelationshipTree nodes={r.nodes} typesList={typesList} onOpen={onOpen} />}
         </div>
       ))}
-      {editing && (
+      {viewing && (
         <RelationshipQueryEditor
-          ownerType={asset.type}
-          initialQueries={relationshipQueriesFor(asset.type)}
+          readOnly
+          initialQueries={allRelationshipQueries(allTypeIds)}
+          builtIn={builtInContentsQueryFor(allTypeIds)}
+          initialActiveId={viewing}
           previewAssetId={asset.id}
           assets={assets} columns={columns} typesList={typesList}
-          onDone={qs => { onSaveQueries(asset.type, qs); setEditing(false); }}
-          onCancel={() => setEditing(false)}
-          doneLabel="Save"
+          onDone={() => setViewing(null)}
+          onCancel={() => setViewing(null)}
         />
       )}
     </div>
@@ -2952,8 +3013,8 @@ const RELATIONSHIP_HEADING = { fontFamily: "'IBM Plex Mono', monospace", fontSiz
 function newRelationshipStep() {
   return { follow: "children", typeIds: [], fieldKey: "", show: true };
 }
-function newRelationshipQuery() {
-  return { id: crypto.randomUUID(), name: "", steps: [newRelationshipStep()], includeArchived: false, hideWhenEmpty: false };
+function newRelationshipQuery(typeIds) {
+  return { id: crypto.randomUUID(), name: "", typeIds: typeIds || [], steps: [newRelationshipStep()], includeArchived: false, hideWhenEmpty: false };
 }
 // A tick box in the style every editor here uses.
 function RelationshipCheck({ checked, onChange, label, disabled }) {
@@ -2970,35 +3031,48 @@ function RelationshipCheck({ checked, onChange, label, disabled }) {
   );
 }
 
-// The query builder. Edits a COPY of the type's queries and hands the whole
-// list back on Done -- the tab saves it at once, the type editor folds it into
-// its own draft so that editor stays one commit. A live preview runs the query
-// being edited against a chosen asset of this type.
-function RelationshipQueryEditor({ ownerType, initialQueries, previewAssetId, assets, columns, typesList, onDone, onCancel, doneLabel }) {
-  const [queries, setQueries] = useState(() => (initialQueries || []).map(q => ({ ...q, steps: q.steps.map(s => ({ ...s, typeIds: [...(s.typeIds || [])] })) })));
-  const [activeId, setActiveId] = useState(() => (initialQueries && initialQueries[0] ? initialQueries[0].id : null));
-  const ownAssets = (assets || []).filter(a => a.type === ownerType && (a.status || "Active") !== "Archived");
-  const [previewId, setPreviewId] = useState(() => previewAssetId || (ownAssets[0] ? ownAssets[0].id : ""));
+// The query builder. Queries are listed, and each names the types it applies
+// to. Edits a COPY of the whole list and hands it back on Done. `builtIn` is
+// Contents: listed first so people can see how it works, never editable.
+// `readOnly` shows the same definitions without controls (a viewer following
+// the Relationships tab's heading). A live preview runs the query being viewed
+// against a chosen asset of one of its types.
+// `initialActiveId` may be a query id, the built-in's id, or "new".
+function RelationshipQueryEditor({ initialQueries, builtIn, initialActiveId, newTypeIds, readOnly, previewAssetId, assets, columns, typesList, onDone, onCancel, doneLabel }) {
+  const [queries, setQueries] = useState(() => {
+    const list = (initialQueries || []).map(q => ({ ...q, typeIds: [...(q.typeIds || [])], steps: q.steps.map(s => ({ ...s, typeIds: [...(s.typeIds || [])] })) }));
+    return initialActiveId === "new" ? [...list, newRelationshipQuery(newTypeIds)] : list;
+  });
+  const [activeId, setActiveId] = useState(() => {
+    if (initialActiveId === "new") return null; // resolved to the new query just below
+    if (initialActiveId && (initialActiveId === (builtIn && builtIn.id) || (initialQueries || []).some(q => q.id === initialActiveId))) return initialActiveId;
+    return (initialQueries && initialQueries[0]) ? initialQueries[0].id : (builtIn ? builtIn.id : null);
+  });
   const [error, setError] = useState("");
-  const typeName = typeNameOf(ownerType, typesList);
+  const [previewId, setPreviewId] = useState(previewAssetId || "");
   const allTypeIds = (typesList || []).map(t => t.id);
-  const active = queries.find(q => q.id === activeId) || null;
+  const effectiveActiveId = activeId || (initialActiveId === "new" && queries.length ? queries[queries.length - 1].id : null);
+  const isBuiltIn = !!builtIn && effectiveActiveId === builtIn.id;
+  const active = isBuiltIn ? builtIn : (queries.find(q => q.id === effectiveActiveId) || null);
+  const locked = !!readOnly || isBuiltIn;
 
-  const updateActive = patch => setQueries(list => list.map(q => (q.id === activeId ? { ...q, ...patch } : q)));
+  const updateActive = patch => setQueries(list => list.map(q => (q.id === effectiveActiveId ? { ...q, ...patch } : q)));
   const updateStep = (i, patch) => updateActive({ steps: active.steps.map((s, j) => (j === i ? { ...s, ...patch } : s)) });
-  const addQuery = () => { const q = newRelationshipQuery(); setQueries(list => [...list, q]); setActiveId(q.id); setError(""); };
+  const addQuery = () => { const q = newRelationshipQuery(newTypeIds); setQueries(list => [...list, q]); setActiveId(q.id); setError(""); };
   const removeQuery = id => {
     const rest = queries.filter(q => q.id !== id);
     setQueries(rest);
-    if (activeId === id) setActiveId(rest[0] ? rest[0].id : null);
+    if (effectiveActiveId === id) setActiveId(rest[0] ? rest[0].id : (builtIn ? builtIn.id : null));
   };
   // Refuses rather than saving something that would run differently from what
-  // the screen shows: an unnamed query, a field step with no field, a "nearest"
-  // with no type, or a last step whose results are hidden (nothing would show).
+  // the screen shows: an unnamed query, one that applies to no type (it would
+  // be stored nowhere and vanish), a field step with no field, or a "nearest"
+  // with no type.
   const done = () => {
     for (const q of queries) {
       const label = q.name.trim() || "A query";
       if (!q.name.trim()) { setActiveId(q.id); setError("Give every query a name."); return; }
+      if (!(q.typeIds || []).length) { setActiveId(q.id); setError(`${label}: pick at least one type it applies to.`); return; }
       for (const s of q.steps) {
         const meta = relationshipFollowMeta(s.follow);
         if (meta.field && !s.fieldKey) { setActiveId(q.id); setError(`${label}: pick the field a step follows.`); return; }
@@ -3008,114 +3082,153 @@ function RelationshipQueryEditor({ ownerType, initialQueries, previewAssetId, as
     onDone(queries.map(q => ({ ...q, name: q.name.trim(), steps: q.steps.map((s, i) => ({ ...s, show: i === q.steps.length - 1 ? true : s.show })) })));
   };
 
-  const previewAsset = (assets || []).find(a => a.id === previewId) || null;
+  const previewOptions = active ? (assets || []).filter(a => (active.typeIds || []).includes(a.type) && (a.status || "Active") !== "Archived") : [];
+  const previewAsset = previewOptions.find(a => a.id === previewId) || previewOptions[0] || null;
   const preview = active && previewAsset ? runRelationshipQuery(previewAsset, { ...active, steps: active.steps.filter(s => !relationshipFollowMeta(s.follow).field || s.fieldKey) }, assets, columns, typesList) : null;
+  const typeNames = ids => (ids || []).map(t => typeNameOf(t, typesList)).join(", ");
 
   return (
     <div onClick={onCancel} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }}>
-      <div onClick={e => e.stopPropagation()} role="dialog" aria-label={`${typeName} relationship queries`}
+      <div onClick={e => e.stopPropagation()} role="dialog" aria-label="Relationship queries"
         style={{ background: C.surface, borderRadius: 14, width: "100%", maxWidth: 560, maxHeight: "90vh", display: "flex", flexDirection: "column", boxShadow: "0 12px 40px rgba(42,52,57,0.25)" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 18px", borderBottom: `1px solid ${C.border}` }}>
-          <div style={{ fontWeight: 700, fontSize: 15, color: C.brandDark }}>{typeName} relationship queries</div>
+          <div style={{ fontWeight: 700, fontSize: 15, color: C.brandDark }}>Relationship queries</div>
           <button type="button" onClick={onCancel} className="icon-btn" aria-label="Close" style={{ background: "none", border: "none", padding: 4, borderRadius: 6, display: "flex" }}><X size={16} color={C.muted} /></button>
         </div>
         <div style={{ padding: 18, overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
-            {queries.map(q => (
+            {[...(builtIn ? [builtIn] : []), ...queries].map(q => (
               <button key={q.id} type="button" onClick={() => { setActiveId(q.id); setError(""); }}
-                style={{ padding: "5px 11px", borderRadius: 999, fontSize: 13, fontWeight: 600, border: `1.5px solid ${q.id === activeId ? C.brand : C.border}`,
-                  background: q.id === activeId ? C.brand : C.surface, color: q.id === activeId ? "#fff" : C.ink }}>
+                style={{ padding: "5px 11px", borderRadius: 999, fontSize: 13, fontWeight: 600, border: `1.5px solid ${q.id === effectiveActiveId ? C.brand : C.border}`,
+                  background: q.id === effectiveActiveId ? C.brand : C.surface, color: q.id === effectiveActiveId ? "#fff" : C.ink }}>
                 {q.name.trim() || "Untitled"}
               </button>
             ))}
-            <button type="button" onClick={addQuery}
-              style={{ display: "flex", alignItems: "center", gap: 4, padding: "5px 11px", borderRadius: 999, fontSize: 13, fontWeight: 600, border: `1.5px dashed ${C.border}`, background: "none", color: C.brandDark }}>
-              <Plus size={13} /> Add query
-            </button>
+            {!readOnly && (
+              <button type="button" onClick={addQuery}
+                style={{ display: "flex", alignItems: "center", gap: 4, padding: "5px 11px", borderRadius: 999, fontSize: 13, fontWeight: 600, border: `1.5px dashed ${C.border}`, background: "none", color: C.brandDark }}>
+                <Plus size={13} /> Add query
+              </button>
+            )}
           </div>
-          {isPlaceType(ownerType) && (
-            <div style={{ fontSize: 12, color: C.empty }}>Contents is built in for {typeName} and always listed first.</div>
+          {!active && <div style={{ fontSize: 13, color: C.empty }}>No queries yet. Add one, then choose the types it applies to.</div>}
+          {active && isBuiltIn && (
+            <div style={{ fontSize: 12, color: C.empty }}>Built in. Every type that can hold things gets this query, listed first. It cannot be changed.</div>
           )}
-          {!active && <div style={{ fontSize: 13, color: C.empty }}>No queries yet. Add one to list related assets on every {typeName}.</div>}
           {active && (
             <>
-              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                <span style={RELATIONSHIP_HEADING}>Name</span>
-                <input value={active.name} onChange={e => updateActive({ name: e.target.value })} placeholder="e.g. HVAC" aria-label="Query name"
-                  style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, borderRadius: 8, fontSize: 14, color: C.ink, background: C.surface }} />
-              </label>
-              {active.steps.map((s, i) => {
-                const meta = relationshipFollowMeta(s.follow);
-                const last = i === active.steps.length - 1;
-                const sourceTypes = relationshipStepSourceTypes(ownerType, active.steps, i, columns);
-                const fieldOpts = meta.field ? relationshipFieldOptions(s.follow, sourceTypes, columns, allTypeIds) : [];
-                return (
-                  <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                      <span style={RELATIONSHIP_HEADING}>Step {i + 1}{i === 0 ? ` · from the ${typeName.toLowerCase()}` : " · from those"}</span>
-                      {active.steps.length > 1 && (
-                        <button type="button" onClick={() => updateActive({ steps: active.steps.filter((_, j) => j !== i) })} className="icon-btn" aria-label={`Remove step ${i + 1}`}
-                          style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }}><Trash2 size={14} color={C.muted} /></button>
-                      )}
-                    </div>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                      <span style={RELATIONSHIP_HEADING}>Follow</span>
-                      <PickerField hideLabel label="Follow" title="Follow" value={s.follow}
-                        options={RELATIONSHIP_FOLLOWS.map(f => f.value)} labelForOption={v => relationshipFollowMeta(v).label}
-                        onChange={v => updateStep(i, { follow: v, fieldKey: relationshipFollowMeta(v).field ? s.fieldKey : "" })} />
-                    </div>
-                    {meta.field && (
-                      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                        <span style={RELATIONSHIP_HEADING}>Field</span>
-                        {fieldOpts.length === 0
-                          ? <div style={{ fontSize: 12, color: C.empty }}>No Reference field can link here. Add one in a type's fields first.</div>
-                          : <PickerField hideLabel label="Field" title="Reference field" value={s.fieldKey}
-                              options={fieldOpts.map(c => c.key)}
-                              labelForOption={k => { const c = fieldOpts.find(x => x.key === k); return c ? `${c.label} (→ ${referenceTargetTypes(c).map(t => typeNameOf(t, typesList)).join(", ") || "any"})` : k; }}
-                              onChange={v => updateStep(i, { fieldKey: v })} />}
-                      </div>
-                    )}
-                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                      <span style={RELATIONSHIP_HEADING}>{meta.needsType ? "Of type" : "Only these types"}</span>
-                      <TypeMultiPicker value={s.typeIds} onChange={v => updateStep(i, { typeIds: v })} typesList={typesList}
-                        placeholder={meta.needsType ? "Pick a type" : "Any type"} title={meta.needsType ? "The nearest of which type" : "Only these types"} />
-                    </div>
-                    {!last && <RelationshipCheck checked={s.show} onChange={v => updateStep(i, { show: v })} label="Show these in the results" />}
+              {locked ? (
+                <>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={RELATIONSHIP_HEADING}>Applies to</span>
+                    <span style={{ fontSize: 14, color: C.ink }}>{typeNames(active.typeIds) || "No types"}</span>
                   </div>
-                );
-              })}
-              {active.steps.length < RELATIONSHIP_MAX_STEPS && (
-                <button type="button" onClick={() => updateActive({ steps: [...active.steps, newRelationshipStep()] })}
-                  style={{ alignSelf: "flex-start", display: "flex", alignItems: "center", gap: 4, padding: "6px 11px", borderRadius: 8, fontSize: 13, fontWeight: 600, border: `1.5px dashed ${C.border}`, background: "none", color: C.brandDark }}>
-                  <Plus size={13} /> Then follow…
-                </button>
+                  {active.steps.map((s, i) => (
+                    <div key={i} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                      <span style={RELATIONSHIP_HEADING}>Step {i + 1}{i === 0 ? " · from the asset" : " · from those"}</span>
+                      <span style={{ fontSize: 14, color: C.ink }}>
+                        {describeRelationshipStep(s, typesList, columns)}
+                        {i < active.steps.length - 1 && !s.show && <span style={{ color: C.muted, fontSize: 12 }}> · only a route, not listed</span>}
+                      </span>
+                    </div>
+                  ))}
+                  <div style={{ fontSize: 12, color: C.muted }}>
+                    {active.includeArchived ? "Includes archived assets." : "Archived assets are left out."}
+                    {active.hideWhenEmpty ? " Hidden when it finds nothing." : ""}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={RELATIONSHIP_HEADING}>Name</span>
+                    <input value={active.name} onChange={e => updateActive({ name: e.target.value })} placeholder="e.g. HVAC" aria-label="Query name"
+                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, borderRadius: 8, fontSize: 14, color: C.ink, background: C.surface }} />
+                  </label>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={RELATIONSHIP_HEADING}>Applies to</span>
+                    <TypeMultiPicker value={active.typeIds} onChange={v => updateActive({ typeIds: v })} typesList={typesList}
+                      placeholder="Pick the types" title="Types this query applies to" />
+                  </div>
+                  {active.steps.map((s, i) => {
+                    const meta = relationshipFollowMeta(s.follow);
+                    const last = i === active.steps.length - 1;
+                    const sourceTypes = relationshipStepSourceTypes(active.typeIds, active.steps, i, columns);
+                    const fieldOpts = meta.field ? relationshipFieldOptions(s.follow, sourceTypes, columns, allTypeIds) : [];
+                    return (
+                      <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                          <span style={RELATIONSHIP_HEADING}>Step {i + 1}{i === 0 ? " · from the asset" : " · from those"}</span>
+                          {active.steps.length > 1 && (
+                            <button type="button" onClick={() => updateActive({ steps: active.steps.filter((_, j) => j !== i) })} className="icon-btn" aria-label={`Remove step ${i + 1}`}
+                              style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }}><Trash2 size={14} color={C.muted} /></button>
+                          )}
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          <span style={RELATIONSHIP_HEADING}>Follow</span>
+                          <PickerField hideLabel label="Follow" title="Follow" value={s.follow}
+                            options={RELATIONSHIP_FOLLOWS.map(f => f.value)} labelForOption={v => relationshipFollowMeta(v).label}
+                            onChange={v => updateStep(i, { follow: v, fieldKey: relationshipFollowMeta(v).field ? s.fieldKey : "" })} />
+                        </div>
+                        {meta.field && (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                            <span style={RELATIONSHIP_HEADING}>Field</span>
+                            {fieldOpts.length === 0
+                              ? <div style={{ fontSize: 12, color: C.empty }}>No Reference field can link here. Add one in a type's fields first.</div>
+                              : <PickerField hideLabel label="Field" title="Reference field" value={s.fieldKey}
+                                  options={fieldOpts.map(c => c.key)}
+                                  labelForOption={k => { const c = fieldOpts.find(x => x.key === k); return c ? `${c.label} (→ ${referenceTargetTypes(c).map(t => typeNameOf(t, typesList)).join(", ") || "any"})` : k; }}
+                                  onChange={v => updateStep(i, { fieldKey: v })} />}
+                          </div>
+                        )}
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          <span style={RELATIONSHIP_HEADING}>{meta.needsType ? "Of type" : "Only these types"}</span>
+                          <TypeMultiPicker value={s.typeIds} onChange={v => updateStep(i, { typeIds: v })} typesList={typesList}
+                            placeholder={meta.needsType ? "Pick a type" : "Any type"} title={meta.needsType ? "The nearest of which type" : "Only these types"} />
+                        </div>
+                        {!last && <RelationshipCheck checked={s.show} onChange={v => updateStep(i, { show: v })} label="Show these in the results" />}
+                      </div>
+                    );
+                  })}
+                  {active.steps.length < RELATIONSHIP_MAX_STEPS && (
+                    <button type="button" onClick={() => updateActive({ steps: [...active.steps, newRelationshipStep()] })}
+                      style={{ alignSelf: "flex-start", display: "flex", alignItems: "center", gap: 4, padding: "6px 11px", borderRadius: 8, fontSize: 13, fontWeight: 600, border: `1.5px dashed ${C.border}`, background: "none", color: C.brandDark }}>
+                      <Plus size={13} /> Then follow…
+                    </button>
+                  )}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    <RelationshipCheck checked={active.includeArchived} onChange={v => updateActive({ includeArchived: v })} label="Include archived assets" />
+                    <RelationshipCheck checked={active.hideWhenEmpty} onChange={v => updateActive({ hideWhenEmpty: v })} label="Hide this query when it finds nothing" />
+                  </div>
+                </>
               )}
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                <RelationshipCheck checked={active.includeArchived} onChange={v => updateActive({ includeArchived: v })} label="Include archived assets" />
-                <RelationshipCheck checked={active.hideWhenEmpty} onChange={v => updateActive({ hideWhenEmpty: v })} label="Hide this query when it finds nothing" />
-              </div>
               <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
                 <span style={RELATIONSHIP_HEADING}>Preview</span>
-                {ownAssets.length === 0
-                  ? <div style={{ fontSize: 12, color: C.empty }}>No {typeName} to try it on yet.</div>
-                  : <PickerField hideLabel label="Preview on" title={`Preview on which ${typeName}`} value={previewId}
-                      options={ownAssets.map(a => a.id)} labelForOption={id => { const a = ownAssets.find(x => x.id === id); return a ? nameOf(a, typesList) : id; }}
+                {previewOptions.length === 0
+                  ? <div style={{ fontSize: 12, color: C.empty }}>{(active.typeIds || []).length ? "No asset of those types to try it on yet." : "Pick a type to try it on."}</div>
+                  : <PickerField hideLabel label="Preview on" title="Preview on which asset" value={previewAsset ? previewAsset.id : ""}
+                      options={previewOptions.map(a => a.id)} labelForOption={id => { const a = previewOptions.find(x => x.id === id); return a ? `${nameOf(a, typesList)} (${typeNameOf(a.type, typesList)})` : id; }}
                       onChange={setPreviewId} />}
                 {preview && (preview.count === 0
                   ? <div style={{ fontSize: 13, color: C.empty }}>Finds nothing on {nameOf(previewAsset, typesList)}.</div>
                   : <RelationshipTree nodes={preview.nodes} typesList={typesList} onOpen={() => {}} />)}
               </div>
-              <button type="button" onClick={() => removeQuery(active.id)}
-                style={{ alignSelf: "flex-start", display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", background: "none", border: "none", color: C.danger, fontSize: 13, fontWeight: 600 }}>
-                <Trash2 size={14} /> Delete this query
-              </button>
+              {!locked && (
+                <button type="button" onClick={() => removeQuery(active.id)}
+                  style={{ alignSelf: "flex-start", display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", background: "none", border: "none", color: C.danger, fontSize: 13, fontWeight: 600 }}>
+                  <Trash2 size={14} /> Delete this query
+                </button>
+              )}
             </>
           )}
           {error && <div role="alert" style={{ fontSize: 13, color: C.danger }}>{error}</div>}
         </div>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, padding: "12px 18px", borderTop: `1px solid ${C.border}` }}>
-          <button type="button" onClick={onCancel} style={{ padding: "8px 14px", background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
-          <button type="button" onClick={done} style={{ padding: "8px 14px", background: C.brand, border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13, color: "#fff" }}>{doneLabel || "Done"}</button>
+          {readOnly
+            ? <button type="button" onClick={onCancel} style={{ padding: "8px 14px", background: C.brand, border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13, color: "#fff" }}>Close</button>
+            : <>
+                <button type="button" onClick={onCancel} style={{ padding: "8px 14px", background: C.surface, border: `1.5px solid ${C.border}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                <button type="button" onClick={done} style={{ padding: "8px 14px", background: C.brand, border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13, color: "#fff" }}>{doneLabel || "Save"}</button>
+              </>}
         </div>
       </div>
     </div>
@@ -5187,7 +5300,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-10.3";
+const APP_VERSION = "2026-10-10.4";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -6439,7 +6552,13 @@ const MOCK_SNAPSHOT = {
     // no iconName at all and so resolves through its shipped registry icon.
     // (Both were question marks before the catalog existed: neither Facilities
     // type had an icon to name.)
-    "Condenser": { iconName: "Fan" },
+    // Condenser carries the SAME query as Mini Split below (one id): one query
+    // applying to two types, as Settings > Relationships lists it.
+    "Condenser": { iconName: "Fan", relationshipQueries: [
+      { id: "rq-ms-controls", name: "Controlled by", includeArchived: false, hideWhenEmpty: true, steps: [
+        { follow: "refIn", typeIds: ["Thermostat"], fieldKey: "controls", show: true },
+      ] },
+    ] },
     // mapPin on a second type (with BCA0098 pinned in the Kitchen) so the
     // map's per-type pin filter has two types to choose between in Sandbox.
     "Electrical Panel": { categoryIds: ["Facilities", "Equipment"], mapPin: true },
@@ -7518,8 +7637,9 @@ function AssetTracker() {
   // rather than closing over a stale settingsSection.
   const settingsOpenRef = useRef(false);
   settingsOpenRef.current = settingsSection !== null;
-  // Settings > Relationships: the type whose queries are being edited.
-  const [relationshipsEditType, setRelationshipsEditType] = useState(null);
+  // Settings > Relationships: the query editor, null when closed, otherwise
+  // { activeId } -- a query id, the built-in's id, "new", or null for the first.
+  const [relationshipsEdit, setRelationshipsEdit] = useState(null);
   // On a phone the app header scrolls away with the page and only returns when
   // the list is back at the top; the tab row (and a table's header) then pin to
   // the top of the screen instead of sitting under it.
@@ -8490,7 +8610,7 @@ function AssetTracker() {
         let section = "";
         try { section = new URLSearchParams(window.location.search).get("settings") || ""; } catch (err) { /* no window */ }
         setSettingsSection(st.settings ? section : null);
-        if (!st.settings) setRelationshipsEditType(null);
+        if (!st.settings) setRelationshipsEdit(null);
         return;
       }
       // The map's drill-downs push entries (setMapScope), so the entry landed
@@ -12283,10 +12403,9 @@ function AssetTracker() {
         floorPlan: !!draft.floorPlan,
         mapPin: !!draft.mapPin,
         // Carried, not rebuilt: this whole object is rewritten here, so a
-        // query list left out would be deleted by an unrelated edit. The
-        // draft holds the builder's result when it was opened from this
-        // editor; otherwise what is stored stays.
-        relationshipQueries: draft.relationshipQueries || (typeSettings[id] || {}).relationshipQueries || undefined,
+        // query list left out would be deleted by an unrelated edit. Queries
+        // are edited in Settings > Relationships, not through this draft.
+        relationshipQueries: (typeSettings[id] || {}).relationshipQueries || undefined,
       },
     };
     persist(assets, { columns: nextColumns, typesList: nextTypesList, typeSettings: nextTypeSettings });
@@ -12311,12 +12430,18 @@ function AssetTracker() {
   // dangling id simply reads as unlabeled, which is a real answer, and rewriting
   // them would turn "I removed a label" into an edit of every type carrying it.
   // (`typeCategories` is the wire key, not the concept — see TYPE LABELS.)
-  // The Relationships tab's own Save: only this type's query list changes, so
-  // it MERGES into the stored override instead of rebuilding it the way the
-  // type editor does.
-  function saveRelationshipQueries(id, queries) {
-    const nextTypeSettings = { ...typeSettings, [id]: { ...(typeSettings[id] || {}), relationshipQueries: queries } };
-    persist(assets, { typeSettings: nextTypeSettings });
+  // Queries are saved from Settings > Relationships (and the type editor's
+  // shortcut to it): the whole list at once, written back under each type it
+  // names. It MERGES into each stored override rather than rebuilding it the
+  // way the type editor does.
+  function saveRelationshipQueries(queries) {
+    persist(assets, { typeSettings: relationshipQueriesToTypeSettings(typeSettings, queries, typesList.map(t => t.id)) });
+  }
+  // The Relationships tab's headings link here: Settings > Relationships with
+  // that query open (or the list, with null).
+  function openRelationshipConfig(queryId) {
+    setRelationshipsEdit(queryId ? { activeId: queryId } : null);
+    openSettings("relationships");
   }
 
   function saveTypeLabels(next) {
@@ -13943,6 +14068,7 @@ function AssetTracker() {
       onToggleIconFavorite={toggleIconFavorite}
       assets={assets}
       columns={columns}
+      onSaveRelationshipQueries={saveRelationshipQueries}
     />
   );
   const typesManagerModal = showTypesManager && renderTypesManager(false);
@@ -14189,12 +14315,12 @@ function AssetTracker() {
     setSettingsSection(key);
   }
   function selectSettingsSection(key) {
-    setRelationshipsEditType(null);
+    setRelationshipsEdit(null);
     try { window.history.replaceState(window.history.state, "", settingsUrl(key)); } catch (e) { /* no history API */ }
     setSettingsSection(key);
   }
   function closeSettings() {
-    setRelationshipsEditType(null);
+    setRelationshipsEdit(null);
     // Pushed by openSettings: popping it is what closes (see the popstate
     // handler). Arrived on a ?settings= link instead: strip the param in place.
     if (settingsPushedRef.current) { settingsPushedRef.current = false; window.history.back(); return; }
@@ -14262,35 +14388,43 @@ function AssetTracker() {
       );
     }
     if (key === "relationships") {
-      const ids = (typesList || []).map(t => t.id).sort((x, y) => typeNameOf(x, typesList).localeCompare(typeNameOf(y, typesList)));
+      const allTypeIds = (typesList || []).map(t => t.id);
+      const custom = allRelationshipQueries(allTypeIds);
+      const rows = [builtInContentsQueryFor(allTypeIds), ...custom];
       return (
         <div style={settingsCardStyle}>
           <div style={settingsHeadingStyle}>
-            Queries by type
-            <HelpTip label="About relationship queries" text="Each type can list related assets on a Relationships tab: what is inside it, what points at it through a reference field, and so on. Place types also get a built-in Contents query." />
+            Queries
+            <HelpTip label="About relationship queries" text="A query lists related assets on a Relationships tab: what is inside something, what points at it through a reference field, and so on. Choose which types each query applies to. Contents is built in for every type that can hold things." />
           </div>
           <div style={{ display: "flex", flexDirection: "column" }}>
-            {ids.map((id, i) => {
-              const n = relationshipQueriesFor(id).length;
-              return (
-                <div key={id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderTop: i === 0 ? "none" : `1px solid ${C.border}` }}>
-                  <span style={{ flex: 1, minWidth: 0, fontSize: 14, color: C.ink }}>{typeNameOf(id, typesList)}</span>
-                  <span style={{ fontSize: 12, color: C.muted }}>{n === 0 ? "None" : `${n} quer${n === 1 ? "y" : "ies"}`}</span>
-                  <button onClick={() => setRelationshipsEditType(id)} className="icon-btn" aria-label={`Edit ${typeNameOf(id, typesList)} queries`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}>
-                    <Pencil size={14} color={C.muted} />
-                  </button>
-                </div>
-              );
-            })}
+            {rows.map((q, i) => (
+              <div key={q.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderTop: i === 0 ? "none" : `1px solid ${C.border}` }}>
+                <button type="button" onClick={() => setRelationshipsEdit({ activeId: q.id })}
+                  style={{ flex: 1, minWidth: 0, textAlign: "left", background: "none", border: "none", padding: 0, cursor: "pointer" }}>
+                  <div style={{ fontSize: 14, color: C.ink }}>{q.name}{q.builtIn && <span style={{ color: C.muted, fontSize: 12 }}> · Built in</span>}</div>
+                  <div style={{ fontSize: 12, color: C.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {q.typeIds.length ? q.typeIds.map(t => typeNameOf(t, typesList)).join(", ") : "No types"}
+                  </div>
+                </button>
+                <button onClick={() => setRelationshipsEdit({ activeId: q.id })} className="icon-btn" aria-label={`${q.builtIn ? "View" : "Edit"} ${q.name}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}>
+                  {q.builtIn ? <ChevronRight size={14} color={C.muted} /> : <Pencil size={14} color={C.muted} />}
+                </button>
+              </div>
+            ))}
           </div>
-          {relationshipsEditType && (
+          <button type="button" onClick={() => setRelationshipsEdit({ activeId: "new" })}
+            style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 4, padding: "6px 11px", borderRadius: 8, fontSize: 13, fontWeight: 600, border: `1.5px dashed ${C.border}`, background: "none", color: C.brandDark }}>
+            <Plus size={13} /> Add query
+          </button>
+          {relationshipsEdit && (
             <RelationshipQueryEditor
-              ownerType={relationshipsEditType}
-              initialQueries={relationshipQueriesFor(relationshipsEditType)}
+              initialQueries={custom}
+              builtIn={builtInContentsQueryFor(allTypeIds)}
+              initialActiveId={relationshipsEdit.activeId}
               assets={assets} columns={columns} typesList={typesList}
-              onDone={qs => { saveRelationshipQueries(relationshipsEditType, qs); setRelationshipsEditType(null); }}
-              onCancel={() => setRelationshipsEditType(null)}
-              doneLabel="Save"
+              onDone={qs => { saveRelationshipQueries(qs); setRelationshipsEdit(null); }}
+              onCancel={() => setRelationshipsEdit(null)}
             />
           )}
         </div>
@@ -15761,7 +15895,7 @@ function AssetTracker() {
 
           {detailTab === "relationships" && (
             <RelationshipsTabContent asset={selectedAsset} assets={assets} columns={columns} typesList={typesList}
-              onOpen={openDetail} canEdit={canEdit} onSaveQueries={saveRelationshipQueries} />
+              onOpen={openDetail} canEdit={canEdit} onOpenConfig={openRelationshipConfig} />
           )}
 
           {detailTab === "floorPlan" && typeHasFloorPlan(selectedAsset.type) && (
@@ -19393,7 +19527,7 @@ function Detail({ label, value, wide, italic }) {
 function TypeManagerModal({
   types, newValue, onNewValueChange, onAdd, onSave, onReset, onRemove, onClose,
   canEdit, isLocked, nameTaken, countFor, fieldOptions, hasOverrides,
-  labels, onSaveLabels, iconFavorites, onToggleIconFavorite, assets, columns, embedded,
+  labels, onSaveLabels, iconFavorites, onToggleIconFavorite, assets, columns, embedded, onSaveRelationshipQueries,
 }) {
   const [confirmId, setConfirmId] = useState(null);
   // The label manager is a THIRD view of this modal, alongside the type list and
@@ -19505,9 +19639,6 @@ function TypeManagerModal({
       // points at is part of what the field IS.
       fieldReferenceTypes: Object.fromEntries(fieldOptions.map(f => [f.key, columnReferenceTypes(f)])),
       newFields: [],
-      // null = untouched, so Save keeps whatever is stored; the builder's
-      // Done replaces it with the edited list.
-      relationshipQueries: null,
     });
     setNewFieldDraft(null);
     setEditingQueries(false);
@@ -20061,7 +20192,8 @@ function TypeManagerModal({
                 asset of this type. Edited in a builder dialog; folded into this
                 draft on Done, so the editor's Save is still the one commit. */}
             {(() => {
-              const qs = draft.relationshipQueries || relationshipQueriesFor(draft.id);
+              const allIds = types.map(t => t.id);
+              const qs = relationshipQueriesShownFor(draft.id);
               return (
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                   <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Relationships</span>
@@ -20075,14 +20207,15 @@ function TypeManagerModal({
                     </button>
                   </div>
                   <div style={{ fontSize: 12, color: C.empty }}>
-                    Queries list related assets on a Relationships tab, such as the HVAC units in a room and the thermostats that control them.
+                    Queries list related assets on a Relationships tab. One query can apply to several types, so they are edited together; saving there takes effect at once.
                   </div>
                   {editingQueries && (
                     <RelationshipQueryEditor
-                      ownerType={draft.id}
-                      initialQueries={qs}
+                      initialQueries={allRelationshipQueries(allIds)}
+                      builtIn={builtInContentsQueryFor(allIds)}
+                      newTypeIds={[draft.id]}
                       assets={assets} columns={columns} typesList={types}
-                      onDone={next => { setDraft(d => ({ ...d, relationshipQueries: next })); setEditingQueries(false); }}
+                      onDone={next => { onSaveRelationshipQueries(next); setEditingQueries(false); }}
                       onCancel={() => setEditingQueries(false)}
                     />
                   )}
