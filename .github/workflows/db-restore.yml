@@ -1,0 +1,95 @@
+# Restores the DEV Supabase database from a nightly backup (db-backup.yml).
+# REPLACES the whole asset_tracker schema: everything saved since that backup is
+# gone. So it runs only by hand, and only when `confirm` reads "restore dev".
+#
+# Before it touches anything it backs up the database as it stands, kept for 90
+# days as `dev-db-before-restore-<time>`, so a restore can itself be undone by
+# restoring that.
+#
+# Inputs:
+#   confirm   type `restore dev`
+#   run_id    which backup: the number at the end of a "Database backup" run's
+#             URL. Blank = the newest successful one.
+#
+# Manual runs need this file on the default branch (main), then pick `dev` as
+# the branch to run on. Uses SUPABASE_DB_URL and BACKUP_PASSPHRASE on the
+# `supabase-dev` environment. This repo is public: nothing echoes a secret.
+#
+# Afterwards, a browser left open holds revisions the restored database does
+# not, so its next save is refused as a conflict and it reloads. That is the
+# optimistic-concurrency check doing its job, not a new bug.
+
+name: Database restore (dev)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "restore dev" to replace the dev database with a backup'
+        required: true
+      run_id:
+        description: "Backup run id (blank = newest successful backup)"
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: supabase-dev-backup
+  cancel-in-progress: false
+
+jobs:
+  restore-dev:
+    if: inputs.confirm == 'restore dev'
+    runs-on: ubuntu-latest
+    environment:
+      name: supabase-dev
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Postgres 17 client
+        run: |
+          sudo apt-get install -y -qq postgresql-common > /dev/null
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y > /dev/null
+          sudo apt-get install -y -qq postgresql-client-17 > /dev/null
+          echo /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
+      - name: Fetch the backup
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RUN_ID" ]; then
+            RUN_ID="$(gh run list -R "$GITHUB_REPOSITORY" --workflow db-backup.yml --status success \
+                       --json databaseId,event -q '[.[] | select(.event != "pull_request")][0].databaseId')"
+          fi
+          [ -n "$RUN_ID" ] || { echo "::error::No successful backup run found."; exit 1; }
+          gh run download "$RUN_ID" -R "$GITHUB_REPOSITORY" -p 'dev-db-*' -D "$RUNNER_TEMP/got"
+          src="$(ls -d "$RUNNER_TEMP"/got/dev-db-daily-* "$RUNNER_TEMP"/got/dev-db-weekly-* 2>/dev/null | head -1)"
+          [ -n "$src" ] || { echo "::error::Run $RUN_ID has no backup left (backups expire after 30 or 90 days)."; exit 1; }
+          mv "$src" "$RUNNER_TEMP/restore"
+          echo "Restoring $(basename "$src") from run $RUN_ID."
+      - name: Back up the database as it is now
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: db/backup.sh "$RUNNER_TEMP/before"
+      - name: Name the safety copy
+        id: name
+        run: echo "before=dev-db-before-restore-$(date -u +%Y%m%dT%H%MZ)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.name.outputs.before }}
+          path: ${{ runner.temp }}/before/
+          retention-days: 90
+          if-no-files-found: error
+      - name: Replace the dev database with the backup
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: db/restore.sh --replace "$RUNNER_TEMP/restore"
+      # A backup older than a migration gets that migration now.
+      - name: Bring the schema up to date
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: db/migrate.sh
