@@ -4638,7 +4638,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-09.6";
+const APP_VERSION = "2026-10-10.1";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -21375,8 +21375,18 @@ function FloorPlanTabContent({
     const pts = (wallsMap.get(wallId) || []).flatMap(id => { const sg = segById.get(id); return sg ? [sg.a, sg.b] : []; });
     if (!pts.length) return null;
     const bb = floorPlanBbox(pts);
-    const m = Math.max(bb.w, bb.h, 1) * 0.35 + 10;
+    const m = Math.max(bb.w, bb.h, 1) * 0.1 + 10;
     return { x: bb.x - m, y: bb.y - m, w: bb.w + m * 2, h: bb.h + m * 2 };
+  };
+  // Is the wall already wholly on screen? A tap on a wall drawn in the current
+  // view leaves the view alone: the wall was only drawn because its space was
+  // selected and framed, and re-framing a long thin box zoomed OUT (2026-10-10).
+  const wallOnScreen = wallId => {
+    const pts = (wallsMap.get(wallId) || []).flatMap(id => { const sg = segById.get(id); return sg ? [sg.a, sg.b] : []; });
+    const v = vbRef.current;
+    if (!pts.length || !v) return false;
+    const bb = floorPlanBbox(pts), ix = v.w * 0.02, iy = v.h * 0.02;
+    return bb.x >= v.x + ix && bb.y >= v.y + iy && bb.x + bb.w <= v.x + v.w - ix && bb.y + bb.h <= v.y + v.h - iy;
   };
 
   // ---- pan/zoom: the viewBox lives in a ref, not state, so a drag/pinch
@@ -21589,9 +21599,20 @@ function FloorPlanTabContent({
     // trigger's comment says why), so a timer lands the view regardless.
     animRef.current = { raf: requestAnimationFrame(step), timer: setTimeout(finish, FLOOR_PLAN_GLIDE_MS + 80) };
   };
+  // The view zoomToFit lands on, for this plan at this stage size.
+  const planFitViewBox = () => {
+    const allPts = plan.status === "ready" ? plan.spaces.flatMap(s => s.pts) : [];
+    return allPts.length ? floorPlanZoomViewBox(floorPlanBbox(allPts), 0.06, stageAspect()) : null;
+  };
   const zoomToBbox = (bbox, pad, keepIfFits, animate) => {
     const next = floorPlanZoomViewBox(bbox, pad == null ? 0.08 : pad, stageAspect());
-    const cur = vbRef.current;
+    let cur = vbRef.current;
+    // The width to hold is never WIDER than the whole-plan fit. Measured against
+    // the current view alone, the result depended on history: tapped from the
+    // fit it kept the fit, tapped after something had zoomed out it kept that,
+    // so the same space framed differently each time (2026-10-10).
+    const fit = planFitViewBox();
+    if (cur && fit && cur.w > fit.w) cur = fit;
     if (keepIfFits && cur && next.w > cur.w) {
       const snug = floorPlanZoomViewBox(bbox, 0.04, stageAspect());
       if (snug.w <= cur.w) {
@@ -22027,6 +22048,7 @@ function FloorPlanTabContent({
     }
     setSelectedShapeId(null); setOpenGroupId(null);
     setSelectedWallId(wallId);
+    if (wallOnScreen(wallId)) return;
     const bb = wallBbox(wallId);
     if (bb) zoomToBbox(bb, 0.3, true, true);
   }
