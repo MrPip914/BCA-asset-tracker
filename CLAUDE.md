@@ -1767,6 +1767,19 @@ onboard one.
   are not. It is a quiet failure — it reads as a styling wobble rather than a bug. The
   panel Table view records the same rule; the Audit tab was where it was met the second
   time, which is why the User column sits ahead of Details.
+- **Help lives behind a "?" icon, not in the menu** (`HelpTip`, 2026-10-10). Explanations
+  used to sit in menus and settings dialogs as grey sentences, read once and then in the way
+  on every visit, or as `title=` tooltips, which a phone never shows. `HelpTip` is a small
+  tap-to-open popover. Put new help behind one rather than writing it inline.
+  - **Portalled to `document.body`, `position: fixed`**, because it usually sits inside a
+    menu card or modal whose overflow would clip it.
+  - **Its root STOPS every click.** React bubbles portal events through the component tree,
+    so without that the tap that closes the help would also close the menu or modal it is in.
+  - **The trigger preventDefaults**, so a "?" inside a `<label>` never toggles the checkbox.
+    In a menu, the row becomes a flex `div` holding the action button and the "?" side by
+    side (a button cannot contain a button).
+  - Header badges (Sandbox pill, View only, Backend outdated, Dev) still use `title=`;
+    they were outside this pass. Covered by `test-frontend-helptip.js`.
 - **Edit affordance convention**: every "edit this record" trigger is an icon-only pencil
   (`<Pencil size={14} color={C.muted}/>`, `aria-label="Edit ..."`), positioned at the trailing
   edge of the row/section it edits, alongside that row's other icon actions (delete, etc.) —
