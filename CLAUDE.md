@@ -796,6 +796,69 @@ instead, and still is for anything that takes that path.
   Driven in Chromium against the real function on a local Postgres: two pages saving
   different assets both land; a third, stale on the same asset, gets the not-saved modal.
 
+## Relationships tab (2026-10-10)
+
+Each asset can show a **Relationships** tab listing assets related to it by named
+queries its TYPE defines ("HVAC" on a Room: the units inside it, then whatever
+points at each unit through a Controls field). The plan behind it is
+`/mnt/project-files/plans/relationships-tab.md`. **Frontend only: no backend
+change, no version bump, no deploy.**
+
+- **Queries live in `typeSettings[id].relationshipQueries`**, a property on an
+  existing Config blob, so it cost no release (Supabase stores Config as a blob
+  too). Shape: `{ id, name, steps: [{ follow, typeIds, fieldKey, show }],
+  includeArchived, hideWhenEmpty }`.
+- **One chain of 1-3 steps, no branching** (Eric took the recommended defaults).
+  A step follows one of `RELATIONSHIP_FOLLOWS`: children, anywhere inside,
+  parent, the nearest ancestor of a type, forward or REVERSE through a Reference
+  field, a device's users, or what a person uses. `typeIds` narrows a step,
+  except on "nearest", where it IS the target type. **A hidden step is walked
+  through**: what the next step finds is lifted to where it would have been. The
+  builder forces the last step shown, since a hidden last step shows nothing.
+- **`runRelationshipQuery` is pure** and builds one index per run (children by
+  parent, who points at whom per Reference field, who uses whom). Three rules:
+  an asset already shown is not shown again (under the first parent that reached
+  it); the asset itself and anything already on the path are never results,
+  which cuts every loop a reference can make; and "anywhere inside" nests its
+  results by containment, so the tree reads like the hierarchy.
+- **Contents is a BUILT-IN query on every place type** (`BUILT_IN_CONTENTS_QUERY`,
+  never stored), listed first. The old Contents tab stays beside it in v1; the
+  query does not list bulk-item allocations (not parent links), so its count can
+  be lower than the Contents tab's. Replacing Contents is step two.
+- **The tab appears when the type has a query to run** (its own, or Contents on a
+  place) — `availableTabsFor`.
+- **The builder (`RelationshipQueryEditor`) is reached two ways**: "Edit <Type>
+  queries" on the tab (saves at once through `saveRelationshipQueries`, MERGING
+  into the stored override, with that asset as the live preview), and the type
+  editor's Relationships row (folds into the editor's draft, so the editor's Save
+  stays one commit). Editors only.
+  - **`saveTypeSettings` rebuilds the whole settings object, so it CARRIES the
+    stored queries** when the draft did not touch them. Leaving that out would
+    delete every query on any unrelated type edit. Tested.
+  - **"Reset to default" keeps a type's queries** — none ship, so they are not a
+    default to reset to.
+- **A field step only offers Reference fields that can match**
+  (`relationshipFieldOptions`): forward, fields the step's source types carry;
+  reverse, fields that can point AT them. The source types are the owner type
+  for step 1, else the previous step's type filter, else a forward field's target.
+  `referenceTargetTypes` reads `referenceTypes` (a list) as well as
+  `referenceType`, ahead of Reference fields allowing several types.
+- **A stored query is cleaned on read** (`relationshipQueriesFor`): an unknown
+  follow or a field step with no field is dropped rather than run as something
+  else, and at most three steps run.
+- `MOCK_SNAPSHOT` carries a `Thermostat` type with a `controls` Reference field
+  (-> Mini Split), a thermostat in Room 102 pointing at its mini split, a Room
+  "HVAC" query (down, then back along the field) and a Mini Split "Controlled by"
+  query. Room's override holds ONLY queries, so the location fallback for a
+  settings object with nothing else in it is exercised.
+- Covered by `test-frontend-relationships.js` (the real runner against a fixture
+  with a parent loop, an archived unit and a two-type reference field),
+  mutation-checked (dedupe, the hidden-step lift, the loop cut, the `referenceTypes`
+  read). The tab, both builder entry points, saving and a reload were driven in
+  Chromium against Sandbox.
+- The connector does not know about queries yet; it is queued in
+  `/mnt/project-files/connector-queue.md`.
+
 ## Local Sandbox mode
 
 Sandbox swaps the real Google Sheet for a local fixture (`MOCK_SNAPSHOT` in
@@ -1613,6 +1676,37 @@ onboard one.
   the one thing that lived there besides the count (clearing an active sort) moved to a small ×
   chip next to the sort arrow on the sorted column's own header; on Maintenance, the overdue
   count that lived there is now a standalone badge above the table.
+- **ONE MENU, top right, and one Settings page** (2026-10-10; plan at
+  `/mnt/project-files/plans/single-menu.md`). The header ☰ replaced the account button,
+  the tab row's ☰ and the panel Layout's ☰. Several passages below describe those older
+  menus; their reasoning still holds, but this is where the controls now live.
+  - **The menu is three parts: this screen's rows, Settings, then You** (identity, Set
+    name, Enter sandbox, Name format, About, Sign out). A screen contributes its rows by
+    portalling them into a slot the menu card renders: `AppMenuContext` holds `{ slot,
+    close }` and `AppMenuScreenRows` portals a titled section into it. That is the map's
+    old shared-slot pattern, generalised — so the map, the floor plan tab and the panel
+    Layout tab keep their own state and handlers and only their rows moved. A screen with
+    nothing to offer renders nothing, and the heading disappears with it.
+  - **Settings is a full-screen overlay** (zIndex 25: above the headers and the menu,
+    below every dialog, so a manager's own pickers still stack over it), with sections
+    from `SETTINGS_SECTIONS`: Types & fields, Relationships, Lists, Electrical, Access,
+    Personal, About & diagnostics. Editors see all of them; viewers see Personal and
+    About only, the editor sections HIDDEN rather than greyed out.
+  - **It is in the address bar** (`?settings=<section>`, a PUSHED history entry carrying
+    `settings: true`), so a setting can be linked and phone Back closes it. The popstate
+    handler checks it FIRST, before any asset navigation. An unknown section opens the
+    section list rather than refusing.
+  - **Each section reuses the existing manager's body**, through `ManagerFrame` — a modal
+    when opened from a field's gear, an embedded card on the Settings page. **The field
+    gears were kept as shortcuts** and open the same code in place, mid-form, which is
+    when someone needs to add a vendor.
+  - **Columns is split.** Which columns are SHOWN (per-device) stays in the Assets screen
+    rows; adding or deleting a custom column changes data and moved to Types & fields.
+    The delete confirmation (`deleteColumnModal`) renders from both views for that reason.
+  - **The panel menu's door-card measurement now runs when the header menu opens** on the
+    Layout tab, so the quoted size is still the size that prints.
+  - Live refresh is held while Settings is open (it is a fixed inset overlay), which is
+    correct: a manager is a draft.
 - **The header's account controls are one dropdown, and About is where the app names its
   own version** (2026-08-26). The top-right used to carry four separate controls beside the
   Sandbox pill — the name/identity tag, an `Access` link, a `View only` badge, `Sign out`.
@@ -1704,6 +1798,19 @@ onboard one.
   are not. It is a quiet failure — it reads as a styling wobble rather than a bug. The
   panel Table view records the same rule; the Audit tab was where it was met the second
   time, which is why the User column sits ahead of Details.
+- **Help lives behind a "?" icon, not in the menu** (`HelpTip`, 2026-10-10). Explanations
+  used to sit in menus and settings dialogs as grey sentences, read once and then in the way
+  on every visit, or as `title=` tooltips, which a phone never shows. `HelpTip` is a small
+  tap-to-open popover. Put new help behind one rather than writing it inline.
+  - **Portalled to `document.body`, `position: fixed`**, because it usually sits inside a
+    menu card or modal whose overflow would clip it.
+  - **Its root STOPS every click.** React bubbles portal events through the component tree,
+    so without that the tap that closes the help would also close the menu or modal it is in.
+  - **The trigger preventDefaults**, so a "?" inside a `<label>` never toggles the checkbox.
+    In a menu, the row becomes a flex `div` holding the action button and the "?" side by
+    side (a button cannot contain a button).
+  - Header badges (Sandbox pill, View only, Backend outdated, Dev) still use `title=`;
+    they were outside this pass. Covered by `test-frontend-helptip.js`.
 - **Edit affordance convention**: every "edit this record" trigger is an icon-only pencil
   (`<Pencil size={14} color={C.muted}/>`, `aria-label="Edit ..."`), positioned at the trailing
   edge of the row/section it edits, alongside that row's other icon actions (delete, etc.) —
