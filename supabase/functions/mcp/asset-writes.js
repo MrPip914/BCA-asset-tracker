@@ -157,6 +157,7 @@ export function schemaOf(view) {
       isPerson: R.isPersonType(t.id) || undefined,
       usesAssetId: R.fieldAppliesTo("tag", t.id) || undefined,
       count: view.assets.filter((a) => a.type === t.id && a.status !== "Archived").length,
+      relationshipQueries: relationshipQueriesOf(view, t.id),
     };
   });
   const fields = view.columns.map((c) => ({
@@ -164,9 +165,34 @@ export function schemaOf(view) {
     key: c.key,
     kind: fieldKind(c),
     choices: R.columnDataType(c) === "select" ? R.columnOptions(c) : undefined,
+    pointsAt: R.columnDataType(c) === "reference" ? R.columnReferenceTypes(c).map((id) => R.typeNameOf(id, view.typesList)) : undefined,
     custom: c.custom || undefined,
   }));
   return { types, fields };
+}
+
+// A type's relationship queries (the Relationships tab), worded for reading:
+// the built-in Contents first on a place, then the type's own. Undefined when
+// it has none, so the schema stays short.
+export function relationshipQueriesOf(view, typeId) {
+  const qs = R.relationshipQueriesShownFor(typeId);
+  if (!qs.length) return undefined;
+  const colLabel = (key) => {
+    const c = view.columns.find((x) => x.key === key);
+    return c ? fieldLabel(c) : key;
+  };
+  return qs.map((q) => ({
+    name: q.name,
+    builtIn: q.builtIn || undefined,
+    steps: q.steps.map((st) => ({
+      follow: R.relationshipFollowMeta(st.follow).label.replace("…", "<type>"),
+      field: st.fieldKey ? colLabel(st.fieldKey) : undefined,
+      types: st.typeIds.length ? st.typeIds.map((id) => R.typeNameOf(id, view.typesList)) : undefined,
+      shown: st.show ? undefined : false,
+    })),
+    includeArchived: q.includeArchived || undefined,
+    hideWhenEmpty: q.hideWhenEmpty || undefined,
+  }));
 }
 
 const PARENT_ALIASES = ["location", "location path", "parent", "parent path", "path", "inside", "within"];
@@ -177,6 +203,7 @@ function fieldKind(c) {
   if (c.key === "peripherals") return "a list, separated by /";
   if (c.key === "type") return "a type name";
   if (c.key === "tag") return "the sticker ID; unique across the site";
+  if (R.columnDataType(c) === "reference") return "reference: ONE asset of a pointsAt type, by id, tag, name or full path (stored as its id); blank clears it";
   return R.columnDataType(c);
 }
 
@@ -197,6 +224,47 @@ function fieldNames(view) {
 }
 
 const cellText = (v) => (Array.isArray(v) ? v.map((x) => String(x ?? "").trim()).filter(Boolean).join("/") : v === null || v === undefined ? "" : String(v).trim());
+
+// What a Reference field's value names: ONE existing asset of one of the
+// field's target types. An archived asset is refused, as the form offers none;
+// so is the asset itself, and a name two assets share.
+export function resolveReference(view, col, value, selfId) {
+  const label = fieldLabel(col);
+  const targets = R.columnReferenceTypes(col);
+  if (!targets.length) return { error: `${label} has no type it points at yet, so it cannot be set.` };
+  const names = targets.map((id) => R.typeNameOf(id, view.typesList));
+  const wanted = names.length === 1 ? names[0] : names.slice(0, -1).join(", ") + " or " + names[names.length - 1];
+  const q = String(value).trim();
+  const lq = q.toLowerCase();
+  const ok = (a) => targets.includes(a.type) && a.status !== "Archived" && a.id !== selfId;
+  const direct = view.byId.get(q);
+  if (direct) {
+    if (ok(direct)) return { id: direct.id };
+    const why = direct.id === selfId ? "it cannot point at itself"
+      : direct.status === "Archived" ? `${R.nameOf(direct, view.typesList)} is archived`
+      : `${R.nameOf(direct, view.typesList)} is a ${R.typeNameOf(direct.type, view.typesList)}`;
+    return { error: `${label} must be a ${wanted}; ${why}.` };
+  }
+  const pool = view.assets.filter(ok);
+  const tiers = [
+    (a) => String(a.tag || "").trim().toLowerCase() === lq,
+    (a) => R.nameOf(a, view.typesList).toLowerCase() === lq,
+    (a) => R.fullPathOf(a, view.assets).toLowerCase() === lq,
+  ];
+  for (const test of tiers) {
+    const hits = pool.filter(test);
+    if (hits.length === 1) return { id: hits[0].id };
+    if (hits.length > 1) return { error: `${label}: "${q}" matches ${hits.length} ${wanted} assets (${hits.slice(0, 5).map((a) => a.id).join(", ")}); give its id.` };
+  }
+  // Nothing of the right type: say what it DID match, if anything.
+  const other = view.assets.find((a) => R.nameOf(a, view.typesList).toLowerCase() === lq || String(a.tag || "").trim().toLowerCase() === lq);
+  if (other) {
+    const why = other.status === "Archived" && targets.includes(other.type) ? `${R.nameOf(other, view.typesList)} is archived`
+      : `${R.nameOf(other, view.typesList)} is a ${R.typeNameOf(other.type, view.typesList)}`;
+    return { error: `${label} must be a ${wanted}; ${why}.` };
+  }
+  return { error: `${label} must be a ${wanted}; no ${wanted} matches "${q}".` };
+}
 
 export class PlanError extends Error {
   constructor(message, detail) { super(message); this.detail = detail; }
@@ -236,6 +304,19 @@ export function planSaveAssets(view, rows, { assignTags = false } = {}) {
       problems.push(`Row ${i + 1}: no asset with id "${r.asset}".`);
     }
     return out;
+  });
+  // A Reference field holds ONE asset's id, and only an asset of a type the
+  // field points at. The app's form offers only those, but its import checks
+  // nothing here, so the connector does: what was given is resolved (id, tag,
+  // name or full path, among assets of those types) and stored as the id.
+  const refCols = R.referenceColumns(view.columns).map((c) => [headersByKey.get(c.key), c]).filter(([h]) => h);
+  given.forEach((out, i) => {
+    for (const [header, col] of refCols) {
+      if (!(header in out) || out[header] === "") continue;
+      const hit = resolveReference(view, col, out[header], rows[i]?.asset);
+      if (hit.error) problems.push(`Row ${i + 1}: ${hit.error}`);
+      else out[header] = hit.id;
+    }
   });
   if (problems.length) throw new PlanError("Nothing was changed.", problems.slice(0, 50));
 
