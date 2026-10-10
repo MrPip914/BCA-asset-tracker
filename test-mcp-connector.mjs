@@ -135,10 +135,13 @@ const ctxFor = (sites) => ({
   // Stands in for index.ts's call to the 0006 Postgres function, which
   // db/test-connector-writes.sql covers against a real database.
   writes: [],
-  async write(tenant, op, args) {
+  // The tool name each write's backup is filed under (0010).
+  backupTools: [],
+  async write(tenant, op, args, tool) {
     if (!sites.some((s) => s.id === tenant)) throw new Error("site not permitted");
     this.writes.push({ tenant, op, args });
-    return { id: `new-${this.writes.length}`, revision: 99 };
+    this.backupTools.push(tool);
+    return { id: `new-${this.writes.length}`, revision: 99, backup: 41 };
   },
 });
 const ONE = [{ id: "dev", name: "Development", role: "editor" }];
@@ -171,13 +174,13 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   // Claude asks before a tool not marked read-only, so a write marked
   // read-only would run without asking. Exactly the writes are writes, and the
   // ones that overwrite or remove something say so.
-  const WRITES = ["add_comment", "add_task", "add_tasks", "archive_assets", "complete_task", "delete_task", "edit_task", "log_work", "replace_floor_plan", "save_assets", "set_plan_walls"];
+  const WRITES = ["add_comment", "add_task", "add_tasks", "archive_assets", "complete_task", "delete_task", "edit_task", "log_work", "replace_floor_plan", "save_assets", "set_plan_walls", "undo_change"];
   eq("exactly the write tools are marked as writes",
     tools.filter((t) => t.annotations.readOnlyHint !== true).map((t) => t.name).sort(), WRITES);
   eq("the write tool list matches", [...WRITE_TOOL_NAMES].sort(), WRITES);
   eq("exactly the tools that overwrite or remove are marked destructive",
     tools.filter((t) => t.annotations.destructiveHint !== false).map((t) => t.name).sort(),
-    ["archive_assets", "delete_task", "edit_task", "replace_floor_plan", "save_assets", "set_plan_walls"]);
+    ["archive_assets", "delete_task", "edit_task", "replace_floor_plan", "save_assets", "set_plan_walls", "undo_change"]);
   check("every tool's annotations carry its title", tools.every((t) => t.annotations.title === t.title));
   check("every tool's schema is a closed object",
     tools.every((t) => t.inputSchema.type === "object" && t.inputSchema.additionalProperties === false));
@@ -324,7 +327,8 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   const ts = fs.readFileSync(path.join(here, "supabase/functions/mcp/index.ts"), "utf8");
   check("every jsonb parameter in index.ts goes through ::text", (ts.match(/::jsonb/g) || []).length === (ts.match(/::text::jsonb/g) || []).length && /::text::jsonb/.test(ts));
   check("index.ts has a writer for every write tool",
-    ["add_task", "complete_task", "log_work", "add_comment", "apply", "replace_floor_plan", "set_plan_walls"].every((n) => ts.includes(`connector_${n}(`)));
+    ["add_task", "complete_task", "log_work", "add_comment", "apply", "replace_floor_plan", "set_plan_walls", "restore_backup", "backup_preview"].every((n) => ts.includes(`connector_${n}(`)));
+  check("index.ts names each write's backup after its tool", /set_config\('connector\.tool', \$\{tool \|\| op\}, true\)/.test(ts));
   check("index.ts loads the revisions a management write sends back", /revisions: "select domain, rev from asset_tracker\.revisions"/.test(ts));
   // Frequencies come out exactly as the app stores them.
   eq("a preset frequency", frequencyFrom("semi annually"), { label: "Semi-Annually", days: 182, recurrence: "" });
@@ -905,6 +909,90 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
     const e = exteriorWalls(rotatedSpaces(floorPlanGeometryOf(fs.readFileSync(p, "utf8")), 0));
     check(`a real plan has outside walls facing all four ways: ${f}`, ["north", "east", "south", "west"].every((d) => e.some((x) => x.facing === d)));
   }
+}
+
+// ---------------------------------------------------------------- backups (0010)
+
+{
+  // Every bulk write files its backup under its own tool and hands the number back.
+  const mk = () => ctxFor(ONE);
+  const cases = [
+    ["save_assets", { rows: [{ asset: "pc1", fields: { "Serial #": "SN-999" } }] }],
+    ["archive_assets", { assets: ["pc1"] }],
+    ["add_tasks", { tasks: [{ asset: "ms1", task: "Coil clean", frequency: "Annually" }] }],
+    ["edit_task", { task: "m1", owner: "Someone new" }],
+    ["delete_task", { task: "m1" }],
+  ];
+  for (const [tool, args] of cases) {
+    const ctx = mk();
+    const r = await call(tool, args, ctx);
+    check(`${tool} files its backup under its own name and returns the number`,
+      !r.isError && ctx.backupTools[0] === tool && r.data?.backup === 41, r.text);
+  }
+
+  // list_backups: newest first, counts in words, the assets named, undone marked.
+  const rowsB = [
+    { id: "7", taken_at: "2026-10-09T20:00:00.000Z", by: "Eric (via Claude)", tool: "save_assets",
+      scope: [{ kind: "asset", key: "pc1" }, { kind: "asset", key: "ms1" }, { kind: "tasks", key: "ms1" }], restored_at: null, restored_by: null },
+    { id: "9", taken_at: "2026-10-09T21:00:00.000Z", by: "Eric (via Claude)", tool: "replace_floor_plan",
+      scope: [{ kind: "asset", key: "b300" }, { kind: "plan", key: "b300" }], restored_at: "2026-10-09T22:00:00.000Z", restored_by: "Eric (via Claude)" },
+  ];
+  const lctx = ctxFor(ONE);
+  const base = lctx.load;
+  lctx.load = async (t, table) => (table === "connector_backups" ? rowsB : base(t, table));
+  let r = await call("list_backups", {}, lctx);
+  eq("list_backups: newest first, with counts and names",
+    r.data?.backups?.map((b) => [b.backup, b.change, b.records, b.assets.join("|"), !!b.undone]),
+    [[9, "replace_floor_plan", "1 asset, 1 floor plan", "Building 300", true], [7, "save_assets", "2 assets, 1 task list", "Teacher PC|Mini Split 1", false]]);
+
+  // undo_change, against a preview shaped like connector_backup_preview's.
+  const asset = (serial) => ({ label: null, tag: "BCA0042", type: "Computer", parent_id: "closet", data: { id: "pc1", name: "Teacher PC", serial } });
+  const preview = (status, extra = {}) => ({
+    id: 7, takenAt: "2026-10-09T20:00:00.000Z", by: "Eric (via Claude)", tool: "save_assets", restoredAt: null, restoredBy: null,
+    records: [
+      { kind: "asset", key: "pc1", status, before: asset("SN-777"), after: asset("WRONG"), current: status === "later" ? asset("HAND") : asset("WRONG") },
+      { kind: "asset", key: "new9", status: "changed", before: null, after: asset("X"), current: asset("X") },
+      { kind: "tasks", key: "ms1", status: "reverted", before: [], after: [], current: [] },
+    ],
+    ...extra,
+  });
+  const uctx = (pv, sites = ONE) => { const c = ctxFor(sites); c.previews = []; c.backup = async (t, id) => { c.previews.push([t, id]); return pv; }; return c; };
+
+  let c = uctx(preview("changed"));
+  r = await call("undo_change", { backup: 7, dry_run: true }, c);
+  check("undo_change dry run: says what comes back and writes nothing",
+    !r.isError && c.writes.length === 0 && r.data.wouldPutBack.length === 2 && r.data.alreadyAsItWas === 1
+      && JSON.stringify(r.data.wouldPutBack[0].fields) === JSON.stringify([{ field: "serial", now: "WRONG", back: "SN-777" }])
+      && /archived/.test(r.data.wouldPutBack[1].putBack), r.text);
+  eq("undo_change reads the backup it was given, on that site", c.previews, [["dev", 7]]);
+
+  c = uctx(preview("changed"));
+  r = await call("undo_change", { backup: 7 }, c);
+  eq("undo_change writes one restore with the revisions it read", c.writes.map((w) => [w.op, w.args[1], w.args[2]]), [["restore_backup", 7, false]]);
+  check("undo_change files its own backup", c.backupTools[0] === "undo_change" && r.data?.undoBackup === 41, r.text);
+
+  c = uctx(preview("later"));
+  r = await call("undo_change", { backup: 7 }, c);
+  check("undo_change refuses over a later change, naming it, writing nothing",
+    r.isError && c.writes.length === 0 && /overwrite_later_changes/.test(r.text) && /Teacher PC/.test(JSON.stringify(r.raw)), r.text);
+  r = await call("undo_change", { backup: 7, dry_run: true }, c);
+  check("undo_change dry run over a later change says so", !r.isError && /changed again/.test(r.data.note) && c.writes.length === 0, r.text);
+  r = await call("undo_change", { backup: 7, overwrite_later_changes: true }, c);
+  eq("undo_change with overwrite_later_changes goes ahead", c.writes.map((w) => [w.op, w.args[2]]), [["restore_backup", true]]);
+
+  c = uctx(preview("changed", { restoredAt: "2026-10-09T22:00:00.000Z", restoredBy: "Eric (via Claude)" }));
+  r = await call("undo_change", { backup: 7 }, c);
+  check("undo_change refuses a backup already undone", r.isError && /already undone/.test(r.text) && c.writes.length === 0, r.text);
+
+  const allBack = preview("reverted");
+  allBack.records = allBack.records.map((x) => ({ ...x, status: "reverted" }));
+  c = uctx(allBack);
+  r = await call("undo_change", { backup: 7 }, c);
+  check("undo_change with nothing left to put back writes nothing", !r.isError && c.writes.length === 0 && /Nothing to undo/.test(r.data.note), r.text);
+
+  c = uctx(preview("changed"), [{ id: "dev", name: "Development", role: "viewer" }]);
+  r = await call("undo_change", { backup: 7 }, c);
+  check("undo_change refuses a viewer", r.isError && /view-only/.test(r.text) && c.writes.length === 0 && c.previews.length === 0, r.text);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

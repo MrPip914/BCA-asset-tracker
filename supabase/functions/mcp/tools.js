@@ -155,6 +155,16 @@ const READ_TOOLS = [
     },
   },
   {
+    name: "list_backups",
+    title: "List backups",
+    description: "The backups taken before each bulk change made through Claude (save_assets, archive_assets, add_tasks, edit_task, delete_task, replace_floor_plan, set_plan_walls, and undo_change itself), newest first: which tool, who, when, how many records, and whether it has been undone. undo_change puts one back.",
+    inputSchema: {
+      type: "object",
+      properties: { site: SITE, limit: LIMIT(200, 20) },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "panel_lookup",
     title: "Electrical panel lookup",
     description: "Give a panel to list its breakers and circuits, or a room (or anything in it) to find the circuits that serve it and which panel and breaker they are on.",
@@ -450,6 +460,23 @@ const MANAGE_TOOLS = [
     },
     annotations: DESTRUCTIVE,
   },
+  {
+    name: "undo_change",
+    title: "Undo a change from its backup",
+    description: "Put back everything one bulk change made through Claude touched, from the backup taken before it (list_backups gives the number; every bulk write also returns it as `backup`). Assets get their old fields back, task lists and floor plan links return as they were, and an asset the change created is archived, never deleted. If anything was changed again since (in the app or by Claude), nothing is undone and those records are listed; only with overwrite_later_changes, after the person agrees to lose those later edits, does it go ahead. Recorded in each asset's change history as this person, via Claude, and itself backed up, so an undo can be undone. Run with dry_run first and show the person what would be put back.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        site: SITE,
+        backup: { type: "integer", minimum: 1, description: "The backup number." },
+        overwrite_later_changes: { type: "boolean", description: "Undo even the records someone changed again since, losing those later changes. Only when the person has agreed." },
+        dry_run: { type: "boolean", description: "Say what would be put back, and what was changed since, without writing anything." },
+      },
+      required: ["backup"],
+      additionalProperties: false,
+    },
+    annotations: DESTRUCTIVE,
+  },
 ];
 
 export const WRITE_TOOL_NAMES = [...WRITE_TOOLS, ...MANAGE_TOOLS].map((t) => t.name);
@@ -490,8 +517,10 @@ async function openSite(ctx, args, tables) {
 
 // A management write: ONE call to connector_apply with the revisions this
 // read saw, which refuses everything if the inventory has moved since.
+// The write takes a backup of everything it touches first (0010) and returns
+// its number as out.backup, which every management tool hands back.
 async function apply(ctx, site, view, ops, tool) {
-  const out = await ctx.write(site.id, "apply", [view.revisions, ops]);
+  const out = await ctx.write(site.id, "apply", [view.revisions, ops], tool);
   ctx.log?.("write", { tool, site: site.id, ops: ops.length });
   return out;
 }
@@ -1023,8 +1052,8 @@ const handlers = {
     const counts = { updated: summary.updated.length, created: summary.created.length, unchanged: summary.unchanged };
     if (args.dry_run) return { site: site.id, dryRun: true, wouldWrite: !!ops.length, counts, ...summary };
     if (!ops.length) return { site: site.id, counts, note: "Nothing to change: every row already matches.", ...summary };
-    await apply(ctx, site, view, ops, "save_assets");
-    return { site: site.id, counts, ...summary };
+    const out = await apply(ctx, site, view, ops, "save_assets");
+    return { site: site.id, counts, ...summary, backup: out?.backup };
   },
 
   async archive_assets(args, ctx) {
@@ -1035,9 +1064,10 @@ const handlers = {
     const ids = [...new Set(refs.map((r) => resolveOrThrow(inv, r).id))];
     const view = appView(rows, site.id);
     const { ops, changed, skipped } = planArchive(view, ids, !!args.restore);
-    if (ops.length) await apply(ctx, site, view, ops, "archive_assets");
+    const out = ops.length ? await apply(ctx, site, view, ops, "archive_assets") : null;
     return {
       site: site.id,
+      backup: out?.backup,
       [args.restore ? "restored" : "archived"]: changed,
       alreadyThatWay: skipped.length ? skipped : undefined,
     };
@@ -1069,8 +1099,8 @@ const handlers = {
       err.detail = problems.slice(0, 50);
       throw err;
     }
-    await apply(ctx, site, appViewRevisions(rows), ops, "add_tasks");
-    return { site: site.id, added: added.length, tasks: added };
+    const out = await apply(ctx, site, appViewRevisions(rows), ops, "add_tasks");
+    return { site: site.id, added: added.length, tasks: added, backup: out?.backup };
   },
 
   async edit_task(args, ctx) {
@@ -1104,12 +1134,13 @@ const handlers = {
     };
     const audit = taskEditAudit(a, orig, updated, taskKindOf);
     if (!audit.length) return { site: site.id, unchanged: taskRow(inv, a, orig), note: "Nothing to change." };
-    await apply(ctx, site, appViewRevisions(rows), [
+    const out = await apply(ctx, site, appViewRevisions(rows), [
       { op: "task_update", id: r.id, assetId: a.id, data: updated },
       ...audit.map((data) => ({ op: "audit", data })),
     ], "edit_task");
     return {
       site: site.id,
+      backup: out?.backup,
       edited: taskRow(inv, a, updated),
       changes: audit.map((e) => ({ field: e.field.slice(orig.task.length + 3), from: e.from, to: e.to })),
     };
@@ -1120,11 +1151,11 @@ const handlers = {
     requireEditor(site);
     const r = findTask(inv, rows.maintenance, String(args.task ?? "").trim(), args.asset);
     const a = inv.byId.get(r.asset_id);
-    await apply(ctx, site, appViewRevisions(rows), [
+    const out = await apply(ctx, site, appViewRevisions(rows), [
       { op: "task_delete", id: r.id, assetId: a.id },
       { op: "audit", data: { assetLabel: a.id, assetType: a.type, action: "maintenance_removed", field: r.data.task || "" } },
     ], "delete_task");
-    return { site: site.id, deleted: taskRow(inv, a, r.data) };
+    return { site: site.id, deleted: taskRow(inv, a, r.data), backup: out?.backup };
   },
 
   async add_comment(args, ctx) {
@@ -1202,13 +1233,13 @@ const handlers = {
     // Bytes first, row second, as the app does: a refused write strands a file
     // at the host rather than leaving a plan that points at nothing.
     const uploaded = await ctx.uploadPlan(site.id, svg, fileName);
-    await ctx.write(site.id, "replace_floor_plan", [
+    const out = await ctx.write(site.id, "replace_floor_plan", [
       appViewRevisions(rows).revisions, a.id,
       { url: uploaded.url, storageKey: uploaded.storageKey, fileName },
       plan.links, plan.groups,
-    ]);
+    ], "replace_floor_plan");
     ctx.log?.("write", { tool: "replace_floor_plan", site: site.id, asset: a.id });
-    return { ...summary, replaced: true };
+    return { ...summary, replaced: true, backup: out?.backup };
   },
 
   async get_plan_walls(args, ctx) {
@@ -1397,11 +1428,125 @@ const handlers = {
       view.revisions, p.asset.id, ops,
       changing.map((r) => ({ wallId: r.wallId, segmentIds: r.segmentIds })),
       removing,
-    ]);
+    ], "set_plan_walls");
     ctx.log?.("write", { tool: "set_plan_walls", site: site.id, asset: p.asset.id, walls: changing.length, removed: removing.length });
-    return { ...summary, saved: true, revision: out?.revision };
+    return { ...summary, saved: true, revision: out?.revision, backup: out?.backup };
+  },
+
+  // ---------------------------------------------------------------- backups
+
+  async list_backups(args, ctx) {
+    const { site, rows, inv } = await openSite(ctx, args, ["connector_backups"]);
+    const list = [...(rows.connector_backups || [])].sort((x, y) => Number(y.id) - Number(x.id));
+    return {
+      site: site.id,
+      backups: list.slice(0, limitOf(args.limit, 20)).map((b) => ({
+        backup: Number(b.id),
+        change: b.tool,
+        by: b.by,
+        at: b.taken_at,
+        records: backupRecordCount(b.scope),
+        assets: backupAssetNames(inv, b.scope),
+        undone: b.restored_at ? { at: b.restored_at, by: b.restored_by } : undefined,
+      })),
+    };
+  },
+
+  async undo_change(args, ctx) {
+    const { site, rows, inv } = await openSite(ctx, args, ["revisions"]);
+    requireEditor(site);
+    const id = Number(args.backup);
+    if (!Number.isInteger(id) || id < 1) throw new ToolError("Give the backup's number (from list_backups).");
+    const pv = await ctx.backup(site.id, id);
+    if (pv.restoredAt) throw new ToolError(`Backup #${id} was already undone (${pv.restoredAt} by ${pv.restoredBy}).`);
+    const records = (pv.records || []).map((r) => describeBackupRecord(inv, r));
+    const toUndo = records.filter((r) => r.status !== "already as it was");
+    const later = records.filter((r) => r.status === "changed again since");
+    const summary = {
+      site: site.id,
+      backup: id,
+      change: pv.tool,
+      by: pv.by,
+      at: pv.takenAt,
+      wouldPutBack: toUndo,
+      alreadyAsItWas: records.length - toUndo.length || undefined,
+    };
+    if (!toUndo.length) return { ...summary, note: "Everything in this backup already reads as it did before that change. Nothing to undo." };
+    if (later.length && !args.overwrite_later_changes) {
+      const note = `${later.length} of these ${later.length === 1 ? "was" : "were"} changed again after this backup was taken. Undoing would lose those later changes too, so it needs overwrite_later_changes, and only if the person agrees.`;
+      if (args.dry_run) return { ...summary, dryRun: true, note };
+      const err = new ToolError(`Nothing was undone: ${note}`);
+      err.detail = later.map((r) => r.what);
+      throw err;
+    }
+    if (args.dry_run) return { ...summary, dryRun: true };
+    const out = await ctx.write(site.id, "restore_backup", [appViewRevisions(rows).revisions, id, !!args.overwrite_later_changes], "undo_change");
+    ctx.log?.("write", { tool: "undo_change", site: site.id, backup: id });
+    return { ...summary, undone: true, archived: out?.archived || undefined, undoBackup: out?.backup };
   },
 };
+
+// ------------------------------------------------------------------ backup helpers
+
+const KIND_WORDS = { asset: ["asset", "assets"], tasks: ["task list", "task lists"], plan: ["floor plan", "floor plans"], config: ["list", "lists"] };
+
+function backupRecordCount(scope) {
+  const n = {};
+  for (const r of Array.isArray(scope) ? scope : []) n[r.kind] = (n[r.kind] || 0) + 1;
+  return Object.keys(KIND_WORDS).filter((k) => n[k]).map((k) => `${n[k]} ${KIND_WORDS[k][n[k] === 1 ? 0 : 1]}`).join(", ") || "nothing";
+}
+
+// The first few assets a backup names, so a list reads as more than counts.
+function backupAssetNames(inv, scope) {
+  const ids = [...new Set((Array.isArray(scope) ? scope : []).filter((r) => r.kind !== "config").map((r) => r.key))];
+  const names = ids.slice(0, 5).map((id) => (inv.byId.get(id) ? inv.nameOf(inv.byId.get(id)) : id));
+  return ids.length > 5 ? [...names, `and ${ids.length - 5} more`] : names;
+}
+
+// Blank, null and an empty list are the same, as the SQL's connector_backup_same has it.
+const blankish = (v) => v === undefined || v === null || v === "" || (Array.isArray(v) && !v.length) ||
+  (v && typeof v === "object" && !Array.isArray(v) && !Object.keys(v).length);
+const showVal = (v) => (blankish(v) ? "" : typeof v === "object" ? JSON.stringify(v) : String(v));
+
+// One backup record, as the person would read it: what it is, where it stands,
+// and what undoing it would put back.
+function describeBackupRecord(inv, r) {
+  const STATUS = { changed: "will be put back", reverted: "already as it was", later: "changed again since" };
+  const a = r.kind === "config" ? null : inv.byId.get(r.key);
+  const name = a ? inv.nameOf(a) : r.key;
+  const before = r.before ?? null;
+  const cur = r.current ?? null;
+  const out = { what: "", status: STATUS[r.status] || r.status };
+  if (r.kind === "asset") {
+    out.what = name;
+    if (!before) {
+      out.putBack = "created by that change: will be archived";
+    } else if (!cur) {
+      out.putBack = "removed since: will come back";
+    } else {
+      const bd = { ...(before.data || {}) };
+      const cd = { ...(cur.data || {}) };
+      const keys = [...new Set([...Object.keys(bd), ...Object.keys(cd)])]
+        .filter((k) => showVal(bd[k]) !== showVal(cd[k]));
+      out.fields = keys.slice(0, 40).map((k) => ({ field: k, now: showVal(cd[k]), back: showVal(bd[k]) }));
+    }
+  } else if (r.kind === "tasks") {
+    out.what = `tasks on ${name}`;
+    const names = (list) => (Array.isArray(list) ? list : []).map((t) => t?.data?.task || t?.id);
+    out.now = names(cur);
+    out.back = names(before);
+  } else if (r.kind === "plan") {
+    out.what = `floor plan links on ${name}`;
+    const n = (p) => `${(p?.links || []).length} links, ${(p?.groups || []).length} groups`;
+    out.now = n(cur);
+    out.back = n(before);
+  } else {
+    out.what = `the ${r.key} list`;
+    out.now = cur;
+    out.back = before;
+  }
+  return out;
+}
 
 
 export async function callTool(name, args, ctx) {

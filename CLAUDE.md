@@ -597,8 +597,8 @@ but a task; editing a work entry is not offered.
   separates tenants underneath; the function must connect as an `asset_api` login role,
   never the service role.
 - **Reads are annotated read-only; the writes are annotated as writes, and the ones that
-  overwrite or remove (save_assets, archive_assets, edit_task, delete_task, replace_floor_plan, set_plan_walls) as
-  destructive**, so Claude asks before each one unless the person told it to always allow
+  overwrite or remove (save_assets, archive_assets, edit_task, delete_task, replace_floor_plan, set_plan_walls,
+  undo_change) as destructive**, so Claude asks before each one unless the person told it to always allow
   that tool. A write marked read-only would run unasked, which `test-mcp-connector.mjs`
   guards.
 - **Every write is ONE Postgres function** (`db/migrations/0006_connector_writes.sql`),
@@ -713,6 +713,33 @@ but a task; editing a work entry is not offered.
     revision, new walls, the app's `space_linked`/`space_unlinked` rows) and then rewrites
     only the named walls' segment rows, refusing an edge still owned by any other row. A
     room link on the same plan is never touched.
+- **Every bulk change through the connector takes a BACKUP first, and `undo_change` puts
+  one back** (2026-10-10, migration 0010; Eric: "always take a backup before doing bulk
+  edits"). The write tools return the number as `backup`; `list_backups` lists them.
+  - **Taken INSIDE the write functions**, in the same transaction as the change —
+    `connector_apply` (so save_assets, archive_assets, add_tasks, edit_task, delete_task),
+    `connector_replace_floor_plan` and `connector_set_plan_walls` — so no tool can write
+    without one, and a refused write leaves none. The four single-record writes of 0006
+    are additive and take none.
+  - **A backup holds RECORDS, each before and after**: an asset row (null before = the
+    change created it), an asset's whole task list, a plan's links and groups, a managed
+    list. Never `nextAssetNumber`, which only climbs. Calls in one transaction share one
+    backup (keyed by txid) and a record keeps the FIRST before it was seen with, which is
+    what makes set_plan_walls (connector_apply, then the plan's edges) one backup.
+  - **The tool's name rides in the transaction setting `connector.tool`**, set by
+    `index.ts`'s `write()`, because `connector_apply` serves five tools and its 0007
+    signature is shared.
+  - **Undo restores a record only where it still reads as the change left it.** A record
+    changed again since (in the app or by Claude) refuses the whole undo, naming it, unless
+    `overwrite_later_changes` — Claude is told to ask first. "The same" ignores blank,
+    null and empty-list fields at any depth (`connector_backup_norm`), because the app's
+    full-snapshot save writes every field and must not read as a later change.
+  - **An asset the change CREATED is archived, never deleted**, with the app's `archived`
+    row. Every asset put back gets one `backup_restored` row in the app's generic
+    "X changed from A to B" shape. Restoring a tag another asset has since taken is refused.
+  - **An undo takes its own backup**, so an undo can be undone; undoing one twice is refused.
+  - The newest 200 per site are kept. Covered by `db/test-connector-backups.sql` (CI, real
+    Postgres, as the API role; mutation-checked) and the tools in `test-mcp-connector.mjs`.
 - **Names are not unique, so a lookup is tiered** (id, tag, name, full path) and two
   matches is an error listing both with their locations, never the first one.
 - **The whole tenant is loaded per call.** Fine at hundreds of assets; the audit log is the

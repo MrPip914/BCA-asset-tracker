@@ -38,6 +38,9 @@ const DELETE_ORDER = [
   "circuits", "breakers", "comments", "allocations", "changes", "maintenance",
   "space_links", "space_groups", "assets", "breaker_types", "photos",
   "audit_log", "config", "revisions", "auth_users",
+  // The connector's backups (0010) describe the data being replaced; undoing
+  // one onto a fresh import would put old rows over it.
+  "connector_backups",
 ];
 const INSERT_ORDER = [
   "assets", "comments", "allocations", "changes", "maintenance", "breakers",
