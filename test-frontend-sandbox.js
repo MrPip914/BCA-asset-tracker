@@ -29,9 +29,9 @@ const check = (name, ok, detail) => {
 // Every call site that flips the mode, so the counts below are about placement
 // rather than about the toggle existing.
 const toggles = (src.match(/onClick=\{[^}]*toggleSandboxMode[^}]*\}/g) || []);
-check('there are exactly three ways to flip the mode',
-      toggles.length === 3,
-      'expected the sign-in link, the account-menu row and the header pill; found ' + toggles.length);
+check('there are exactly four ways to flip the mode',
+      toggles.length === 4,
+      'expected the sign-in link, the menu row, Settings > Personal and the header pill; found ' + toggles.length);
 
 // ---- the pill is conditional ----
 // Sliced from the header's own block: the pill and its Reset button sit inside
