@@ -234,6 +234,32 @@ Everything below exists to make that safe. None of it is optional.
     a second pause happens despite the ping; the restore drill fails; egress passes 60% or
     storage 70% of the free limit; or a school asks for an uptime/backup commitment.
 
+**What was built for dev (2026-10-10).** Items 1–3 exist for the dev tenant, with three
+deliberate departures from the text above:
+- **Keep-alive** is `.github/workflows/db-keepalive.yml`: `psql` runs a real query over
+  `SUPABASE_DB_URL` at 03:17 and 15:17 UTC. Same DATABASE activity, no `/health` endpoint
+  needed (that is still worth adding for item 6).
+- **Backups** are `.github/workflows/db-backup.yml` at 10:23 UTC (3:23am Pacific), via
+  `db/backup.sh`. Encrypted with a **passphrase** (`BACKUP_PASSPHRASE` on the GitHub
+  environment `supabase-dev`, gpg AES-256) rather than an age keypair: the drill has to
+  decrypt in CI, which would put the private key in CI anyway. Stored as **GitHub Actions
+  artifacts**, not R2 or a private repo: off the Supabase project, nothing new to sign up
+  for, and expiry does the pruning — every night kept 30 days, Sundays also 90 days (GitHub's
+  ceiling for a public repo; that is the "12 weeklies"). No per-tenant JSON export yet; dev is
+  one tenant.
+- **The restore drill runs every night, not monthly**, inside the backup run: the dump is
+  decrypted, restored into a throwaway Postgres and every table's row count compared
+  (`db/restore.sh --check`). A failed drill fails the run, so GitHub emails.
+
+**Restoring dev**: run the "Database restore (dev)" workflow on `dev` with `confirm` set to
+`restore dev` and, optionally, the backup run's id (blank = newest). It first backs up the
+database as it stands (`dev-db-before-restore-<time>`, 90 days), then replaces the
+`asset_tracker` schema in one transaction and runs pending migrations. By hand:
+download the artifact from the run's page, then
+`DATABASE_URL=… BACKUP_PASSPHRASE=… db/restore.sh --replace <unzipped folder>`.
+**Scheduled and manual runs only exist once the workflow files are on `main`** — GitHub runs
+schedules from the default branch only.
+
 Residual risk, stated plainly: a missed ping still pauses everyone until someone clicks
 Resume, and between nightly exports up to a day of edits is unprotected. Both are accepted
 for the free tier; Pro's 7 daily backups and no-pause guarantee are what removes them.
