@@ -879,7 +879,12 @@ const handlers = {
       picked = all.filter((q) => norm(q.name) === norm(args.query));
       if (!picked.length) throw new ToolError(`${typeName} has no query called "${args.query}". Its queries: ${all.map((q) => q.name).join(", ")}.`);
     }
-    const node = (n) => ({
+    const node = (n) => n.circuit ? {
+      circuit: n.circuit.label || n.circuit.tag || "Circuit",
+      slot: n.breaker ? cellsLabel_(n.breaker) : "unassigned",
+      amps: (n.breaker && n.breaker.ampRating) || undefined,
+      panel: describe(view, n.panel),
+    } : ({
       ...describe(view, n.asset),
       ...(n.children.length ? { children: n.children.map(node) } : {}),
     });

@@ -48,6 +48,7 @@ new Function('module', [
   grabBlock('const COLUMN_DATA_TYPES = [', '// What a kind is CALLED'),
   'const DEFAULT_COLUMN_DATA_TYPES = {};',
   grabFn('columnDataType'),
+  grabFn('cellsLabel_'),
   grabFn('personLabelsOf'),
   grabFn('parentOf'),
   grabFn('ancestorsOf'),
@@ -184,6 +185,32 @@ check('the stored copy carries no typeIds (the connector\'s shape is unchanged)'
 check('Contents lists the place types it applies to', JSON.stringify(R.builtInContentsQueryFor(['Computer', 'Room', 'Building']).typeIds) === JSON.stringify(['Room', 'Building']));
 check('a step\'s source types accept a list of owner types',
   JSON.stringify(R.relationshipStepSourceTypes(['Room', 'Building'], [S('children')], 0, columns)) === JSON.stringify(['Room', 'Building']));
+
+// ---- Circuits that serve it: rows are circuits, not assets ----
+const panelA = A('P1', 'Electrical Panel', 'R2', { breakers: [
+  { id: 'b1', cells: ['13a', '13b'], ampRating: 20, circuits: [{ id: 'c1', label: 'Outlets', roomsServedIds: ['R1', 'R2'] }, { id: 'c2', label: 'Lights', roomsServedIds: ['R1'] }] },
+  { id: 'b2', cells: ['5a'], ampRating: 15, circuits: [{ id: 'c3', label: 'Other room', roomsServedIds: ['B1'] }] },
+], unassignedCircuits: [{ id: 'c4', label: 'Spare run', roomsServedIds: ['R1'] }] });
+const panelOld = A('P2', 'Electrical Panel', 'R1', { status: 'Archived', breakers: [{ id: 'b3', cells: ['1a'], ampRating: 30, circuits: [{ id: 'c5', label: 'Old', roomsServedIds: ['R1'] }] }] });
+const withPanels = [...assets, panelA, panelOld];
+const circQ = (extra) => ({ id: 'q', name: 'Breakers', steps: [S('circuits')], includeArchived: false, hideWhenEmpty: false, ...(extra || {}) });
+const cr = R.runRelationshipQuery(withPanels.find(a => a.id === 'R1'), circQ(), withPanels, columns, []);
+check('circuits step lists the circuits serving the place (breaker, unassigned; archived panel left out)',
+  cr.count === 3 && cr.nodes.map(n => n.circuit.id).join() === 'c1,c2,c4', JSON.stringify(cr.nodes.map(n => n.circuit.id)));
+check('a circuit row carries its breaker and panel; an unassigned one has no breaker',
+  cr.nodes[0].breaker.id === 'b1' && cr.nodes[0].panel.id === 'P1' && cr.nodes[2].breaker === null);
+check('circuits are ordered by slot within a panel', cr.nodes[0].breaker.cells[0] === '13a');
+check('includeArchived brings in the archived panel\'s circuit',
+  R.runRelationshipQuery(withPanels.find(a => a.id === 'R1'), circQ({ includeArchived: true }), withPanels, columns, []).count === 4);
+check('a place nothing serves finds nothing', R.runRelationshipQuery(withPanels.find(a => a.id === 'R2'), circQ(), withPanels, columns, []).count === 1);
+check('a steps after circuits is ignored (circuits are terminal)',
+  R.runRelationshipQuery(withPanels.find(a => a.id === 'R1'), circQ({ steps: [S('circuits'), S('children')] }), withPanels, columns, []).count === 3);
+check('a stored circuits step that is not last is dropped when cleaned', (() => {
+  R.setTypeSettings({ Room: { relationshipQueries: [{ id: 'z', name: 'Z', steps: [{ follow: 'circuits' }, { follow: 'children' }] }] } });
+  const q = R.relationshipQueriesFor('Room')[0];
+  R.setTypeSettings({});
+  return q.steps.length === 1 && q.steps[0].follow === 'children';
+})());
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

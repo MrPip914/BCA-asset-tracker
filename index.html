@@ -2611,12 +2611,15 @@ const RELATIONSHIP_FOLLOWS = [
   { value: "refIn", label: "Field children (assets whose reference field is set to this one)", kind: "field", field: true },
   { value: "users", label: "Assigned users (the people on this asset)", kind: "people" },
   { value: "usedBy", label: "Assigned assets (assets this person is assigned to)", kind: "people" },
+  // Circuits are not assets, so this step LISTS circuit rows and must be last.
+  { value: "circuits", label: "Circuits that serve it (breaker, amps, panel)", kind: "electrical", terminal: true },
 ];
 // The one line under "Follow", saying which kind of link the choice walks.
 const RELATIONSHIP_KIND_HELP = {
   location: "Follows where assets sit (their Path), not any reference field.",
   field: "Follows the reference field you pick below, not where assets sit.",
   people: "Follows who is assigned to the asset.",
+  electrical: "Finds the panel circuits that serve this place. Each row shows the breaker slot, amps and panel. Must be the last step; no type filter applies.",
 };
 function relationshipFollowMeta(follow) {
   return RELATIONSHIP_FOLLOWS.find(f => f.value === follow) || RELATIONSHIP_FOLLOWS[0];
@@ -2655,6 +2658,7 @@ function relationshipQueriesFor(type) {
     name: String(q.name || "").trim() || "Untitled",
     steps: (Array.isArray(q.steps) ? q.steps : []).filter(s => s && RELATIONSHIP_FOLLOWS.some(f => f.value === s.follow)
       && (!relationshipFollowMeta(s.follow).field || s.fieldKey)).slice(0, RELATIONSHIP_MAX_STEPS)
+      .filter((s, i, all) => !relationshipFollowMeta(s.follow).terminal || i === all.length - 1)
       .map(s => ({ follow: s.follow, typeIds: Array.isArray(s.typeIds) ? s.typeIds.filter(Boolean) : [], fieldKey: s.fieldKey || "", show: s.show !== false })),
     includeArchived: !!q.includeArchived,
     hideWhenEmpty: !!q.hideWhenEmpty,
@@ -2711,6 +2715,7 @@ function describeRelationshipStep(step, typesList, columns) {
     text = meta.value === "refOut" ? `Field parent through ${col ? col.label : "a reference field"}` : `Field children through ${col ? col.label : "a reference field"}`;
   }
   const names = (step.typeIds || []).map(t => typeNameOf(t, typesList));
+  if (meta.terminal) return meta.label.replace(/ \(.*\)$/, "") + " (breaker, amps, panel)";
   if (meta.needsType) text = `Nearest location ancestor of type ${names.join(" or ") || "…"}`;
   else if (names.length) text += `, only ${names.join(", ")}`;
   return text;
@@ -2745,7 +2750,19 @@ function relationshipIndex(assets, columns) {
       usedBy.get(pid).push(a);
     });
   });
-  return { byId, children, pointedAtBy, usedBy };
+  // Circuits by the place they serve. Breakers and circuits are not assets, so
+  // they are read out of each panel: [{ circuit, breaker (null if unassigned), panel }].
+  const circuitsServing = new Map();
+  (assets || []).forEach(a => {
+    if (!a || (!Array.isArray(a.breakers) && !Array.isArray(a.unassignedCircuits))) return;
+    const add = (c, b) => (c.roomsServedIds || []).forEach(rid => {
+      if (!circuitsServing.has(rid)) circuitsServing.set(rid, []);
+      circuitsServing.get(rid).push({ circuit: c, breaker: b, panel: a });
+    });
+    (a.breakers || []).forEach(b => (b.circuits || []).forEach(c => add(c, b)));
+    (a.unassignedCircuits || []).forEach(c => add(c, null));
+  });
+  return { byId, children, pointedAtBy, usedBy, circuitsServing };
 }
 
 // What ONE step reaches from ONE asset, before the type filter. Every walk is
@@ -2777,6 +2794,7 @@ function relationshipStepTargets(source, step, assets, index) {
     case "refIn": return (index.pointedAtBy.get(step.fieldKey) || new Map()).get(source.id) || [];
     case "users": return personLabelsOf(source).map(id => index.byId.get(id)).filter(Boolean);
     case "usedBy": return index.usedBy.get(source.id) || [];
+    case "circuits": return index.circuitsServing.get(source.id) || [];
     default: return [];
   }
 }
@@ -2794,6 +2812,9 @@ function runRelationshipQuery(asset, query, assets, columns, typesList) {
   if (!asset || !query || !Array.isArray(query.steps) || !query.steps.length) return { nodes: [], count: 0 };
   const index = relationshipIndex(assets, columns);
   const shown = new Set();
+  // A circuits step is terminal: ignore any step after it.
+  const firstTerminal = query.steps.findIndex(s => relationshipFollowMeta(s.follow).terminal);
+  if (firstTerminal >= 0 && firstTerminal < query.steps.length - 1) query = { ...query, steps: query.steps.slice(0, firstTerminal + 1) };
   const live = a => query.includeArchived || (a.status || "Active") !== "Archived";
   const byName = (x, y) => nameOf(x, typesList).localeCompare(nameOf(y, typesList), undefined, { numeric: true, sensitivity: "base" });
 
@@ -2801,6 +2822,21 @@ function runRelationshipQuery(asset, query, assets, columns, typesList) {
   function expand(sources, i, path) {
     if (i >= query.steps.length) return [];
     const step = query.steps[i];
+    if (step.follow === "circuits") {
+      // Terminal step: rows are circuits, not assets, so no type filter, no
+      // hidden-step lifting, and no next step. Deduped by circuit id.
+      const rows = [];
+      sources.forEach(src => relationshipStepTargets(src, step, assets, index).forEach(r => {
+        const key = "circuit:" + r.circuit.id;
+        if (shown.has(key) || !live(r.panel)) return;
+        shown.add(key);
+        rows.push({ circuit: r.circuit, breaker: r.breaker, panel: r.panel, children: [] });
+      }));
+      const slotKey = n => (n.breaker ? cellsLabel_(n.breaker) : "\uffff");
+      rows.sort((x, y) => nameOf(x.panel, typesList).localeCompare(nameOf(y.panel, typesList), undefined, { numeric: true, sensitivity: "base" })
+        || slotKey(x).localeCompare(slotKey(y), undefined, { numeric: true }));
+      return rows;
+    }
     const filterTypes = step.follow === "nearest" ? null : new Set(step.typeIds || []);
     const reached = [];
     const reachedIds = new Set();
@@ -2902,12 +2938,33 @@ function relationshipStepSourceTypes(ownerType, steps, i, columns) {
 function RelationshipTree({ nodes, typesList, onOpen, depth = 0 }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      {nodes.map(n => <RelationshipTreeRow key={n.asset.id} node={n} typesList={typesList} onOpen={onOpen} depth={depth} />)}
+      {nodes.map(n => <RelationshipTreeRow key={n.circuit ? "circuit:" + n.circuit.id : n.asset.id} node={n} typesList={typesList} onOpen={onOpen} depth={depth} />)}
     </div>
   );
 }
 function RelationshipTreeRow({ node, typesList, onOpen, depth }) {
   const [open, setOpen] = useState(depth < 1);
+  if (node.circuit) {
+    // A circuit row: not an asset. Opens the panel it lives in.
+    const slot = node.breaker ? `Slot ${cellsLabel_(node.breaker)}` : "Unassigned";
+    const amps = node.breaker && node.breaker.ampRating ? ` · ${node.breaker.ampRating}A` : "";
+    const what = node.circuit.label || node.circuit.tag || "Circuit";
+    return (
+      <div style={{ marginLeft: depth ? 18 : 0 }}>
+        <div style={{ display: "flex", alignItems: "stretch", border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface }}>
+          <span style={{ width: 26, flexShrink: 0 }} />
+          <button type="button" onClick={() => onOpen(node.panel)} className="row-body" aria-label={`${slot}, ${what}, in ${nameOf(node.panel, typesList)}`}
+            style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0, border: "none", borderRadius: 10, background: "none", padding: "9px 12px 9px 4px", textAlign: "left" }}>
+            <Zap size={15} style={{ color: C.brand, flexShrink: 0 }} />
+            <span style={{ fontSize: 14, color: C.ink, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {slot}{amps} · {what}
+              <span style={{ color: C.muted, fontSize: 12 }}> · {nameOf(node.panel, typesList)}</span>
+            </span>
+          </button>
+        </div>
+      </div>
+    );
+  }
   const a = node.asset;
   const Icon = iconFor(a.type);
   const hasKids = node.children.length > 0;
@@ -3092,6 +3149,7 @@ function RelationshipQueryEditor({ initialQueries, builtIn, initialActiveId, new
         const meta = relationshipFollowMeta(s.follow);
         if (meta.field && !s.fieldKey) { setActiveId(q.id); setError(`${label}: pick the reference field this step follows.`); return; }
         if (meta.needsType && !(s.typeIds || []).length) { setActiveId(q.id); setError(`${label}: pick the type of location ancestor to find.`); return; }
+        if (meta.terminal && s !== q.steps[q.steps.length - 1]) { setActiveId(q.id); setError(`${label}: "Circuits that serve it" lists circuits, not assets, so it has to be the last step.`); return; }
       }
     }
     onDone(queries.map(q => ({ ...q, name: q.name.trim(), steps: q.steps.map((s, i) => ({ ...s, show: i === q.steps.length - 1 ? true : s.show })) })));
@@ -3181,11 +3239,11 @@ function RelationshipQueryEditor({ initialQueries, builtIn, initialActiveId, new
                                   onChange={v => updateStep(i, { fieldKey: v })} />}
                           </div>
                         )}
-                        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        {!meta.terminal && <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                           <span style={RELATIONSHIP_HEADING}>{meta.needsType ? "Type of the ancestor to find" : "Keep only these types"}</span>
                           <TypeMultiPicker value={s.typeIds} onChange={v => updateStep(i, { typeIds: v })} typesList={typesList}
                             placeholder={meta.needsType ? "Pick a type" : "Any type"} title={meta.needsType ? "Type of the ancestor to find" : "Keep only these types"} />
-                        </div>
+                        </div>}
                         {!last && <RelationshipCheck checked={s.show} onChange={v => updateStep(i, { show: v })} label="Show what this step finds (turn off if it is only a route to the next step)" />}
                       </div>
                     );
@@ -5301,7 +5359,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-11.1";
+const APP_VERSION = "2026-10-11.2";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -6573,6 +6631,9 @@ const MOCK_SNAPSHOT = {
       { id: "rq-room-hvac", name: "HVAC", includeArchived: false, hideWhenEmpty: false, steps: [
         { follow: "descendants", typeIds: ["Mini Split", "Condenser"], fieldKey: "", show: true },
         { follow: "refIn", typeIds: [], fieldKey: "controls", show: true },
+      ] },
+      { id: "rq-room-breakers", name: "Breakers feeding this room", includeArchived: false, hideWhenEmpty: true, steps: [
+        { follow: "circuits", typeIds: [], fieldKey: "", show: true },
       ] },
     ] },
     "Mini Split": { categoryId: "Equipment", iconName: "AirVent", mapPin: true, relationshipQueries: [

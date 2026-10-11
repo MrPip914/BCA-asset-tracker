@@ -347,6 +347,22 @@ function personLabelsOf(asset) {
   return Array.isArray(ids) ? ids.filter(Boolean) : [];
 }
 
+function cellsLabel_(breaker) {
+  const cells = breaker.cells || [];
+  const halvesBySlot = new Map();
+  const order = [];
+  cells.forEach(c => {
+    const slot = c.slice(0, -1);
+    const half = c.slice(-1);
+    if (!halvesBySlot.has(slot)) { halvesBySlot.set(slot, new Set()); order.push(slot); }
+    halvesBySlot.get(slot).add(half);
+  });
+  return order.map(slot => {
+    const halves = halvesBySlot.get(slot);
+    return halves.has("a") && halves.has("b") ? slot : `${slot}${[...halves][0]}`;
+  }).join("/") || "—";
+}
+
 function personNamesOf(asset, assets) {
   const ids = personLabelsOf(asset);
   if (ids.length) {
@@ -1164,6 +1180,8 @@ const RELATIONSHIP_FOLLOWS = [
   { value: "refIn", label: "Field children (assets whose reference field is set to this one)", kind: "field", field: true },
   { value: "users", label: "Assigned users (the people on this asset)", kind: "people" },
   { value: "usedBy", label: "Assigned assets (assets this person is assigned to)", kind: "people" },
+  // Circuits are not assets, so this step LISTS circuit rows and must be last.
+  { value: "circuits", label: "Circuits that serve it (breaker, amps, panel)", kind: "electrical", terminal: true },
 ];
 
 function relationshipFollowMeta(follow) {
@@ -1194,6 +1212,7 @@ function relationshipQueriesFor(type) {
     name: String(q.name || "").trim() || "Untitled",
     steps: (Array.isArray(q.steps) ? q.steps : []).filter(s => s && RELATIONSHIP_FOLLOWS.some(f => f.value === s.follow)
       && (!relationshipFollowMeta(s.follow).field || s.fieldKey)).slice(0, RELATIONSHIP_MAX_STEPS)
+      .filter((s, i, all) => !relationshipFollowMeta(s.follow).terminal || i === all.length - 1)
       .map(s => ({ follow: s.follow, typeIds: Array.isArray(s.typeIds) ? s.typeIds.filter(Boolean) : [], fieldKey: s.fieldKey || "", show: s.show !== false })),
     includeArchived: !!q.includeArchived,
     hideWhenEmpty: !!q.hideWhenEmpty,
@@ -1231,7 +1250,19 @@ function relationshipIndex(assets, columns) {
       usedBy.get(pid).push(a);
     });
   });
-  return { byId, children, pointedAtBy, usedBy };
+  // Circuits by the place they serve. Breakers and circuits are not assets, so
+  // they are read out of each panel: [{ circuit, breaker (null if unassigned), panel }].
+  const circuitsServing = new Map();
+  (assets || []).forEach(a => {
+    if (!a || (!Array.isArray(a.breakers) && !Array.isArray(a.unassignedCircuits))) return;
+    const add = (c, b) => (c.roomsServedIds || []).forEach(rid => {
+      if (!circuitsServing.has(rid)) circuitsServing.set(rid, []);
+      circuitsServing.get(rid).push({ circuit: c, breaker: b, panel: a });
+    });
+    (a.breakers || []).forEach(b => (b.circuits || []).forEach(c => add(c, b)));
+    (a.unassignedCircuits || []).forEach(c => add(c, null));
+  });
+  return { byId, children, pointedAtBy, usedBy, circuitsServing };
 }
 
 function relationshipStepTargets(source, step, assets, index) {
@@ -1260,6 +1291,7 @@ function relationshipStepTargets(source, step, assets, index) {
     case "refIn": return (index.pointedAtBy.get(step.fieldKey) || new Map()).get(source.id) || [];
     case "users": return personLabelsOf(source).map(id => index.byId.get(id)).filter(Boolean);
     case "usedBy": return index.usedBy.get(source.id) || [];
+    case "circuits": return index.circuitsServing.get(source.id) || [];
     default: return [];
   }
 }
@@ -1268,6 +1300,9 @@ function runRelationshipQuery(asset, query, assets, columns, typesList) {
   if (!asset || !query || !Array.isArray(query.steps) || !query.steps.length) return { nodes: [], count: 0 };
   const index = relationshipIndex(assets, columns);
   const shown = new Set();
+  // A circuits step is terminal: ignore any step after it.
+  const firstTerminal = query.steps.findIndex(s => relationshipFollowMeta(s.follow).terminal);
+  if (firstTerminal >= 0 && firstTerminal < query.steps.length - 1) query = { ...query, steps: query.steps.slice(0, firstTerminal + 1) };
   const live = a => query.includeArchived || (a.status || "Active") !== "Archived";
   const byName = (x, y) => nameOf(x, typesList).localeCompare(nameOf(y, typesList), undefined, { numeric: true, sensitivity: "base" });
 
@@ -1275,6 +1310,21 @@ function runRelationshipQuery(asset, query, assets, columns, typesList) {
   function expand(sources, i, path) {
     if (i >= query.steps.length) return [];
     const step = query.steps[i];
+    if (step.follow === "circuits") {
+      // Terminal step: rows are circuits, not assets, so no type filter, no
+      // hidden-step lifting, and no next step. Deduped by circuit id.
+      const rows = [];
+      sources.forEach(src => relationshipStepTargets(src, step, assets, index).forEach(r => {
+        const key = "circuit:" + r.circuit.id;
+        if (shown.has(key) || !live(r.panel)) return;
+        shown.add(key);
+        rows.push({ circuit: r.circuit, breaker: r.breaker, panel: r.panel, children: [] });
+      }));
+      const slotKey = n => (n.breaker ? cellsLabel_(n.breaker) : "\uffff");
+      rows.sort((x, y) => nameOf(x.panel, typesList).localeCompare(nameOf(y.panel, typesList), undefined, { numeric: true, sensitivity: "base" })
+        || slotKey(x).localeCompare(slotKey(y), undefined, { numeric: true }));
+      return rows;
+    }
     const filterTypes = step.follow === "nearest" ? null : new Set(step.typeIds || []);
     const reached = [];
     const reachedIds = new Set();
