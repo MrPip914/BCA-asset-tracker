@@ -1,0 +1,180 @@
+# Nightly backup of the DEV Supabase database. See DATABASE_BACKEND_PLAN.md,
+# "Running on the free tier", items 2 and 3: the free plan keeps no backups at
+# all, so this is the only one.
+#
+# ---------------------------------------------------------------- WHAT IT DOES
+#
+#   1. pg_dump of the asset_tracker schema (db/backup.sh), ENCRYPTED with
+#      BACKUP_PASSPHRASE before it is written anywhere.
+#   2. The restore drill: decrypts that file and restores it into a throwaway
+#      Postgres, then checks every table's row count against the live database
+#      (db/restore.sh --check). A backup that has never been restored is a hope.
+#   3. Keeps it as a GitHub Actions artifact on this run: every night's for 30
+#      days, and Sunday's ALSO for 90 days. Expiry is the pruning; there is
+#      nothing to clean up by hand. It lives at GitHub, not in the Supabase
+#      project it protects.
+#
+# Artifacts of a public repo can be downloaded by any signed-in GitHub user,
+# which is why the dump is encrypted. Without the passphrase the file is noise.
+#
+# Restoring is db-restore.yml (or db/restore.sh by hand). DATABASE_BACKEND_PLAN.md
+# has the steps.
+#
+# ---------------------------------------------------------------- ONE-TIME SETUP
+#
+# On the `supabase-dev` environment (Settings > Environments), add a secret
+#
+#   BACKUP_PASSPHRASE   a long random passphrase. KEEP A COPY OUTSIDE GITHUB
+#                       (a password manager): GitHub will not show it again, and
+#                       without it no backup can ever be opened.
+#
+# SUPABASE_DB_URL is already there (db-migrate.yml).
+#
+# SCHEDULES ONLY RUN FROM THE DEFAULT BRANCH (main), as do manual runs. On a pull
+# request this rehearses the whole cycle against a throwaway database instead.
+#
+# This repo is public: nothing below echoes a secret, and there is no `set -x`.
+
+name: Database backup
+
+on:
+  schedule:
+    # 10:23 UTC = 3:23am Pacific (2:23am in winter): after the 1:07am connector
+    # routine, before anyone is at school. Off the hour on purpose.
+    - cron: "23 10 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "db/backup.sh"
+      - "db/restore.sh"
+      - "db/migrations/**"
+      - ".github/workflows/db-backup.yml"
+      - ".github/workflows/db-restore.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supabase-dev-backup
+  cancel-in-progress: false
+
+jobs:
+  # Pull requests: back up a throwaway database built from the migrations, and
+  # restore it both ways. No secrets.
+  rehearse:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: rehearsal
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:rehearsal@localhost:5432/postgres
+      DRILL_URL: postgresql://postgres:rehearsal@localhost:5432/drill
+      BACKUP_PASSPHRASE: rehearsal-only
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Postgres 17 client
+        run: |
+          sudo apt-get install -y -qq postgresql-common > /dev/null
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y > /dev/null
+          sudo apt-get install -y -qq postgresql-client-17 > /dev/null
+          echo /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
+      - name: Build a database with some rows in it
+        run: |
+          db/migrate.sh
+          psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f db/test-schema.sql
+      - name: Back it up
+        run: db/backup.sh "$RUNNER_TEMP/backup"
+      - name: Restore drill into an empty database
+        run: |
+          psql "$DATABASE_URL" -X -q -c "create database drill"
+          DATABASE_URL="$DRILL_URL" db/restore.sh --check "$RUNNER_TEMP/backup"
+      - name: Replace in place, as db-restore.yml does
+        run: |
+          db/restore.sh --replace "$RUNNER_TEMP/backup"
+          db/migrate.sh
+      - name: A wrong passphrase must not open it
+        run: |
+          if BACKUP_PASSPHRASE=wrong DATABASE_URL="$DRILL_URL" db/restore.sh --check "$RUNNER_TEMP/backup" 2>/dev/null; then
+            echo "::error::A backup opened with the wrong passphrase."; exit 1
+          fi
+
+  backup-dev:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment:
+      name: supabase-dev
+    services:
+      drill:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: drill
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Postgres 17 client
+        run: |
+          sudo apt-get install -y -qq postgresql-common > /dev/null
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y > /dev/null
+          sudo apt-get install -y -qq postgresql-client-17 > /dev/null
+          echo /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
+      - name: Back up the dev database
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          for v in DATABASE_URL BACKUP_PASSPHRASE; do
+            if [ -z "${!v:-}" ]; then
+              echo "::error::$v is missing. Add it on the supabase-dev environment (see the top of this workflow)."
+              exit 1
+            fi
+          done
+          db/backup.sh "$RUNNER_TEMP/backup"
+      - name: Restore drill
+        env:
+          DATABASE_URL: postgresql://postgres:drill@localhost:5432/postgres
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -o pipefail
+          db/restore.sh --check "$RUNNER_TEMP/backup" | tee "$RUNNER_TEMP/drill.txt"
+      - name: Name it
+        id: name
+        run: |
+          day="$(date -u +%F)"
+          echo "daily=dev-db-daily-$day" >> "$GITHUB_OUTPUT"
+          echo "weekly=dev-db-weekly-$day" >> "$GITHUB_OUTPUT"
+          echo "sunday=$([ "$(date -u +%u)" = 7 ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
+      - name: Keep it for 30 days
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.name.outputs.daily }}
+          path: ${{ runner.temp }}/backup/
+          retention-days: 30
+          if-no-files-found: error
+      - name: On Sundays, also keep it for 90 days
+        if: steps.name.outputs.sunday == 'yes'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.name.outputs.weekly }}
+          path: ${{ runner.temp }}/backup/
+          retention-days: 90
+          if-no-files-found: error
+      - name: Summary
+        run: |
+          {
+            echo "### Dev database backed up"
+            echo "Artifact \`${{ steps.name.outputs.daily }}\` (30 days)$([ '${{ steps.name.outputs.sunday }}' = yes ] && echo " and \`${{ steps.name.outputs.weekly }}\` (90 days)")."
+            echo '```'
+            cat "$RUNNER_TEMP/drill.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

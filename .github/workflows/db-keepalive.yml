@@ -1,0 +1,42 @@
+# Keeps the DEV Supabase project awake. See DATABASE_BACKEND_PLAN.md, "Running on
+# the free tier", item 1: a free project is paused after about a week without
+# DATABASE activity, so this runs a real query against it twice a day. The
+# nightly backup (db-backup.yml) touches the database too; this is the one that
+# does nothing else, so a broken backup cannot also let the project pause.
+#
+# A failed ping fails the run, and GitHub emails about failed scheduled runs.
+#
+# SCHEDULES ONLY RUN FROM THE DEFAULT BRANCH (main). Until this file is on main,
+# it does nothing on its own; a manual run works once it is there too.
+#
+# Uses SUPABASE_DB_URL on the `supabase-dev` environment, as db-migrate.yml does.
+# This repo is public: nothing below echoes it.
+
+name: Database keep-alive
+
+on:
+  schedule:
+    # 03:17 and 15:17 UTC. Off the hour, when GitHub's scheduler is least busy.
+    - cron: "17 3,15 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping-dev:
+    runs-on: ubuntu-latest
+    environment:
+      name: supabase-dev
+    steps:
+      - name: Query the dev database
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DATABASE_URL:-}" ]; then
+            echo "::error::SUPABASE_DB_URL is not set on the supabase-dev environment."
+            exit 1
+          fi
+          n="$(psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -At -c "select count(*) from asset_tracker.assets")"
+          echo "✓ Dev database answered: $n asset rows."
