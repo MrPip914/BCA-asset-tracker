@@ -1228,10 +1228,15 @@ function relationshipQueriesFor(type) {
   })).filter(q => q.steps.length > 0);
 }
 
+function withBuiltInOptions(type, q) {
+  const o = ((typeEntryFor(type) || {}).builtInQueryOptions || {})[q.id];
+  return o && typeof o.hideWhenEmpty === "boolean" ? { ...q, hideWhenEmpty: o.hideWhenEmpty } : q;
+}
+
 function relationshipQueriesShownFor(type) {
   return [
-    ...(isPlaceType(type) ? [BUILT_IN_CONTENTS_QUERY] : []),
-    ...(type === BUILT_IN_ROOM_TYPE_ID ? [BUILT_IN_BREAKERS_QUERY] : []),
+    ...(isPlaceType(type) ? [withBuiltInOptions(type, BUILT_IN_CONTENTS_QUERY)] : []),
+    ...(type === BUILT_IN_ROOM_TYPE_ID ? [withBuiltInOptions(type, BUILT_IN_BREAKERS_QUERY)] : []),
     ...relationshipQueriesFor(type),
   ];
 }

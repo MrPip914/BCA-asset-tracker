@@ -2888,10 +2888,18 @@ function relationshipQueriesFor(type) {
 // Every query the Relationships tab shows for a type: Contents first on a place.
 function relationshipQueriesShownFor(type) {
   return [
-    ...(isPlaceType(type) ? [BUILT_IN_CONTENTS_QUERY] : []),
-    ...(type === BUILT_IN_ROOM_TYPE_ID ? [BUILT_IN_BREAKERS_QUERY] : []),
+    ...(isPlaceType(type) ? [withBuiltInOptions(type, BUILT_IN_CONTENTS_QUERY)] : []),
+    ...(type === BUILT_IN_ROOM_TYPE_ID ? [withBuiltInOptions(type, BUILT_IN_BREAKERS_QUERY)] : []),
     ...relationshipQueriesFor(type),
   ];
+}
+// A built-in query is never stored, but "hide it when it finds nothing" is a
+// choice: kept per type as typeSettings[type].builtInQueryOptions[queryId]
+// ({ hideWhenEmpty }), a property on an existing blob so it costs no release.
+// Absent means the query's own default.
+function withBuiltInOptions(type, q) {
+  const o = ((typeEntryFor(type) || {}).builtInQueryOptions || {})[q.id];
+  return o && typeof o.hideWhenEmpty === "boolean" ? { ...q, hideWhenEmpty: o.hideWhenEmpty } : q;
 }
 
 // QUERIES ARE LISTED FIRST, TYPES ASSIGNED TO THEM (2026-10-10). A query is one
@@ -2920,7 +2928,12 @@ function builtInContentsQueryFor(typeIds) {
 // Every built-in query as the settings list and the builder show it.
 function builtInQueriesFor(typeIds) {
   const ids = typeIds || [];
-  return [builtInContentsQueryFor(ids), { ...BUILT_IN_BREAKERS_QUERY, typeIds: ids.filter(t => t === BUILT_IN_ROOM_TYPE_ID) }];
+  const contentsTypes = ids.filter(t => isPlaceType(t));
+  const breakerTypes = ids.filter(t => t === BUILT_IN_ROOM_TYPE_ID);
+  return [
+    { ...withBuiltInOptions(contentsTypes[0], BUILT_IN_CONTENTS_QUERY), typeIds: contentsTypes },
+    { ...withBuiltInOptions(breakerTypes[0], BUILT_IN_BREAKERS_QUERY), typeIds: breakerTypes },
+  ];
 }
 // Writes a query list back to where it is stored: each type gets exactly the
 // queries naming it, and a type left with none loses the key (and its override
@@ -3356,7 +3369,10 @@ function RelationshipQueryEditor({ initialQueries, builtIns, initialActiveId, ne
   const [previewId, setPreviewId] = useState(previewAssetId || "");
   const allTypeIds = (typesList || []).map(t => t.id);
   const effectiveActiveId = activeId || (initialActiveId === "new" && queries.length ? queries[queries.length - 1].id : null);
-  const builtInActive = (builtIns || []).find(b => b.id === effectiveActiveId) || null;
+  // "Hide when it finds nothing" is the one thing about a built-in that can change.
+  const [hideChoices, setHideChoices] = useState({});
+  const builtInBase = (builtIns || []).find(b => b.id === effectiveActiveId) || null;
+  const builtInActive = builtInBase ? { ...builtInBase, hideWhenEmpty: hideChoices[builtInBase.id] !== undefined ? hideChoices[builtInBase.id] : builtInBase.hideWhenEmpty } : null;
   const isBuiltIn = !!builtInActive;
   const active = isBuiltIn ? builtInActive : (queries.find(q => q.id === effectiveActiveId) || null);
   const locked = !!readOnly || isBuiltIn;
@@ -3366,7 +3382,7 @@ function RelationshipQueryEditor({ initialQueries, builtIns, initialActiveId, ne
   // One query is open at a time, so deleting it saves the list without it and
   // closes. Two taps, since there is no Cancel afterwards.
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const removeQuery = id => onDone(queries.filter(q => q.id !== id).map(q => ({ ...q, name: q.name.trim() })));
+  const removeQuery = id => onDone(queries.filter(q => q.id !== id).map(q => ({ ...q, name: q.name.trim() })), hideChoices);
   // Refuses rather than saving something that would run differently from what
   // the screen shows: an unnamed query, one that applies to no type (it would
   // be stored nowhere and vanish), a field step with no field, or a "nearest"
@@ -3383,7 +3399,7 @@ function RelationshipQueryEditor({ initialQueries, builtIns, initialActiveId, ne
         if (meta.terminal && s !== q.steps[q.steps.length - 1]) { setActiveId(q.id); setError(`${label}: "Circuits that serve it" lists circuits, not assets, so it has to be the last step.`); return; }
       }
     }
-    onDone(queries.map(q => ({ ...q, name: q.name.trim(), steps: q.steps.map((s, i) => ({ ...s, show: i === q.steps.length - 1 ? true : s.show })) })));
+    onDone(queries.map(q => ({ ...q, name: q.name.trim(), steps: q.steps.map((s, i) => ({ ...s, show: i === q.steps.length - 1 ? true : s.show })) })), hideChoices);
   };
 
   const previewOptions = active ? (assets || []).filter(a => (active.typeIds || []).includes(a.type) && (a.status || "Active") !== "Archived") : [];
@@ -3423,8 +3439,11 @@ function RelationshipQueryEditor({ initialQueries, builtIns, initialActiveId, ne
                   ))}
                   <div style={{ fontSize: 12, color: C.muted }}>
                     {active.includeArchived ? "Includes archived assets." : "Archived assets are left out."}
-                    {active.hideWhenEmpty ? " Hidden when it finds nothing." : ""}
+                    {!(isBuiltIn && !readOnly) && active.hideWhenEmpty ? " Hidden when it finds nothing." : ""}
                   </div>
+                  {isBuiltIn && !readOnly && (
+                    <RelationshipCheck checked={!!active.hideWhenEmpty} onChange={v => setHideChoices(c => ({ ...c, [active.id]: v }))} label="Hide this query when it finds nothing" />
+                  )}
                 </>
               ) : (
                 <>
@@ -5593,7 +5612,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-11.11";
+const APP_VERSION = "2026-10-11.12";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -12741,6 +12760,7 @@ function AssetTracker() {
         // query list left out would be deleted by an unrelated edit. Queries
         // are edited in Settings > Relationships, not through this draft.
         relationshipQueries: (typeSettings[id] || {}).relationshipQueries || undefined,
+        builtInQueryOptions: (typeSettings[id] || {}).builtInQueryOptions || undefined,
       },
     };
     persist(assets, { columns: nextColumns, typesList: nextTypesList, typeSettings: nextTypeSettings });
@@ -12769,8 +12789,23 @@ function AssetTracker() {
   // shortcut to it): the whole list at once, written back under each type it
   // names. It MERGES into each stored override rather than rebuilding it the
   // way the type editor does.
-  function saveRelationshipQueries(queries) {
-    persist(assets, { typeSettings: relationshipQueriesToTypeSettings(typeSettings, queries, typesList.map(t => t.id)) });
+  function saveRelationshipQueries(queries, builtInHide) {
+    const ids = typesList.map(t => t.id);
+    let next = relationshipQueriesToTypeSettings(typeSettings, queries, ids);
+    // Built-in queries: write each changed "hide when empty" choice under the
+    // types the query runs on, or remove it when it matches the default.
+    builtInQueriesFor(ids).forEach(b => {
+      if (!builtInHide || builtInHide[b.id] === undefined) return;
+      const dflt = (b.id === BUILT_IN_BREAKERS_QUERY.id ? BUILT_IN_BREAKERS_QUERY : BUILT_IN_CONTENTS_QUERY).hideWhenEmpty;
+      b.typeIds.forEach(t => {
+        const entry = { ...(next[t] || {}) };
+        const opts = { ...(entry.builtInQueryOptions || {}) };
+        if (builtInHide[b.id] === dflt) delete opts[b.id]; else opts[b.id] = { hideWhenEmpty: builtInHide[b.id] };
+        if (Object.keys(opts).length) entry.builtInQueryOptions = opts; else delete entry.builtInQueryOptions;
+        if (Object.keys(entry).length) next = { ...next, [t]: entry }; else { next = { ...next }; delete next[t]; }
+      });
+    });
+    persist(assets, { typeSettings: next });
   }
   // The Relationships tab's headings link here: Settings > Relationships with
   // that query open (or the list, with null).
@@ -12795,7 +12830,11 @@ function AssetTracker() {
     // A type's relationship queries are not a "default" it ships with -- none
     // do -- so resetting its fields must not throw them away.
     const keptQueries = (typeSettings[id] || {}).relationshipQueries;
-    if (Array.isArray(keptQueries) && keptQueries.length) nextTypeSettings[id] = { relationshipQueries: keptQueries };
+    const keptBuiltIn = (typeSettings[id] || {}).builtInQueryOptions;
+    const kept = {};
+    if (Array.isArray(keptQueries) && keptQueries.length) kept.relationshipQueries = keptQueries;
+    if (keptBuiltIn && Object.keys(keptBuiltIn).length) kept.builtInQueryOptions = keptBuiltIn;
+    if (Object.keys(kept).length) nextTypeSettings[id] = kept;
     persist(assets, { typeSettings: nextTypeSettings });
   }
 
@@ -14783,7 +14822,7 @@ function AssetTracker() {
               builtIns={builtInQueriesFor(allTypeIds)}
               initialActiveId={relationshipsEdit.activeId}
               assets={assets} columns={columns} typesList={typesList}
-              onDone={qs => { saveRelationshipQueries(qs); setRelationshipsEdit(null); }}
+              onDone={(qs, hide) => { saveRelationshipQueries(qs, hide); setRelationshipsEdit(null); }}
               onCancel={() => setRelationshipsEdit(null)}
             />
           )}
@@ -20824,7 +20863,7 @@ function TypeManagerModal({
                       initialActiveId={editingQueries}
                       newTypeIds={[draft.id]}
                       assets={assets} columns={columns} typesList={types}
-                      onDone={next => { onSaveRelationshipQueries(next); setEditingQueries(null); }}
+                      onDone={(next, hide) => { onSaveRelationshipQueries(next, hide); setEditingQueries(null); }}
                       onCancel={() => setEditingQueries(null)}
                     />
                   )}

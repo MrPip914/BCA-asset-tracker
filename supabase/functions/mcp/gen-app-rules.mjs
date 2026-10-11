@@ -114,6 +114,7 @@ const PIECES = [
   "referenceTargetTypes",
   "referenceColumns",
   "relationshipQueriesFor",
+  "withBuiltInOptions",
   "relationshipQueriesShownFor",
   "relationshipIndex",
   "relationshipStepTargets",

@@ -54,7 +54,7 @@ new Function('module', [
   grabFn('ancestorsOf'),
   grabBlock('// ---------- RELATIONSHIP QUERIES ----------', "// The Rooms/Devices/Bulk-Items listing"),
   grabFn('availableTabsFor').replace(/\.\.\.\(typeHasFloorPlan[^\n]*\n/, '').replace(/\.\.\.modulesFor\(type\),/, ''),
-  'module.exports = { runRelationshipQuery, relationshipQueriesFor, relationshipQueriesShownFor, relationshipFieldOptions, relationshipStepSourceTypes, allRelationshipQueries, relationshipQueriesToTypeSettings, builtInContentsQueryFor, builtInQueriesFor, referenceTargetTypes, availableTabsFor, setTypeSettings: s => { TYPE_SETTINGS = s; } };',
+  'module.exports = { runRelationshipQuery, relationshipQueriesFor, relationshipQueriesShownFor, relationshipFieldOptions, relationshipStepSourceTypes, allRelationshipQueries, relationshipQueriesToTypeSettings, builtInContentsQueryFor, builtInQueriesFor, withBuiltInOptions, referenceTargetTypes, availableTabsFor, setTypeSettings: s => { TYPE_SETTINGS = s; } };',
 ].join('\n'))(mod);
 const R = mod.exports;
 
@@ -215,6 +215,13 @@ check('a stored circuits step that is not last is dropped when cleaned', (() => 
   R.setTypeSettings({});
   return q.steps.length === 1 && q.steps[0].follow === 'children';
 })());
+
+R.setTypeSettings({ Room: { builtInQueryOptions: { 'builtin-breakers': { hideWhenEmpty: false }, 'builtin-contents': { hideWhenEmpty: true } } } });
+check('a stored choice overrides a built-in query\'s hide-when-empty default, per query',
+  R.relationshipQueriesShownFor('Room')[0].hideWhenEmpty === true && R.relationshipQueriesShownFor('Room')[1].hideWhenEmpty === false);
+check('…and the settings list reports the stored choice', R.builtInQueriesFor(['Room'])[0].hideWhenEmpty === true && R.builtInQueriesFor(['Room'])[1].hideWhenEmpty === false);
+check('…while a type with no stored choice keeps the default', R.relationshipQueriesShownFor('Building')[0].hideWhenEmpty === false);
+R.setTypeSettings({});
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
