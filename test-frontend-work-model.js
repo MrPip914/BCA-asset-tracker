@@ -23,7 +23,11 @@ const code = [
   slice('function columnOptions(col) {'),
   slice('function validateColumnValue(col, raw) {'),
   slice('function adoptWorkModel(raw) {'),
+  'const DEFAULT_WORK_TYPE_ID = "__default";',
   slice('function workModelParts(model, kind) {'),
+  slice('function resolveWorkTypeId(model, kind, typeId) {'),
+  slice('function workBuiltinShown(model, kind, typeId, key) {'),
+  slice('function setWorkBuiltinShown(model, kind, typeId, key, on) {'),
   slice('function customFieldsFor(model, kind, typeId) {'),
   slice('function requiredCustomFieldsFor(model, kind, typeId) {'),
   slice('function validateCustomValues(model, kind, typeId, values) {'),
@@ -37,7 +41,7 @@ const code = [
   slice('function renameTaskType(model, id, name) {'),
   slice('function removeTaskType(model, id) {'),
   slice('function taskTypeNameOf(model, id) {'),
-  'return { addWorkField, removeWorkField, setTypeHasField, setTypeFieldRequired, addTaskType, renameTaskType, removeTaskType, taskTypeNameOf, adoptWorkModel, customFieldsFor, requiredCustomFieldsFor, validateCustomValues, newWorkFieldKey };',
+  'return { resolveWorkTypeId, workBuiltinShown, setWorkBuiltinShown, DEFAULT_WORK_TYPE_ID, addWorkField, removeWorkField, setTypeHasField, setTypeFieldRequired, addTaskType, renameTaskType, removeTaskType, taskTypeNameOf, adoptWorkModel, customFieldsFor, requiredCustomFieldsFor, validateCustomValues, newWorkFieldKey };',
 ].join('\n');
 const H = new Function('DEFAULT_COLUMN_DATA_TYPES', code)({});
 
@@ -122,6 +126,26 @@ check('work saves validate custom values', (src.match(/validateCustomValues\(wor
 check('the draft is seeded with custom when editing', /custom: ch\.custom && typeof ch\.custom === "object"/.test(src));
 check('the Work types settings section exists', /key: "worktypes"/.test(src) && /key === "worktypes"/.test(src));
 check('work search covers custom values', /Object\.values\(r\.change\.custom/.test(src));
+
+// ---- default type and built-in field switches
+{
+  const base = H.adoptWorkModel(null);
+  check('a blank type resolves to the default', H.resolveWorkTypeId(base, 'task', '') === '__default' && H.resolveWorkTypeId(base, 'work', '') === '__default');
+  check('a removed task type resolves to the default', H.resolveWorkTypeId(base, 'task', 'tt-gone') === '__default');
+  check('a named work type resolves to itself', H.resolveWorkTypeId(base, 'work', 'Repair') === 'Repair');
+  check('nothing is hidden on a fresh model', H.workBuiltinShown(base, 'task', '', 'owner') && H.workBuiltinShown(base, 'work', 'Repair', 'cost'));
+  const off = H.setWorkBuiltinShown(base, 'task', '__default', 'owner', false);
+  check('switching a built-in off hides it for untyped tasks', !H.workBuiltinShown(off, 'task', '', 'owner') && H.workBuiltinShown(off, 'task', '', 'notes'));
+  check('switching it back on shows it', H.workBuiltinShown(H.setWorkBuiltinShown(off, 'task', '__default', 'owner', true), 'task', '', 'owner'));
+  check('hiding is per type', H.workBuiltinShown(H.setWorkBuiltinShown(base, 'work', 'Repair', 'cost', false), 'work', 'Inspection', 'cost'));
+  const withField = H.setTypeHasField(off, 'task', '__default', 'cf_x', true);
+  check('ticking a custom field keeps the hidden list', !H.workBuiltinShown(withField, 'task', '', 'owner'));
+  check('hidden fields survive a reload through adoptWorkModel', !H.workBuiltinShown(H.adoptWorkModel(JSON.parse(JSON.stringify(off))), 'task', '', 'owner'));
+  const df = H.addWorkField(base, 'task', { label: 'Site code' });
+  const dm = H.setTypeHasField(df.model, 'task', '__default', df.key, true);
+  check('custom fields on the default type reach untyped tasks', H.customFieldsFor(dm, 'task', '').length === 1);
+  check('the dialogs gate each built-in on the type', (src.match(/workBuiltinShown\(workModel, "(task|work)"/g) || []).length >= 9);
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

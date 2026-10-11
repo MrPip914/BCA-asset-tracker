@@ -3318,6 +3318,17 @@ tasks, then work.
   fields, enforce required ones, and write `custom`; edits audit each changed value; History
   rows and search show them. A removed work type's settings are left in place, so adding the
   same name back restores its fields. **The Excel export does not carry custom values yet.**
+- **Every task and work entry HAS a type: the built-in DEFAULT** (2026-10-11). A record naming
+  none -- or a task naming a removed type -- resolves to `__default` (`resolveWorkTypeId`). It is
+  virtual (never in `taskTypes`/`changeTypes`), cannot be renamed or removed, and its settings
+  live in the model like any type's, so custom fields can be put on it and reach every untyped
+  record. A fresh model hides nothing, so nothing changed for existing data.
+- **The built-in fields are switchable per type** via `hiddenFields` beside `fieldKeys` in a
+  type's settings (`WORK_BUILTIN_FIELDS`): task Notes and Owner; work Vendor, Cost, Linked task
+  and Details. Structural fields (a task's name, kind, schedule/due date, completion; a work
+  entry's type, performed date, files) are not switchable. Hiding only hides: stored values are
+  never touched, and the hidden list is preserved by every settings edit. The task dialog and
+  both work forms (Log work, completion) read `workBuiltinShown`.
 - Covered by `test-frontend-work-model.js`.
 
 **A scheduled task can repeat on a CUSTOM rule (backend v52, 2026-10-07).** The Frequency
