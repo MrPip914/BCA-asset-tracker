@@ -1194,6 +1194,15 @@ const BUILT_IN_CONTENTS_QUERY = {
   includeArchived: false, hideWhenEmpty: false,
 };
 
+const BUILT_IN_BREAKERS_QUERY = {
+  id: "builtin-breakers", name: "Breakers feeding this room", builtIn: true,
+  steps: [{ follow: "circuits", typeIds: [], fieldKey: "", show: true }],
+  includeArchived: false, hideWhenEmpty: true,
+  builtInNote: "Built in: the panel circuits that serve a room (breaker slot, amps, panel). Shown only when there are any. It cannot be changed.",
+};
+
+const BUILT_IN_ROOM_TYPE_ID = "Room";
+
 function referenceTargetTypes(col) {
   if (!col) return [];
   if (Array.isArray(col.referenceTypes) && col.referenceTypes.length) return col.referenceTypes.filter(Boolean);
@@ -1220,7 +1229,11 @@ function relationshipQueriesFor(type) {
 }
 
 function relationshipQueriesShownFor(type) {
-  return [...(isPlaceType(type) ? [BUILT_IN_CONTENTS_QUERY] : []), ...relationshipQueriesFor(type)];
+  return [
+    ...(isPlaceType(type) ? [BUILT_IN_CONTENTS_QUERY] : []),
+    ...(type === BUILT_IN_ROOM_TYPE_ID ? [BUILT_IN_BREAKERS_QUERY] : []),
+    ...relationshipQueriesFor(type),
+  ];
 }
 
 function relationshipIndex(assets, columns) {

@@ -109,6 +109,8 @@ const PIECES = [
   ["const RELATIONSHIP_FOLLOWS = [", "\n];"],
   "relationshipFollowMeta",
   ["const BUILT_IN_CONTENTS_QUERY = {", "\n};"],
+  ["const BUILT_IN_BREAKERS_QUERY = {", "\n};"],
+  ["const BUILT_IN_ROOM_TYPE_ID", ";"],
   "referenceTargetTypes",
   "referenceColumns",
   "relationshipQueriesFor",
