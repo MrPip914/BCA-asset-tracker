@@ -3329,6 +3329,7 @@ tasks, then work.
   entry's type, performed date, files) are not switchable. Hiding only hides: stored values are
   never touched, and the hidden list is preserved by every settings edit. The task dialog and
   both work forms (Log work, completion) read `workBuiltinShown`.
+- **Any type can be made the default** ("Use as default" in Settings, 2026-10-11): `defaultTaskType` / `defaultWorkType` on the `workModel` blob (a property, so no release). `resolveWorkTypeId` sends blank and removed types there instead of to `__default`; the built-in stays reachable by its id and is restored by choosing it again. Removing the chosen task type clears the setting; a removed work type (a bare name) just has no fields.
 - Covered by `test-frontend-work-model.js`.
 
 **A scheduled task can repeat on a CUSTOM rule (backend v52, 2026-10-07).** The Frequency

@@ -1808,9 +1808,24 @@ const WORK_BUILTIN_FIELDS = {
   task: [{ key: "notes", label: "Notes" }, { key: "owner", label: "Owner" }],
   work: [{ key: "vendor", label: "Vendor" }, { key: "cost", label: "Cost" }, { key: "task", label: "Linked task" }, { key: "note", label: "Details" }],
 };
+// The type a record with none (or a removed one) falls back to: the one marked
+// "Use as default" in Settings, else the built-in Default. A marked task type that
+// has since been removed reads as the built-in; a work type is a bare name in the
+// changeTypes list, which the model cannot check, so a removed one simply has no fields.
+function defaultWorkTypeId(model, kind) {
+  const m = model || {};
+  const id = kind === "task" ? m.defaultTaskType : m.defaultWorkType;
+  if (!id || id === DEFAULT_WORK_TYPE_ID) return DEFAULT_WORK_TYPE_ID;
+  if (kind === "task" && !(m.taskTypes || []).some(t => t.id === id)) return DEFAULT_WORK_TYPE_ID;
+  return id;
+}
+function setDefaultWorkType(model, kind, id) {
+  return { ...model, [kind === "task" ? "defaultTaskType" : "defaultWorkType"]: id === DEFAULT_WORK_TYPE_ID ? "" : id };
+}
 function resolveWorkTypeId(model, kind, typeId) {
-  if (!typeId) return DEFAULT_WORK_TYPE_ID;
-  if (kind === "task" && !((model && model.taskTypes) || []).some(t => t.id === typeId)) return DEFAULT_WORK_TYPE_ID;
+  if (typeId === DEFAULT_WORK_TYPE_ID) return DEFAULT_WORK_TYPE_ID;
+  if (!typeId) return defaultWorkTypeId(model, kind);
+  if (kind === "task" && !((model && model.taskTypes) || []).some(t => t.id === typeId)) return defaultWorkTypeId(model, kind);
   return typeId;
 }
 // Is this built-in field on for the record's type?
@@ -1846,6 +1861,8 @@ function adoptWorkModel(raw) {
     taskFields: fields(m.taskFields),
     workTypeSettings: settings(m.workTypeSettings),
     workFields: fields(m.workFields),
+    defaultTaskType: typeof m.defaultTaskType === "string" ? m.defaultTaskType : "",
+    defaultWorkType: typeof m.defaultWorkType === "string" ? m.defaultWorkType : "",
   };
 }
 function workModelParts(model, kind) {
@@ -1963,7 +1980,7 @@ function renameTaskType(model, id, name) {
 function removeTaskType(model, id) {
   const settings = { ...(model.taskTypeSettings || {}) };
   delete settings[id];
-  return { ...model, taskTypes: (model.taskTypes || []).filter(t => t.id !== id), taskTypeSettings: settings };
+  return { ...model, taskTypes: (model.taskTypes || []).filter(t => t.id !== id), taskTypeSettings: settings, defaultTaskType: model.defaultTaskType === id ? "" : model.defaultTaskType };
 }
 function taskTypeNameOf(model, id) {
   const t = id ? (model.taskTypes || []).find(x => x.id === id) : null;
@@ -5556,7 +5573,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-11.6";
+const APP_VERSION = "2026-10-11.7";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -15411,7 +15428,7 @@ function AssetTracker() {
                         value={maintenanceDraft.taskType || ""}
                         onChange={v => setMaintenanceDraft({ ...maintenanceDraft, taskType: v })}
                         options={["", ...workModel.taskTypes.map(t => t.id)]}
-                        labelForOption={id => (id ? (taskTypeNameOf(workModel, id) || "(removed type)") : DEFAULT_WORK_TYPE_NAME)}
+                        labelForOption={id => (id ? (taskTypeNameOf(workModel, id) || "(removed type)") : (taskTypeNameOf(workModel, defaultWorkTypeId(workModel, "task")) || DEFAULT_WORK_TYPE_NAME))}
                         title="Select task type"
                       />
                     </div>
@@ -18713,6 +18730,7 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
   const [fieldError, setFieldError] = useState("");
   const [fieldDraft, setFieldDraft] = useState({ label: "", dataType: "text", optionsText: "" });
   const selected = types.find(t => t.id === selId) || null;
+  const defaultId = defaultWorkTypeId(model, kind);
   const st = selected ? ((model[fieldsKey.settings] || {})[selected.id] || { fieldKeys: [], requiredFields: [], hiddenFields: [] }) : null;
   const inputStyle = { padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, minWidth: 0 };
   const card = { background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, width: "100%", maxWidth: 460 };
@@ -18743,7 +18761,7 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
                   <>
                     <button onClick={() => setSelId(t.id === selId ? "" : t.id)} aria-pressed={t.id === selId}
                       style={{ flex: 1, textAlign: "left", padding: "8px 10px", border: `1.5px solid ${t.id === selId ? C.brand : C.border}`, background: t.id === selId ? C.hover : "none", borderRadius: 10, fontSize: 14, color: C.ink }}>
-                      {t.name}
+                      {t.name}{t.id === defaultId && t.id !== DEFAULT_WORK_TYPE_ID ? <span style={{ fontSize: 12, color: C.muted }}> (default)</span> : null}
                     </button>
                     {typeActions && t.id !== DEFAULT_WORK_TYPE_ID && <button onClick={() => setRenameVal({ id: t.id, name: t.name })} className="icon-btn" aria-label={`Rename ${t.name}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}><Pencil size={14} color={C.muted} /></button>}
                     {typeActions && t.id !== DEFAULT_WORK_TYPE_ID && <button onClick={() => { if (selId === t.id) setSelId(""); onModel(typeActions.remove(t.id)); }} className="icon-btn" aria-label={`Remove ${t.name}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}><Trash2 size={14} color={C.danger} /></button>}
@@ -18766,6 +18784,9 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
       {selected && (
         <div style={card}>
           <div style={heading}>Fields on {selected.name}</div>
+          {selected.id === defaultId
+            ? <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>New and untyped {noun === "task" ? "tasks" : "work entries"} use this type.</div>
+            : <button onClick={() => onModel(setDefaultWorkType(model, kind, selected.id))} style={{ marginBottom: 10, padding: "6px 12px", border: `1.5px solid ${C.border}`, background: "none", borderRadius: 8, fontSize: 13, color: C.ink }}>Use as default</button>}
           {WORK_BUILTIN_FIELDS[kind].map(b => (
             <div key={b.key} style={{ padding: "6px 0", fontSize: 14 }}>
               <label style={{ display: "flex", alignItems: "center", gap: 8 }}>

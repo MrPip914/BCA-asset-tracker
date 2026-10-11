@@ -25,6 +25,8 @@ const code = [
   slice('function adoptWorkModel(raw) {'),
   'const DEFAULT_WORK_TYPE_ID = "__default";',
   slice('function workModelParts(model, kind) {'),
+  slice('function defaultWorkTypeId(model, kind) {'),
+  slice('function setDefaultWorkType(model, kind, id) {'),
   slice('function resolveWorkTypeId(model, kind, typeId) {'),
   slice('function workBuiltinShown(model, kind, typeId, key) {'),
   slice('function setWorkBuiltinShown(model, kind, typeId, key, on) {'),
@@ -41,7 +43,7 @@ const code = [
   slice('function renameTaskType(model, id, name) {'),
   slice('function removeTaskType(model, id) {'),
   slice('function taskTypeNameOf(model, id) {'),
-  'return { resolveWorkTypeId, workBuiltinShown, setWorkBuiltinShown, DEFAULT_WORK_TYPE_ID, addWorkField, removeWorkField, setTypeHasField, setTypeFieldRequired, addTaskType, renameTaskType, removeTaskType, taskTypeNameOf, adoptWorkModel, customFieldsFor, requiredCustomFieldsFor, validateCustomValues, newWorkFieldKey };',
+  'return { defaultWorkTypeId, setDefaultWorkType, resolveWorkTypeId, workBuiltinShown, setWorkBuiltinShown, DEFAULT_WORK_TYPE_ID, addWorkField, removeWorkField, setTypeHasField, setTypeFieldRequired, addTaskType, renameTaskType, removeTaskType, taskTypeNameOf, adoptWorkModel, customFieldsFor, requiredCustomFieldsFor, validateCustomValues, newWorkFieldKey };',
 ].join('\n');
 const H = new Function('DEFAULT_COLUMN_DATA_TYPES', code)({});
 
@@ -133,6 +135,18 @@ check('work search covers custom values', /Object\.values\(r\.change\.custom/.te
   check('a blank type resolves to the default', H.resolveWorkTypeId(base, 'task', '') === '__default' && H.resolveWorkTypeId(base, 'work', '') === '__default');
   check('a removed task type resolves to the default', H.resolveWorkTypeId(base, 'task', 'tt-gone') === '__default');
   check('a named work type resolves to itself', H.resolveWorkTypeId(base, 'work', 'Repair') === 'Repair');
+  {
+    let m = H.addTaskType(base, 'Repair').model; const id = m.taskTypes[0].id;
+    m = H.setDefaultWorkType(m, 'task', id);
+    check('a chosen default takes blank and removed task types', H.resolveWorkTypeId(m, 'task', '') === id && H.resolveWorkTypeId(m, 'task', 'tt-gone') === id);
+    check('the built-in stays reachable by id', H.resolveWorkTypeId(m, 'task', '__default') === '__default');
+    check('a chosen task type does not move work', H.resolveWorkTypeId(m, 'work', '') === '__default');
+    check('removing the chosen type falls back to the built-in', H.resolveWorkTypeId(H.removeTaskType(m, id), 'task', '') === '__default');
+    check('choosing the built-in clears the setting', H.resolveWorkTypeId(H.setDefaultWorkType(m, 'task', '__default'), 'task', '') === '__default');
+    const w = H.setDefaultWorkType(base, 'work', 'Repair');
+    check('a chosen work default takes blank', H.resolveWorkTypeId(w, 'work', '') === 'Repair');
+    check('the default survives adoption', H.adoptWorkModel(m).defaultTaskType === id && H.adoptWorkModel(w).defaultWorkType === 'Repair');
+  }
   check('nothing is hidden on a fresh model', H.workBuiltinShown(base, 'task', '', 'owner') && H.workBuiltinShown(base, 'work', 'Repair', 'cost'));
   const off = H.setWorkBuiltinShown(base, 'task', '__default', 'owner', false);
   check('switching a built-in off hides it for untyped tasks', !H.workBuiltinShown(off, 'task', '', 'owner') && H.workBuiltinShown(off, 'task', '', 'notes'));
