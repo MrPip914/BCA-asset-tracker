@@ -73,7 +73,7 @@ check('a SHORTER log is a fallback', auditAppendOf([e1, e2], [e1]) === null);
 
 // ---- the body ----
 const payload = { assets: prev, columns: [1], changeTypes: [2], vendors: [], peripheralsList: [], usersList: [],
-  bulkItemTypes: [], typesList: [], typeSettings: {}, typeCategories: [], nextAssetNumber: 7,
+  bulkItemTypes: [], typesList: [], typeSettings: {}, typeCategories: [], workModel: {}, nextAssetNumber: 7,
   breakerTypes: [3], photos: [4], auditLog: [e1], auditBase: 0 };
 const dirtyAssets = { assets: true, config: false, breakerTypes: false, photos: false };
 let body = perRecordBody(payload, dirtyAssets, { upsert: [edited], remove: [] }, []);
@@ -82,7 +82,7 @@ check('an assets-only save carries no asset list, no log, no other domain',
 check('...and carries the changes and the appended entries', body.assetChanges && Array.isArray(body.auditAppend));
 body = perRecordBody(payload, { assets: false, config: true, breakerTypes: false, photos: true }, null, []);
 check('a config save restates every config key, as the backend expects of one',
-  ['columns', 'changeTypes', 'vendors', 'peripheralsList', 'usersList', 'bulkItemTypes', 'typesList', 'typeSettings', 'typeCategories', 'nextAssetNumber']
+  ['columns', 'changeTypes', 'vendors', 'peripheralsList', 'usersList', 'bulkItemTypes', 'typesList', 'typeSettings', 'typeCategories', 'workModel', 'nextAssetNumber']
     .every(k => k in body) && body.photos === payload.photos && !('breakerTypes' in body));
 check('a save naming no asset marks assets clean', body._dirty.assets === false && !('assetChanges' in body));
 check('the allowlist is sent only when the payload carries it', !('authUsers' in body)

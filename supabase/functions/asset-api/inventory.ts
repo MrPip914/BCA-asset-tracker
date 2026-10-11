@@ -19,7 +19,7 @@ export const REVISION_DOMAINS = ["assets", "config", "breakerTypes", "photos"];
 // key is kept in the table (the save path must preserve it) but not sent.
 const CONFIG_KEYS = [
   "columns", "changeTypes", "vendors", "peripheralsList", "usersList", "bulkItemTypes",
-  "typesList", "typeSettings", "typeCategories",
+  "typesList", "typeSettings", "typeCategories", "workModel",
 ];
 
 // deno-lint-ignore no-explicit-any

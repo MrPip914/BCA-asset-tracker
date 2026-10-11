@@ -40,6 +40,7 @@ const CONFIG_WRITES: [string, () => unknown][] = [
   ["columns", () => []], ["changeTypes", () => []], ["vendors", () => []],
   ["peripheralsList", () => []], ["usersList", () => []], ["bulkItemTypes", () => []],
   ["typesList", () => []], ["typeSettings", () => ({})], ["typeCategories", () => []],
+  ["workModel", () => ({})],
 ];
 
 // Each table a save rewrites: its key, and its columns as jsonb_to_recordset
