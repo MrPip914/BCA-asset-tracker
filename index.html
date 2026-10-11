@@ -1793,6 +1793,52 @@ function validateColumnValue(col, raw) {
 // A blank/absent type reads as "no type": no custom fields, nothing required --
 // exactly how every task and work entry behaves today.
 const WORK_FIELD_KINDS = ["task", "work"];
+// Every task and every work entry HAS a type: a record naming none (or a task
+// naming a removed one) reads as the built-in DEFAULT type. It is virtual, never
+// in the managed list, and cannot be renamed or removed -- its settings live in
+// the model under this id like any other type's. A fresh model hides nothing and
+// adds nothing, so the default type behaves exactly as tasks and work always did.
+const DEFAULT_WORK_TYPE_ID = "__default";
+const DEFAULT_WORK_TYPE_NAME = "Default";
+// The built-in fields a type may switch off. Everything else in the dialogs is
+// structural: a task's name, kind, schedule or due date and completion date, and
+// a work entry's type, performed date and files. Switching one off hides it; the
+// stored value is never touched.
+const WORK_BUILTIN_FIELDS = {
+  task: [{ key: "notes", label: "Notes" }, { key: "owner", label: "Owner" }],
+  work: [{ key: "vendor", label: "Vendor" }, { key: "cost", label: "Cost" }, { key: "task", label: "Linked task" }, { key: "note", label: "Details" }],
+};
+// The type a record with none (or a removed one) falls back to: the one marked
+// "Use as default" in Settings, else the built-in Default. A marked task type that
+// has since been removed reads as the built-in; a work type is a bare name in the
+// changeTypes list, which the model cannot check, so a removed one simply has no fields.
+function defaultWorkTypeId(model, kind) {
+  const m = model || {};
+  const id = kind === "task" ? m.defaultTaskType : m.defaultWorkType;
+  if (!id || id === DEFAULT_WORK_TYPE_ID) return DEFAULT_WORK_TYPE_ID;
+  if (kind === "task" && !(m.taskTypes || []).some(t => t.id === id)) return DEFAULT_WORK_TYPE_ID;
+  return id;
+}
+function setDefaultWorkType(model, kind, id) {
+  return { ...model, [kind === "task" ? "defaultTaskType" : "defaultWorkType"]: id === DEFAULT_WORK_TYPE_ID ? "" : id };
+}
+function resolveWorkTypeId(model, kind, typeId) {
+  if (typeId === DEFAULT_WORK_TYPE_ID) return DEFAULT_WORK_TYPE_ID;
+  if (!typeId) return defaultWorkTypeId(model, kind);
+  if (kind === "task" && !((model && model.taskTypes) || []).some(t => t.id === typeId)) return defaultWorkTypeId(model, kind);
+  return typeId;
+}
+// Is this built-in field on for the record's type?
+function workBuiltinShown(model, kind, typeId, key) {
+  const st = workModelParts(model, kind).settings[resolveWorkTypeId(model, kind, typeId)];
+  return !(st && (st.hiddenFields || []).includes(key));
+}
+function setWorkBuiltinShown(model, kind, typeId, key, on) {
+  const k = workModelKey(kind);
+  const cur = (model[k.settings] || {})[typeId] || { fieldKeys: [], requiredFields: [], hiddenFields: [] };
+  const hidden = (cur.hiddenFields || []).filter(x => x !== key);
+  return { ...model, [k.settings]: { ...(model[k.settings] || {}), [typeId]: { ...cur, hiddenFields: on ? hidden : [...hidden, key] } } };
+}
 function adoptWorkModel(raw) {
   const m = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
   const list = v => (Array.isArray(v) ? v : []);
@@ -1805,7 +1851,7 @@ function adoptWorkModel(raw) {
   const settings = v => {
     const out = {};
     Object.entries(obj(v)).forEach(([id, st]) => {
-      out[id] = { fieldKeys: list(st && st.fieldKeys).map(String), requiredFields: list(st && st.requiredFields).map(String) };
+      out[id] = { fieldKeys: list(st && st.fieldKeys).map(String), requiredFields: list(st && st.requiredFields).map(String), hiddenFields: list(st && st.hiddenFields).map(String) };
     });
     return out;
   };
@@ -1815,6 +1861,8 @@ function adoptWorkModel(raw) {
     taskFields: fields(m.taskFields),
     workTypeSettings: settings(m.workTypeSettings),
     workFields: fields(m.workFields),
+    defaultTaskType: typeof m.defaultTaskType === "string" ? m.defaultTaskType : "",
+    defaultWorkType: typeof m.defaultWorkType === "string" ? m.defaultWorkType : "",
   };
 }
 function workModelParts(model, kind) {
@@ -1827,9 +1875,8 @@ function workModelParts(model, kind) {
 // type names but no definition exists for is dropped at READ time (a hand-edited
 // blob must not put a field on screen that nothing can render or validate).
 function customFieldsFor(model, kind, typeId) {
-  if (!typeId) return [];
   const { fields, settings } = workModelParts(model, kind);
-  const st = settings[typeId];
+  const st = settings[resolveWorkTypeId(model, kind, typeId)];
   if (!st) return [];
   return st.fieldKeys.map(k => fields.find(f => f.key === k)).filter(Boolean);
 }
@@ -1837,7 +1884,7 @@ function customFieldsFor(model, kind, typeId) {
 // invisible field would refuse every save with nothing on screen to fix.
 function requiredCustomFieldsFor(model, kind, typeId) {
   const have = new Set(customFieldsFor(model, kind, typeId).map(f => f.key));
-  const st = typeId ? workModelParts(model, kind).settings[typeId] : null;
+  const st = workModelParts(model, kind).settings[resolveWorkTypeId(model, kind, typeId)];
   return st ? st.requiredFields.filter(k => have.has(k)) : [];
 }
 // The first problem with a record's custom values, or "". Emptiness is never
@@ -1896,16 +1943,16 @@ function removeWorkField(model, kind, key) {
   const k = workModelKey(kind);
   const settings = {};
   Object.entries(model[k.settings] || {}).forEach(([id, st]) => {
-    settings[id] = { fieldKeys: st.fieldKeys.filter(x => x !== key), requiredFields: st.requiredFields.filter(x => x !== key) };
+    settings[id] = { ...st, fieldKeys: st.fieldKeys.filter(x => x !== key), requiredFields: st.requiredFields.filter(x => x !== key) };
   });
   return { ...model, [k.fields]: (model[k.fields] || []).filter(f => f.key !== key), [k.settings]: settings };
 }
 function setTypeHasField(model, kind, typeId, key, on) {
   const k = workModelKey(kind);
-  const cur = (model[k.settings] || {})[typeId] || { fieldKeys: [], requiredFields: [] };
+  const cur = (model[k.settings] || {})[typeId] || { fieldKeys: [], requiredFields: [], hiddenFields: [] };
   const fieldKeys = on ? (cur.fieldKeys.includes(key) ? cur.fieldKeys : [...cur.fieldKeys, key]) : cur.fieldKeys.filter(x => x !== key);
   const requiredFields = on ? cur.requiredFields : cur.requiredFields.filter(x => x !== key);
-  return { ...model, [k.settings]: { ...(model[k.settings] || {}), [typeId]: { fieldKeys, requiredFields } } };
+  return { ...model, [k.settings]: { ...(model[k.settings] || {}), [typeId]: { ...cur, fieldKeys, requiredFields } } };
 }
 function setTypeFieldRequired(model, kind, typeId, key, on) {
   const k = workModelKey(kind);
@@ -1933,7 +1980,7 @@ function renameTaskType(model, id, name) {
 function removeTaskType(model, id) {
   const settings = { ...(model.taskTypeSettings || {}) };
   delete settings[id];
-  return { ...model, taskTypes: (model.taskTypes || []).filter(t => t.id !== id), taskTypeSettings: settings };
+  return { ...model, taskTypes: (model.taskTypes || []).filter(t => t.id !== id), taskTypeSettings: settings, defaultTaskType: model.defaultTaskType === id ? "" : model.defaultTaskType };
 }
 function taskTypeNameOf(model, id) {
   const t = id ? (model.taskTypes || []).find(x => x.id === id) : null;
@@ -5526,7 +5573,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-11.5";
+const APP_VERSION = "2026-10-11.7";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -14663,7 +14710,7 @@ function AssetTracker() {
         <WorkTypesManager
           kind="task"
           model={workModel}
-          types={workModel.taskTypes}
+          types={[{ id: DEFAULT_WORK_TYPE_ID, name: DEFAULT_WORK_TYPE_NAME }, ...workModel.taskTypes]}
           onModel={next => persist(assets, { workModel: next })}
           typeActions={{
             add: name => addTaskType(workModel, name),
@@ -14678,7 +14725,7 @@ function AssetTracker() {
         <WorkTypesManager
           kind="work"
           model={workModel}
-          types={changeTypes.map(name => ({ id: name, name }))}
+          types={[{ id: DEFAULT_WORK_TYPE_ID, name: DEFAULT_WORK_TYPE_NAME }, ...changeTypes.map(name => ({ id: name, name }))]}
           onModel={next => persist(assets, { workModel: next })}
         />
       );
@@ -15060,7 +15107,8 @@ function AssetTracker() {
                       style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
                     />
                   </label>
-                  <PickerField
+                  {workBuiltinShown(workModel, "work", changeDraft.changeType, "vendor") && (
+<PickerField
                     label="Vendor"
                     value={changeDraft.vendor}
                     onChange={v => setChangeDraft({ ...changeDraft, vendor: v })}
@@ -15070,7 +15118,9 @@ function AssetTracker() {
                     manageLabel="Manage vendors"
                     title="Select vendor"
                   />
-                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+)}
+                  {workBuiltinShown(workModel, "work", changeDraft.changeType, "cost") && (
+<label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Cost</span>
                     <input
                       type="number"
@@ -15081,6 +15131,7 @@ function AssetTracker() {
                       style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
                     />
                   </label>
+)}
                   <CustomFieldInputs model={workModel} kind="work" typeId={changeDraft.changeType} values={changeDraft.custom}
                     onChange={custom => setChangeDraft({ ...changeDraft, custom })} />
                   {/* v34, optional: attach this change to one of the asset's
@@ -15088,7 +15139,7 @@ function AssetTracker() {
                       task performed; that stays a Maintenance-tab action.
                       Hidden entirely when the asset has no schedules, so it
                       costs a Computer's change form nothing. */}
-                  {(workTarget?.maintenanceItems || []).length > 0 && (
+                  {(workTarget?.maintenanceItems || []).length > 0 && workBuiltinShown(workModel, "work", changeDraft.changeType, "task") && (
                   <PickerField
                     label="Task"
                     value={changeDraft.maintenanceId}
@@ -15136,13 +15187,15 @@ function AssetTracker() {
                   )}
                 </div>
                 )}
-                <textarea
+                {workBuiltinShown(workModel, "work", changeDraft.changeType, "note") && (
+<textarea
                   value={changeDraft.note}
                   onChange={e => setChangeDraft({ ...changeDraft, note: e.target.value })}
                   placeholder="Details — what happened, why…"
                   rows={2}
                   style={{ width: "100%", padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, resize: "vertical", color: C.ink }}
                 />
+)}
                 {changeDraft.markPerformed && !changeDraft.performedOn && (
                   <div style={{ fontSize: 12, color: C.danger, marginTop: 8 }}>Pick the date it was performed.</div>
                 )}
@@ -15277,7 +15330,8 @@ function AssetTracker() {
                   </label>
                   {/* A schedule survives on its task string because "Filter
                       clean" says everything. A project does not. */}
-                  <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
+                  {workBuiltinShown(workModel, "task", maintenanceDraft.taskType, "notes") && (
+<label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
                     <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Notes</span>
                     <textarea
                       value={maintenanceDraft.notes}
@@ -15287,6 +15341,7 @@ function AssetTracker() {
                       style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, fontFamily: "inherit", resize: "vertical" }}
                     />
                   </label>
+)}
                   {maintenanceDraft.kind === TASK_KIND_ONEOFF ? (
                     <>
                     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -15349,7 +15404,8 @@ function AssetTracker() {
                       )}
                     </>
                   )}
-                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  {workBuiltinShown(workModel, "task", maintenanceDraft.taskType, "owner") && (
+<label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Owner</span>
                     <input
                       value={maintenanceDraft.owner}
@@ -15358,6 +15414,7 @@ function AssetTracker() {
                       style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
                     />
                   </label>
+)}
                   {/* Task type: decides which custom fields follow. Only offered
                       once at least one type exists, so a school that never sets
                       any up sees the dialog exactly as before. */}
@@ -15371,7 +15428,7 @@ function AssetTracker() {
                         value={maintenanceDraft.taskType || ""}
                         onChange={v => setMaintenanceDraft({ ...maintenanceDraft, taskType: v })}
                         options={["", ...workModel.taskTypes.map(t => t.id)]}
-                        labelForOption={id => (id ? (taskTypeNameOf(workModel, id) || "(removed type)") : "No type")}
+                        labelForOption={id => (id ? (taskTypeNameOf(workModel, id) || "(removed type)") : (taskTypeNameOf(workModel, defaultWorkTypeId(workModel, "task")) || DEFAULT_WORK_TYPE_NAME))}
                         title="Select task type"
                       />
                     </div>
@@ -15528,7 +15585,8 @@ function AssetTracker() {
                     manageLabel="Manage work types"
                     title="Select work type"
                   />
-                  <PickerField
+                  {workBuiltinShown(workModel, "work", maintenanceCompleteModal.changeType, "vendor") && (
+<PickerField
                     label="Vendor"
                     value={maintenanceCompleteModal.vendor}
                     onChange={v => set({ vendor: v })}
@@ -15538,7 +15596,9 @@ function AssetTracker() {
                     manageLabel="Manage vendors"
                     title="Select vendor"
                   />
-                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+)}
+                  {workBuiltinShown(workModel, "work", maintenanceCompleteModal.changeType, "cost") && (
+<label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Cost</span>
                     <input
                       type="number"
@@ -15549,16 +15609,19 @@ function AssetTracker() {
                       style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
                     />
                   </label>
+)}
                   <CustomFieldInputs model={workModel} kind="work" typeId={maintenanceCompleteModal.changeType} values={maintenanceCompleteModal.custom}
                     onChange={custom => set({ custom })} />
                 </div>
-                <textarea
+                {workBuiltinShown(workModel, "work", maintenanceCompleteModal.changeType, "note") && (
+<textarea
                   value={maintenanceCompleteModal.note}
                   onChange={e => set({ note: e.target.value })}
                   placeholder="What was done, what was found…"
                   rows={3}
                   style={{ width: "100%", padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, resize: "vertical", color: C.ink }}
                 />
+)}
                 {/* The files belong to the WORK ENTRY this writes, not to the
                     schedule: they are evidence of one visit -- the receipt, the
                     part that failed, the before and after -- which is what a
@@ -18667,7 +18730,8 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
   const [fieldError, setFieldError] = useState("");
   const [fieldDraft, setFieldDraft] = useState({ label: "", dataType: "text", optionsText: "" });
   const selected = types.find(t => t.id === selId) || null;
-  const st = selected ? ((model[fieldsKey.settings] || {})[selected.id] || { fieldKeys: [], requiredFields: [] }) : null;
+  const defaultId = defaultWorkTypeId(model, kind);
+  const st = selected ? ((model[fieldsKey.settings] || {})[selected.id] || { fieldKeys: [], requiredFields: [], hiddenFields: [] }) : null;
   const inputStyle = { padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, minWidth: 0 };
   const card = { background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, width: "100%", maxWidth: 460 };
   const heading = { display: "flex", alignItems: "center", gap: 6, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginBottom: 12 };
@@ -18679,7 +18743,7 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
         <div style={card}>
           <div style={heading}>
             {kind === "task" ? "Task types" : "Work types"}
-            <HelpTip label={`About ${noun} types`} text={`A type decides which extra fields show on a ${noun} and which of them are required. A ${noun} with no type shows none. Pick a type to choose its fields.`} />
+            <HelpTip label={`About ${noun} types`} text={`A type decides which extra fields show on a ${noun} and which of them are required. A ${noun} with no type uses the Default type. Pick a type to choose its fields.`} />
           </div>
           {types.length === 0 && <div style={{ fontSize: 13, color: C.empty, marginBottom: 12 }}>No types yet.</div>}
           <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 14 }}>
@@ -18697,10 +18761,10 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
                   <>
                     <button onClick={() => setSelId(t.id === selId ? "" : t.id)} aria-pressed={t.id === selId}
                       style={{ flex: 1, textAlign: "left", padding: "8px 10px", border: `1.5px solid ${t.id === selId ? C.brand : C.border}`, background: t.id === selId ? C.hover : "none", borderRadius: 10, fontSize: 14, color: C.ink }}>
-                      {t.name}
+                      {t.name}{t.id === defaultId && t.id !== DEFAULT_WORK_TYPE_ID ? <span style={{ fontSize: 12, color: C.muted }}> (default)</span> : null}
                     </button>
-                    {typeActions && <button onClick={() => setRenameVal({ id: t.id, name: t.name })} className="icon-btn" aria-label={`Rename ${t.name}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}><Pencil size={14} color={C.muted} /></button>}
-                    {typeActions && <button onClick={() => { if (selId === t.id) setSelId(""); onModel(typeActions.remove(t.id)); }} className="icon-btn" aria-label={`Remove ${t.name}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}><Trash2 size={14} color={C.danger} /></button>}
+                    {typeActions && t.id !== DEFAULT_WORK_TYPE_ID && <button onClick={() => setRenameVal({ id: t.id, name: t.name })} className="icon-btn" aria-label={`Rename ${t.name}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}><Pencil size={14} color={C.muted} /></button>}
+                    {typeActions && t.id !== DEFAULT_WORK_TYPE_ID && <button onClick={() => { if (selId === t.id) setSelId(""); onModel(typeActions.remove(t.id)); }} className="icon-btn" aria-label={`Remove ${t.name}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}><Trash2 size={14} color={C.danger} /></button>}
                   </>
                 )}
               </div>
@@ -18720,6 +18784,18 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
       {selected && (
         <div style={card}>
           <div style={heading}>Fields on {selected.name}</div>
+          {selected.id === defaultId
+            ? <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>New and untyped {noun === "task" ? "tasks" : "work entries"} use this type.</div>
+            : <button onClick={() => onModel(setDefaultWorkType(model, kind, selected.id))} style={{ marginBottom: 10, padding: "6px 12px", border: `1.5px solid ${C.border}`, background: "none", borderRadius: 8, fontSize: 13, color: C.ink }}>Use as default</button>}
+          {WORK_BUILTIN_FIELDS[kind].map(b => (
+            <div key={b.key} style={{ padding: "6px 0", fontSize: 14 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input type="checkbox" checked={workBuiltinShown(model, kind, selected.id, b.key)} onChange={e => onModel(setWorkBuiltinShown(model, kind, selected.id, b.key, e.target.checked))} />
+                <span>{b.label}</span>
+                <span style={{ fontSize: 12, color: C.muted }}>built in</span>
+              </label>
+            </div>
+          ))}
           {fields.length === 0 && <div style={{ fontSize: 13, color: C.empty }}>Add a field below, then tick it here.</div>}
           {fields.map(f => {
             const on = st.fieldKeys.includes(f.key);
