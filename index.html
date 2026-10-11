@@ -3681,9 +3681,10 @@ function taskMatchesSearch(r, assets, typesList, q, model) {
     .some(v => (v || "").toLowerCase().includes(q));
 }
 // The History tab's search over one work row ({ asset, change }).
-function workMatchesSearch(r, typesList, q) {
+function workMatchesSearch(r, typesList, q, model) {
   if (!q) return true;
-  return [nameOf(r.asset, typesList), r.asset.tag, r.change.changeType, r.change.vendor, r.change.note]
+  const extra = model ? Object.values(r.change.custom || {}).map(String) : [];
+  return [...extra, nameOf(r.asset, typesList), r.asset.tag, r.change.changeType, r.change.vendor, r.change.note]
     .some(v => String(v || "").toLowerCase().includes(q));
 }
 
@@ -5525,7 +5526,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-11.4";
+const APP_VERSION = "2026-10-11.5";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -7740,7 +7741,7 @@ function AssetTracker() {
   // render that has already been scheduled, and must not cause another one.
   const scrollToTopRef = useRef(false);
   const [commentDraft, setCommentDraft] = useState("");
-  const [changeDraft, setChangeDraft] = useState({ changeType: "", vendor: "", cost: "", note: "", maintenanceId: "", markPerformed: false, performedOn: localDateString() });
+  const [changeDraft, setChangeDraft] = useState({ changeType: "", vendor: "", cost: "", note: "", maintenanceId: "", markPerformed: false, performedOn: localDateString(), custom: {} });
   const [showChangeTypeManager, setShowChangeTypeManager] = useState(false);
   const [showVendorManager, setShowVendorManager] = useState(false);
   const [newChangeTypeName, setNewChangeTypeName] = useState("");
@@ -9535,7 +9536,7 @@ function AssetTracker() {
       if (!inHierarchyScope(r.asset, scopeId, assets)) return false;
       if (workTypeFilter !== "All work types" && r.change.changeType !== workTypeFilter) return false;
       if (workVendorFilter !== "All vendors" && r.change.vendor !== workVendorFilter) return false;
-      return workMatchesSearch(r, typesList, q);
+      return workMatchesSearch(r, typesList, q, workModel);
     });
     if (workSortConfig) {
       const { key, dir } = workSortConfig;
@@ -11310,7 +11311,7 @@ function AssetTracker() {
       // host. That is the same failure this feature already chooses everywhere
       // -- an invisible orphan rather than a row whose image 404s.
       id: crypto.randomUUID(),
-      changeType: "", vendor: "", cost: "", note: "", maintenanceId: "", markPerformed: false, performedOn: localDateString(),
+      changeType: "", vendor: "", cost: "", note: "", maintenanceId: "", markPerformed: false, performedOn: localDateString(), custom: {},
     });
     setChangeModal({ mode: "add" });
   }
@@ -11335,6 +11336,7 @@ function AssetTracker() {
       // the entry -- re-applying it every time someone fixes a typo would
       // silently re-stamp lastPerformed. The checkbox is hidden in edit mode.
       markPerformed: false,
+      custom: ch.custom && typeof ch.custom === "object" ? { ...ch.custom } : {},
     });
     setChangeModal({ mode: "edit", changeId });
   }
@@ -11366,7 +11368,9 @@ function AssetTracker() {
       note: changeDraft.note.trim(),
       performedOn: changeDraft.performedOn || changePerformedOn(original),
       maintenanceId: changeDraft.maintenanceId || "",
+      custom: { ...(changeDraft.custom || {}) },
     };
+    if (validateCustomValues(workModel, "work", updated.changeType, updated.custom)) return;
     const mkEntry = (field, from, to) => ({
       at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId,
       assetType: selectedAsset.type, action: "change_edited",
@@ -11380,6 +11384,13 @@ function AssetTracker() {
     if (changePerformedOn(original) !== updated.performedOn) {
       entries.push(mkEntry("Performed on", formatDateOnly(changePerformedOn(original)) || "—", formatDateOnly(updated.performedOn) || "—"));
     }
+    // Per custom field, for the fields the type now carries or carried: this
+    // rewrites a record and the audit row is the only trail of what it said.
+    new Set([...customFieldsFor(workModel, "work", original.changeType), ...customFieldsFor(workModel, "work", updated.changeType)].map(f => f.key)).forEach(key => {
+      const def = (workModel.workFields || []).find(f => f.key === key);
+      const before = String((original.custom || {})[key] ?? ""), after = String((updated.custom || {})[key] ?? "");
+      if (def && before !== after) entries.push(mkEntry(def.label, before || "—", after || "—"));
+    });
     if ((original.maintenanceId || "") !== updated.maintenanceId) {
       const nameOfTask = id => {
         if (!id) return "—";
@@ -11420,7 +11431,9 @@ function AssetTracker() {
       // v34, optional: the maintenance schedule this change was performed
       // against, picked in the form.
       maintenanceId: changeDraft.maintenanceId || "",
+      custom: { ...(changeDraft.custom || {}) },
     };
+    if (validateCustomValues(workModel, "work", entry.changeType, entry.custom)) return; // Save is disabled on it, with the reason on screen
     // Linking alone does NOT complete the schedule -- ticking "Mark this task
     // performed" does, and it defaults off (Eric's call, 2026-09-10).
     //
@@ -11720,7 +11733,7 @@ function AssetTracker() {
       // removed, and seeding a value that isn't an option would render a picker
       // showing something it cannot re-select.
       changeType: changeTypes.includes("Maintenance") ? "Maintenance" : "",
-      vendor: "", cost: "", note: "", error: "",
+      vendor: "", cost: "", note: "", custom: {}, error: "",
     });
   }
 
@@ -11732,7 +11745,7 @@ function AssetTracker() {
   async function submitMaintenanceComplete() {
     if (savingRef.current) return; // double-submit guard, see savingRef
     if (!maintenanceCompleteModal || !workTarget) return;
-    const { itemId, changeId, date, changeType, vendor, cost, note } = maintenanceCompleteModal;
+    const { itemId, changeId, date, changeType, vendor, cost, note, custom } = maintenanceCompleteModal;
     const items = workTarget.maintenanceItems || [];
     const item = items.find(m => m && m.id === itemId);
     if (!item) return;
@@ -11742,6 +11755,11 @@ function AssetTracker() {
     }
     if (!changeType) {
       setMaintenanceCompleteModal({ ...maintenanceCompleteModal, error: "Pick a work type." });
+      return;
+    }
+    const customErr = validateCustomValues(workModel, "work", changeType, custom);
+    if (customErr) {
+      setMaintenanceCompleteModal({ ...maintenanceCompleteModal, error: customErr });
       return;
     }
     const nextItems = items.map(it => (it && it.id === itemId ? { ...it, lastPerformed: date } : it));
@@ -11764,6 +11782,7 @@ function AssetTracker() {
       // allowed to disagree -- one value feeds both.
       performedOn: date,
       maintenanceId: item.id || "",
+      custom: { ...(custom || {}) },
     };
     const entry = {
       at: new Date().toISOString(), by: currentUser || "", assetLabel: workTargetId, assetType: workTarget.type,
@@ -14654,6 +14673,16 @@ function AssetTracker() {
         />
       );
     }
+    if (key === "worktypes") {
+      return (
+        <WorkTypesManager
+          kind="work"
+          model={workModel}
+          types={changeTypes.map(name => ({ id: name, name }))}
+          onModel={next => persist(assets, { workModel: next })}
+        />
+      );
+    }
     if (key === "relationships") {
       const allTypeIds = (typesList || []).map(t => t.id);
       const custom = allRelationshipQueries(allTypeIds);
@@ -15052,6 +15081,8 @@ function AssetTracker() {
                       style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
                     />
                   </label>
+                  <CustomFieldInputs model={workModel} kind="work" typeId={changeDraft.changeType} values={changeDraft.custom}
+                    onChange={custom => setChangeDraft({ ...changeDraft, custom })} />
                   {/* v34, optional: attach this change to one of the asset's
                       maintenance schedules. LINK ONLY -- it does not mark the
                       task performed; that stays a Maintenance-tab action.
@@ -15140,8 +15171,8 @@ function AssetTracker() {
                   <button onClick={() => setChangeModal(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                   <button
                     onClick={changeModal.mode === "edit" ? saveChangeEdit : addChange}
-                    disabled={!changeDraft.changeType || !workTarget || (changeDraft.markPerformed && !changeDraft.performedOn)}
-                    style={{ padding: "8px 14px", background: (changeDraft.changeType && workTarget && !(changeDraft.markPerformed && !changeDraft.performedOn)) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                    disabled={!changeDraft.changeType || !workTarget || (changeDraft.markPerformed && !changeDraft.performedOn) || !!validateCustomValues(workModel, "work", changeDraft.changeType, changeDraft.custom)}
+                    style={{ padding: "8px 14px", background: (changeDraft.changeType && workTarget && !(changeDraft.markPerformed && !changeDraft.performedOn) && !validateCustomValues(workModel, "work", changeDraft.changeType, changeDraft.custom)) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                   >
                     {(changeModal.mode === "edit" ? "Save changes" : "Log work")}
                   </button>
@@ -15389,6 +15420,7 @@ function AssetTracker() {
                             {[ch.vendor, ch.cost && `$${parseFloat(ch.cost).toFixed(2)}`, ch.by].filter(Boolean).join(" · ") || "—"}
                           </div>
                           {ch.note && <div style={{ fontSize: 13, color: C.ink, whiteSpace: "pre-wrap", marginTop: 2 }}>{ch.note}</div>}
+                          <CustomValuesLine model={workModel} kind="work" typeId={ch.changeType} values={ch.custom} />
                         </div>
                       ))}
                     </div>
@@ -15517,6 +15549,8 @@ function AssetTracker() {
                       style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
                     />
                   </label>
+                  <CustomFieldInputs model={workModel} kind="work" typeId={maintenanceCompleteModal.changeType} values={maintenanceCompleteModal.custom}
+                    onChange={custom => set({ custom })} />
                 </div>
                 <textarea
                   value={maintenanceCompleteModal.note}
@@ -16557,6 +16591,7 @@ function AssetTracker() {
                                       {[ch.vendor, ch.cost && `$${parseFloat(ch.cost).toFixed(2)}`, ch.by].filter(Boolean).join(" · ") || "—"}
                                     </div>
                                     {ch.note && <div style={{ fontSize: 13, color: C.ink, whiteSpace: "pre-wrap", marginTop: 2 }}>{ch.note}</div>}
+                          <CustomValuesLine model={workModel} kind="work" typeId={ch.changeType} values={ch.custom} />
                                   </div>
                                 ))}
                               </div>
@@ -16642,6 +16677,7 @@ function AssetTracker() {
                           {[ch.vendor, ch.cost && `$${parseFloat(ch.cost).toFixed(2)}`].filter(Boolean).join(" · ") || "—"}
                         </div>
                         {ch.note && <div style={{ fontSize: 14, color: C.ink, whiteSpace: "pre-wrap", marginBottom: 6 }}>{ch.note}</div>}
+                        <CustomValuesLine model={workModel} kind="work" typeId={ch.changeType} values={ch.custom} />
                         {(() => {
                           const shots = photosForOwner("change", ch.id);
                           if (!shots.length) return null;
@@ -18639,10 +18675,10 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-      {typeActions && (
+      {(typeActions || types.length > 0) && (
         <div style={card}>
           <div style={heading}>
-            {kind === "task" ? "Task types" : "Types"}
+            {kind === "task" ? "Task types" : "Work types"}
             <HelpTip label={`About ${noun} types`} text={`A type decides which extra fields show on a ${noun} and which of them are required. A ${noun} with no type shows none. Pick a type to choose its fields.`} />
           </div>
           {types.length === 0 && <div style={{ fontSize: 13, color: C.empty, marginBottom: 12 }}>No types yet.</div>}
@@ -18663,20 +18699,21 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
                       style={{ flex: 1, textAlign: "left", padding: "8px 10px", border: `1.5px solid ${t.id === selId ? C.brand : C.border}`, background: t.id === selId ? C.hover : "none", borderRadius: 10, fontSize: 14, color: C.ink }}>
                       {t.name}
                     </button>
-                    <button onClick={() => setRenameVal({ id: t.id, name: t.name })} className="icon-btn" aria-label={`Rename ${t.name}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}><Pencil size={14} color={C.muted} /></button>
-                    <button onClick={() => { if (selId === t.id) setSelId(""); onModel(typeActions.remove(t.id)); }} className="icon-btn" aria-label={`Remove ${t.name}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}><Trash2 size={14} color={C.danger} /></button>
+                    {typeActions && <button onClick={() => setRenameVal({ id: t.id, name: t.name })} className="icon-btn" aria-label={`Rename ${t.name}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}><Pencil size={14} color={C.muted} /></button>}
+                    {typeActions && <button onClick={() => { if (selId === t.id) setSelId(""); onModel(typeActions.remove(t.id)); }} className="icon-btn" aria-label={`Remove ${t.name}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}><Trash2 size={14} color={C.danger} /></button>}
                   </>
                 )}
               </div>
             ))}
           </div>
-          <div style={{ display: "flex", gap: 6 }}>
+          {!typeActions && <div style={{ fontSize: 12, color: C.muted }}>Work types are added and removed under Lists. Pick one here to choose its fields.</div>}
+          {typeActions && <div style={{ display: "flex", gap: 6 }}>
             <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="New type name" aria-label="New type name"
               onKeyDown={e => { if (e.key === "Enter") { const r = typeActions.add(newName); if (apply(r)) { setNewName(""); if (r.id) setSelId(r.id); } } }}
               style={{ ...inputStyle, flex: 1 }} />
             <button onClick={() => { const r = typeActions.add(newName); if (apply(r)) { setNewName(""); if (r.id) setSelId(r.id); } }}
               style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600, flexShrink: 0 }}>Add</button>
-          </div>
+          </div>}
           {error && <div role="alert" style={{ fontSize: 12, color: C.danger, marginTop: 8 }}>{error}</div>}
         </div>
       )}
@@ -18744,6 +18781,19 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
           {fieldError && <div role="alert" style={{ fontSize: 12, color: C.danger }}>{fieldError}</div>}
         </div>
       </div>
+    </div>
+  );
+}
+
+// A record's custom values as "Label: value" lines (nothing when it has none).
+function CustomValuesLine({ model, kind, typeId, values }) {
+  const shown = customFieldsFor(model, kind, typeId).filter(f => String((values || {})[f.key] ?? "") !== "");
+  if (!shown.length) return null;
+  return (
+    <div style={{ marginBottom: 4 }}>
+      {shown.map(f => (
+        <div key={f.key} style={{ fontSize: 13, color: C.ink }}><span style={{ color: C.muted }}>{f.label}:</span> {dataTypeDisplay(f, values[f.key])}</div>
+      ))}
     </div>
   );
 }
@@ -21056,6 +21106,7 @@ const SETTINGS_SECTIONS = [
   { key: "types", label: "Types & fields", icon: Layers, editor: true },
   { key: "relationships", label: "Relationships", icon: ArrowLeftRight, editor: true },
   { key: "tasktypes", label: "Task types", icon: ClipboardList, editor: true },
+  { key: "worktypes", label: "Work types & fields", icon: Wrench, editor: true },
   { key: "lists", label: "Lists", icon: FileText, editor: true },
   { key: "electrical", label: "Electrical", icon: Zap, editor: true },
   { key: "access", label: "Access", icon: Users, editor: true, live: true },

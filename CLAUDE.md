@@ -3312,6 +3312,12 @@ tasks, then work.
   disabled with the reason on screen. Edits audit the type and each custom value.
   A choice-list custom field and the Type picker avoid `<label>` wrappers on purpose
   (the `PickerField` re-open bug in `BUGS.md`).
+- **Logged work works the same way** (Settings > Work types & fields): a work type's
+  settings are keyed by its NAME (the `changeTypes` entry), the type list itself still being
+  managed under Lists. The Log work dialog and the task completion form both show the type's
+  fields, enforce required ones, and write `custom`; edits audit each changed value; History
+  rows and search show them. A removed work type's settings are left in place, so adding the
+  same name back restores its fields. **The Excel export does not carry custom values yet.**
 - Covered by `test-frontend-work-model.js`.
 
 **A scheduled task can repeat on a CUSTOM rule (backend v52, 2026-10-07).** The Frequency

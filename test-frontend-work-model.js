@@ -115,5 +115,13 @@ check('Save is disabled while a custom value is invalid', /\|\| !!taskCustomErro
 check('the Task types settings section exists', /key: "tasktypes"/.test(src) && /key === "tasktypes"/.test(src));
 check('the edge function keeps taskType/custom on save', /TASK_EXTRA_KEYS = \["taskType", "custom"\]/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api/save-shape.ts'), 'utf8')));
 
+// ---- work dialog wiring (source)
+check('add and edit work saves write custom', (src.match(/custom: \{ \.\.\.\(changeDraft\.custom \|\| \{\}\) \}/g) || []).length === 2);
+check('the completion form writes custom and validates it', /custom: \{ \.\.\.\(custom \|\| \{\}\) \}/.test(src) && /validateCustomValues\(workModel, "work", changeType, custom\)/.test(src));
+check('work saves validate custom values', (src.match(/validateCustomValues\(workModel, "work"/g) || []).length >= 4);
+check('the draft is seeded with custom when editing', /custom: ch\.custom && typeof ch\.custom === "object"/.test(src));
+check('the Work types settings section exists', /key: "worktypes"/.test(src) && /key === "worktypes"/.test(src));
+check('work search covers custom values', /Object\.values\(r\.change\.custom/.test(src));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -163,7 +163,7 @@ check(sctx.taskMatchesSearch({ asset: sPc, item: { task: 'Clean filter' } }, sAl
 check(sctx.workMatchesSearch({ asset: sPc, change: { vendor: 'Acme' } }, null, 'acme')
   && sctx.workMatchesSearch({ asset: sPc, change: {} }, null, 'front desk'), 'history search matches the vendor and the asset name');
 check(/return assetMatchesSearch\(a, assets, typesList, q\);/.test(src) && /return taskMatchesSearch\(r, assets, typesList, q(?:, workModel)?\);/.test(src)
-  && /return workMatchesSearch\(r, typesList, q\);/.test(src), 'the Assets, Tasks and History tabs use the same search functions');
+  && /return workMatchesSearch\(r, typesList, q(?:, workModel)?\);/.test(src), 'the Assets, Tasks and History tabs use the same search functions');
 const mwl = sliceFn('MapWorkList');
 check(/taskMatchesSearch\(r, assets \|\| \[\], typesList, q\)/.test(mwl) && /workMatchesSearch\(r, typesList, q\)/.test(mwl)
   && /query=\{listQ\} assets=\{assets\}/.test(fp), "the map's Tasks and History lists apply the search");
