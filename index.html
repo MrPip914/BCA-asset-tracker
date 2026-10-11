@@ -2844,6 +2844,16 @@ const BUILT_IN_CONTENTS_QUERY = {
   steps: [{ follow: "descendants", typeIds: [], fieldKey: "", show: true }],
   includeArchived: false, hideWhenEmpty: false,
 };
+// The panel circuits that serve a Room, built in on Room beside Contents so it
+// shows on every tenant with nothing added by hand. Hidden while empty, since
+// most rooms have no panel circuit. Offered on the Room type only.
+const BUILT_IN_BREAKERS_QUERY = {
+  id: "builtin-breakers", name: "Breakers feeding this room", builtIn: true,
+  steps: [{ follow: "circuits", typeIds: [], fieldKey: "", show: true }],
+  includeArchived: false, hideWhenEmpty: true,
+  builtInNote: "Built in: the panel circuits that serve a room (breaker slot, amps, panel). Shown only when there are any. It cannot be changed.",
+};
+const BUILT_IN_ROOM_TYPE_ID = "Room";
 
 // Which asset types a Reference column may point at. One today
 // (`referenceType`); a list (`referenceTypes`) is read as well, so a column
@@ -2877,7 +2887,11 @@ function relationshipQueriesFor(type) {
 }
 // Every query the Relationships tab shows for a type: Contents first on a place.
 function relationshipQueriesShownFor(type) {
-  return [...(isPlaceType(type) ? [BUILT_IN_CONTENTS_QUERY] : []), ...relationshipQueriesFor(type)];
+  return [
+    ...(isPlaceType(type) ? [BUILT_IN_CONTENTS_QUERY] : []),
+    ...(type === BUILT_IN_ROOM_TYPE_ID ? [BUILT_IN_BREAKERS_QUERY] : []),
+    ...relationshipQueriesFor(type),
+  ];
 }
 
 // QUERIES ARE LISTED FIRST, TYPES ASSIGNED TO THEM (2026-10-10). A query is one
@@ -2902,6 +2916,11 @@ function allRelationshipQueries(typeIds) {
 // to (every type that can hold things).
 function builtInContentsQueryFor(typeIds) {
   return { ...BUILT_IN_CONTENTS_QUERY, typeIds: (typeIds || []).filter(t => isPlaceType(t)) };
+}
+// Every built-in query as the settings list and the builder show it.
+function builtInQueriesFor(typeIds) {
+  const ids = typeIds || [];
+  return [builtInContentsQueryFor(ids), { ...BUILT_IN_BREAKERS_QUERY, typeIds: ids.filter(t => t === BUILT_IN_ROOM_TYPE_ID) }];
 }
 // Writes a query list back to where it is stored: each type gets exactly the
 // queries naming it, and a type left with none loses the key (and its override
@@ -3264,7 +3283,7 @@ function RelationshipsTabContent({ asset, assets, columns, typesList, onOpen, ca
         <RelationshipQueryEditor
           readOnly
           initialQueries={allRelationshipQueries(allTypeIds)}
-          builtIn={builtInContentsQueryFor(allTypeIds)}
+          builtIns={builtInQueriesFor(allTypeIds)}
           initialActiveId={viewing}
           previewAssetId={asset.id}
           assets={assets} columns={columns} typesList={typesList}
@@ -3323,22 +3342,23 @@ function RelationshipCheck({ checked, onChange, label, disabled }) {
 // the Relationships tab's heading). A live preview runs the query being viewed
 // against a chosen asset of one of its types.
 // `initialActiveId` may be a query id, the built-in's id, or "new".
-function RelationshipQueryEditor({ initialQueries, builtIn, initialActiveId, newTypeIds, readOnly, previewAssetId, assets, columns, typesList, onDone, onCancel, doneLabel }) {
+function RelationshipQueryEditor({ initialQueries, builtIns, initialActiveId, newTypeIds, readOnly, previewAssetId, assets, columns, typesList, onDone, onCancel, doneLabel }) {
   const [queries, setQueries] = useState(() => {
     const list = (initialQueries || []).map(q => ({ ...q, typeIds: [...(q.typeIds || [])], steps: q.steps.map(s => ({ ...s, typeIds: [...(s.typeIds || [])] })) }));
     return initialActiveId === "new" ? [...list, newRelationshipQuery(newTypeIds)] : list;
   });
   const [activeId, setActiveId] = useState(() => {
     if (initialActiveId === "new") return null; // resolved to the new query just below
-    if (initialActiveId && (initialActiveId === (builtIn && builtIn.id) || (initialQueries || []).some(q => q.id === initialActiveId))) return initialActiveId;
-    return (initialQueries && initialQueries[0]) ? initialQueries[0].id : (builtIn ? builtIn.id : null);
+    if (initialActiveId && ((builtIns || []).some(b => b.id === initialActiveId) || (initialQueries || []).some(q => q.id === initialActiveId))) return initialActiveId;
+    return (initialQueries && initialQueries[0]) ? initialQueries[0].id : ((builtIns && builtIns[0]) ? builtIns[0].id : null);
   });
   const [error, setError] = useState("");
   const [previewId, setPreviewId] = useState(previewAssetId || "");
   const allTypeIds = (typesList || []).map(t => t.id);
   const effectiveActiveId = activeId || (initialActiveId === "new" && queries.length ? queries[queries.length - 1].id : null);
-  const isBuiltIn = !!builtIn && effectiveActiveId === builtIn.id;
-  const active = isBuiltIn ? builtIn : (queries.find(q => q.id === effectiveActiveId) || null);
+  const builtInActive = (builtIns || []).find(b => b.id === effectiveActiveId) || null;
+  const isBuiltIn = !!builtInActive;
+  const active = isBuiltIn ? builtInActive : (queries.find(q => q.id === effectiveActiveId) || null);
   const locked = !!readOnly || isBuiltIn;
 
   const updateActive = patch => setQueries(list => list.map(q => (q.id === effectiveActiveId ? { ...q, ...patch } : q)));
@@ -3382,7 +3402,7 @@ function RelationshipQueryEditor({ initialQueries, builtIn, initialActiveId, new
         <div style={{ padding: 18, overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
           {!active && <div style={{ fontSize: 13, color: C.empty }}>Nothing to show.</div>}
           {active && isBuiltIn && (
-            <div style={{ fontSize: 12, color: C.empty }}>Built in: location descendants (everything inside), for every type that can hold things. It cannot be changed.</div>
+            <div style={{ fontSize: 12, color: C.empty }}>{active.builtInNote || "Built in: location descendants (everything inside), for every type that can hold things. It cannot be changed."}</div>
           )}
           {active && (
             <>
@@ -5573,7 +5593,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-11.10";
+const APP_VERSION = "2026-10-11.11";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -6845,9 +6865,6 @@ const MOCK_SNAPSHOT = {
       { id: "rq-room-hvac", name: "HVAC", includeArchived: false, hideWhenEmpty: false, steps: [
         { follow: "descendants", typeIds: ["Mini Split", "Condenser"], fieldKey: "", show: true },
         { follow: "refIn", typeIds: [], fieldKey: "controls", show: true },
-      ] },
-      { id: "rq-room-breakers", name: "Breakers feeding this room", includeArchived: false, hideWhenEmpty: true, steps: [
-        { follow: "circuits", typeIds: [], fieldKey: "", show: true },
       ] },
     ] },
     "Mini Split": { categoryId: "Equipment", iconName: "AirVent", mapPin: true, relationshipQueries: [
@@ -14733,12 +14750,12 @@ function AssetTracker() {
     if (key === "relationships") {
       const allTypeIds = (typesList || []).map(t => t.id);
       const custom = allRelationshipQueries(allTypeIds);
-      const rows = [builtInContentsQueryFor(allTypeIds), ...custom];
+      const rows = [...builtInQueriesFor(allTypeIds), ...custom];
       return (
         <div style={settingsCardStyle}>
           <div style={settingsHeadingStyle}>
             Queries
-            <HelpTip label="About relationship queries" text="A query lists related assets on a Relationships tab. Each step follows one link: location (parents and children by where things sit), a reference field (parents and children through a field you pick), or people. Choose which types each query runs on. Contents is built in: the location descendants of any place." />
+            <HelpTip label="About relationship queries" text="A query lists related assets on a Relationships tab. Each step follows one link: location (parents and children by where things sit), a reference field (parents and children through a field you pick), or people. Choose which types each query runs on. Contents (everything inside a place) and Breakers feeding this room (on Room) are built in." />
           </div>
           <div style={{ display: "flex", flexDirection: "column" }}>
             {rows.map((q, i) => (
@@ -14763,7 +14780,7 @@ function AssetTracker() {
           {relationshipsEdit && (
             <RelationshipQueryEditor
               initialQueries={custom}
-              builtIn={builtInContentsQueryFor(allTypeIds)}
+              builtIns={builtInQueriesFor(allTypeIds)}
               initialActiveId={relationshipsEdit.activeId}
               assets={assets} columns={columns} typesList={typesList}
               onDone={qs => { saveRelationshipQueries(qs); setRelationshipsEdit(null); }}
@@ -20803,7 +20820,7 @@ function TypeManagerModal({
                   {editingQueries && (
                     <RelationshipQueryEditor
                       initialQueries={allRelationshipQueries(allIds)}
-                      builtIn={builtInContentsQueryFor(allIds)}
+                      builtIns={builtInQueriesFor(allIds)}
                       initialActiveId={editingQueries}
                       newTypeIds={[draft.id]}
                       assets={assets} columns={columns} typesList={types}

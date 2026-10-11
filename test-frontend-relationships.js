@@ -54,7 +54,7 @@ new Function('module', [
   grabFn('ancestorsOf'),
   grabBlock('// ---------- RELATIONSHIP QUERIES ----------', "// The Rooms/Devices/Bulk-Items listing"),
   grabFn('availableTabsFor').replace(/\.\.\.\(typeHasFloorPlan[^\n]*\n/, '').replace(/\.\.\.modulesFor\(type\),/, ''),
-  'module.exports = { runRelationshipQuery, relationshipQueriesFor, relationshipQueriesShownFor, relationshipFieldOptions, relationshipStepSourceTypes, allRelationshipQueries, relationshipQueriesToTypeSettings, builtInContentsQueryFor, referenceTargetTypes, availableTabsFor, setTypeSettings: s => { TYPE_SETTINGS = s; } };',
+  'module.exports = { runRelationshipQuery, relationshipQueriesFor, relationshipQueriesShownFor, relationshipFieldOptions, relationshipStepSourceTypes, allRelationshipQueries, relationshipQueriesToTypeSettings, builtInContentsQueryFor, builtInQueriesFor, referenceTargetTypes, availableTabsFor, setTypeSettings: s => { TYPE_SETTINGS = s; } };',
 ].join('\n'))(mod);
 const R = mod.exports;
 
@@ -148,6 +148,10 @@ check('stored queries are cleaned: unknown follows and fieldless field steps dro
 check('names are trimmed and steps default to shown', qs[0].name === 'Users' && qs[0].steps[0].show === true);
 check('at most three steps run', qs[1].steps.length === 3);
 check('a place gets the built-in Contents query first', R.relationshipQueriesShownFor('Room')[0].builtIn === true);
+check('Room also gets the built-in Breakers query, after Contents, and no other type does',
+  R.relationshipQueriesShownFor('Room')[1].id === 'builtin-breakers' && R.relationshipQueriesShownFor('Room')[1].hideWhenEmpty === true
+  && !R.relationshipQueriesShownFor('Building').some(q => q.id === 'builtin-breakers'));
+check('Breakers is listed with Room as its only type', JSON.stringify(R.builtInQueriesFor(['Computer', 'Room', 'Building'])[1].typeIds) === JSON.stringify(['Room']));
 check('the Relationships tab appears for a type with queries', R.availableTabsFor('Computer').includes('relationships'));
 check('…and for a place, through Contents', R.availableTabsFor('Room').includes('relationships'));
 check('…and not for a type with neither', !R.availableTabsFor('Monitor').includes('relationships'));

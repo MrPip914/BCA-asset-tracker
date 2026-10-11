@@ -963,10 +963,10 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   eq("schema: a Reference field allowed several types lists them all", f("Holds")?.pointsAt, ["TV", "Monitor"]);
   check("schema: a field that is not a Reference carries no pointsAt", sc.fields.every((x) => x.field === "Controls" || x.field === "Holds" || x.pointsAt === undefined));
   const room = sc.types.find((t) => t.name === "Room");
-  eq("schema: a place lists the built-in Contents query first, then its own",
-    room.relationshipQueries?.map((q) => q.name), ["Contents", "HVAC", "Empty one"]);
+  eq("schema: a Room lists the built-in Contents and Breakers queries first, then its own",
+    room.relationshipQueries?.map((q) => q.name), ["Contents", "Breakers feeding this room", "HVAC", "Empty one"]);
   eq("schema: a query's steps are worded for reading, with the field and types named",
-    room.relationshipQueries?.[1]?.steps, [{ follow: "Location descendants (everything inside it, any depth)", types: ["Mini Split"] }, { follow: "Field children (assets whose reference field is set to this one)", field: "Controls" }]);
+    room.relationshipQueries?.[2]?.steps, [{ follow: "Location descendants (everything inside it, any depth)", types: ["Mini Split"] }, { follow: "Field children (assets whose reference field is set to this one)", field: "Controls" }]);
   check("schema: a type with no queries says nothing about them", sc.types.find((t) => t.name === "Thermostat").relationshipQueries === undefined);
 
   // get_relationships.
