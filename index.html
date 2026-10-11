@@ -1776,6 +1776,96 @@ function validateColumnValue(col, raw) {
   return "";
 }
 
+// ---------------------------------------------------------------- WORK MODEL
+// Managed types and custom fields for TASKS and for LOGGED WORK, the way assets
+// have them. Everything lives in ONE Config blob, `workModel`, so the whole
+// feature costs one new Config key (one backend change) however many lists it
+// grows:
+//   taskTypes         [{ id, name }]       managed list; a task carries `taskType` (the id)
+//   taskTypeSettings  { [typeId]: { fieldKeys: [], requiredFields: [] } }
+//   taskFields        [{ key, label, dataType, options }]  the custom field definitions
+//   workTypeSettings  { [workTypeName]: { fieldKeys, requiredFields } }
+//   workFields        same shape as taskFields
+// Work types stay the existing `changeTypes` string list -- a name IS its id,
+// the trick built-in asset types use, so nothing is migrated.
+// A record keeps its custom values in a `custom` sub-object ({ key: value }), so
+// a custom key can never collide with a built-in field of the same name.
+// A blank/absent type reads as "no type": no custom fields, nothing required --
+// exactly how every task and work entry behaves today.
+const WORK_FIELD_KINDS = ["task", "work"];
+function adoptWorkModel(raw) {
+  const m = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  const list = v => (Array.isArray(v) ? v : []);
+  const obj = v => (v && typeof v === "object" && !Array.isArray(v) ? v : {});
+  const fields = v => list(v).filter(f => f && typeof f.key === "string" && f.key).map(f => ({
+    key: f.key, label: f.label || f.key,
+    dataType: COLUMN_DATA_TYPE_VALUES.has(f.dataType) ? f.dataType : "text",
+    options: list(f.options).map(String),
+  }));
+  const settings = v => {
+    const out = {};
+    Object.entries(obj(v)).forEach(([id, st]) => {
+      out[id] = { fieldKeys: list(st && st.fieldKeys).map(String), requiredFields: list(st && st.requiredFields).map(String) };
+    });
+    return out;
+  };
+  return {
+    taskTypes: list(m.taskTypes).filter(t => t && t.id).map(t => ({ id: String(t.id), name: String(t.name || t.id) })),
+    taskTypeSettings: settings(m.taskTypeSettings),
+    taskFields: fields(m.taskFields),
+    workTypeSettings: settings(m.workTypeSettings),
+    workFields: fields(m.workFields),
+  };
+}
+function workModelParts(model, kind) {
+  const m = model || adoptWorkModel(null);
+  return kind === "task"
+    ? { fields: m.taskFields || [], settings: m.taskTypeSettings || {} }
+    : { fields: m.workFields || [], settings: m.workTypeSettings || {} };
+}
+// The custom fields a type carries, in the order the type lists them. A key the
+// type names but no definition exists for is dropped at READ time (a hand-edited
+// blob must not put a field on screen that nothing can render or validate).
+function customFieldsFor(model, kind, typeId) {
+  if (!typeId) return [];
+  const { fields, settings } = workModelParts(model, kind);
+  const st = settings[typeId];
+  if (!st) return [];
+  return st.fieldKeys.map(k => fields.find(f => f.key === k)).filter(Boolean);
+}
+// Required fields, restricted to fields the type actually has -- a rule about an
+// invisible field would refuse every save with nothing on screen to fix.
+function requiredCustomFieldsFor(model, kind, typeId) {
+  const have = new Set(customFieldsFor(model, kind, typeId).map(f => f.key));
+  const st = typeId ? workModelParts(model, kind).settings[typeId] : null;
+  return st ? st.requiredFields.filter(k => have.has(k)) : [];
+}
+// The first problem with a record's custom values, or "". Emptiness is never
+// falsiness: 0 and "0" are filled in. Values of fields the type does not carry
+// are ignored (they stay on the record, untouched).
+function validateCustomValues(model, kind, typeId, values) {
+  const v = values && typeof values === "object" ? values : {};
+  const fields = customFieldsFor(model, kind, typeId);
+  const required = new Set(requiredCustomFieldsFor(model, kind, typeId));
+  for (const f of fields) {
+    const raw = v[f.key];
+    const empty = raw === undefined || raw === null || String(raw).trim() === "";
+    if (empty) { if (required.has(f.key)) return `${f.label} is required.`; continue; }
+    const err = validateColumnValue(f, raw);
+    if (err) return err;
+  }
+  return "";
+}
+// A new field key from a label: stable, unique among the kind's fields, and
+// prefixed so it can never read as one of the built-in columns.
+function newWorkFieldKey(fields, label) {
+  const base = "cf_" + (String(label || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "field");
+  const taken = new Set((fields || []).map(f => f.key));
+  let key = base, n = 2;
+  while (taken.has(key)) key = base + "_" + n++;
+  return key;
+}
+
 // The fields the type editor lets you switch on and off for a type. Everything
 // else in DEFAULT_COLUMNS is structural and not a per-type choice: name, type
 // and parent identify and place the asset, and status is the archive flag.
@@ -5359,7 +5449,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-11.2";
+const APP_VERSION = "2026-10-11.3";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -5755,7 +5845,7 @@ function auditAppendOf(prev, next) {
 // entries in place of the log, and each other domain only when it is written.
 // The `_rev`s are added at send time, not here.
 const CONFIG_PAYLOAD_KEYS = ["columns", "changeTypes", "vendors", "peripheralsList", "usersList", "bulkItemTypes",
-  "typesList", "typeSettings", "typeCategories", "nextAssetNumber", "authUsers"];
+  "typesList", "typeSettings", "typeCategories", "workModel", "nextAssetNumber", "authUsers"];
 function perRecordBody(payload, dirty, assetChanges, appended) {
   const body = {
     _dirty: { ...dirty, assets: !!assetChanges },
@@ -7410,6 +7500,8 @@ function AssetTracker() {
   // state says labels; the wire key it saves under is still `typeCategories`,
   // because a config key of its own is a backend release (see TYPE LABELS).
   const [typeLabels, setTypeLabels] = useState(DEFAULT_TYPE_LABELS);
+  // Task/work types and custom fields -- see WORK MODEL. Wire key `workModel`.
+  const [workModel, setWorkModel] = useState(() => adoptWorkModel(null));
   const [showTypesManager, setShowTypesManager] = useState(false);
   const [newTypeName, setNewTypeName] = useState("");
   const [breakerTypes, setBreakerTypes] = useState(SEEDED_BREAKER_TYPES);
@@ -8274,6 +8366,7 @@ function AssetTracker() {
         ? data.typeCategories
         : DEFAULT_TYPE_LABELS
     ));
+    setWorkModel(adoptWorkModel(data.workModel));
     // Absent/0/garbage all mean "never stored" — peekAssetNumber() seeds it
     // from the loaded assets instead, and the first asset created writes it.
     const storedNextNumber = Number(data.nextAssetNumber);
@@ -8836,6 +8929,7 @@ function AssetTracker() {
       typesList: nextTypesList = typesList,
       typeSettings: nextTypeSettings = typeSettings,
       typeCategories: nextTypeLabels = typeLabels,
+      workModel: nextWorkModel = workModel,
       breakerTypes: nextBreakerTypes = breakerTypes,
       photos: nextPhotos = photos,
       nextAssetNumber: nextNumberToIssue = nextAssetNumber,
@@ -8890,7 +8984,7 @@ function AssetTracker() {
       config: nextColumns !== columns || nextChangeTypes !== changeTypes || nextVendors !== vendors
         || nextPeripheralsList !== peripheralsList || nextUsersList !== usersList || nextBulkItemTypes !== bulkItemTypes
         || nextTypesList !== typesList || nextTypeSettings !== typeSettings
-        || nextTypeLabels !== typeLabels
+        || nextTypeLabels !== typeLabels || nextWorkModel !== workModel
         || nextNumberToIssue !== nextAssetNumber
         || nextAuthUsers !== undefined,
       breakerTypes: nextBreakerTypes !== breakerTypes,
@@ -8930,6 +9024,7 @@ function AssetTracker() {
       applyTypeSettings(nextTypeSettings, nextColumns);
       setTypeSettings(nextTypeSettings);
       setTypeLabels(nextTypeLabels);
+      setWorkModel(nextWorkModel);
       setBreakerTypes(nextBreakerTypes);
       setPhotos(nextPhotos);
       setNextAssetNumber(nextNumberToIssue);
@@ -8945,6 +9040,7 @@ function AssetTracker() {
         auditBase: auditBaseRef.current,
         bulkItemTypes: nextBulkItemTypes, typesList: nextTypesList,
         typeSettings: nextTypeSettings, typeCategories: nextTypeLabels,
+        workModel: nextWorkModel,
         breakerTypes: nextBreakerTypes,
         photos: nextPhotos,
         nextAssetNumber: nextNumberToIssue, _dirty: dirty,

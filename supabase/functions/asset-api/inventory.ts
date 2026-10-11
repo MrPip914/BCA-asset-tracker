@@ -17,6 +17,8 @@ export const REVISION_DOMAINS = ["assets", "config", "breakerTypes", "photos"];
 
 // The Config keys the read names, and the order it names them in. Any other
 // key is kept in the table (the save path must preserve it) but not sent.
+// Config keys the Sheet backend never had: sent only once stored (see save.ts).
+const OPTIONAL_CONFIG_KEYS = ["workModel"];
 const CONFIG_KEYS = [
   "columns", "changeTypes", "vendors", "peripheralsList", "usersList", "bulkItemTypes",
   "typesList", "typeSettings", "typeCategories",
@@ -92,6 +94,7 @@ export async function readInventory(tx: Tx) {
     photos: data(photos),
   };
   for (const k of CONFIG_KEYS) payload[k] = cfg[k] || null;
+  for (const k of OPTIONAL_CONFIG_KEYS) if (cfg[k]) payload[k] = cfg[k];
   payload.nextAssetNumber = cfg.nextAssetNumber || null;
   payload.revisions = revisionsFrom(revisions);
   return payload;

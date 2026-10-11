@@ -41,6 +41,10 @@ const CONFIG_WRITES: [string, () => unknown][] = [
   ["peripheralsList", () => []], ["usersList", () => []], ["bulkItemTypes", () => []],
   ["typesList", () => []], ["typeSettings", () => ({})], ["typeCategories", () => []],
 ];
+// Config keys the Sheet backend never had: written only when the save carries one,
+// so an older client's config save cannot erase it, and the stored rows stay what
+// the .gs would hold until the feature is used (the parity tests compare them).
+const OPTIONAL_CONFIG_KEYS = ["workModel"];
 
 // Each table a save rewrites: its key, and its columns as jsonb_to_recordset
 // types (the same names as db/load-sql.mjs's TABLE_COLUMNS; api_test.ts checks).
@@ -292,6 +296,9 @@ export async function saveInventory(tx: Tx, body: Body, ctx: SaveContext): Promi
     // posting a lower number must not walk it back and reissue a label.
     const [{ value: storedNext } = { value: null }] = await tx`select value from config where key = 'nextAssetNumber'`;
     const values: [string, unknown][] = CONFIG_WRITES.map(([k, empty]) => [k, body[k] || empty()]);
+    for (const k of OPTIONAL_CONFIG_KEYS) {
+      if (body[k] && typeof body[k] === "object" && !Array.isArray(body[k])) values.push([k, body[k]]);
+    }
     values.push(["nextAssetNumber", Math.max(Number(body.nextAssetNumber) || 0, Number(storedNext) || 0)]);
     await tx`insert into config (tenant_id, key, value)
       select current_tenant(), e.v->>0, e.v->1 from jsonb_array_elements(${tx.json(values)}::jsonb) as e(v)
