@@ -883,7 +883,17 @@ change, no version bump, no deploy.**
   mutation-checked (dedupe, the hidden-step lift, the loop cut, the `referenceTypes`
   read). The tab, both builder entry points, saving and a reload were driven in
   Chromium against Sandbox.
-- The connector does not know about queries yet; it is queued in
+- **"Circuits that serve it" (`follow: "circuits"`, 2026-10-11)** lists the panel circuits
+  whose `roomsServedIds` contain the place, as the tree's first NON-ASSET rows
+  (`{ circuit, breaker, panel }`; row shows slot, amps, description, panel, and opens the
+  panel). Breakers and circuits are not assets, so the step is TERMINAL (`terminal: true`
+  in `RELATIONSHIP_FOLLOWS`): last step only, no type filter, nothing after it runs, and a
+  stored query with it mid-chain is cleaned. Deduped by circuit id; an archived panel's
+  circuits need `includeArchived`. `relationshipIndex` builds `circuitsServing` from each
+  asset's `breakers`/`unassignedCircuits`. Frontend only. The connector's `app-rules.js` was
+  regenerated (it now slices `cellsLabel_`) and `get_relationships` prints circuit rows.
+  Sandbox's Room carries a "Breakers feeding this room" query.
+- The rest of the connector's query support is queued in
   `/mnt/project-files/connector-queue.md`.
 
 ## Local Sandbox mode

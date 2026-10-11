@@ -55,6 +55,7 @@ const PIECES = [
   "personMatchKey",
   "nameOf",
   "personLabelsOf",
+  "cellsLabel_",
   "personNamesOf",
   ["const UNASSIGNED_LABEL", ";"],
   ["const MAX_PARENT_DEPTH", ";"],
