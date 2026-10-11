@@ -1156,14 +1156,14 @@ function planAssetImport(parsed, ctx) {
 const RELATIONSHIP_MAX_STEPS = 3;
 
 const RELATIONSHIP_FOLLOWS = [
-  { value: "children", label: "Directly inside it" },
-  { value: "descendants", label: "Anywhere inside it" },
-  { value: "parent", label: "What it sits in" },
-  { value: "nearest", label: "The nearest … above it", needsType: true },
-  { value: "refOut", label: "What its field points to", field: true },
-  { value: "refIn", label: "What points to it through a field", field: true },
-  { value: "users", label: "Its users" },
-  { value: "usedBy", label: "What this person uses" },
+  { value: "children", label: "Location children (directly inside it)", kind: "location" },
+  { value: "descendants", label: "Location descendants (everything inside it, any depth)", kind: "location" },
+  { value: "parent", label: "Location parent (the place it is directly in)", kind: "location" },
+  { value: "nearest", label: "Nearest location ancestor", kind: "location", needsType: true },
+  { value: "refOut", label: "Field parent (the asset chosen in a reference field)", kind: "field", field: true },
+  { value: "refIn", label: "Field children (assets whose reference field is set to this one)", kind: "field", field: true },
+  { value: "users", label: "Assigned users (the people on this asset)", kind: "people" },
+  { value: "usedBy", label: "Assigned assets (assets this person is assigned to)", kind: "people" },
 ];
 
 function relationshipFollowMeta(follow) {

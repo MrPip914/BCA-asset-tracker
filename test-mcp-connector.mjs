@@ -966,7 +966,7 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   eq("schema: a place lists the built-in Contents query first, then its own",
     room.relationshipQueries?.map((q) => q.name), ["Contents", "HVAC", "Empty one"]);
   eq("schema: a query's steps are worded for reading, with the field and types named",
-    room.relationshipQueries?.[1]?.steps, [{ follow: "Anywhere inside it", types: ["Mini Split"] }, { follow: "What points to it through a field", field: "Controls" }]);
+    room.relationshipQueries?.[1]?.steps, [{ follow: "Location descendants (everything inside it, any depth)", types: ["Mini Split"] }, { follow: "Field children (assets whose reference field is set to this one)", field: "Controls" }]);
   check("schema: a type with no queries says nothing about them", sc.types.find((t) => t.name === "Thermostat").relationshipQueries === undefined);
 
   // get_relationships.

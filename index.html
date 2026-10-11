@@ -2603,15 +2603,21 @@ const RELATIONSHIP_MAX_STEPS = 3;
 // `needsType` marks the one whose type list is not a filter but the TARGET
 // (the nearest ancestor OF that type).
 const RELATIONSHIP_FOLLOWS = [
-  { value: "children", label: "Directly inside it" },
-  { value: "descendants", label: "Anywhere inside it" },
-  { value: "parent", label: "What it sits in" },
-  { value: "nearest", label: "The nearest … above it", needsType: true },
-  { value: "refOut", label: "What its field points to", field: true },
-  { value: "refIn", label: "What points to it through a field", field: true },
-  { value: "users", label: "Its users" },
-  { value: "usedBy", label: "What this person uses" },
+  { value: "children", label: "Location children (directly inside it)", kind: "location" },
+  { value: "descendants", label: "Location descendants (everything inside it, any depth)", kind: "location" },
+  { value: "parent", label: "Location parent (the place it is directly in)", kind: "location" },
+  { value: "nearest", label: "Nearest location ancestor", kind: "location", needsType: true },
+  { value: "refOut", label: "Field parent (the asset chosen in a reference field)", kind: "field", field: true },
+  { value: "refIn", label: "Field children (assets whose reference field is set to this one)", kind: "field", field: true },
+  { value: "users", label: "Assigned users (the people on this asset)", kind: "people" },
+  { value: "usedBy", label: "Assigned assets (assets this person is assigned to)", kind: "people" },
 ];
+// The one line under "Follow", saying which kind of link the choice walks.
+const RELATIONSHIP_KIND_HELP = {
+  location: "Follows where assets sit (their Path), not any reference field.",
+  field: "Follows the reference field you pick below, not where assets sit.",
+  people: "Follows who is assigned to the asset.",
+};
 function relationshipFollowMeta(follow) {
   return RELATIONSHIP_FOLLOWS.find(f => f.value === follow) || RELATIONSHIP_FOLLOWS[0];
 }
@@ -2699,13 +2705,13 @@ function relationshipQueriesToTypeSettings(typeSettings, queries, typeIds) {
 // One step as a phrase, for read-only views and the settings list.
 function describeRelationshipStep(step, typesList, columns) {
   const meta = relationshipFollowMeta(step.follow);
-  let text = meta.label;
+  let text = meta.label.replace(/ \(.*\)$/, "");
   if (meta.field) {
     const col = referenceColumns(columns).find(c => c.key === step.fieldKey);
-    text = meta.value === "refOut" ? `What its ${col ? col.label : "field"} points to` : `What points to it through ${col ? col.label : "a field"}`;
+    text = meta.value === "refOut" ? `Field parent through ${col ? col.label : "a reference field"}` : `Field children through ${col ? col.label : "a reference field"}`;
   }
   const names = (step.typeIds || []).map(t => typeNameOf(t, typesList));
-  if (meta.needsType) text = `The nearest ${names.join(" or ") || "…"} above it`;
+  if (meta.needsType) text = `Nearest location ancestor of type ${names.join(" or ") || "…"}`;
   else if (names.length) text += `, only ${names.join(", ")}`;
   return text;
 }
@@ -2910,7 +2916,7 @@ function RelationshipTreeRow({ node, typesList, onOpen, depth }) {
     <div style={{ marginLeft: depth ? 18 : 0 }}>
       <div style={{ display: "flex", alignItems: "stretch", border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface }}>
         {hasKids ? (
-          <button type="button" onClick={() => setOpen(!open)} className="icon-btn" aria-expanded={open} aria-label={`${open ? "Hide" : "Show"} what is under ${nameOf(a, typesList)}`}
+          <button type="button" onClick={() => setOpen(!open)} className="icon-btn" aria-expanded={open} aria-label={`${open ? "Hide" : "Show"} what ${nameOf(a, typesList)} leads to`}
             style={{ display: "flex", alignItems: "center", padding: "0 4px 0 8px", border: "none", borderRadius: 10, background: "none", color: C.muted }}>
             {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
           </button>
@@ -2952,7 +2958,7 @@ function RelationshipsTabContent({ asset, assets, columns, typesList, onOpen, ca
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
       {visible.length === 0 && (
         <div style={{ fontSize: 13, color: C.empty, textAlign: "center", padding: "12px 0" }}>
-          {queries.length === 0 ? `No relationship queries for ${typeName} yet.` : "Nothing related to show."}
+          {queries.length === 0 ? `No relationship queries for ${typeName} yet.` : "Nothing found by any query."}
           {canEdit && (
             <div style={{ marginTop: 8 }}>
               <button type="button" onClick={() => onOpenConfig(queries.length ? null : "new")}
@@ -2974,7 +2980,7 @@ function RelationshipsTabContent({ asset, assets, columns, typesList, onOpen, ca
               {folded ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
             </button>
             <button type="button" onClick={() => openConfig(q.id)} aria-label={`${q.name}: how this query works`}
-              title="How this query works"
+              title="See how this query follows locations and reference fields"
               style={{ display: "flex", alignItems: "center", gap: 4, background: "none", border: "none", padding: 0, cursor: "pointer",
                 fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", color: C.accent, textDecoration: "underline", textAlign: "left" }}>
               {q.name} ({r.count}) <ChevronRight size={12} />
@@ -3084,8 +3090,8 @@ function RelationshipQueryEditor({ initialQueries, builtIn, initialActiveId, new
       if (!(q.typeIds || []).length) { setActiveId(q.id); setError(`${label}: pick at least one type it applies to.`); return; }
       for (const s of q.steps) {
         const meta = relationshipFollowMeta(s.follow);
-        if (meta.field && !s.fieldKey) { setActiveId(q.id); setError(`${label}: pick the field a step follows.`); return; }
-        if (meta.needsType && !(s.typeIds || []).length) { setActiveId(q.id); setError(`${label}: pick which type "the nearest" means.`); return; }
+        if (meta.field && !s.fieldKey) { setActiveId(q.id); setError(`${label}: pick the reference field this step follows.`); return; }
+        if (meta.needsType && !(s.typeIds || []).length) { setActiveId(q.id); setError(`${label}: pick the type of location ancestor to find.`); return; }
       }
     }
     onDone(queries.map(q => ({ ...q, name: q.name.trim(), steps: q.steps.map((s, i) => ({ ...s, show: i === q.steps.length - 1 ? true : s.show })) })));
@@ -3107,19 +3113,19 @@ function RelationshipQueryEditor({ initialQueries, builtIn, initialActiveId, new
         <div style={{ padding: 18, overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
           {!active && <div style={{ fontSize: 13, color: C.empty }}>Nothing to show.</div>}
           {active && isBuiltIn && (
-            <div style={{ fontSize: 12, color: C.empty }}>Built in. Every type that can hold things gets this query, listed first. It cannot be changed.</div>
+            <div style={{ fontSize: 12, color: C.empty }}>Built in: location descendants (everything inside), for every type that can hold things. It cannot be changed.</div>
           )}
           {active && (
             <>
               {locked ? (
                 <>
                   <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    <span style={RELATIONSHIP_HEADING}>Applies to</span>
+                    <span style={RELATIONSHIP_HEADING}>Runs on assets of type</span>
                     <span style={{ fontSize: 14, color: C.ink }}>{typeNames(active.typeIds) || "No types"}</span>
                   </div>
                   {active.steps.map((s, i) => (
                     <div key={i} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                      <span style={RELATIONSHIP_HEADING}>Step {i + 1}{i === 0 ? " · from the asset" : " · from those"}</span>
+                      <span style={RELATIONSHIP_HEADING}>Step {i + 1}{i === 0 ? " · starts at this asset" : " · starts at each asset step " + i + " found"}</span>
                       <span style={{ fontSize: 14, color: C.ink }}>
                         {describeRelationshipStep(s, typesList, columns)}
                         {i < active.steps.length - 1 && !s.show && <span style={{ color: C.muted, fontSize: 12 }}> · only a route, not listed</span>}
@@ -3139,7 +3145,7 @@ function RelationshipQueryEditor({ initialQueries, builtIn, initialActiveId, new
                       style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, borderRadius: 8, fontSize: 14, color: C.ink, background: C.surface }} />
                   </label>
                   <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    <span style={RELATIONSHIP_HEADING}>Applies to</span>
+                    <span style={RELATIONSHIP_HEADING}>Runs on assets of type</span>
                     <TypeMultiPicker value={active.typeIds} onChange={v => updateActive({ typeIds: v })} typesList={typesList}
                       placeholder="Pick the types" title="Types this query applies to" />
                   </div>
@@ -3151,42 +3157,43 @@ function RelationshipQueryEditor({ initialQueries, builtIn, initialActiveId, new
                     return (
                       <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
                         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                          <span style={RELATIONSHIP_HEADING}>Step {i + 1}{i === 0 ? " · from the asset" : " · from those"}</span>
+                          <span style={RELATIONSHIP_HEADING}>Step {i + 1}{i === 0 ? " · starts at this asset" : " · starts at each asset step " + i + " found"}</span>
                           {active.steps.length > 1 && (
                             <button type="button" onClick={() => updateActive({ steps: active.steps.filter((_, j) => j !== i) })} className="icon-btn" aria-label={`Remove step ${i + 1}`}
                               style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }}><Trash2 size={14} color={C.muted} /></button>
                           )}
                         </div>
                         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                          <span style={RELATIONSHIP_HEADING}>Follow</span>
+                          <span style={RELATIONSHIP_HEADING}>Follow which link?</span>
                           <PickerField hideLabel label="Follow" title="Follow" value={s.follow}
                             options={RELATIONSHIP_FOLLOWS.map(f => f.value)} labelForOption={v => relationshipFollowMeta(v).label}
                             onChange={v => updateStep(i, { follow: v, fieldKey: relationshipFollowMeta(v).field ? s.fieldKey : "" })} />
+                          <div style={{ fontSize: 12, color: C.empty }}>{RELATIONSHIP_KIND_HELP[meta.kind]}</div>
                         </div>
                         {meta.field && (
                           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                            <span style={RELATIONSHIP_HEADING}>Field</span>
+                            <span style={RELATIONSHIP_HEADING}>Reference field</span>
                             {fieldOpts.length === 0
-                              ? <div style={{ fontSize: 12, color: C.empty }}>No Reference field can link here. Add one in a type's fields first.</div>
+                              ? <div style={{ fontSize: 12, color: C.empty }}>No reference field links these types. Add a Reference field to a type first.</div>
                               : <PickerField hideLabel label="Field" title="Reference field" value={s.fieldKey}
                                   options={fieldOpts.map(c => c.key)}
-                                  labelForOption={k => { const c = fieldOpts.find(x => x.key === k); return c ? `${c.label} (→ ${referenceTargetTypes(c).map(t => typeNameOf(t, typesList)).join(", ") || "any"})` : k; }}
+                                  labelForOption={k => { const c = fieldOpts.find(x => x.key === k); return c ? `${c.label} (points to ${referenceTargetTypes(c).map(t => typeNameOf(t, typesList)).join(", ") || "any"})` : k; }}
                                   onChange={v => updateStep(i, { fieldKey: v })} />}
                           </div>
                         )}
                         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                          <span style={RELATIONSHIP_HEADING}>{meta.needsType ? "Of type" : "Only these types"}</span>
+                          <span style={RELATIONSHIP_HEADING}>{meta.needsType ? "Type of the ancestor to find" : "Keep only these types"}</span>
                           <TypeMultiPicker value={s.typeIds} onChange={v => updateStep(i, { typeIds: v })} typesList={typesList}
-                            placeholder={meta.needsType ? "Pick a type" : "Any type"} title={meta.needsType ? "The nearest of which type" : "Only these types"} />
+                            placeholder={meta.needsType ? "Pick a type" : "Any type"} title={meta.needsType ? "Type of the ancestor to find" : "Keep only these types"} />
                         </div>
-                        {!last && <RelationshipCheck checked={s.show} onChange={v => updateStep(i, { show: v })} label="Show these in the results" />}
+                        {!last && <RelationshipCheck checked={s.show} onChange={v => updateStep(i, { show: v })} label="Show what this step finds (turn off if it is only a route to the next step)" />}
                       </div>
                     );
                   })}
                   {active.steps.length < RELATIONSHIP_MAX_STEPS && (
                     <button type="button" onClick={() => updateActive({ steps: [...active.steps, newRelationshipStep()] })}
                       style={{ alignSelf: "flex-start", display: "flex", alignItems: "center", gap: 4, padding: "6px 11px", borderRadius: 8, fontSize: 13, fontWeight: 600, border: `1.5px dashed ${C.border}`, background: "none", color: C.brandDark }}>
-                      <Plus size={13} /> Then follow…
+                      <Plus size={13} /> Add another step
                     </button>
                   )}
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -5294,7 +5301,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-10.6";
+const APP_VERSION = "2026-10-11.1";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -14389,7 +14396,7 @@ function AssetTracker() {
         <div style={settingsCardStyle}>
           <div style={settingsHeadingStyle}>
             Queries
-            <HelpTip label="About relationship queries" text="A query lists related assets on a Relationships tab: what is inside something, what points at it through a reference field, and so on. Choose which types each query applies to. Contents is built in for every type that can hold things." />
+            <HelpTip label="About relationship queries" text="A query lists related assets on a Relationships tab. Each step follows one link: location (parents and children by where things sit), a reference field (parents and children through a field you pick), or people. Choose which types each query runs on. Contents is built in: the location descendants of any place." />
           </div>
           <div style={{ display: "flex", flexDirection: "column" }}>
             {rows.map((q, i) => (
@@ -14398,7 +14405,7 @@ function AssetTracker() {
                   style={{ flex: 1, minWidth: 0, textAlign: "left", background: "none", border: "none", padding: 0, cursor: "pointer" }}>
                   <div style={{ fontSize: 14, color: C.ink }}>{q.name}{q.builtIn && <span style={{ color: C.muted, fontSize: 12 }}> · Built in</span>}</div>
                   <div style={{ fontSize: 12, color: C.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {q.typeIds.length ? q.typeIds.map(t => typeNameOf(t, typesList)).join(", ") : "No types"}
+                    {q.typeIds.length ? "Runs on: " + q.typeIds.map(t => typeNameOf(t, typesList)).join(", ") : "No types"}
                   </div>
                 </button>
                 <button onClick={() => setRelationshipsEdit({ activeId: q.id })} className="icon-btn" aria-label={`${q.builtIn ? "View" : "Edit"} ${q.name}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}>
@@ -20208,7 +20215,7 @@ function TypeManagerModal({
                     </button>
                   </div>
                   <div style={{ fontSize: 12, color: C.empty }}>
-                    Queries list related assets on a Relationships tab. One query can apply to several types; saving a query takes effect at once.
+                    Queries list related assets on a Relationships tab, following location or a reference field. One query can run on several types; saving a query takes effect at once.
                   </div>
                   {editingQueries && (
                     <RelationshipQueryEditor
