@@ -28,7 +28,16 @@ const code = [
   slice('function requiredCustomFieldsFor(model, kind, typeId) {'),
   slice('function validateCustomValues(model, kind, typeId, values) {'),
   slice('function newWorkFieldKey(fields, label) {'),
-  'return { adoptWorkModel, customFieldsFor, requiredCustomFieldsFor, validateCustomValues, newWorkFieldKey };',
+  slice('function workModelKey(kind) {'),
+  slice('function addWorkField(model, kind, def) {'),
+  slice('function removeWorkField(model, kind, key) {'),
+  slice('function setTypeHasField(model, kind, typeId, key, on) {'),
+  slice('function setTypeFieldRequired(model, kind, typeId, key, on) {'),
+  slice('function addTaskType(model, name) {'),
+  slice('function renameTaskType(model, id, name) {'),
+  slice('function removeTaskType(model, id) {'),
+  slice('function taskTypeNameOf(model, id) {'),
+  'return { addWorkField, removeWorkField, setTypeHasField, setTypeFieldRequired, addTaskType, renameTaskType, removeTaskType, taskTypeNameOf, adoptWorkModel, customFieldsFor, requiredCustomFieldsFor, validateCustomValues, newWorkFieldKey };',
 ].join('\n');
 const H = new Function('DEFAULT_COLUMN_DATA_TYPES', code)({});
 
@@ -71,6 +80,48 @@ check('load adopts it', /setWorkModel\(adoptWorkModel\(data\.workModel\)\)/.test
 const root = __dirname;
 check('the backend writes the key', /OPTIONAL_CONFIG_KEYS = \["workModel"\]/.test(fs.readFileSync(path.join(root, 'supabase/functions/asset-api/save.ts'), 'utf8')));
 check('the backend reads the key', /OPTIONAL_CONFIG_KEYS = \["workModel"\]/.test(fs.readFileSync(path.join(root, 'supabase/functions/asset-api/inventory.ts'), 'utf8')));
+
+// ---- editing
+let em = H.adoptWorkModel(null);
+let r = H.addTaskType(em, ' Inspection ');
+check('a task type is added, trimmed, with an id', r.id && r.model.taskTypes[0].name === 'Inspection');
+em = r.model;
+check('a duplicate type name is refused case-insensitively', !!H.addTaskType(em, 'inspection').error);
+check('a blank type name is refused', !!H.addTaskType(em, '  ').error);
+const tid = r.id;
+r = H.addWorkField(em, 'task', { label: 'PSI', dataType: 'number' });
+check('a field is added with a key', r.key === 'cf_psi' && r.model.taskFields.length === 1);
+check('a duplicate field label is refused', !!H.addWorkField(r.model, 'task', { label: 'psi', dataType: 'text' }).error);
+check('a choice list with no choices is refused', !!H.addWorkField(r.model, 'task', { label: 'Grade', dataType: 'select', options: [' ', ''] }).error);
+check('task and work field pools are separate', H.addWorkField(r.model, 'work', { label: 'PSI', dataType: 'text' }).model.workFields.length === 1);
+em = H.setTypeHasField(r.model, 'task', tid, 'cf_psi', true);
+em = H.setTypeFieldRequired(em, 'task', tid, 'cf_psi', true);
+check('ticking a field then requiring it sticks', H.requiredCustomFieldsFor(em, 'task', tid).join() === 'cf_psi');
+check('requiring a field the type lacks does nothing', H.setTypeFieldRequired(r.model, 'task', tid, 'cf_psi', true) === r.model);
+const em2 = H.setTypeHasField(em, 'task', tid, 'cf_psi', false);
+check('unticking a field also drops its required flag', em2.taskTypeSettings[tid].requiredFields.length === 0);
+const em3 = H.removeWorkField(em, 'task', 'cf_psi');
+check('removing a field definition unticks it everywhere', em3.taskFields.length === 0 && em3.taskTypeSettings[tid].fieldKeys.length === 0 && em3.taskTypeSettings[tid].requiredFields.length === 0);
+check('a rename keeps the id', H.renameTaskType(em, tid, 'Check').model.taskTypes[0].id === tid && H.taskTypeNameOf(H.renameTaskType(em, tid, 'Check').model, tid) === 'Check');
+const em4 = H.removeTaskType(em, tid);
+check('removing a type drops its settings; a task naming it reads untyped', em4.taskTypes.length === 0 && !em4.taskTypeSettings[tid] && H.taskTypeNameOf(em4, tid) === '');
+check('the original model is never mutated', em.taskTypes.length === 1 && em.taskFields.length === 1);
+
+// ---- task dialog wiring (source)
+check('the add and edit saves both write taskType and custom', (src.match(/taskType: maintenanceDraft\.taskType \|\| ""/g) || []).length === 2);
+check('both saves validate custom values', (src.match(/validateCustomValues\(workModel, "task"/g) || []).length >= 3);
+check('the draft is seeded with taskType/custom when editing', /taskType: item\.taskType \|\| "",/.test(src));
+check('Save is disabled while a custom value is invalid', /\|\| !!taskCustomError\}/.test(src));
+check('the Task types settings section exists', /key: "tasktypes"/.test(src) && /key === "tasktypes"/.test(src));
+check('the edge function keeps taskType/custom on save', /TASK_EXTRA_KEYS = \["taskType", "custom"\]/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api/save-shape.ts'), 'utf8')));
+
+// ---- work dialog wiring (source)
+check('add and edit work saves write custom', (src.match(/custom: \{ \.\.\.\(changeDraft\.custom \|\| \{\}\) \}/g) || []).length === 2);
+check('the completion form writes custom and validates it', /custom: \{ \.\.\.\(custom \|\| \{\}\) \}/.test(src) && /validateCustomValues\(workModel, "work", changeType, custom\)/.test(src));
+check('work saves validate custom values', (src.match(/validateCustomValues\(workModel, "work"/g) || []).length >= 4);
+check('the draft is seeded with custom when editing', /custom: ch\.custom && typeof ch\.custom === "object"/.test(src));
+check('the Work types settings section exists', /key: "worktypes"/.test(src) && /key === "worktypes"/.test(src));
+check('work search covers custom values', /Object\.values\(r\.change\.custom/.test(src));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -93,6 +93,27 @@ export function customColumnKeys(bodyColumns: unknown, storedColumns: unknown): 
   return keys;
 }
 
+// The ONE deliberate divergence from the .gs write projection: a task's `taskType`
+// and `custom` values, and a work entry's `custom` values, ride along on their
+// records. The Sheet has no column for them (the Apps Script fallback drops
+// them, accepted -- plans/task-work-custom-fields.md), but here a record is a
+// jsonb document and dropping them would silently lose what the new Task types
+// and Work types features save. Only present keys are copied, so a record that
+// has none reads back exactly as the .gs would give it, which is what the parity
+// test compares.
+const extrasOf = (r: Row, keys: string[]): Row => {
+  const out: Row = {};
+  for (const k of keys) {
+    const v = r[k];
+    if (v === undefined || v === null || v === "") continue;
+    if (typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 0) continue;
+    out[k] = v;
+  }
+  return out;
+};
+const TASK_EXTRA_KEYS = ["taskType", "custom"];
+const WORK_EXTRA_KEYS = ["custom"];
+
 // The assets, with every child array, as the .gs read would answer them.
 export function shapeAssets(posted: Row[], customKeys: string[]): Row[] {
   const assets = (posted || []).filter((a) => a && typeof a === "object");
@@ -102,11 +123,13 @@ export function shapeAssets(posted: Row[], customKeys: string[]): Row[] {
   );
 
   const comments: Row[] = [], changes: Row[] = [], allocations: Row[] = [], maintenance: Row[] = [];
+  const changeExtra = new Map<string, Row>(), taskExtra = new Map<string, Row>();
   const breakers: Row[] = [], circuits: Row[] = [], links: Row[] = [], groups: Row[] = [];
   for (const a of assets) {
     const key = a.id || a.label;
     for (const c of a.comments || []) comments.push({ assetLabel: key, text: c.text, at: c.at, by: c.by || "" });
     for (const c of a.changes || []) {
+      if (c.id) { const x = extrasOf(c, WORK_EXTRA_KEYS); if (Object.keys(x).length) changeExtra.set(String(c.id), x); }
       changes.push({
         assetLabel: key, changeType: c.changeType, vendor: c.vendor || "", cost: c.cost || "", note: c.note || "", at: c.at, by: c.by || "",
         id: c.id || "", maintenanceId: c.maintenanceId || "", performedOn: c.performedOn || "",
@@ -114,6 +137,7 @@ export function shapeAssets(posted: Row[], customKeys: string[]): Row[] {
     }
     for (const al of a.allocations || []) allocations.push({ assetLabel: key, room: al.roomId, quantity: al.quantity });
     for (const m of a.maintenanceItems || []) {
+      if (m.id) { const x = extrasOf(m, TASK_EXTRA_KEYS); if (Object.keys(x).length) taskExtra.set(String(m.id), x); }
       maintenance.push({
         assetLabel: key, id: m.id || "", kind: m.kind || "", task: m.task, notes: m.notes || "",
         frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays, recurrence: m.recurrence || "",
@@ -175,12 +199,14 @@ export function shapeAssets(posted: Row[], customKeys: string[]): Row[] {
       changes: changesOf(label).map((c) => ({
         changeType: c.changeType, vendor: c.vendor, cost: c.cost, note: c.note, at: c.at, by: c.by,
         id: c.id || "", maintenanceId: c.maintenanceId || "", performedOn: c.performedOn || "",
+        ...(changeExtra.get(String(c.id)) || {}),
       })),
       allocations: allocationsOf(label).map((al) => ({ roomId: al.room, quantity: al.quantity })),
       maintenanceItems: maintenanceOf(label).map((m) => ({
         id: m.id || "", kind: m.kind || "", task: m.task, notes: m.notes || "",
         frequencyLabel: m.frequencyLabel, frequencyDays: m.frequencyDays, recurrence: m.recurrence || "",
         dueDate: m.dueDate || "", lastPerformed: m.lastPerformed, owner: m.owner, at: m.at, by: m.by,
+        ...(taskExtra.get(String(m.id)) || {}),
       })),
       breakers: breakersOf(label).map((b) => ({
         id: b.id, panelLabel: b.panelLabel,
