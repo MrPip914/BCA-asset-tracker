@@ -1866,6 +1866,80 @@ function newWorkFieldKey(fields, label) {
   return key;
 }
 
+// A custom value as text: a date reads in the app's date style, the rest as typed.
+function dataTypeDisplay(field, value) {
+  return field.dataType === "date" ? (formatDateOnly(value) || String(value)) : String(value);
+}
+
+// ---- editing the model. Each returns a NEW model (never mutates), so a caller
+// can hand the result to persist() and reference equality marks config dirty.
+function workModelKey(kind) {
+  return kind === "task"
+    ? { fields: "taskFields", settings: "taskTypeSettings" }
+    : { fields: "workFields", settings: "workTypeSettings" };
+}
+function addWorkField(model, kind, def) {
+  const k = workModelKey(kind);
+  const fields = model[k.fields] || [];
+  const label = String(def.label || "").trim();
+  if (!label) return { model, error: "Give the field a name." };
+  if (fields.some(f => f.label.toLowerCase() === label.toLowerCase())) return { model, error: `There is already a field called "${label}".` };
+  const dataType = COLUMN_DATA_TYPE_VALUES.has(def.dataType) && def.dataType !== "reference" ? def.dataType : "text";
+  const options = dataType === "select" ? (def.options || []).map(o => String(o).trim()).filter(Boolean) : [];
+  if (dataType === "select" && !options.length) return { model, error: "A choice list needs at least one choice." };
+  const key = newWorkFieldKey(fields, label);
+  return { model: { ...model, [k.fields]: [...fields, { key, label, dataType, options }] }, key };
+}
+// Removing a definition also unticks it from every type, so no type names a
+// field that no longer exists. Values already stored on records are left alone.
+function removeWorkField(model, kind, key) {
+  const k = workModelKey(kind);
+  const settings = {};
+  Object.entries(model[k.settings] || {}).forEach(([id, st]) => {
+    settings[id] = { fieldKeys: st.fieldKeys.filter(x => x !== key), requiredFields: st.requiredFields.filter(x => x !== key) };
+  });
+  return { ...model, [k.fields]: (model[k.fields] || []).filter(f => f.key !== key), [k.settings]: settings };
+}
+function setTypeHasField(model, kind, typeId, key, on) {
+  const k = workModelKey(kind);
+  const cur = (model[k.settings] || {})[typeId] || { fieldKeys: [], requiredFields: [] };
+  const fieldKeys = on ? (cur.fieldKeys.includes(key) ? cur.fieldKeys : [...cur.fieldKeys, key]) : cur.fieldKeys.filter(x => x !== key);
+  const requiredFields = on ? cur.requiredFields : cur.requiredFields.filter(x => x !== key);
+  return { ...model, [k.settings]: { ...(model[k.settings] || {}), [typeId]: { fieldKeys, requiredFields } } };
+}
+function setTypeFieldRequired(model, kind, typeId, key, on) {
+  const k = workModelKey(kind);
+  const cur = (model[k.settings] || {})[typeId];
+  if (!cur || !cur.fieldKeys.includes(key)) return model; // required needs the field to be on
+  const requiredFields = on ? (cur.requiredFields.includes(key) ? cur.requiredFields : [...cur.requiredFields, key]) : cur.requiredFields.filter(x => x !== key);
+  return { ...model, [k.settings]: { ...model[k.settings], [typeId]: { ...cur, requiredFields } } };
+}
+// Task types (work types are the existing changeTypes list and are managed by
+// its own manager; only their per-type settings live in the model).
+function addTaskType(model, name) {
+  const n = String(name || "").trim();
+  if (!n) return { model, error: "Give the type a name." };
+  if ((model.taskTypes || []).some(t => t.name.toLowerCase() === n.toLowerCase())) return { model, error: `There is already a type called "${n}".` };
+  const id = "tt-" + (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID().slice(0, 8) : String(Date.now()));
+  return { model: { ...model, taskTypes: [...(model.taskTypes || []), { id, name: n }] }, id };
+}
+function renameTaskType(model, id, name) {
+  const n = String(name || "").trim();
+  if (!n) return { model, error: "Give the type a name." };
+  if ((model.taskTypes || []).some(t => t.id !== id && t.name.toLowerCase() === n.toLowerCase())) return { model, error: `There is already a type called "${n}".` };
+  return { model: { ...model, taskTypes: (model.taskTypes || []).map(t => (t.id === id ? { ...t, name: n } : t)) } };
+}
+// A task still naming a removed type's id simply reads as untyped.
+function removeTaskType(model, id) {
+  const settings = { ...(model.taskTypeSettings || {}) };
+  delete settings[id];
+  return { ...model, taskTypes: (model.taskTypes || []).filter(t => t.id !== id), taskTypeSettings: settings };
+}
+function taskTypeNameOf(model, id) {
+  const t = id ? (model.taskTypes || []).find(x => x.id === id) : null;
+  return t ? t.name : "";
+}
+
 // The fields the type editor lets you switch on and off for a type. Everything
 // else in DEFAULT_COLUMNS is structural and not a per-type choice: name, type
 // and parent identify and place the asset, and status is the archive flag.
@@ -3599,9 +3673,11 @@ function assetMatchesSearch(a, assets, typesList, q) {
   return Object.values(a).some(v => typeof v === "string" && v.toLowerCase().includes(q));
 }
 // The Tasks tab's search over one task row ({ asset, item }).
-function taskMatchesSearch(r, assets, typesList, q) {
+function taskMatchesSearch(r, assets, typesList, q, model) {
   if (!q) return true;
-  return [r.item.task, r.item.notes, r.item.owner, r.asset.tag, nameOf(r.asset, typesList), roomNameOf(r.asset, assets), typeNameOf(r.asset.type, typesList)]
+  // The task's type name and custom values are searchable once a work model is given.
+  const extra = model ? [taskTypeNameOf(model, r.item.taskType), ...Object.values(r.item.custom || {}).map(String)] : [];
+  return [...extra, r.item.task, r.item.notes, r.item.owner, r.asset.tag, nameOf(r.asset, typesList), roomNameOf(r.asset, assets), typeNameOf(r.asset.type, typesList)]
     .some(v => (v || "").toLowerCase().includes(q));
 }
 // The History tab's search over one work row ({ asset, change }).
@@ -5449,7 +5525,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-11.3";
+const APP_VERSION = "2026-10-11.4";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -7674,7 +7750,7 @@ function AssetTracker() {
   // The draft behind the task dialog, filled by BOTH modes -- `id` is the item
   // the dialog acts on, minted on open in add mode so a photo can name the task
   // while the form is still being filled in.
-  const [maintenanceDraft, setMaintenanceDraft] = useState({ id: "", kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "" });
+  const [maintenanceDraft, setMaintenanceDraft] = useState({ id: "", kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {} });
   // null when closed; { mode: "add" } or { mode: "edit", itemId }. ONE dialog
   // for both, the shape changeModal already uses and for the same reason: a
   // separate edit form is a second copy of the same fields to keep in step, and
@@ -9527,7 +9603,7 @@ function AssetTracker() {
       if (maintenanceKindFilter !== "All kinds" && taskKindOf(r.item) !== maintenanceKindFilter) return false;
       if (maintenanceFrequencyFilter !== "All frequencies" && r.item.frequencyLabel !== maintenanceFrequencyFilter) return false;
       if (maintenanceOwnerFilter !== "All owners" && r.item.owner !== maintenanceOwnerFilter) return false;
-      return taskMatchesSearch(r, assets, typesList, q);
+      return taskMatchesSearch(r, assets, typesList, q, workModel);
     });
     if (maintenanceSortConfig) {
       const { key, dir } = maintenanceSortConfig;
@@ -9804,7 +9880,7 @@ function AssetTracker() {
     setConfirmArchive(null);
     setAllocationDraft({ roomId: "", quantity: "", error: "" });
     setConfirmAllocationRemove(null);
-    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "" });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {} });
     setConfirmMaintenanceDelete(null);
     setMaintenanceCompleteModal(null);
     setOpenMaintenanceHistory(null);
@@ -11468,7 +11544,7 @@ function AssetTracker() {
     setWorkDialogAssetId(assetId === undefined ? null : assetId);
     // Minted on OPEN so a photo can name this schedule while the form is still
     // being filled in -- the same rule openChangeAdd follows.
-    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "" });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {} });
     setMaintenanceModal({ mode: "add" });
   }
 
@@ -11498,6 +11574,8 @@ function AssetTracker() {
       dueDate: dateOnly(item.dueDate),
       lastPerformed: dateOnly(item.lastPerformed),
       owner: item.owner || "",
+      taskType: item.taskType || "",
+      custom: item.custom && typeof item.custom === "object" ? { ...item.custom } : {},
     });
     setMaintenanceModal({ mode: "edit", itemId });
   }
@@ -11527,12 +11605,15 @@ function AssetTracker() {
       dueDate: oneOff ? (maintenanceDraft.dueDate || "") : "",
       lastPerformed: oneOff ? "" : (maintenanceDraft.lastPerformed || ""),
       owner: maintenanceDraft.owner.trim(),
+      taskType: maintenanceDraft.taskType || "",
+      custom: { ...(maintenanceDraft.custom || {}) },
       at: new Date().toISOString(),
       by: currentUser || "",
     };
+    if (validateCustomValues(workModel, "task", item.taskType, item.custom)) return; // Save is disabled on it, with the reason on screen
     const next = assets.map(a => (a.id === workTargetId ? { ...a, maintenanceItems: [...(a.maintenanceItems || []), item] } : a));
     await persist(next, { columns });
-    setMaintenanceDraft({ id: crypto.randomUUID(), kind: maintenanceDraft.kind, task: "", notes: "", frequency: maintenanceDraft.frequency, recurrence: maintenanceDraft.recurrence, dueDate: "", lastPerformed: "", owner: "" });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: maintenanceDraft.kind, task: "", notes: "", frequency: maintenanceDraft.frequency, recurrence: maintenanceDraft.recurrence, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {} });
     setMaintenanceModal(null);
   }
 
@@ -11568,7 +11649,10 @@ function AssetTracker() {
       // like any other field edit.
       lastPerformed: maintenanceDraft.lastPerformed || "",
       owner: maintenanceDraft.owner.trim(),
+      taskType: maintenanceDraft.taskType || "",
+      custom: { ...(maintenanceDraft.custom || {}) },
     };
+    if (validateCustomValues(workModel, "task", updated.taskType, updated.custom)) return;
     const mkEntry = (field, from, to) => ({
       at: new Date().toISOString(), by: currentUser || "", assetLabel: workTargetId,
       assetType: workTarget.type, action: "maintenance_edited", field: `${original.task} — ${field}`, from, to,
@@ -11583,6 +11667,16 @@ function AssetTracker() {
       entries.push(mkEntry("Due date", formatDateOnly(original.dueDate) || "—", formatDateOnly(updated.dueDate) || "—"));
     }
     if ((original.owner || "") !== (updated.owner || "")) entries.push(mkEntry("Owner", original.owner || "—", updated.owner || "—"));
+    if ((original.taskType || "") !== (updated.taskType || "")) {
+      entries.push(mkEntry("Type", taskTypeNameOf(workModel, original.taskType) || "—", taskTypeNameOf(workModel, updated.taskType) || "—"));
+    }
+    // Per custom field, for the fields the type now carries or carried: an edit
+    // rewrites a record, and the audit row is the only trail of what it said.
+    new Set([...customFieldsFor(workModel, "task", original.taskType), ...customFieldsFor(workModel, "task", updated.taskType)].map(f => f.key)).forEach(key => {
+      const def = (workModel.taskFields || []).find(f => f.key === key);
+      const before = String((original.custom || {})[key] ?? ""), after = String((updated.custom || {})[key] ?? "");
+      if (def && before !== after) entries.push(mkEntry(def.label, before || "—", after || "—"));
+    });
     if ((original.lastPerformed || "") !== (updated.lastPerformed || "")) {
       // "Last performed" is the same fact under both kinds, but a one-off's is
       // its completion, so the audit sentence says so rather than describing a
@@ -14545,6 +14639,21 @@ function AssetTracker() {
         </div>
       );
     }
+    if (key === "tasktypes") {
+      return (
+        <WorkTypesManager
+          kind="task"
+          model={workModel}
+          types={workModel.taskTypes}
+          onModel={next => persist(assets, { workModel: next })}
+          typeActions={{
+            add: name => addTaskType(workModel, name),
+            rename: (id, name) => renameTaskType(workModel, id, name),
+            remove: id => removeTaskType(workModel, id),
+          }}
+        />
+      );
+    }
     if (key === "relationships") {
       const allTypeIds = (typesList || []).map(t => t.id);
       const custom = allRelationshipQueries(allTypeIds);
@@ -15059,6 +15168,7 @@ function AssetTracker() {
             const taskDone = taskItem ? taskIsDone(taskItem) : false;
             // A Custom frequency must describe a real rule before Save lights.
             const maintenanceFrequencyOk = maintenanceDraft.kind === TASK_KIND_ONEOFF || !!frequencyFromDraft(maintenanceDraft);
+            const taskCustomError = validateCustomValues(workModel, "task", maintenanceDraft.taskType, maintenanceDraft.custom);
             const taskStatusMeta = taskItem ? maintenanceStatusMeta(maintenanceStatusOf(taskItem)) : null;
             // Only ever shown for a dialog opened somewhere OTHER than the
             // asset's own page -- workDialogAssetId is null exactly when the
@@ -15217,7 +15327,28 @@ function AssetTracker() {
                       style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
                     />
                   </label>
+                  {/* Task type: decides which custom fields follow. Only offered
+                      once at least one type exists, so a school that never sets
+                      any up sees the dialog exactly as before. */}
+                  {(workModel.taskTypes.length > 0 || maintenanceDraft.taskType) && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Type</span>
+                      {/* hideLabel under our own heading: a labelled PickerField re-opens itself after a choice (BUGS.md). */}
+                      <PickerField
+                        label="Type"
+                        hideLabel
+                        value={maintenanceDraft.taskType || ""}
+                        onChange={v => setMaintenanceDraft({ ...maintenanceDraft, taskType: v })}
+                        options={["", ...workModel.taskTypes.map(t => t.id)]}
+                        labelForOption={id => (id ? (taskTypeNameOf(workModel, id) || "(removed type)") : "No type")}
+                        title="Select task type"
+                      />
+                    </div>
+                  )}
+                  <CustomFieldInputs model={workModel} kind="task" typeId={maintenanceDraft.taskType} values={maintenanceDraft.custom}
+                    onChange={custom => setMaintenanceDraft({ ...maintenanceDraft, custom })} />
                 </div>
+                {taskCustomError && <div role="alert" style={{ fontSize: 12, color: C.danger, marginTop: 8 }}>{taskCustomError}</div>}
                 <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
                   <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 8 }}>Files</div>
                   <PhotoGallery
@@ -15289,8 +15420,8 @@ function AssetTracker() {
                   <button onClick={() => setMaintenanceModal(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                   <button
                     onClick={editing ? saveMaintenanceEdit : addMaintenanceItem}
-                    disabled={!maintenanceDraft.task.trim() || !workTarget || !maintenanceFrequencyOk}
-                    style={{ padding: "8px 14px", background: (maintenanceDraft.task.trim() && workTarget && maintenanceFrequencyOk) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                    disabled={!maintenanceDraft.task.trim() || !workTarget || !maintenanceFrequencyOk || !!taskCustomError}
+                    style={{ padding: "8px 14px", background: (maintenanceDraft.task.trim() && workTarget && maintenanceFrequencyOk && !taskCustomError) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                   >
                     {editing ? "Save changes" : (maintenanceDraft.kind === TASK_KIND_ONEOFF ? "Add task" : "Schedule")}
                   </button>
@@ -16316,7 +16447,7 @@ function AssetTracker() {
                     return (
                       <div key={item.id} style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "10px 14px" }}>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4, gap: 8 }}>
-                          <span style={{ fontWeight: 700, fontSize: 13, color: C.brandDark }}>{item.task}</span>
+                          <span style={{ fontWeight: 700, fontSize: 13, color: C.brandDark }}>{item.task}{taskTypeNameOf(workModel, item.taskType) && <span style={{ fontWeight: 500, color: C.muted }}> · {taskTypeNameOf(workModel, item.taskType)}</span>}</span>
                           <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
                             <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: statusMeta.color }}>
                               {statusMeta.label}
@@ -16339,6 +16470,9 @@ function AssetTracker() {
                         {item.notes && (
                           <div style={{ fontSize: 13, color: C.ink, whiteSpace: "pre-wrap", marginBottom: 6 }}>{item.notes}</div>
                         )}
+                        {customFieldsFor(workModel, "task", item.taskType).filter(f => String((item.custom || {})[f.key] ?? "") !== "").map(f => (
+                          <div key={f.key} style={{ fontSize: 13, color: C.ink, marginBottom: 2 }}><span style={{ color: C.muted }}>{f.label}:</span> {dataTypeDisplay(f, item.custom[f.key])}</div>
+                        ))}
                         {/* The same stored field reads differently by kind:
                             a schedule's lastPerformed is the start of its next
                             interval, a one-off's is the end of it. */}
@@ -18072,7 +18206,7 @@ function AssetTracker() {
                     onClick={() => (canEdit ? openMaintenanceEdit(item.id, asset.id) : openDetail(asset, "maintenance"))}
                     style={{ display: "grid", gridTemplateColumns: "220px 170px 100px 110px 130px 130px 130px 120px", alignItems: "center", cursor: "pointer", background: C.surface, borderTop: `1px solid ${C.border}` }}
                   >
-                    <div style={{ padding: "12px 14px", fontSize: 13, color: C.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.task}</div>
+                    <div style={{ padding: "12px 14px", fontSize: 13, color: C.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.task}{taskTypeNameOf(workModel, item.taskType) && <span style={{ color: C.muted }}> · {taskTypeNameOf(workModel, item.taskType)}</span>}</div>
                     <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted, display: "flex", alignItems: "center", gap: 6, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       <AssetIcon size={14} style={{ flexShrink: 0, color: C.brand }} />
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{assetName}</span>
@@ -18479,6 +18613,170 @@ function RequiredMark({ on }) {
 function FieldError({ message }) {
   if (!message) return null;
   return <span style={{ fontSize: 12, color: C.danger }}>{message}</span>;
+}
+
+// Settings: the types of one record kind (tasks now; logged work reuses it) and
+// the custom fields they carry. `types` is [{ id, name }]; `typeActions` (add /
+// rename / remove) is given when this screen owns the list, and each returns a
+// new model (add/rename as { model, error? }). Every change goes straight to
+// onModel -> persist, like the other Settings managers.
+function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
+  const noun = kind === "task" ? "task" : "work";
+  const fieldsKey = workModelKey(kind);
+  const fields = model[fieldsKey.fields] || [];
+  const [selId, setSelId] = useState("");
+  const [newName, setNewName] = useState("");
+  const [renameVal, setRenameVal] = useState(null);
+  const [error, setError] = useState("");
+  const [fieldError, setFieldError] = useState("");
+  const [fieldDraft, setFieldDraft] = useState({ label: "", dataType: "text", optionsText: "" });
+  const selected = types.find(t => t.id === selId) || null;
+  const st = selected ? ((model[fieldsKey.settings] || {})[selected.id] || { fieldKeys: [], requiredFields: [] }) : null;
+  const inputStyle = { padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, minWidth: 0 };
+  const card = { background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, width: "100%", maxWidth: 460 };
+  const heading = { display: "flex", alignItems: "center", gap: 6, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginBottom: 12 };
+  const apply = r => { if (r.error) { setError(r.error); return false; } setError(""); onModel(r.model || r); return true; };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      {typeActions && (
+        <div style={card}>
+          <div style={heading}>
+            {kind === "task" ? "Task types" : "Types"}
+            <HelpTip label={`About ${noun} types`} text={`A type decides which extra fields show on a ${noun} and which of them are required. A ${noun} with no type shows none. Pick a type to choose its fields.`} />
+          </div>
+          {types.length === 0 && <div style={{ fontSize: 13, color: C.empty, marginBottom: 12 }}>No types yet.</div>}
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 14 }}>
+            {types.map(t => (
+              <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                {renameVal && renameVal.id === t.id ? (
+                  <>
+                    <input value={renameVal.name} autoFocus onChange={e => setRenameVal({ id: t.id, name: e.target.value })}
+                      onKeyDown={e => { if (e.key === "Enter" && apply(typeActions.rename(t.id, renameVal.name))) setRenameVal(null); }}
+                      style={{ ...inputStyle, flex: 1 }} aria-label="Type name" />
+                    <button onClick={() => { if (apply(typeActions.rename(t.id, renameVal.name))) setRenameVal(null); }} style={{ padding: "6px 10px", background: C.brand, color: "#fff", border: "none", borderRadius: 8, fontSize: 13, fontWeight: 600 }}>Save</button>
+                    <button onClick={() => { setRenameVal(null); setError(""); }} className="icon-btn" aria-label="Cancel rename" style={{ background: "none", border: "none", padding: 4 }}><X size={14} color={C.muted} /></button>
+                  </>
+                ) : (
+                  <>
+                    <button onClick={() => setSelId(t.id === selId ? "" : t.id)} aria-pressed={t.id === selId}
+                      style={{ flex: 1, textAlign: "left", padding: "8px 10px", border: `1.5px solid ${t.id === selId ? C.brand : C.border}`, background: t.id === selId ? C.hover : "none", borderRadius: 10, fontSize: 14, color: C.ink }}>
+                      {t.name}
+                    </button>
+                    <button onClick={() => setRenameVal({ id: t.id, name: t.name })} className="icon-btn" aria-label={`Rename ${t.name}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}><Pencil size={14} color={C.muted} /></button>
+                    <button onClick={() => { if (selId === t.id) setSelId(""); onModel(typeActions.remove(t.id)); }} className="icon-btn" aria-label={`Remove ${t.name}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}><Trash2 size={14} color={C.danger} /></button>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="New type name" aria-label="New type name"
+              onKeyDown={e => { if (e.key === "Enter") { const r = typeActions.add(newName); if (apply(r)) { setNewName(""); if (r.id) setSelId(r.id); } } }}
+              style={{ ...inputStyle, flex: 1 }} />
+            <button onClick={() => { const r = typeActions.add(newName); if (apply(r)) { setNewName(""); if (r.id) setSelId(r.id); } }}
+              style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600, flexShrink: 0 }}>Add</button>
+          </div>
+          {error && <div role="alert" style={{ fontSize: 12, color: C.danger, marginTop: 8 }}>{error}</div>}
+        </div>
+      )}
+      {selected && (
+        <div style={card}>
+          <div style={heading}>Fields on {selected.name}</div>
+          {fields.length === 0 && <div style={{ fontSize: 13, color: C.empty }}>Add a field below, then tick it here.</div>}
+          {fields.map(f => {
+            const on = st.fieldKeys.includes(f.key);
+            return (
+              <div key={f.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0", fontSize: 14 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
+                  <input type="checkbox" checked={on} onChange={e => onModel(setTypeHasField(model, kind, selected.id, f.key, e.target.checked))} />
+                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{f.label}</span>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: on ? C.ink : C.muted }}>
+                  <input type="checkbox" disabled={!on} checked={on && st.requiredFields.includes(f.key)} onChange={e => onModel(setTypeFieldRequired(model, kind, selected.id, f.key, e.target.checked))} />
+                  Required
+                </label>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <div style={card}>
+        <div style={heading}>
+          Custom fields
+          <HelpTip label="About custom fields" text={`A custom field is an extra box on ${noun}s. Make it here, then tick it on the types that should show it. The kind of value cannot be changed once it is made.`} />
+        </div>
+        {fields.length === 0 && <div style={{ fontSize: 13, color: C.empty, marginBottom: 12 }}>No custom fields yet.</div>}
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+          {fields.map(f => (
+            <div key={f.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 14 }}>
+              <span>
+                {f.label}
+                <span style={{ fontSize: 12, color: C.muted, marginLeft: 8 }}>
+                  {(COLUMN_DATA_TYPES.find(t => t.value === f.dataType) || {}).label || ""}
+                  {f.dataType === "select" && f.options.length ? ` (${f.options.join(", ")})` : ""}
+                </span>
+              </span>
+              <button onClick={() => onModel(removeWorkField(model, kind, f.key))} className="icon-btn" aria-label={`Remove ${f.label}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}><Trash2 size={14} color={C.danger} /></button>
+            </div>
+          ))}
+        </div>
+        <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 14, display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ display: "flex", gap: 6 }}>
+            <input value={fieldDraft.label} onChange={e => setFieldDraft({ ...fieldDraft, label: e.target.value })} placeholder="New field name" aria-label="New field name" style={{ ...inputStyle, flex: 1 }} />
+            <div style={{ width: 120, flexShrink: 0 }}>
+              <PickerField label="New field kind" hideLabel value={fieldDraft.dataType} onChange={v => setFieldDraft({ ...fieldDraft, dataType: v })}
+                options={COLUMN_DATA_TYPES.filter(t => t.value !== "reference").map(t => t.value)}
+                labelForOption={v => (COLUMN_DATA_TYPES.find(t => t.value === v) || {}).label || v} title="Kind of value" />
+            </div>
+          </div>
+          {fieldDraft.dataType === "select" && (
+            <input value={fieldDraft.optionsText} onChange={e => setFieldDraft({ ...fieldDraft, optionsText: e.target.value })} placeholder="Choices, separated by commas" aria-label="Choices" style={inputStyle} />
+          )}
+          <button onClick={() => {
+            const r = addWorkField(model, kind, { label: fieldDraft.label, dataType: fieldDraft.dataType, options: fieldDraft.optionsText.split(",") });
+            if (r.error) { setFieldError(r.error); return; }
+            // Ticked on the open type straight away: the usual reason to make a field.
+            let next = r.model;
+            if (selected) next = setTypeHasField(next, kind, selected.id, r.key, true);
+            setFieldError(""); setFieldDraft({ label: "", dataType: "text", optionsText: "" }); onModel(next);
+          }} style={{ alignSelf: "flex-start", padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600 }}>Add field</button>
+          {fieldError && <div role="alert" style={{ fontSize: 12, color: C.danger }}>{fieldError}</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// The custom-field inputs for one record, under a type. Used by the task dialog
+// (and the work dialog next). `values` is the record's `custom` object.
+function CustomFieldInputs({ model, kind, typeId, values, onChange }) {
+  const fields = customFieldsFor(model, kind, typeId);
+  if (!fields.length) return null;
+  const required = new Set(requiredCustomFieldsFor(model, kind, typeId));
+  return (
+    <>
+      {fields.map(f => f.dataType === "select" ? (
+        // Field's select sits inside a <label>, which re-opens the picker after a
+        // choice (BUGS.md); a choice-list custom field gets a div and its own heading.
+        <div key={f.key} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>{f.label}<RequiredMark on={required.has(f.key)} /></span>
+          <PickerField label={f.label} hideLabel value={(values && values[f.key]) || ""} onChange={v => onChange({ ...(values || {}), [f.key]: v })}
+            options={["", ...f.options]} labelForOption={o => o || "—"} title={`Select ${f.label}`} />
+        </div>
+      ) : (
+        <Field
+          key={f.key}
+          label={f.label}
+          value={(values && values[f.key]) ?? ""}
+          onChange={e => onChange({ ...(values || {}), [f.key]: e && e.target ? e.target.value : e })}
+          dataType={f.dataType}
+          options={f.options}
+          required={required.has(f.key)}
+        />
+      ))}
+    </>
+  );
 }
 
 // The generic asset-form input for one column. What it renders comes from the
@@ -20757,6 +21055,7 @@ function AppMenuScreenRows({ title, children }) {
 const SETTINGS_SECTIONS = [
   { key: "types", label: "Types & fields", icon: Layers, editor: true },
   { key: "relationships", label: "Relationships", icon: ArrowLeftRight, editor: true },
+  { key: "tasktypes", label: "Task types", icon: ClipboardList, editor: true },
   { key: "lists", label: "Lists", icon: FileText, editor: true },
   { key: "electrical", label: "Electrical", icon: Zap, editor: true },
   { key: "access", label: "Access", icon: Users, editor: true, live: true },

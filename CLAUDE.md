@@ -3284,6 +3284,36 @@ that were rejected.
   Eric's call. The Changes sheet's resolved *Maintenance task* column is
   untouched.
 
+**Tasks and logged work have managed TYPES and CUSTOM FIELDS (2026-10-11, no migration).**
+Plan: `/mnt/project-files/plans/task-work-custom-fields.md`. Built in three PRs: storage,
+tasks, then work.
+- **ONE Config key, `workModel`**, holds all of it: `taskTypes` `[{id,name}]`,
+  `taskTypeSettings` / `workTypeSettings` (`{ typeId: { fieldKeys, requiredFields } }`),
+  `taskFields` / `workFields` (the field definitions: key, label, dataType, options). A new
+  Config key is a release, so one key rather than five. Work types stay the existing
+  `changeTypes` string list (a name IS its id, as a built-in asset type's does), so only
+  their settings live in the model.
+- **A record keeps its values in a `custom` object** (`{ cf_psi: "42" }`) and a task also
+  carries `taskType` (the id). A `custom` sub-object, never top-level keys, so a custom key
+  cannot collide with a built-in field. A blank type means no fields and nothing required,
+  which is every existing record. A removed type's id on a task simply reads as untyped.
+- **The Supabase save projection is the `.gs` write projection, which would DROP both.**
+  `save-shape.ts` runs each record through the Sheet's field list on purpose, so `taskType`
+  and `custom` are re-attached by record id after it (`extrasOf`) — the one deliberate
+  divergence, only for records that carry them, so the parity test is unaffected. **The
+  Apps Script fallback (`?backend=sheet`) still drops them**, accepted: it is dev's safety net.
+- **Rules are the asset ones**: a field's kind is fixed once created; required is per type
+  and enforced at the form only; a field a type names but has no definition for is ignored
+  at read time; emptiness never falsiness (`validateCustomValues`, built on
+  `validateColumnValue`). Removing a field definition unticks it from every type and leaves
+  stored values alone.
+- Managed in Settings > Task types (`WorkTypesManager`, written for either kind). The task
+  dialog shows a Type picker only once a type exists, then that type's fields, and Save is
+  disabled with the reason on screen. Edits audit the type and each custom value.
+  A choice-list custom field and the Type picker avoid `<label>` wrappers on purpose
+  (the `PickerField` re-open bug in `BUGS.md`).
+- Covered by `test-frontend-work-model.js`.
+
 **A scheduled task can repeat on a CUSTOM rule (backend v52, 2026-10-07).** The Frequency
 picker keeps its five presets and adds **Custom…**, which offers "every N days / weeks /
 months / years" or "the first/second/third/fourth/last <weekday>, every N months".
