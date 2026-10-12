@@ -1939,6 +1939,15 @@ function addWorkField(model, kind, def) {
 }
 // Removing a definition also unticks it from every type, so no type names a
 // field that no longer exists. Values already stored on records are left alone.
+// Choices can be added to an existing choice-list field, never removed or
+// renamed (a stored value would be left naming a choice no longer offered).
+function addWorkFieldChoice(model, kind, key, choice) {
+  const k = workModelKey(kind);
+  const text = String(choice || "").trim();
+  const f = (model[k.fields] || []).find(x => x.key === key);
+  if (!text || !f || f.dataType !== "select" || f.options.includes(text)) return model;
+  return { ...model, [k.fields]: model[k.fields].map(x => x.key === key ? { ...x, options: [...x.options, text] } : x) };
+}
 function removeWorkField(model, kind, key) {
   const k = workModelKey(kind);
   const settings = {};
@@ -5612,7 +5621,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-11.13";
+const APP_VERSION = "2026-10-12.1";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -12721,6 +12730,16 @@ function AssetTracker() {
     // carries a kind per field, and one stray write path would reintroduce the
     // whole problem silently.
 
+    // The one write to an existing column: choices ADDED to a choice list. The
+    // draft was seeded from the column's own options, so anything new is at the
+    // end; existing choices are never dropped or reordered.
+    nextColumns = nextColumns.map(c => {
+      if (createdKeys.includes(c.key) || columnDataType(c) !== "select") return c;
+      const have = columnOptions(c);
+      const extra = String((draft.fieldChoices || {})[c.key] || "").split("\n").map(o => o.trim()).filter(o => o && !have.includes(o));
+      return extra.length ? { ...c, options: [...have, ...[...new Set(extra)]] } : c;
+    });
+
     const fields = typeEditableFields(nextColumns).map(c => c.key);
     const wanted = new Set([...draft.fields, ...createdKeys]);
     // Restriction is read off the columns being SAVED, not the current ones, so
@@ -18790,6 +18809,7 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
   const [error, setError] = useState("");
   const [fieldError, setFieldError] = useState("");
   const [fieldDraft, setFieldDraft] = useState({ label: "", dataType: "text", optionsText: "" });
+  const [choiceDraft, setChoiceDraft] = useState({ key: "", text: "" });
   const selected = types.find(t => t.id === selId) || null;
   const defaultId = defaultWorkTypeId(model, kind);
   const st = selected ? ((model[fieldsKey.settings] || {})[selected.id] || { fieldKeys: [], requiredFields: [], hiddenFields: [] }) : null;
@@ -18883,7 +18903,7 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
         {fields.length === 0 && <div style={{ fontSize: 13, color: C.empty, marginBottom: 12 }}>No custom fields yet.</div>}
         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
           {fields.map(f => (
-            <div key={f.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 14 }}>
+            <div key={f.key} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", fontSize: 14 }}>
               <span>
                 {f.label}
                 <span style={{ fontSize: 12, color: C.muted, marginLeft: 8 }}>
@@ -18892,6 +18912,15 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
                 </span>
               </span>
               <button onClick={() => onModel(removeWorkField(model, kind, f.key))} className="icon-btn" aria-label={`Remove ${f.label}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}><Trash2 size={14} color={C.danger} /></button>
+              {f.dataType === "select" && (
+                <div style={{ flexBasis: "100%", display: "flex", gap: 6, marginTop: 4 }}>
+                  <input value={choiceDraft.key === f.key ? choiceDraft.text : ""} onChange={e => setChoiceDraft({ key: f.key, text: e.target.value })}
+                    onKeyDown={e => { if (e.key === "Enter") { onModel(addWorkFieldChoice(model, kind, f.key, choiceDraft.text)); setChoiceDraft({ key: "", text: "" }); } }}
+                    placeholder="Add a choice" aria-label={`Add a choice to ${f.label}`} style={{ ...inputStyle, flex: 1, minWidth: 0 }} />
+                  <button onClick={() => { onModel(addWorkFieldChoice(model, kind, f.key, choiceDraft.key === f.key ? choiceDraft.text : "")); setChoiceDraft({ key: "", text: "" }); }}
+                    style={{ padding: "6px 12px", background: C.brand, color: "#fff", border: "none", borderRadius: 8, fontSize: 13, fontWeight: 600 }}>Add</button>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -20237,6 +20266,8 @@ function TypeManagerModal({
   // them makes closing it `setNewFieldDraft(null)` and leaves nothing behind to
   // reset. Same shape as breakerModal and addBreakerDraft.
   const [newFieldDraft, setNewFieldDraft] = useState(null);
+  // Text typed into an existing choice-list field's "Add a choice" box: { key, text }.
+  const [choiceAdd, setChoiceAdd] = useState(null);
   // The relationship query builder, opened from the editor's Relationships
   // row. A dialog nested inside this modal's tree, like the new-field dialog.
   const [editingQueries, setEditingQueries] = useState(null);
@@ -20365,6 +20396,13 @@ function TypeManagerModal({
   // session and not yet a column — renders the same row, so the thing you just
   // created is configured the same way as the ones that already existed rather
   // than appearing as a differently-shaped chip.
+  const addChoiceToDraft = key => {
+    const text = (choiceAdd && choiceAdd.key === key ? choiceAdd.text : "").trim();
+    if (!text) return;
+    const cur = String((draft.fieldChoices || {})[key] || "").split("\n").filter(Boolean);
+    if (!cur.includes(text)) setDraft({ ...draft, fieldChoices: { ...(draft.fieldChoices || {}), [key]: [...cur, text].join("\n") } });
+    setChoiceAdd(null);
+  };
   const fieldRow = (key, label, pending) => {
     const on = pending || draft.fields.includes(key);
     // person, peripherals and subType are edited by their own components (a chip
@@ -20476,6 +20514,22 @@ function TypeManagerModal({
             {(draft.fieldChoices || {})[key]
               ? String(draft.fieldChoices[key]).split("\n").filter(Boolean).join(" · ")
               : "No choices configured."}
+          </div>
+        )}
+        {/* Choices can be ADDED to a choice list at any time, never removed or
+            renamed: a stored value would be left naming a choice the field no
+            longer offers. Appended choices are saved with the type. */}
+        {kind === "select" && on && !pending && !bespoke && (
+          <div style={{ marginLeft: 24, display: "flex", gap: 6 }}>
+            <input
+              value={choiceAdd && choiceAdd.key === key ? choiceAdd.text : ""}
+              onChange={e => setChoiceAdd({ key, text: e.target.value })}
+              onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addChoiceToDraft(key); } }}
+              placeholder="Add a choice"
+              aria-label={`Add a choice to ${label}`}
+              style={{ flex: 1, minWidth: 0, padding: "5px 8px", border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 13, fontFamily: "inherit", background: C.surface, color: C.ink }}
+            />
+            <button type="button" onClick={() => addChoiceToDraft(key)} style={{ padding: "5px 10px", background: C.brand, color: "#fff", border: "none", borderRadius: 8, fontSize: 13, fontWeight: 600 }}>Add</button>
           </div>
         )}
         {kind === "reference" && on && (
