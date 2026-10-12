@@ -48,12 +48,14 @@ const code = [
   grabBlock('const COLUMN_DATA_TYPES = [', '\n];'),
   'const COLUMN_DATA_TYPE_VALUES = new Set(COLUMN_DATA_TYPES.map(t => t.value));',
   grabBlock('const DEFAULT_COLUMN_DATA_TYPES = {', '\n};'),
+  grabFn('isChoiceKind'),
+  grabFn('multiValues'),
   grabFn('columnDataType'),
   grabFn('columnOptions'),
   grabFn('dateOnly'),
   grabFn('validateColumnValue'),
   grabFn('applyFieldKind'),
-  'module.exports = { columnDataType, columnOptions, validateColumnValue, applyFieldKind, COLUMN_DATA_TYPES, DEFAULT_COLUMN_DATA_TYPES };',
+  'module.exports = { multiValues, columnDataType, columnOptions, validateColumnValue, applyFieldKind, COLUMN_DATA_TYPES, DEFAULT_COLUMN_DATA_TYPES };',
 ].join('\n');
 
 const mod = { exports: {} };
@@ -63,7 +65,7 @@ try {
   console.error('Could not evaluate the extracted helpers:\n  ' + e.message);
   process.exit(1);
 }
-const { columnDataType, columnOptions, validateColumnValue, applyFieldKind, DEFAULT_COLUMN_DATA_TYPES } = mod.exports;
+const { multiValues, columnDataType, columnOptions, validateColumnValue, applyFieldKind, DEFAULT_COLUMN_DATA_TYPES } = mod.exports;
 
 let pass = 0, fail = 0;
 const check = (name, ok, detail) => {
@@ -170,6 +172,19 @@ check('columnOptions on a column with none is empty',
   check('switching away from a choice list DROPS its options',
     !('options' in c6),
     'otherwise switching back would silently resurrect a stale list');
+}
+
+{
+  const m = { key: 'tags', label: 'Tags', dataType: 'multiselect', options: ['A', 'B', 'C'] };
+  check('multiselect keeps its kind', columnDataType(m) === 'multiselect');
+  check('multiselect accepts several picks', validateColumnValue(m, 'A; C') === '');
+  check('multiselect accepts blank', validateColumnValue(m, '') === '');
+  check('multiselect refuses a pick outside the list', validateColumnValue(m, 'A; Z') !== '');
+  check('multiValues splits and trims', JSON.stringify(multiValues(' A ;B;; ')) === '["A","B"]');
+  const c7 = { key: 'tags', label: 'Tags' };
+  applyFieldKind(c7, 'multiselect', 'A;x\nB');
+  check('multiselect keeps options, semicolons become commas',
+    c7.dataType === 'multiselect' && JSON.stringify(c7.options) === '["A,x","B"]', JSON.stringify(c7));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
