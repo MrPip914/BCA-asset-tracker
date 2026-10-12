@@ -19,7 +19,8 @@
 // separates tenants again underneath, by row-level security.
 
 import { buildInventory } from "./inventory.js";
-import { isPlaceType, referenceColumns, relationshipQueriesShownFor, runRelationshipQuery } from "./app-rules.js";
+import { makeWorkModelTools, modelOf } from "./work-model.js";
+import { taskTypeNameOf, isPlaceType, referenceColumns, relationshipQueriesShownFor, runRelationshipQuery } from "./app-rules.js";
 import { floorPlanSpacesOf, floorPlanGeometryOf, planFloorPlanReplace, PlanFileError, FLOORPLAN_TOOL_MAX_BYTES } from "./floorplan.js";
 import { rotatedSpaces, exteriorWalls, wallsOnPlan, planWallChanges, WallPlanError, FACINGS } from "./walls.js";
 import {
@@ -32,6 +33,8 @@ import {
 } from "./from-app.js";
 
 export class ToolError extends Error {}
+
+const WM = makeWorkModelTools(ToolError);
 
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 // Additive: nothing a write tool does removes or overwrites a person's data
@@ -212,12 +215,15 @@ const READ_TOOLS = [
   },
 ];
 
+const CUSTOM_FIELDS = { type: "object", description: "Custom field values for the record's type, as { field name: value } (get_schema lists each type's fields; a field can be named by its label or key). Values are text; a date is yyyy-mm-dd." };
+const TASK_TYPE = { type: "string", description: "The task type, by name from get_schema. Omit (or Default) for the default type." };
 const DATE = (what) => ({ type: "string", description: `${what}, yyyy-mm-dd. Default today.` });
 const WORK_FIELDS = {
   work_type: { type: "string", description: "The work type, from the site's list (e.g. Maintenance, Repair, Purchase)." },
   vendor: { type: "string", description: "Who did the work, from the site's vendor list. Omit for in-house work." },
   cost: { type: "string", description: "What it cost, e.g. 120 or $1,200.50." },
   note: { type: "string", description: "What was done or found." },
+  custom: CUSTOM_FIELDS,
 };
 
 const WRITE_TOOLS = [
@@ -240,6 +246,8 @@ const WRITE_TOOLS = [
         due_date: { type: "string", description: "One-off only: when it is due, yyyy-mm-dd." },
         owner: { type: "string", description: "Who is responsible." },
         notes: { type: "string" },
+        task_type: TASK_TYPE,
+        custom: CUSTOM_FIELDS,
       },
       required: ["asset", "task"],
       additionalProperties: false,
@@ -308,6 +316,8 @@ const TASK_FIELDS = {
   due_date: { type: "string", description: "One-off only: when it is due, yyyy-mm-dd." },
   owner: { type: "string", description: "Who is responsible." },
   notes: { type: "string" },
+  task_type: TASK_TYPE,
+  custom: CUSTOM_FIELDS,
 };
 
 // Changing or removing what is already there. Each one is checked against the
@@ -389,7 +399,7 @@ const MANAGE_TOOLS = [
   {
     name: "edit_task",
     title: "Edit task",
-    description: "Change a task's name, kind, frequency, due date, last-done date, owner or notes. Only the fields given change; an empty string clears one (clearing a finished one-off's last_done reopens it). Each change is recorded in the change history as the app records it.",
+    description: "Change a task's name, kind, type, custom fields, frequency, due date, last-done date, owner or notes. Only the fields given change; an empty string clears one (clearing a finished one-off's last_done reopens it). Each change is recorded in the change history as the app records it.",
     inputSchema: {
       type: "object",
       properties: {
@@ -403,6 +413,8 @@ const MANAGE_TOOLS = [
         due_date: { type: "string", description: "One-off only: yyyy-mm-dd, or empty to clear." },
         owner: TASK_FIELDS.owner,
         notes: TASK_FIELDS.notes,
+        task_type: { type: "string", description: "Move the task to this task type, by name from get_schema (Default for none)." },
+        custom: { ...CUSTOM_FIELDS, description: CUSTOM_FIELDS.description + " Only the fields given change; an empty string clears one." },
       },
       required: ["task"],
       additionalProperties: false,
@@ -617,6 +629,7 @@ const STATUS_ORDER = { overdue: 0, never: 1, "due-soon": 2, ok: 3, undated: 4, d
 
 function taskRow(inv, asset, m) {
   const status = maintenanceStatusOf(m);
+  const model = modelOf(inv);
   return {
     id: m.id,
     task: m.task || "",
@@ -627,6 +640,8 @@ function taskRow(inv, asset, m) {
     lastDone: dateOnly(m.lastPerformed) || undefined,
     owner: m.owner || undefined,
     notes: m.notes || undefined,
+    type: taskTypeNameOf(model, m.taskType) || undefined,
+    custom: WM.labelled(model, "task", m.taskType, m.custom),
     asset: inv.summary(asset),
   };
 }
@@ -704,17 +719,26 @@ function costText(v) {
 function workFields(inv, args, dfltType) {
   const type = args.work_type ?? dfltType;
   if (!type) throw new ToolError(`Say which work type: ${changeTypesOf(inv).join(", ")}.`);
+  const model = modelOf(inv);
+  const changeType = fromList(type, changeTypesOf(inv), "work types");
+  const label = WM.typeLabel(model, "work", changeType, changeType);
+  // A built-in the type has switched off is not offered; a custom value must be
+  // a field the type carries and pass the app's own checks (required, data type).
+  WM.checkBuiltins(model, "work", changeType, { vendor: args.vendor, cost: args.cost, note: args.note }, label);
+  const custom = WM.mergeCustom(model, "work", changeType, {}, args.custom, label);
+  WM.validateOrThrow(model, "work", changeType, custom, label);
   return {
-    changeType: fromList(type, changeTypesOf(inv), "work types"),
+    changeType,
     vendor: args.vendor ? fromList(args.vendor, inv.cfg.vendors, "vendors") : "",
     cost: costText(args.cost),
     note: String(args.note ?? "").trim(),
+    custom,
   };
 }
 
 // A new task as addMaintenanceItem builds it. Both halves are always written,
 // the unused one blank, so flipping the kind later cannot resurrect either.
-function taskItem(args) {
+function taskItem(args, inv) {
   const task = String(args.task ?? "").trim();
   if (!task) throw new ToolError("Say what the task is.");
   const oneOff = args.kind === "one-off";
@@ -736,7 +760,21 @@ function taskItem(args) {
     dueDate: oneOff ? realDate(args.due_date, "due_date") : "",
     lastPerformed: oneOff ? "" : realDate(args.last_done, "last_done"),
     owner: String(args.owner ?? "").trim(),
+    ...taskTypeFields(inv, args, "", {}),
   };
+}
+
+// taskType and custom for a task being added (existing nothing) or edited
+// (existing = the stored values). Mirrors the app's save: the type is an id or
+// "", the custom values are checked against the type the task ends up with.
+function taskTypeFields(inv, args, existingType, existingCustom) {
+  const model = modelOf(inv);
+  const taskType = args.task_type !== undefined && args.task_type !== null ? WM.resolveTaskType(model, args.task_type) : existingType;
+  const label = WM.typeLabel(model, "task", taskType);
+  WM.checkBuiltins(model, "task", taskType, { notes: args.notes, owner: args.owner }, label);
+  const custom = WM.mergeCustom(model, "task", taskType, existingCustom, args.custom, label);
+  WM.validateOrThrow(model, "task", taskType, custom, label);
+  return { taskType, custom };
 }
 
 function frequencyOrThrow(text) {
@@ -832,6 +870,7 @@ const handlers = {
         workTypes: changeTypesOf(inv),
         vendors: Array.isArray(inv.cfg.vendors) ? inv.cfg.vendors : [],
       },
+      tasksAndWork: WM.schemaFor(modelOf(inv), changeTypesOf(inv)),
       people: view.usersAreAssets
         ? "People are User assets: the User field takes their names, and a new person is created as a User asset first."
         : "People are plain names in the User field (this site has not converted them to User assets).",
@@ -949,6 +988,7 @@ const handlers = {
       out.push({
         date, type: c.changeType || undefined, vendor: c.vendor || undefined, cost: costOf(c) ?? undefined,
         note: c.note || undefined, by: c.by || undefined,
+        custom: WM.labelled(modelOf(inv), "work", c.changeType, c.custom),
         task: c.maintenanceId ? taskName.get(c.maintenanceId) : undefined,
         asset: inv.summary(a),
       });
@@ -1046,7 +1086,7 @@ const handlers = {
     const { site, inv } = await openSite(ctx, args, []);
     requireEditor(site);
     const a = liveAsset(inv, args.asset);
-    const item = taskItem(args);
+    const item = taskItem(args, inv);
     const out = await ctx.write(site.id, "add_task", [a.id, item]);
     ctx.log?.("write", { tool: "add_task", site: site.id, asset: a.id, id: out.id });
     return { site: site.id, added: taskRow(inv, a, { ...item, id: out.id }) };
@@ -1072,7 +1112,7 @@ const handlers = {
       site: site.id,
       completed: taskRow(inv, a, after),
       previouslyDone: dateOnly(r.data.lastPerformed) || "never",
-      workEntry: { id: out.id, date, type: work.changeType, vendor: work.vendor || undefined, cost: work.cost || undefined, note: work.note || undefined },
+      workEntry: { id: out.id, date, type: work.changeType, vendor: work.vendor || undefined, cost: work.cost || undefined, note: work.note || undefined, custom: WM.labelled(modelOf(inv), "work", work.changeType, work.custom) },
     };
   },
 
@@ -1092,7 +1132,8 @@ const handlers = {
       site: site.id,
       logged: {
         id: out.id, date, type: work.changeType, vendor: work.vendor || undefined, cost: work.cost || undefined,
-        note: work.note || undefined, task: task ? task.data.task : undefined, asset: inv.summary(a),
+        note: work.note || undefined, custom: WM.labelled(modelOf(inv), "work", work.changeType, work.custom),
+        task: task ? task.data.task : undefined, asset: inv.summary(a),
       },
     };
   },
@@ -1151,7 +1192,7 @@ const handlers = {
     list.forEach((t, i) => {
       try {
         const a = liveAsset(inv, t.asset);
-        const item = taskItem(t);
+        const item = taskItem(t, inv);
         const id = crypto.randomUUID();
         ops.push({ op: "task_insert", id, assetId: a.id, data: item });
         added.push(taskRow(inv, a, { ...item, id }));
@@ -1197,8 +1238,9 @@ const handlers = {
       dueDate: oneOff ? (given("due_date") ? realDate(args.due_date, "due_date") : (orig.dueDate || "")) : "",
       lastPerformed: given("last_done") ? realDate(args.last_done, "last_done") : (orig.lastPerformed || ""),
       owner: given("owner") ? String(args.owner).trim() : (orig.owner || ""),
+      ...taskTypeFields(inv, args, orig.taskType || "", orig.custom),
     };
-    const audit = taskEditAudit(a, orig, updated, taskKindOf);
+    const audit = taskEditAudit(a, orig, updated, taskKindOf, modelOf(inv));
     if (!audit.length) return { site: site.id, unchanged: taskRow(inv, a, orig), note: "Nothing to change." };
     const out = await apply(ctx, site, appViewRevisions(rows), [
       { op: "task_update", id: r.id, assetId: a.id, data: updated },

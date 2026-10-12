@@ -119,6 +119,20 @@ const PIECES = [
   "relationshipIndex",
   "relationshipStepTargets",
   "runRelationshipQuery",
+  // Task and work types and their custom fields (the WORK MODEL), read by the
+  // task and work tools and get_schema.
+  ["const DEFAULT_WORK_TYPE_ID", ";"],
+  ["const DEFAULT_WORK_TYPE_NAME", ";"],
+  ["const WORK_BUILTIN_FIELDS = {", "\n};"],
+  "defaultWorkTypeId",
+  "resolveWorkTypeId",
+  "workBuiltinShown",
+  "adoptWorkModel",
+  "workModelParts",
+  "customFieldsFor",
+  "requiredCustomFieldsFor",
+  "validateCustomValues",
+  "taskTypeNameOf",
 ];
 
 const EXPORTS = [
@@ -131,6 +145,9 @@ const EXPORTS = [
   "assetToImportRow", "resolveImportType", "isLockedType", "nearestAncestorOfType",
   "columnReferenceTypes", "referenceColumns", "RELATIONSHIP_FOLLOWS", "relationshipFollowMeta",
   "relationshipQueriesFor", "relationshipQueriesShownFor", "runRelationshipQuery",
+  "DEFAULT_WORK_TYPE_ID", "DEFAULT_WORK_TYPE_NAME", "WORK_BUILTIN_FIELDS", "defaultWorkTypeId",
+  "resolveWorkTypeId", "workBuiltinShown", "adoptWorkModel", "customFieldsFor",
+  "requiredCustomFieldsFor", "validateCustomValues", "taskTypeNameOf",
 ];
 
 function grabber(src) {

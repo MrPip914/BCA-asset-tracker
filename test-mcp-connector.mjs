@@ -346,7 +346,7 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   let r = await w("add_task", { asset: "Mini Split 1", task: "Drain check", frequency: "Quarterly", last_done: "2026-09-01", owner: " Jim " });
   eq("add_task writes the app's record shape", r.writes, [{ tenant: "dev", op: "add_task", args: ["ms1", {
     kind: "scheduled", task: "Drain check", notes: "", frequencyLabel: "Quarterly", frequencyDays: 90, recurrence: "",
-    dueDate: "", lastPerformed: "2026-09-01", owner: "Jim" }] }]);
+    dueDate: "", lastPerformed: "2026-09-01", owner: "Jim", taskType: "", custom: {} }] }]);
   eq("add_task answers with the new task's status", [r.data.added.id, r.data.added.due, r.data.added.status], ["new-1", "2026-11-30", "ok"]);
   r = await w("add_task", { asset: "b300", task: "Gutters", kind: "one-off", due_date: "2026-11-01" });
   eq("a one-off keeps its due date and blanks the schedule half",
@@ -382,7 +382,7 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   // complete_task
   r = await w("complete_task", { task: "filter clean", date: "2026-10-05", vendor: "coolco", cost: "$120", note: "dusty" });
   eq("complete_task by name defaults to Maintenance and spells the vendor as the list does", r.writes[0], { tenant: "dev", op: "complete_task",
-    args: ["m1", "2026-10-05", { changeType: "Maintenance", vendor: "CoolCo", cost: "$120", note: "dusty" }] });
+    args: ["m1", "2026-10-05", { changeType: "Maintenance", vendor: "CoolCo", cost: "$120", note: "dusty", custom: {} }] });
   eq("complete_task reports the task as done and when it was last done before",
     [r.data.completed.status, r.data.completed.lastDone, r.data.previouslyDone], ["ok", "2026-10-05", day(-45)]);
   r = await w("complete_task", { task: "m3" });
@@ -414,7 +414,7 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   check("log_work refuses a task that is not on the asset", r.isError && r.writes.length === 0, r.text);
   r = await w("log_work", { asset: "Mini Split 1", work_type: "repair", date: "2026-10-01", task: "Coil clean" });
   eq("log_work links a task on the asset without completing it", r.writes[0], { tenant: "dev", op: "log_work",
-    args: ["ms1", { changeType: "Repair", vendor: "", cost: "", note: "", performedOn: "2026-10-01", maintenanceId: "m2" }] });
+    args: ["ms1", { changeType: "Repair", vendor: "", cost: "", note: "", custom: {}, performedOn: "2026-10-01", maintenanceId: "m2" }] });
   r = await w("log_work", { asset: "ms1" });
   check("log_work needs a work type", r.isError && r.writes.length === 0, r.text);
 
@@ -1115,6 +1115,92 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   c = uctx(preview("changed"), [{ id: "dev", name: "Development", role: "viewer" }]);
   r = await call("undo_change", { backup: 7 }, c);
   check("undo_change refuses a viewer", r.isError && /view-only/.test(r.text) && c.writes.length === 0 && c.previews.length === 0, r.text);
+}
+
+// ---------------------------------------------------------------- task and work types, custom fields
+
+{
+  const model = {
+    taskTypes: [{ id: "tt-insp", name: "Inspection" }],
+    taskTypeSettings: {
+      "tt-insp": { fieldKeys: ["cf_result", "cf_count"], requiredFields: ["cf_result"], hiddenFields: ["owner"] },
+    },
+    taskFields: [
+      { key: "cf_result", label: "Result", dataType: "select", options: ["Pass", "Fail"] },
+      { key: "cf_count", label: "Count", dataType: "number", options: [] },
+    ],
+    workTypeSettings: { Repair: { fieldKeys: ["cf_part"], requiredFields: [], hiddenFields: ["cost"] } },
+    workFields: [{ key: "cf_part", label: "Part number", dataType: "text", options: [] }],
+  };
+  const dev = SITES.dev;
+  dev.config.push({ key: "workModel", value: model });
+  dev.maintenance.push({ id: "m9", asset_id: "ms1", position: 2, data: { id: "m9", task: "Walkthrough", kind: "oneoff", taskType: "tt-insp", custom: { cf_result: "Pass", cf_count: "3" } } });
+  const writes = (c) => c.writes.flatMap((w) => (Array.isArray(w.args[1]) ? w.args[1] : []));
+  const auditsOf = (c) => writes(c).filter((o) => o.op === "audit").map((o) => o.data);
+
+  let r = await call("get_schema", {});
+  const tw = r.data.tasksAndWork;
+  eq("task types: get_schema lists them, Default first", tw.tasks.types.map((t) => t.name), ["Default", "Inspection"]);
+  check("task types: a type's custom fields, required, and switched-off built-ins",
+    JSON.stringify(tw.tasks.types[1].customFields.map((f) => [f.label, f.dataType, !!f.required, f.choices])) === JSON.stringify([["Result", "select", true, ["Pass", "Fail"]], ["Count", "number", false, null]])
+    && tw.tasks.types[1].switchedOff.join() === "Owner", r.text);
+  const repair = tw.work.types.find((t) => t.name === "Repair");
+  check("work types: a work type's fields and switched-off built-ins", repair.customFields[0].label === "Part number" && repair.switchedOff.join() === "Cost", r.text);
+
+  r = await call("list_tasks", { status: "all" });
+  const t9 = r.data.tasks.find((t) => t.id === "m9");
+  check("list_tasks: type name and labelled custom values", t9.type === "Inspection" && t9.custom.Result === "Pass" && t9.custom.Count === "3", r.text);
+
+  let c = ctxFor(ONE);
+  r = await call("add_task", { asset: "ms1", task: "Roof look", kind: "one-off", task_type: "inspection", custom: { Result: "Fail", cf_count: 2 } }, c);
+  const item = c.writes[0]?.args[1];
+  check("add_task: stores the type id and custom values by key", !r.isError && item.taskType === "tt-insp" && item.custom.cf_result === "Fail" && item.custom.cf_count === "2", r.text);
+
+  c = ctxFor(ONE);
+  r = await call("add_task", { asset: "ms1", task: "Roof look", kind: "one-off", task_type: "Inspection" }, c);
+  check("add_task: a required custom field is enforced", r.isError && /Result is required/.test(r.text) && c.writes.length === 0, r.text);
+  r = await call("add_task", { asset: "ms1", task: "Roof look", kind: "one-off", task_type: "Inspection", custom: { Result: "Maybe" } }, c);
+  check("add_task: a value outside the choice list is refused", r.isError && c.writes.length === 0, r.text);
+  r = await call("add_task", { asset: "ms1", task: "Roof look", kind: "one-off", task_type: "Inspection", custom: { Result: "Pass", Colour: "red" } }, c);
+  check("add_task: an unknown custom field is refused, not dropped", r.isError && /no custom field/.test(r.text) && c.writes.length === 0, r.text);
+  r = await call("add_task", { asset: "ms1", task: "Roof look", kind: "one-off", task_type: "Inspection", custom: { Result: "Pass", Count: "lots" } }, c);
+  check("add_task: the data type is checked", r.isError && c.writes.length === 0, r.text);
+  r = await call("add_task", { asset: "ms1", task: "Roof look", kind: "one-off", task_type: "Inspection", owner: "Bob", custom: { Result: "Pass" } }, c);
+  check("add_task: a switched-off built-in is refused", r.isError && /Owner.{1,3} switched off/.test(r.text) && c.writes.length === 0, r.text);
+  r = await call("add_task", { asset: "ms1", task: "Roof look", kind: "one-off", task_type: "Nope" }, c);
+  check("add_task: an unknown task type lists the real ones", r.isError && /Default, Inspection/.test(r.text), r.text);
+
+  c = ctxFor(ONE);
+  r = await call("add_tasks", { tasks: [{ asset: "ms1", task: "A", kind: "one-off" }, { asset: "ms1", task: "B", kind: "one-off", task_type: "Inspection", custom: { Result: "Pass" } }] }, c);
+  const ins = writes(c).filter((o) => o.op === "task_insert");
+  check("add_tasks: per-task type; an untyped one stores the default as blank", !r.isError && ins[0].data.taskType === "" && ins[1].data.taskType === "tt-insp", r.text);
+
+  c = ctxFor(ONE);
+  r = await call("edit_task", { task: "m9", custom: { Count: "5" } }, c);
+  const upd = writes(c).find((o) => o.op === "task_update");
+  check("edit_task: only the given custom field changes", !r.isError && upd.data.custom.cf_result === "Pass" && upd.data.custom.cf_count === "5", r.text);
+  eq("edit_task: audited per custom field, as the app words it", auditsOf(c).map((a) => [a.field, a.from, a.to]), [["Walkthrough — Count", "3", "5"]]);
+  c = ctxFor(ONE);
+  r = await call("edit_task", { task: "m1", task_type: "Inspection" }, c);
+  check("edit_task: moving to a type with a required field needs it", r.isError && /Result is required/.test(r.text), r.text);
+  r = await call("edit_task", { task: "m1", task_type: "Inspection", custom: { Result: "Pass" } }, c);
+  eq("edit_task: a type change is audited as Type, then the fields", auditsOf(c).map((a) => [a.field, a.from, a.to]), [["Filter clean — Type", "—", "Inspection"], ["Filter clean — Result", "—", "Pass"]]);
+
+  c = ctxFor(ONE);
+  r = await call("log_work", { asset: "ms1", work_type: "Repair", custom: { "part number": "X-12" } }, c);
+  check("log_work: custom values ride on the work entry", !r.isError && c.writes[0].args[1].custom.cf_part === "X-12" && r.data.logged.custom["Part number"] === "X-12", r.text);
+  r = await call("log_work", { asset: "ms1", work_type: "Repair", cost: "50" }, c);
+  check("log_work: a switched-off built-in is refused", r.isError && /Cost.{1,3} switched off/.test(r.text), r.text);
+  r = await call("log_work", { asset: "ms1", work_type: "Purchase", custom: { "Part number": "X" } }, c);
+  check("log_work: a type without that field refuses it", r.isError && /no custom field/.test(r.text), r.text);
+  c = ctxFor(ONE);
+  r = await call("complete_task", { task: "m1", custom: { "Part number": "ignored" } }, c);
+  check("complete_task: custom fields follow the work type (Maintenance has none)", r.isError, r.text);
+  r = await call("complete_task", { task: "m1", work_type: "Repair", custom: { "Part number": "Z-9" } }, c);
+  check("complete_task: custom values land on the linked work entry", !r.isError && c.writes[0].args[2].custom.cf_part === "Z-9", r.text);
+
+  dev.config.pop();
+  dev.maintenance.pop();
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
