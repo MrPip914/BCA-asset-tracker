@@ -525,6 +525,7 @@ const COLUMN_DATA_TYPES = [
   { value: "number", label: "Number" },
   { value: "date", label: "Date" },
   { value: "select", label: "Choice list" },
+  { value: "multiselect", label: "Multiple choice" },
   { value: "reference", label: "Reference" },
 ];
 
@@ -578,6 +579,12 @@ function validateColumnValue(col, raw) {
     if (parsed.getUTCFullYear() !== yy || parsed.getUTCMonth() !== mm - 1 || parsed.getUTCDate() !== dd) {
       return `${col.label} is not a real date.`;
     }
+    return "";
+  }
+  if (kind === "multiselect") {
+    const opts = columnOptions(col);
+    const bad = multiValues(value).filter(v => !opts.includes(v));
+    if (opts.length && bad.length) return `${col.label} must be from: ${opts.join(", ")}.`;
     return "";
   }
   if (kind === "select") {
