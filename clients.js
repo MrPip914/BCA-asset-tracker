@@ -117,7 +117,13 @@
       // BCR/BCB labels on the live sheet, but those predate the counter and are
       // never issued by it — there is no per-type prefix scheme.
       labelPrefix: "BCA",
-      apiUrl: "https://script.google.com/macros/s/AKfycbzXaKRuCrTesxobxP-b2me1TSn0YoGogoYhNPTWU4qWWjXANXGlPuDzJSKGClOTsfOXRQ/exec",
+      // ON SUPABASE since 2026-10-12 (prod project): the asset-api Edge Function,
+      // which names the tenant in its query string. Both schools moved together.
+      apiUrl: "https://fdzrrrynttsbqofmbkja.supabase.co/functions/v1/asset-api?tenant=bca",
+      // The Apps Script /exec this school used before, KEPT as the fallback:
+      // open the site with ?backend=sheet to run against it. The two never share
+      // data, so it is for looking at the old copy or for an emergency.
+      sheetApiUrl: "https://script.google.com/macros/s/AKfycbzXaKRuCrTesxobxP-b2me1TSn0YoGogoYhNPTWU4qWWjXANXGlPuDzJSKGClOTsfOXRQ/exec",
     },
 
     // Throwaway data, its own Sheet, its own Apps Script deployment. This is what
@@ -144,7 +150,15 @@
       // is a readability loss and not a correctness one — but a screenshot from
       // dev now looks exactly like one from production.
       labelPrefix: "BCA",
-      apiUrl: "https://script.google.com/macros/s/AKfycbyMI_-SlWIYy1DxO0pjtAl31uQbWN5bFZLq9WMrTfrwHbeqNw4xfaGElEGdgT3yvUFI/exec",
+      // ON SUPABASE since 2026-10-09 (DATABASE_BACKEND_PLAN.md, rollout step 5):
+      // the asset-api Edge Function, which names the tenant in its query string.
+      apiUrl: "https://offremfwubxetpdkxtcy.supabase.co/functions/v1/asset-api?tenant=dev",
+      // The Apps Script /exec this tenant used before, KEPT and still deployable.
+      // It is the fallback, and it is the only place a change to
+      // AssetTrackerSync.gs can be tried before it reaches a school: open
+      // /dev/?backend=sheet to run the app against it. deploy.mjs deploys and
+      // verifies against this URL, never against apiUrl.
+      sheetApiUrl: "https://script.google.com/macros/s/AKfycbyMI_-SlWIYy1DxO0pjtAl31uQbWN5bFZLq9WMrTfrwHbeqNw4xfaGElEGdgT3yvUFI/exec",
 
       // NO `theme` here, deliberately, though a loud one would be the obvious
       // thing to give the dev tenant. It is the same argument as labelPrefix
@@ -190,7 +204,11 @@
       appName: "3C Asset Tracker",
       orgName: "Carlsbad Community Church",
       labelPrefix: "3C",
-      apiUrl: "https://script.google.com/macros/s/AKfycbxRVmaXDnIvEauIRXhotJwMC6TgFsRRWDBzfQzGfVdvm0aidrvb2V1geLkh3vpy7ZUh/exec",
+      apiUrl: "https://fdzrrrynttsbqofmbkja.supabase.co/functions/v1/asset-api?tenant=3c",
+      // The Apps Script /exec this school used before, KEPT as the fallback:
+      // open the site with ?backend=sheet to run against it. The two never share
+      // data, so it is for looking at the old copy or for an emergency.
+      sheetApiUrl: "https://script.google.com/macros/s/AKfycbxRVmaXDnIvEauIRXhotJwMC6TgFsRRWDBzfQzGfVdvm0aidrvb2V1geLkh3vpy7ZUh/exec",
     },
   };
 
@@ -300,6 +318,19 @@
     Object.keys(theme).forEach(function (key) { style.setProperty(cssVarName(key), theme[key]); });
   }
 
+  // ?backend=sheet runs a tenant that has moved to Supabase against its old
+  // Apps Script backend instead (see sheetApiUrl on the dev tenant). Ignored for
+  // a tenant that has no sheetApiUrl, i.e. one that never moved.
+  var useSheet = !!config.sheetApiUrl && (params.get("backend") || "").trim().toLowerCase() === "sheet";
+
+  // ?backend=prod, on a /dev/ build only, points a school that has a prodApiUrl at
+  // its copy in the prod Supabase project. It exists so a school's data can be
+  // looked at (and worked on) in the app before that school moves. The root site
+  // ignores it, so a link cannot send a school's live app to the preview.
+  var usePreview = isDevBuild && !!config.prodApiUrl
+    && (params.get("backend") || "").trim().toLowerCase() === "prod";
+  var backend = usePreview || (config.sheetApiUrl && !useSheet) ? "supabase" : "sheet";
+
   var theme = resolveTheme(config.theme);
   applyTheme(theme);
 
@@ -308,7 +339,15 @@
     appName: config.appName,
     orgName: config.orgName,
     labelPrefix: config.labelPrefix,
-    apiUrl: config.apiUrl,
+    apiUrl: usePreview ? config.prodApiUrl : useSheet ? config.sheetApiUrl : config.apiUrl,
+    // "sheet" (Apps Script) or "supabase": which backend apiUrl is.
+    backend: backend,
+    // True only when ?backend=sheet moved a tenant that HAS a database backend
+    // onto its Apps Script fallback. index.html badges the header with it.
+    onSheetFallback: useSheet,
+    // True when ?backend=prod put this /dev/ build on the school's prod copy.
+    // index.html badges the header with it.
+    onProdPreview: usePreview,
     isDefault: id === DEFAULT_CLIENT_ID,
 
     // The merged palette. index.html reads this straight into `C`; the two
@@ -340,7 +379,10 @@
      * adoptLegacyStorageKeys() there.
      */
     storageKey: function (base) {
-      return base + ":" + id;
+      // The Sheet fallback of a moved tenant gets keys of its own: its sessions
+      // mean nothing to Supabase, and sharing a key would read as a broken
+      // sign-in every time someone switched between the two.
+      return base + ":" + id + (useSheet ? ":sheet" : "") + (usePreview ? ":prod" : "");
     },
 
     /**

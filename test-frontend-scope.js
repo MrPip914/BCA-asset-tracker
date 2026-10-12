@@ -1,12 +1,11 @@
-// The location navigator (scopeId / scopeExact) survives a refresh: it is written
+// The location navigator (scopeId) survives a refresh: it is written
 // to the address bar and to localStorage, and read back with the URL winning.
 // Runs the real helpers out of index.html.
 //
 // Silent failures guarded: the tenant (`c=`) or the asset params being dropped
 // when the scope is written; a scope left in the URL after it is cleared (a
 // reload would re-apply a filter the user removed); the storage fallback
-// overriding an explicit URL; "Hide children" not travelling with the place;
-// the history STATE being replaced (it carries navDepth/backTo/homeDepth).
+// overriding an explicit URL; a retired `exact` param lingering; the history STATE being replaced (it carries navDepth/backTo/homeDepth).
 //
 // Run: node test-frontend-scope.js   (exits non-zero on failure)
 const fs = require('fs');
@@ -44,46 +43,44 @@ function eq(name, a, e) {
 }
 
 at('?c=dev&scope=B1&exact=1');
-eq('reads the scope and Hide children from the URL', readInitialScope(), { scopeId: 'B1', scopeExact: true });
-at('?scope=B1');
-eq('Hide children defaults off when the URL does not say', readInitialScope(), { scopeId: 'B1', scopeExact: false });
+eq('reads the scope from the URL, ignoring a retired exact param', readInitialScope(), { scopeId: 'B1' });
 
 store['scope-key'] = JSON.stringify({ scopeId: 'S1', scopeExact: true });
 at('?c=dev');
-eq('falls back to storage with no scope in the URL', readInitialScope(), { scopeId: 'S1', scopeExact: true });
+eq('falls back to storage with no scope in the URL (old entry shape still reads)', readInitialScope(), { scopeId: 'S1' });
 at('?scope=B1');
-eq('an explicit URL scope beats storage', readInitialScope(), { scopeId: 'B1', scopeExact: false });
+eq('an explicit URL scope beats storage', readInitialScope(), { scopeId: 'B1' });
 store['scope-key'] = '{not json';
 at('');
-eq('corrupt storage starts unscoped', readInitialScope(), { scopeId: '', scopeExact: false });
+eq('corrupt storage starts unscoped', readInitialScope(), { scopeId: '' });
 delete store['scope-key'];
-eq('nothing anywhere starts unscoped', readInitialScope(), { scopeId: '', scopeExact: false });
+eq('nothing anywhere starts unscoped', readInitialScope(), { scopeId: '' });
 
 at('?c=dev&asset=A1&tab=details');
-persistScope('B1', true);
-eq('writing keeps the tenant and asset params, adds scope + exact',
-  replaced.url, '/index.html?c=dev&asset=A1&tab=details&scope=B1&exact=1');
+persistScope('B1');
+eq('writing keeps the tenant and asset params, adds scope',
+  replaced.url, '/index.html?c=dev&asset=A1&tab=details&scope=B1');
 eq('the history state is passed through untouched', replaced.st, { navDepth: 2, backTo: 'X' });
-eq('storage is written too', JSON.parse(store['scope-key']), { scopeId: 'B1', scopeExact: true });
+eq('storage is written too', JSON.parse(store['scope-key']), { scopeId: 'B1' });
 
 at('?c=dev&scope=B1&exact=1');
-persistScope('B1', false);
-eq('unticking Hide children removes exact from the URL', replaced.url, '/index.html?c=dev&scope=B1');
+persistScope('B1');
+eq('an old link\'s exact param is stripped', replaced.url, '/index.html?c=dev&scope=B1');
 
 at('?c=dev&scope=B1&exact=1');
-persistScope('', false);
-eq('clearing the scope clears BOTH params, keeps the tenant', replaced.url, '/index.html?c=dev');
+persistScope('');
+eq('clearing the scope clears it (and exact), keeps the tenant', replaced.url, '/index.html?c=dev');
 eq('clearing the scope clears storage', 'scope-key' in store, false);
 
 replaced = null;
 at('?c=dev');
-persistScope('', false);
+persistScope('');
 eq('no change to the URL means no history write', replaced, null);
 
 // The one thing a unit test can't see: that the component actually wires these.
 eq('the component seeds scopeId from readInitialScope', /useState\(initialScopeRef\.current\.scopeId\)/.test(src), true);
-eq('the component seeds scopeExact from it too', /useState\(initialScopeRef\.current\.scopeExact\)/.test(src), true);
-eq('the component persists on change', /persistScope\(scopeId, scopeExact\)/.test(src), true);
+eq('the component persists on change', /persistScope\(scopeId\)/.test(src), true);
+eq('"Hide children" is gone', /scopeExact|Hide children —/.test(src), false);
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

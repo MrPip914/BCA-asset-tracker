@@ -200,10 +200,15 @@ const quote = (tab) => `'${String(tab).replace(/'/g, "''")}'`;
 // screen, as a string. getValues()/UNFORMATTED_VALUE would hand back a serial
 // number for any cell Sheets managed to interpret as a date, which is the exact
 // corruption the write path takes pains to avoid creating.
-export async function readGrid(sheetId, tab) {
+//
+// `render` exists for db/import-from-sheet.mjs, which passes UNFORMATTED_VALUE
+// so cells come back typed (a number as a number) the way Apps Script's
+// getValues() hands them to doGet -- the importer runs doGet's own code and has
+// to feed it what doGet would see.
+export async function readGrid(sheetId, tab, render = "FORMATTED_VALUE") {
   const res = await api(
     `${API}/${sheetId}/values/${encodeURIComponent(quote(tab))}` +
-    `?valueRenderOption=FORMATTED_VALUE&dateTimeRenderOption=FORMATTED_STRING`
+    `?valueRenderOption=${render}&dateTimeRenderOption=FORMATTED_STRING`
   );
   return res.values || [];
 }

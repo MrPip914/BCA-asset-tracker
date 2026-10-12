@@ -12,6 +12,13 @@
 #
 #   SUPABASE_DB_URL   the dev project's SESSION POOLER connection string
 #                     (postgresql://postgres.<ref>:<password>@aws-…pooler.supabase.com:5432/postgres)
+#   GOOGLE_SA_KEY     the contents of ~/.bca-asset-tracker-sheets.json (the
+#                     service-account key sheet.mjs uses), for the import
+#   SHEETS_TENANTS    the contents of ~/.bca-asset-tracker-sheets-tenants.json
+#                     (which Sheet is which tenant's)
+#   SUPABASE_ACCESS_TOKEN  a Supabase personal access token
+#                     (https://supabase.com/dashboard/account/tokens), which is
+#                     what deploys the asset-api Edge Function
 #
 # An ENVIRONMENT secret, not a repository secret, for the reason deploy-backend.yml
 # gives: only a job naming that environment can read it.
@@ -19,12 +26,31 @@
 # ---------------------------------------------------------------- WHAT RUNS WHEN
 #
 #   pull request touching db/   rehearse only. No secrets, safe for forks.
+#   (or supabase/, or index.html / clients.js, which the connector's rules are generated from)
 #   push to `dev` touching db/  rehearse, then apply to the dev database.
 #   manual run                  the same as a push (only once this file is on main,
 #                               which is where GitHub looks for dispatchable workflows).
 #
-# Production is deliberately NOT here. When a school moves, it gets its own
-# environment and a manual trigger, per the client-dispatch rule in CLAUDE.md.
+# `import` (dev) copies the dev tenant's Sheet into the database
+# (db/import-from-sheet.mjs), REPLACING what dev had. It only reads the Sheet.
+# Since 2026-10-09 the dev app saves to Supabase (clients.js), so an import now
+# ERASES real dev work, and it no longer runs on a push. It runs only from a
+# manual run of this workflow on `dev` with `reimport` set to `replace dev`.
+#
+# `deploy-api` deploys the asset-api Edge Function (supabase/functions/) to
+# the same project, then asks it two questions that prove it is up and can
+# reach the database. The dev tenant's app uses it (clients.js); every other
+# tenant still uses its Google Sheet.
+#
+# PRODUCTION (the schools' own Supabase project, GitHub environment
+# `supabase-prod`, same four secrets as dev) runs through THIS file too, but only
+# from a manual run with `target` set to `prod`. A push never touches it. A prod
+# run applies the migrations, deploys both functions and, when `prod_import`
+# names schools, copies their Sheets in. Nothing a prod run does changes which
+# backend a school's app uses: that is a clients.js edit on main, made separately.
+# A prod run is a client dispatch under the project's rule: only on Eric's say-so
+# in that turn. (It lives here rather than in a new file because a manual run can
+# only be started for a workflow file that already exists on main.)
 #
 # This repo is public, so run logs are world-readable: nothing below echoes the
 # connection string, and there is no `set -x`.
@@ -35,13 +61,36 @@ on:
   pull_request:
     paths:
       - "db/**"
+      - "supabase/**"
       - ".github/workflows/db-migrate.yml"
+      - "test-mcp-connector.mjs"
+      # The connector checks assets with the app's own rules, generated from
+      # these (supabase/functions/mcp/gen-app-rules.mjs). A PR changing them
+      # rehearses too, so a stale copy fails there and not on someone's
+      # unrelated database change later.
+      - "index.html"
+      - "clients.js"
   push:
     branches: [dev]
     paths:
       - "db/**"
+      - "supabase/**"
       - ".github/workflows/db-migrate.yml"
   workflow_dispatch:
+    inputs:
+      target:
+        description: "Which Supabase project. `prod` is the schools' live database."
+        type: choice
+        options: [dev, prod]
+        default: dev
+      prod_import:
+        description: 'prod only: school ids to copy from their Sheets into the prod database, replacing what prod holds for them (e.g. "bca 3c"). Blank = no import.'
+        required: false
+        default: ""
+      reimport:
+        description: 'Type "replace dev" to copy the dev Sheet over the dev database, erasing everything saved in the app since'
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -74,22 +123,39 @@ jobs:
         run: db/migrate.sh
       - name: Check isolation, append-only audit, and cascades
         run: psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f db/test-schema.sql
+      - name: Check the Claude connector's write functions
+        run: psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f db/test-connector-writes.sql
+      - name: Check the per-asset version triggers
+        run: psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f db/test-asset-versions.sql
+      - name: Check the Claude connector's backups and undo
+        run: psql "$DATABASE_URL" -X -v ON_ERROR_STOP=1 -f db/test-connector-backups.sql
+      - name: Check the importer against a fixture Sheet, loading it for real
+        run: node db/test-import.mjs
+      - name: Check the Claude connector's tools, and that its copy of the app's rules is current
+        run: node test-mcp-connector.mjs
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Check the API against the same fixture, including parity with the Sheet backend's read and save
+        run: deno test --allow-env --allow-read --allow-net --allow-sys supabase/functions/asset-api/
 
-  apply-dev:
+  # One job for both projects: the environment (and so the secrets) is chosen by
+  # `target`. A push has no inputs, so it is always dev.
+  apply:
     needs: rehearse
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     environment:
-      name: supabase-dev
+      name: ${{ inputs.target == 'prod' && 'supabase-prod' || 'supabase-dev' }}
     steps:
       - uses: actions/checkout@v4
-      - name: Apply to the dev database
+      - name: Apply to the ${{ inputs.target == 'prod' && 'PROD' || 'dev' }} database
         env:
           DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
           set -euo pipefail
           if [ -z "${DATABASE_URL:-}" ]; then
-            echo "::error::SUPABASE_DB_URL is not set on the supabase-dev environment. See the setup notes at the top of this workflow."
+            echo "::error::SUPABASE_DB_URL is not set on the ${{ inputs.target == 'prod' && 'supabase-prod' || 'supabase-dev' }} environment. See the setup notes at the top of this workflow."
             exit 1
           fi
           db/migrate.sh
@@ -98,3 +164,183 @@ jobs:
           DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
           psql "$DATABASE_URL" -X -A -c "select name, applied_at from asset_tracker.schema_migrations order by name"
+
+  # dev: only from a manual run with `reimport` = `replace dev`.
+  # prod: only from a manual run with target = prod and `prod_import` naming schools.
+  import:
+    needs: apply
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      ((inputs.target != 'prod' && inputs.reimport == 'replace dev') ||
+       (inputs.target == 'prod' && inputs.prod_import != ''))
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.target == 'prod' && 'supabase-prod' || 'supabase-dev' }}
+    steps:
+      - uses: actions/checkout@v4
+      # Secrets arrive through `env:` and are written to files with umask 077;
+      # nothing echoes them. The files live in RUNNER_TEMP and are deleted at
+      # the end whatever happened.
+      - name: Install the Sheets credential
+        env:
+          GOOGLE_SA_KEY: ${{ secrets.GOOGLE_SA_KEY }}
+          SHEETS_TENANTS: ${{ secrets.SHEETS_TENANTS }}
+        run: |
+          set -euo pipefail
+          for v in GOOGLE_SA_KEY SHEETS_TENANTS; do
+            if [ -z "${!v:-}" ]; then
+              echo "::error::$v is not set on the ${{ inputs.target == 'prod' && 'supabase-prod' || 'supabase-dev' }} environment. See the setup notes at the top of this workflow."
+              exit 1
+            fi
+          done
+          umask 077
+          printf '%s' "$GOOGLE_SA_KEY"  > "$RUNNER_TEMP/sa.json"
+          printf '%s' "$SHEETS_TENANTS" > "$RUNNER_TEMP/tenants.json"
+          check_json () {
+            python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$1" 2>/dev/null \
+              || { echo "::error::$2 is not valid JSON. Re-copy the whole file, including the outer braces."; exit 1; }
+          }
+          check_json "$RUNNER_TEMP/sa.json" GOOGLE_SA_KEY
+          check_json "$RUNNER_TEMP/tenants.json" SHEETS_TENANTS
+      # Each school is its own transaction and a failure stops the run, so a
+      # bad Sheet cannot leave a half-imported second school behind it. The ids
+      # come from an input, so they are checked against a strict pattern before
+      # they reach a shell, and `dev` is refused in prod.
+      - name: Import
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+          TARGET: ${{ inputs.target }}
+          PROD_IMPORT: ${{ inputs.prod_import }}
+        run: |
+          set -euo pipefail
+          if [ "$TARGET" = prod ]; then
+            tenants="$PROD_IMPORT"; flag="--i-mean-a-client"
+          else
+            tenants="dev"; flag=""
+          fi
+          for t in $tenants; do
+            [[ "$t" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "::error::\"$t\" is not a valid school id."; exit 1; }
+            if [ "$TARGET" = prod ] && [ "$t" = dev ]; then
+              echo "::error::The dev tenant does not belong in the prod database."; exit 1
+            fi
+          done
+          for t in $tenants; do
+            echo "=== $t ==="
+            BCA_SHEETS_KEY="$RUNNER_TEMP/sa.json" BCA_SHEETS_TENANTS="$RUNNER_TEMP/tenants.json" \
+              node db/import-from-sheet.mjs "$t" $flag
+          done
+      - name: Forget the credential
+        if: always()
+        run: rm -f "$RUNNER_TEMP/sa.json" "$RUNNER_TEMP/tenants.json"
+
+  deploy-api:
+    needs: apply
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.target == 'prod' && 'supabase-prod' || 'supabase-dev' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+      # The project ref is the part after "postgres." in the pooler URL's user
+      # name, so it needs no secret of its own.
+      - name: Deploy the asset-api Edge Function
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SUPABASE_ACCESS_TOKEN:-}" ]; then
+            echo "::error::SUPABASE_ACCESS_TOKEN is not set on the ${{ inputs.target == 'prod' && 'supabase-prod' || 'supabase-dev' }} environment. See the setup notes at the top of this workflow."
+            exit 1
+          fi
+          ref=$(node -e 'const u=new URL(process.env.DATABASE_URL); const m=/^postgres\.(.+)$/.exec(decodeURIComponent(u.username)); if(!m) process.exit(1); console.log(m[1])') \
+            || { echo "::error::Could not read the project ref from SUPABASE_DB_URL (expected a pooler URL whose user is postgres.<ref>)."; exit 1; }
+          echo "PROJECT_REF=$ref" >> "$GITHUB_ENV"
+          supabase functions deploy asset-api --project-ref "$ref" --no-verify-jwt
+          # The Claude connector. It imports asset-api's Google check, so the
+          # two always deploy together from the same commit.
+          supabase functions deploy mcp --project-ref "$ref" --no-verify-jwt
+      # Upload signing (sign.ts) needs the shared Cloudinary account's three
+      # secrets. Only their NAMES are checked; the listing, which also carries
+      # a digest of each value, is never printed. A warning, not a failure:
+      # nothing uses signing until the app is pointed at this backend.
+      - name: Check the Cloudinary secrets are set
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          names=$(supabase secrets list --project-ref "$PROJECT_REF" -o json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).map(x=>x.name).join(" ")))') \
+            || { echo "::warning::Could not list the Supabase Edge Function secrets, so the Cloudinary check was skipped."; exit 0; }
+          missing=""
+          for k in CLOUDINARY_CLOUD_NAME CLOUDINARY_API_KEY CLOUDINARY_API_SECRET; do
+            case " $names " in *" $k "*) ;; *) missing="$missing $k" ;; esac
+          done
+          if [ -n "$missing" ]; then
+            echo "::warning::Upload signing will answer 'not set up' until these Supabase Edge Function secrets are added:$missing"
+          else
+            echo "✓ All three Cloudinary secrets are set."
+          fi
+      - name: Ask the deployed function two questions
+        env:
+          TARGET: ${{ inputs.target }}
+          PROD_IMPORT: ${{ inputs.prod_import }}
+        run: |
+          set -euo pipefail
+          # The tenant the questions are asked as: dev, or in prod the first
+          # school this run imports. A prod database with no school in it yet
+          # answers "no such tenant", so those questions wait for the import.
+          if [ "$TARGET" = prod ]; then
+            tenant="${PROD_IMPORT%% *}"
+            [[ -z "$tenant" || "$tenant" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "::error::Not a valid school id."; exit 1; }
+          else
+            tenant="dev"
+          fi
+          url="https://$PROJECT_REF.supabase.co/functions/v1/asset-api"
+          # 1. The bare GET: is it up, and which contract version is it?
+          get=$(curl -sS --max-time 30 "$url")
+          echo "GET  -> $get"
+          node -e 'const r=JSON.parse(process.argv[1]); if(!r.scriptVersion) process.exit(1)' "$get"
+          if [ -n "$tenant" ]; then
+          # 2. A read with no session: reaching "sign in again" means it got
+          #    into the database as asset_api and found the tenant.
+          post=$(curl -sS --max-time 30 -H "Content-Type: text/plain" -d '{"op":"read"}' "$url?tenant=$tenant")
+          echo "POST -> $post"
+          node -e 'const r=JSON.parse(process.argv[1]); if(!(r.authFailed && r.reason==="signin")) process.exit(1)' "$post"
+          # 2b. A save with no session: the save route is live, takes the lock,
+          #     and refuses before writing anything.
+          save=$(curl -sS --max-time 30 -H "Content-Type: text/plain" -d '{"assets":[]}' "$url?tenant=$tenant")
+          echo "SAVE -> $save"
+          node -e 'const r=JSON.parse(process.argv[1]); if(!(r.authFailed && r.reason==="signin")) process.exit(1)' "$save"
+          # 2c. The whole audit log with no session: routed, and refused.
+          audit=$(curl -sS --max-time 30 -H "Content-Type: text/plain" -d '{"op":"auditFull"}' "$url?tenant=$tenant")
+          echo "AUDIT -> $audit"
+          node -e 'const r=JSON.parse(process.argv[1]); if(!(r.authFailed && r.reason==="signin")) process.exit(1)' "$audit"
+          # 2d. An upload signature with no session: refused before signing.
+          upload=$(curl -sS --max-time 30 -H "Content-Type: text/plain" -d '{"op":"photoSign"}' "$url?tenant=$tenant")
+          echo "SIGN -> $upload"
+          node -e 'const r=JSON.parse(process.argv[1]); if(!(r.authFailed && r.reason==="signin")) process.exit(1)' "$upload"
+          # 2e. The backend log with no session: refused.
+          dlog=$(curl -sS --max-time 30 -H "Content-Type: text/plain" -d '{"op":"diagnostics"}' "$url?tenant=$tenant")
+          echo "DIAG -> $dlog"
+          node -e 'const r=JSON.parse(process.argv[1]); if(!(r.authFailed && r.reason==="signin")) process.exit(1)' "$dlog"
+          # 2f. The anonymous panel read: routed, reaches the tenant, and says
+          #     nothing about a code that names no panel.
+          pnl=$(curl -sS --max-time 30 "$url?tenant=$tenant&panel=no-such-panel")
+          echo "PANEL -> $pnl"
+          node -e 'const r=JSON.parse(process.argv[1]); if(r.error!=="No electrical panel found for that code.") process.exit(1)' "$pnl"
+          echo "✓ asset-api is up on $TARGET and reaches the database."
+          else
+            echo "::notice::No school in the prod database yet, so the tenant questions were skipped. Run again with prod_import set after the first import."
+          fi
+          # 3. The connector: a question with no token must be refused with a
+          #    pointer to its sign-in metadata, and that metadata must load.
+          mcp="https://$PROJECT_REF.supabase.co/functions/v1/mcp"
+          code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"ping"}' "$mcp")
+          echo "MCP POST (no token) -> $code"
+          [ "$code" = "401" ] || exit 1
+          meta=$(curl -sS --max-time 30 "$mcp/.well-known/oauth-authorization-server")
+          echo "MCP metadata -> $meta"
+          node -e 'const r=JSON.parse(process.argv[1]); if(!(r.token_endpoint && r.code_challenge_methods_supported.includes("S256"))) process.exit(1)' "$meta"
+          echo "✓ the Claude connector is up on $TARGET and asks for sign-in."

@@ -551,6 +551,351 @@ failure modal and the sign-in screen both said *that* it happened and kept nothi
   picking a time window, View, Download, the disabled state with nothing ticked, and
   About surviving a close — was driven in Chromium against a mocked backend.
 
+## Claude connector (`supabase/functions/mcp/`, started 2026-10-08)
+
+A remote MCP server, as a Supabase Edge Function, so Claude (web, desktop, phone) can
+answer questions from the inventory. The evaluation behind it is
+`/mnt/project-files/evaluations/claude-connector.md`. **Dev tenant only. Reads, four
+additive writes (2026-10-09: add a task, log a task completion, log work, add a comment),
+and MANAGEMENT (2026-10-09, Eric: "manage all assets and tasks… adding items in bulk and
+reviewing data to make recommendations"): create and edit assets in bulk, archive and
+restore them, add tasks in bulk, edit and delete tasks.** Nothing is permanently deleted
+but a task; editing a work entry is not offered.
+
+- **Sign-in is OAuth whose only proof of identity is the app's Google sign-in**
+  (`oauth.js`). Claude registers, `/authorize` redirects to `mcp-connect.html` on the app
+  origin (the only origin Google sign-in is registered for; Supabase will not serve HTML),
+  the page posts the Google ID token to `/authorize/complete`, which checks it with the
+  same `verifyGoogleIdToken` the Supabase backend uses and requires at least one site, and
+  Claude trades the code (PKCE S256) for an hour's access token and a 30-day refresh.
+  - **Stateless: every client id, request, code and token is HMAC-signed JSON**, so there
+    is no table. A token cannot be revoked by itself, which is why access is re-read from
+    the allowlists on EVERY request and on every refresh — removing someone works on their
+    next question, as in the app.
+  - **The connect page PINS the connector URL.** Reading it from the link would let a
+    crafted link collect a Google token that also signs into the app.
+  - **Codes only go back to Claude's own callbacks or a loopback address**, checked at
+    registration, at authorize, and again by the page.
+  - Discovery is served under the function itself (`/functions/v1/mcp/.well-known/...`),
+    since the supabase.co root is not ours; the 401 names it in `WWW-Authenticate`.
+  - The signing key derives from the service role key unless `MCP_SIGNING_KEY` is set
+    (Supabase > Edge Functions > Secrets). Changing either signs everyone out of Claude.
+  - Deployed by `deploy-api` beside `asset-api`, from the same commit, since it imports
+    `asset-api/auth.ts`.
+- **Built on the Phase 1 tables, never on Apps Script.** Apps Script cannot send the status
+  codes and headers an MCP sign-in needs, and every Claude request would meet Google's
+  intermittent failures.
+- **Everything that decides an answer is plain JS** (`protocol.js`, `tools.js`,
+  `inventory.js`, `from-app.js`) so `test-mcp-connector.mjs` drives it in Node with
+  fixture rows. `index.ts` is only HTTP and SQL. The MCP protocol is hand-written
+  (stateless streamable HTTP, JSON replies) rather than the SDK, per the no-dependency rule.
+- **`from-app.js` is a VERBATIM copy of the app's task due-date rules and `cellsLabel_`**,
+  pinned by the test the way `panel.html`'s copies are. Change `index.html`, then re-copy.
+- **A tenant is named per tool call (`site`)**, and a person sees only the sites whose
+  allowlist (or owner) names them, re-read on every request. "No such site" and "not
+  yours" are the same answer. Every read sets `app.tenant_id` first, so row-level security
+  separates tenants underneath; the function must connect as an `asset_api` login role,
+  never the service role.
+- **Reads are annotated read-only; the writes are annotated as writes, and the ones that
+  overwrite or remove (save_assets, archive_assets, edit_task, delete_task, replace_floor_plan, set_plan_walls,
+  undo_change) as destructive**, so Claude asks before each one unless the person told it to always allow
+  that tool. A write marked read-only would run unasked, which `test-mcp-connector.mjs`
+  guards.
+- **Every write is ONE Postgres function** (`db/migrations/0006_connector_writes.sql`),
+  never a direct table write from the connector — that is `sheet.mjs`'s bypass all over
+  again. In one transaction it re-checks the role (owner or allowlisted editor, re-read),
+  **bumps the `assets` revision FIRST** (that UPDATE is the row lock every save takes, and
+  the bump is what makes an open browser reload instead of overwriting the change), checks
+  the asset is live and in this tenant, writes, and stamps `by` as "<name> (via Claude)".
+  - **It audits exactly what the app audits**: a completion writes the
+    `maintenance_completed` row (`from`/`to` in the app's "Oct 9, 2026" wording); adding a
+    task, logging work and commenting carry their own at/by and write no audit row, as in
+    the app.
+  - **JS builds the record, SQL enforces the rules that must hold whatever JS sent.**
+    `tools.js` shapes the task or work entry with the app's own code (presets and repeat
+    rules copied verbatim into `from-app.js`), resolves work types and vendors against the
+    site's managed lists (a value the list lacks is refused, not added), and finds a task
+    by id or by name — two tasks with one name is an error listing both.
+  - **A refusal meant for the person starts `connector: `** in the SQL; `index.ts` turns it
+    into the tool's answer. Anything else stays a vague failure.
+  - **A record goes to Postgres as `::text::jsonb`**: postgres.js JSON-encodes a parameter it
+    infers as jsonb, so a bare `::jsonb` stores a JSON *string*. Tested.
+  - **"Today" is the site's day** (`SITE_TIME_ZONE`, America/Los_Angeles), not UTC's.
+  - Covered by `db/test-connector-writes.sql` (CI, real Postgres, as the API role) and
+    `test-mcp-connector.mjs` (the tools, against a fake `ctx.write`).
+  - **The dev app reads and saves Supabase since 2026-10-09**, so a write is real dev data.
+    The Sheet importer no longer runs on a push, since it replaces the tenant wholesale;
+    it runs only from a manual `Database migrations` run with `reimport` = `replace dev`.
+- **Asset writes go through the app's OWN import planner, not a copy of its rules**
+  (2026-10-09). `save_assets` builds a spreadsheet-shaped set of rows and hands it to
+  `planAssetImport`, so a row from Claude is checked exactly as an imported row is — type,
+  per-type fields, data types, tags unique across the whole inventory, parent types and
+  loops against the PROJECTED inventory, a parent created by another row in the same call,
+  people resolved only in id mode — and audited exactly as an import is (one `edited` row
+  per field, one `created` row per asset). Errors refuse the whole call.
+  - **`app-rules.js` is GENERATED** from `index.html` by `gen-app-rules.mjs` (~75 sliced
+    declarations: the type registry and settings, naming, the parent chain, data types, the
+    import planner) plus each tenant's tag prefix from `clients.js`. **Change either file,
+    re-run the generator.** `test-mcp-connector.mjs` fails on a stale copy and on any name
+    the slice uses but does not declare (that is how `DEFAULT_PARENT_TYPES` was found
+    missing: a ReferenceError only on a user-made type). CI rehearses PRs touching
+    `index.html`/`clients.js` for that reason.
+  - **`appView()` (asset-writes.js) rebuilds the inventory the way `applySnapshot` does** —
+    column migration, `applyTypeSettings`, the type list, the id/tag/personIds/name
+    adoptions, `usersAreAssets` — because the planner must see what the app sees.
+  - **The type settings are MODULE STATE, as in the app**, so everything from `appView()`
+    to the plan runs with no `await` between. Concurrent requests share an isolate.
+  - **An update row changes only the fields it names.** A spreadsheet's columns are
+    file-wide and a blank cell clears, so every other column some row sets is filled with
+    the asset's CURRENT cell (`assetToImportRow`); the parent goes as its id, which
+    resolves back to itself without needing a unique path.
+  - **Status is not settable there**: archive/restore is `archive_assets`, which writes the
+    app's `archived`/`restored` rows.
+  - Tasks: `add_tasks` (bulk, all-or-nothing), `edit_task` (only the fields given; the app's
+    `maintenance_edited` row per field, "Completed" for a one-off's date, which is also how
+    a finished one-off is reopened), `delete_task` (`maintenance_removed`).
+  - **Every management write is ONE call to `connector_apply`** (`0007_connector_manage.sql`),
+    a list of ops applied whole or not at all. **It refuses if the `assets` (and, when
+    touched, `config`) revision is not the one the tools read** — the read loads the
+    revisions FIRST — because the plan was made against that picture; then it moves them on
+    like any save. It stamps every audit row's at/by itself, keeps a task's original at/by
+    on edit, keeps `nextAssetNumber` monotonic, allows only three config keys
+    (`nextAssetNumber`, `peripheralsList`, `bulkItemTypes`), and refuses two assets ending
+    up with one tag. An asset's `data` is written whole in the save's shape (`ASSET_FIELDS`
+    pinned to `save-shape.ts` by test).
+  - `get_schema` is what Claude reads first; `search_assets` takes `include_fields` (up to
+    1000 rows) for reviews.
+- **`replace_floor_plan` is the Map tab's Replace** (2026-10-09, migration 0008). Claude
+  sends the whole SVG as text; the tool reads its spaces, carries every link and group onto
+  the new plan's shapes with the app's own `floorPlanRemapLinksAndGroups` (copied verbatim
+  into `from-app.js`, so by id, then by `Space.N` title; a wall segment rides on its
+  space), uploads the file to Cloudinary from the Edge Function, then makes ONE call to
+  `connector_replace_floor_plan`, which sets the three plan fields, rewrites the asset's
+  `space_links`/`space_groups`, and writes the app's `floor_plan_replaced` row.
+  - **There is no DOMParser in an Edge Function**, so `floorplan.js` is a small tag reader
+    answering only what a replace asks: which groups are spaces (own `<title>` starting
+    "Space", a path or rect with three points) and their gid/title. Checked against the
+    app's `parseFloorPlanSvg` in Chromium on all eight real plans when written; the test
+    pins the one subtle case (a nested title ahead of the group's own).
+  - **The old plan is fetched to learn its titles, only from `res.cloudinary.com`** — the
+    url comes from a stored row, which is not a licence to fetch anything. Unreadable is a
+    note, not a refusal: only unchanged ids carry over, as in the app.
+  - Bytes first, row second (the app's order); the SQL refuses any url that is not the
+    host's. Places only. `dry_run` uploads nothing and lists what would be dropped.
+  - Uses the same three `CLOUDINARY_*` secrets as `asset-api`'s signing, and the tenant's
+    `cloudinary_folder`.
+- **`get_plan_walls` / `set_plan_walls` are the Map tab's Walls setup** (2026-10-09,
+  migration 0009), built so Claude can give each building a North/South/East/West wall by
+  sorting its outside edges by facing.
+  - **The outside-edge rule is the APP'S**: `floorPlanExteriorSegments`,
+    `floorPlanSetWallSegments` and the geometry under them (transform chain, rotation,
+    point-in-polygon, bbox) are copied verbatim into `from-app.js` and pinned, so a segment
+    id the connector offers is exactly one the Map tab draws. **Change that rule in
+    `index.html` and the test fails until it is re-copied.** `floorplan.js`'s
+    `floorPlanGeometryOf` carries points through ancestors' transforms as
+    `parseFloorPlanSvg` does (starting at the geometry's PARENT); it matched the app in
+    Chromium on all seven real plans, at rotation 0 and 1.
+  - **It also takes the app's `floorPlanWallCoverSet`** (PR #41): on a plan that is not a
+    building's own, only a space linked into a building closes off an edge. Computed from the
+    plan's links to shapes the drawing still has, exactly as the Map tab does.
+  - **Facing is the connector's own**: the outward normal as a bearing, nearest of the four,
+    with north = UP on the plan as the app shows it, after `floorPlanRotation`. The app has
+    no north, so that is the only honest reading.
+  - **Each entry is a wall's COMPLETE set of edges on that plan** (segment ids, or a space
+    plus a facing). A new wall is created through `planSaveAssets` (the import planner:
+    legal parent, `created` audit row), parented to what its space is linked to; `wall` +
+    `name` renames. An edge owned by a wall NOT in the change is refused, never taken;
+    every named wall is cleared first, so moving an edge between named walls works.
+    `remove` takes a wall off the plan and keeps the asset, as the app's unlink does.
+    `auto` (a list of spaces) expands to one new wall per facing that has edges, named
+    "<linked name> North Wall" etc. -- the building-walls case in one call.
+  - **One call to `connector_set_plan_walls`**, which runs `connector_apply` (role, the
+    revision, new walls, the app's `space_linked`/`space_unlinked` rows) and then rewrites
+    only the named walls' segment rows, refusing an edge still owned by any other row. A
+    room link on the same plan is never touched.
+- **Every bulk change through the connector takes a BACKUP first, and `undo_change` puts
+  one back** (2026-10-10, migration 0010; Eric: "always take a backup before doing bulk
+  edits"). The write tools return the number as `backup`; `list_backups` lists them.
+  - **Taken INSIDE the write functions**, in the same transaction as the change —
+    `connector_apply` (so save_assets, archive_assets, add_tasks, edit_task, delete_task),
+    `connector_replace_floor_plan` and `connector_set_plan_walls` — so no tool can write
+    without one, and a refused write leaves none. The four single-record writes of 0006
+    are additive and take none.
+  - **A backup holds RECORDS, each before and after**: an asset row (null before = the
+    change created it), an asset's whole task list, a plan's links and groups, a managed
+    list. Never `nextAssetNumber`, which only climbs. Calls in one transaction share one
+    backup (keyed by txid) and a record keeps the FIRST before it was seen with, which is
+    what makes set_plan_walls (connector_apply, then the plan's edges) one backup.
+  - **The tool's name rides in the transaction setting `connector.tool`**, set by
+    `index.ts`'s `write()`, because `connector_apply` serves five tools and its 0007
+    signature is shared.
+  - **Undo restores a record only where it still reads as the change left it.** A record
+    changed again since (in the app or by Claude) refuses the whole undo, naming it, unless
+    `overwrite_later_changes` — Claude is told to ask first. "The same" ignores blank,
+    null and empty-list fields at any depth (`connector_backup_norm`), because the app's
+    full-snapshot save writes every field and must not read as a later change.
+  - **An asset the change CREATED is archived, never deleted**, with the app's `archived`
+    row. Every asset put back gets one `backup_restored` row in the app's generic
+    "X changed from A to B" shape. Restoring a tag another asset has since taken is refused.
+  - **An undo takes its own backup**, so an undo can be undone; undoing one twice is refused.
+  - The newest 200 per site are kept. Covered by `db/test-connector-backups.sql` (CI, real
+    Postgres, as the API role; mutation-checked) and the tools in `test-mcp-connector.mjs`.
+- **Names are not unique, so a lookup is tiered** (id, tag, name, full path) and two
+  matches is an error listing both with their locations, never the first one.
+- **The whole tenant is loaded per call.** Fine at hundreds of assets; the audit log is the
+  table that will make it slow, and the fix then is filtering it in SQL.
+
+## Live refresh (Supabase tenants, 2026-10-09)
+
+Another person's save appears without a reload (`DATABASE_BACKEND_PLAN.md`, Phase 2a).
+While the tab is visible the app sends `op:"revisions"` every minute, and at once on
+focus or when the tab comes back. That answers the four revision counters and nothing
+else. Only when one has moved past this device's does it run a quiet `op:"read"` (no
+loading screen) and apply it through `applySnapshot`, the same as a load.
+
+- **Supabase only (`LIVE_REFRESH_SUPPORTED`), and the gate is load-bearing.** The Apps
+  Script `doPost` reads an op it does not know as a SAVE, so the check must never reach
+  it. Every Apps Script tenant and `/dev/?backend=sheet` keep manual refresh.
+- **HELD WHILE SOMEONE IS EDITING, because a refresh moves `revisions`.** Moving them
+  under an open draft turns the conflict that draft's save would have raised into a
+  silent overwrite of the other person's change. `liveRefreshHeld` holds on the inline
+  forms (named in `formOpen`), a write in flight, a focused text field, and ANY
+  `position: fixed; inset: 0` overlay. Every modal and menu in this app is one, which
+  covers child components' own drafts without a list to keep in step. **A new overlay
+  built some other way, or a new inline form, must join `formOpen`.** A held change is
+  applied on the first 5-second tick after the form closes.
+- **A read older than this device is discarded** (`revisionsBehind`). This covers a save
+  of this device's landing while the read was in flight. A device's own save never
+  triggers a read, since its reply already moved `revisions`.
+- One attempt per check (no retries), silent on failure. An `authFailed` goes through
+  `loadData()`, which signs out properly. A backend that answers "isn't available"
+  (deployed before this op) is not asked again that session.
+- Cost: ~1,000 checks per open device per day, against the free tier's 500k function
+  calls a month. Re-measure before a school moves.
+- Covered by `test-frontend-live-refresh.js` (helpers run for real, wiring read as
+  source, mutation-checked) and an `api_test.ts` case for the op. Driven in Chromium
+  against the real function on a local Postgres: a change elsewhere appears on focus,
+  stays held while the edit form is open and lands on Cancel; an idle check costs one
+  tiny request; the device's own save triggers no read; the Sheet backend never sees
+  the op.
+
+## Per-record saves (Supabase tenants, 2026-10-09)
+
+A save to a Supabase tenant names only the assets it changed (`DATABASE_BACKEND_PLAN.md`,
+Phase 2b). `persist()` diffs the asset list by reference and posts
+`assetChanges: { upsert, remove }`, each asset carrying the version (`_rev`) it was read
+with. The backend refuses only when one of THOSE assets moved, so two people saving
+different assets both land. A whole-snapshot save is refused on the whole assets domain
+instead, and still is for anything that takes that path.
+
+- **Supabase only (`PER_RECORD_SAVES`), the same gate as live refresh.** An Apps Script
+  backend does not know `assetChanges` and would read the body as a save of no assets.
+- **The version lives in triggers (migration 0007), not in any writer's code.** A row
+  trigger moves `assets.rev` on a content change (not `position`), and statement triggers
+  on every child table move the owner once. So a full-snapshot save from an older build,
+  the connector's functions, the importer and a hand edit all move it, and none can be
+  overwritten silently by a per-record save that never saw them.
+- **The read carries `_rev` per asset; `applySnapshot` strips it into `assetRevsRef`**, so
+  nothing else sees or saves it. It is read at SEND time, inside the write queue, and a
+  save's new versions (`assetRevs` in the reply) are stamped in the same chain, so a
+  second save of the same asset queued behind the first posts the version the first made.
+- **What cannot be named by reference falls back to the whole snapshot**: the same
+  entries in a fresh array (`attachPhotos`' `assets.slice()`), a reorder, or an audit log
+  that is not the held one with entries appended (the full history fetched since). The
+  backend still takes that body, domain-checked as before.
+- **The body carries only what is written**: the changes, `auditAppend` (only the new
+  entries, appended as sent, since the offset a whole save uses cannot hold when two
+  saves of different assets both land), and config, breaker types or photos only when
+  dirty. The write is scoped: a row of an asset the save does not name is never deleted.
+- **A new asset must not exist yet**, which makes a retried request a conflict, not a
+  duplicate. Removing an already-removed asset is not a conflict. Removing every asset at
+  once is refused, as in a whole save.
+- **REVISIONS ARE ADOPTED ONLY WHEN THEY ARE THIS SAVE'S OWN** (`adoptSavedRevisions`): a
+  written domain moves only if the server's number is exactly one past the held one. A
+  domain someone else bumped in between keeps the held number, so live refresh fetches
+  their change and a later save of that domain is checked against it. Adopting it would
+  let that save overwrite them silently. The whole-snapshot path still adopts everything,
+  which is that bug (`BUGS.md`).
+- **What it does not fix**: two people CREATING assets at once still conflict, on the
+  config domain's `nextAssetNumber`. Photos stay one domain.
+- Covered by `test-frontend-per-record.js` (helpers run for real, wiring read as source,
+  mutation-checked), `save_test.ts`'s per-record cases, and `db/test-asset-versions.sql`.
+  Driven in Chromium against the real function on a local Postgres: two pages saving
+  different assets both land; a third, stale on the same asset, gets the not-saved modal.
+
+## Relationships tab (2026-10-10)
+
+Each asset can show a **Relationships** tab listing assets related to it by named
+queries its TYPE defines ("HVAC" on a Room: the units inside it, then whatever
+points at each unit through a Controls field). The plan behind it is
+`/mnt/project-files/plans/relationships-tab.md`. **Frontend only: no backend
+change, no version bump, no deploy.**
+
+- **Queries live in `typeSettings[id].relationshipQueries`**, a property on an
+  existing Config blob, so it cost no release (Supabase stores Config as a blob
+  too). Shape: `{ id, name, steps: [{ follow, typeIds, fieldKey, show }],
+  includeArchived, hideWhenEmpty }`.
+- **One chain of 1-3 steps, no branching** (Eric took the recommended defaults).
+  A step follows one of `RELATIONSHIP_FOLLOWS`: children, anywhere inside,
+  parent, the nearest ancestor of a type, forward or REVERSE through a Reference
+  field, a device's users, or what a person uses. `typeIds` narrows a step,
+  except on "nearest", where it IS the target type. **A hidden step is walked
+  through**: what the next step finds is lifted to where it would have been. The
+  builder forces the last step shown, since a hidden last step shows nothing.
+- **`runRelationshipQuery` is pure** and builds one index per run (children by
+  parent, who points at whom per Reference field, who uses whom). Three rules:
+  an asset already shown is not shown again (under the first parent that reached
+  it); the asset itself and anything already on the path are never results,
+  which cuts every loop a reference can make; and "anywhere inside" nests its
+  results by containment, so the tree reads like the hierarchy.
+- **Contents is a BUILT-IN query on every place type** (`BUILT_IN_CONTENTS_QUERY`,
+  never stored), listed first. The old Contents tab stays beside it in v1; the
+  query does not list bulk-item allocations (not parent links), so its count can
+  be lower than the Contents tab's. Replacing Contents is step two.
+- **The tab appears when the type has a query to run** (its own, or Contents on a
+  place) — `availableTabsFor`.
+- **The builder (`RelationshipQueryEditor`) is reached two ways**: "Edit <Type>
+  queries" on the tab (saves at once through `saveRelationshipQueries`, MERGING
+  into the stored override, with that asset as the live preview), and the type
+  editor's Relationships row (folds into the editor's draft, so the editor's Save
+  stays one commit). Editors only.
+  - **`saveTypeSettings` rebuilds the whole settings object, so it CARRIES the
+    stored queries** when the draft did not touch them. Leaving that out would
+    delete every query on any unrelated type edit. Tested.
+  - **"Reset to default" keeps a type's queries** — none ship, so they are not a
+    default to reset to.
+- **A field step only offers Reference fields that can match**
+  (`relationshipFieldOptions`): forward, fields the step's source types carry;
+  reverse, fields that can point AT them. The source types are the owner type
+  for step 1, else the previous step's type filter, else a forward field's target.
+  `referenceTargetTypes` reads `referenceTypes` (a list) as well as
+  `referenceType`, ahead of Reference fields allowing several types.
+- **A stored query is cleaned on read** (`relationshipQueriesFor`): an unknown
+  follow or a field step with no field is dropped rather than run as something
+  else, and at most three steps run.
+- `MOCK_SNAPSHOT` carries a `Thermostat` type with a `controls` Reference field
+  (-> Mini Split), a thermostat in Room 102 pointing at its mini split, a Room
+  "HVAC" query (down, then back along the field) and a Mini Split "Controlled by"
+  query. Room's override holds ONLY queries, so the location fallback for a
+  settings object with nothing else in it is exercised.
+- Covered by `test-frontend-relationships.js` (the real runner against a fixture
+  with a parent loop, an archived unit and a two-type reference field),
+  mutation-checked (dedupe, the hidden-step lift, the loop cut, the `referenceTypes`
+  read). The tab, both builder entry points, saving and a reload were driven in
+  Chromium against Sandbox.
+- **"Circuits that serve it" (`follow: "circuits"`, 2026-10-11)** lists the panel circuits
+  whose `roomsServedIds` contain the place, as the tree's first NON-ASSET rows
+  (`{ circuit, breaker, panel }`; row shows slot, amps, description, panel, and opens the
+  panel). Breakers and circuits are not assets, so the step is TERMINAL (`terminal: true`
+  in `RELATIONSHIP_FOLLOWS`): last step only, no type filter, nothing after it runs, and a
+  stored query with it mid-chain is cleaned. Deduped by circuit id; an archived panel's
+  circuits need `includeArchived`. `relationshipIndex` builds `circuitsServing` from each
+  asset's `breakers`/`unassignedCircuits`. Frontend only. The connector's `app-rules.js` was
+  regenerated (it now slices `cellsLabel_`) and `get_relationships` prints circuit rows.
+  Sandbox's Room carries a "Breakers feeding this room" query.
+- The rest of the connector's query support is queued in
+  `/mnt/project-files/connector-queue.md`.
+
 ## Local Sandbox mode
 
 Sandbox swaps the real Google Sheet for a local fixture (`MOCK_SNAPSHOT` in
@@ -708,6 +1053,27 @@ onboard one.
   allowlist answers "may they in". Holding a client id authorizes nothing, so one client
   leaks nothing between tenants, and it keeps the authorized-JavaScript-origins list to one
   entry rather than one per school.
+- **The dev tenant runs on Supabase (2026-10-09), the others on Apps Script.** Its
+  `apiUrl` in `clients.js` is the `asset-api` Edge Function (`?tenant=dev`), and its old
+  `/exec` is kept as `sheetApiUrl`. **`deploy.mjs` and the `Deploy backend` workflow still
+  deploy dev's Apps Script project, and verify against `sheetApiUrl`** — that fallback is
+  the only place a `.gs` change can be tried before a school. To drive the app against it,
+  open `/dev/?backend=sheet` (its `localStorage` keys get a `:sheet` suffix, so its
+  sessions never meet Supabase's). Everything else about block B above is unchanged.
+  **The header shows a `Sheet` pill beside `Dev` while on that fallback**, and the
+  diagnostics file names the backend kind after its version. `navUrl()` keeps every param,
+  so one link carrying `?backend=sheet` held a session on Apps Script with 5–7s saves and
+  nothing on screen saying so (2026-10-09).
+- **bca and 3c moved to Supabase together on 2026-10-12** (the prod project, ref
+  `fdzrrrynttsbqofmbkja`). Their `apiUrl` is the prod `asset-api`; their old `/exec` is kept as
+  `sheetApiUrl`, so `?backend=sheet` is the fallback (the two never share data). Reverting a school
+  is a one-line `clients.js` edit on main; there is no database-to-Sheet copy-back yet. The
+  `prodApiUrl` / `?backend=prod` preview below stays in the code for any later tenant.
+- **`/dev/?c=<school>&backend=prod` opens a school's copy in the prod Supabase project**
+  (2026-10-12; `prodApiUrl` on `bca` and `3c`). Honoured on the /dev/ build only, so a link
+  cannot send a school's live app there; the header shows a `Prod copy` pill and storage keys
+  get a `:prod` suffix. It is for looking at (and trying things on) the copy before a school
+  moves -- the school itself still runs on its Sheet until `apiUrl` is flipped on main.
 - **Every `localStorage` key is namespaced by tenant** (`CLIENT.storageKey()` →
   `asset-tracker-session:bca`). All tenants share one origin, so without it opening client B
   after client A hands B's backend A's session id — rejected correctly, so not a hole, but
@@ -718,8 +1084,8 @@ onboard one.
   `DEFAULT_CLIENT_ID` ever changed. **The adoption is default-tenant-only** — the bare keys
   were written when there was one tenant, so they belong to whoever the default is; adopting
   them for an arbitrary `?client=` would hand a second school the first one's session.
-- **The location navigator survives a refresh** (2026-09-28). `scopeId` and `scopeExact`
-  ("Hide children") are written to the address bar (`?scope=<id>&exact=1`, by
+- **The location navigator survives a refresh** (2026-09-28). `scopeId` is written
+  to the address bar (`?scope=<id>`, by
   `replaceState`, never a push) and to per-device `localStorage`
   (`asset-tracker-scope:<tenant>`); the URL wins when it names a scope, storage is the
   fallback for a bare open. `navUrl()` rebuilds from the current search string, so the
@@ -1357,6 +1723,37 @@ onboard one.
   the one thing that lived there besides the count (clearing an active sort) moved to a small ×
   chip next to the sort arrow on the sorted column's own header; on Maintenance, the overdue
   count that lived there is now a standalone badge above the table.
+- **ONE MENU, top right, and one Settings page** (2026-10-10; plan at
+  `/mnt/project-files/plans/single-menu.md`). The header ☰ replaced the account button,
+  the tab row's ☰ and the panel Layout's ☰. Several passages below describe those older
+  menus; their reasoning still holds, but this is where the controls now live.
+  - **The menu is three parts: this screen's rows, Settings, then You** (identity, Set
+    name, Enter sandbox, Name format, About, Sign out). A screen contributes its rows by
+    portalling them into a slot the menu card renders: `AppMenuContext` holds `{ slot,
+    close }` and `AppMenuScreenRows` portals a titled section into it. That is the map's
+    old shared-slot pattern, generalised — so the map, the floor plan tab and the panel
+    Layout tab keep their own state and handlers and only their rows moved. A screen with
+    nothing to offer renders nothing, and the heading disappears with it.
+  - **Settings is a full-screen overlay** (zIndex 25: above the headers and the menu,
+    below every dialog, so a manager's own pickers still stack over it), with sections
+    from `SETTINGS_SECTIONS`: Types & fields, Relationships, Lists, Electrical, Access,
+    Personal, About & diagnostics. Editors see all of them; viewers see Personal and
+    About only, the editor sections HIDDEN rather than greyed out.
+  - **It is in the address bar** (`?settings=<section>`, a PUSHED history entry carrying
+    `settings: true`), so a setting can be linked and phone Back closes it. The popstate
+    handler checks it FIRST, before any asset navigation. An unknown section opens the
+    section list rather than refusing.
+  - **Each section reuses the existing manager's body**, through `ManagerFrame` — a modal
+    when opened from a field's gear, an embedded card on the Settings page. **The field
+    gears were kept as shortcuts** and open the same code in place, mid-form, which is
+    when someone needs to add a vendor.
+  - **Columns is split.** Which columns are SHOWN (per-device) stays in the Assets screen
+    rows; adding or deleting a custom column changes data and moved to Types & fields.
+    The delete confirmation (`deleteColumnModal`) renders from both views for that reason.
+  - **The panel menu's door-card measurement now runs when the header menu opens** on the
+    Layout tab, so the quoted size is still the size that prints.
+  - Live refresh is held while Settings is open (it is a fixed inset overlay), which is
+    correct: a manager is a draft.
 - **The header's account controls are one dropdown, and About is where the app names its
   own version** (2026-08-26). The top-right used to carry four separate controls beside the
   Sandbox pill — the name/identity tag, an `Access` link, a `View only` badge, `Sign out`.
@@ -1448,6 +1845,19 @@ onboard one.
   are not. It is a quiet failure — it reads as a styling wobble rather than a bug. The
   panel Table view records the same rule; the Audit tab was where it was met the second
   time, which is why the User column sits ahead of Details.
+- **Help lives behind a "?" icon, not in the menu** (`HelpTip`, 2026-10-10). Explanations
+  used to sit in menus and settings dialogs as grey sentences, read once and then in the way
+  on every visit, or as `title=` tooltips, which a phone never shows. `HelpTip` is a small
+  tap-to-open popover. Put new help behind one rather than writing it inline.
+  - **Portalled to `document.body`, `position: fixed`**, because it usually sits inside a
+    menu card or modal whose overflow would clip it.
+  - **Its root STOPS every click.** React bubbles portal events through the component tree,
+    so without that the tap that closes the help would also close the menu or modal it is in.
+  - **The trigger preventDefaults**, so a "?" inside a `<label>` never toggles the checkbox.
+    In a menu, the row becomes a flex `div` holding the action button and the "?" side by
+    side (a button cannot contain a button).
+  - Header badges (Sandbox pill, View only, Backend outdated, Dev) still use `title=`;
+    they were outside this pass. Covered by `test-frontend-helptip.js`.
 - **Edit affordance convention**: every "edit this record" trigger is an icon-only pencil
   (`<Pencil size={14} color={C.muted}/>`, `aria-label="Edit ..."`), positioned at the trailing
   edge of the row/section it edits, alongside that row's other icon actions (delete, etc.) —
@@ -1488,6 +1898,18 @@ label ids; the vocabulary is `[{ id, name }]` with **array order as display orde
   being answerable by counting. So the Type picker, the Type column filter and the type
   manager all list every type alphabetically and offer the labels as a chip row that narrows
   the list. Same information, no double-counting.
+- **GROUPING CAME BACK, AS COLLAPSIBLE HEADINGS** (2026-10-09, Eric's call). The Type
+  picker, the type manager and the map's Pins filter list types under one expandable
+  heading per label (`groupByLabel` + `LabelGroupHeader`), in the vocabulary's order, with
+  **Unlabeled** last. A two-label type IS listed under both headings — the double-count
+  above, accepted because collapsed headings are how someone narrows to "the Facilities
+  types". One heading only (say, everything unlabeled) renders flat, since a lone heading
+  is a click spent revealing the whole list. The picker opens with the current value's
+  group expanded, and a search opens every group holding a match. **In the Pins filter a
+  heading has its own checkbox** that ticks every type under that label pinned on the plan
+  (half-ticked when only some are); what is stored is still the TYPE, so ticking a shared
+  type in one group ticks it in the other. **The Type COLUMN filter keeps its chip row**
+  (`useLabelFilter`) — it was not part of the ask. Frontend only.
 - **THE CONFIG KEY IS STILL `typeCategories`, AND THAT IS DELIBERATE.** The per-type array
   rides `typeSettings`, a blob the backend stringifies whole, so this whole change cost **no
   backend version and no deploy** — but the vocabulary lives under a key of its own, and
@@ -2113,22 +2535,17 @@ separate from the column **filters**: they intersect rather than override.
   the same scope test: a Building has its own row, can carry its own tasks (a roof inspection,
   not tied to any room) and its own audit history, and hiding those from a view scoped to that
   exact Building was the one place scoping disagreed with itself. `inHierarchyScope(a, scopeId,
-  assets, exact)` is the one shared test now — `a.id === scopeId` short-circuits true before
+  assets)` is the one shared test now — `a.id === scopeId` short-circuits true before
   the `ancestorsOf` walk, so the place counts as inside its own scope everywhere the test is
   used: the Assets list, Tasks (both Scheduled and History), and the master Audit tab.
 - **`roomMovable` (the bulk move-to-room toolbar) is UNCHANGED by this**, because it was never
   built on the exclusion — it separately filters `a.id !== bulkMoveSourceId`, by id, regardless
   of what the underlying `filtered` list contains. The old reasoning about a room "dragging
   itself along" was really about that filter, not about the scope test, and it still holds.
-- **"Hide children" is a checkbox under HierarchyNav** (`scopeExact`, shared the same way
-  `scopeId` is — narrowing on one tab and switching to another keeps the checkbox where you
-  left it), rendered only where a scope is actually applied to a list — Assets, Tasks, Audit —
-  and only once something is scoped (unchecked, inert, and hidden with nothing chosen). Checked
-  narrows `inHierarchyScope` from "this place and everything beneath it" to "this place's own
-  row only," for "what does this location's own record say" without every device in every room
-  in the way. The Map tab's own `HierarchyNav` doesn't pass `setScopeExact` at all — it has no
-  filtered list for the checkbox to act on, the same reason it doesn't get one on the Add
-  asset/Add task prefill either.
+- **"Hide children" was REMOVED on 2026-10-08** (Eric's call). It was a checkbox under
+  HierarchyNav (`scopeExact`, `?exact=1`) narrowing a scope to the place's own row only.
+  `persistScope` still strips a stale `exact` param, since old links and bookmarks carry it,
+  and a remembered storage entry with a `scopeExact` key still reads (the key is ignored).
 
 It's deliberately NOT built on `HierarchyBrowserModal` despite the overlap. That component
 picks one thing out of a tree and closes, and to do it it hides rows you can't pick and
@@ -2877,6 +3294,54 @@ that were rejected.
   Eric's call. The Changes sheet's resolved *Maintenance task* column is
   untouched.
 
+**Tasks and logged work have managed TYPES and CUSTOM FIELDS (2026-10-11, no migration).**
+Plan: `/mnt/project-files/plans/task-work-custom-fields.md`. Built in three PRs: storage,
+tasks, then work.
+- **ONE Config key, `workModel`**, holds all of it: `taskTypes` `[{id,name}]`,
+  `taskTypeSettings` / `workTypeSettings` (`{ typeId: { fieldKeys, requiredFields } }`),
+  `taskFields` / `workFields` (the field definitions: key, label, dataType, options). A new
+  Config key is a release, so one key rather than five. Work types stay the existing
+  `changeTypes` string list (a name IS its id, as a built-in asset type's does), so only
+  their settings live in the model.
+- **A record keeps its values in a `custom` object** (`{ cf_psi: "42" }`) and a task also
+  carries `taskType` (the id). A `custom` sub-object, never top-level keys, so a custom key
+  cannot collide with a built-in field. A blank type means no fields and nothing required,
+  which is every existing record. A removed type's id on a task simply reads as untyped.
+- **The Supabase save projection is the `.gs` write projection, which would DROP both.**
+  `save-shape.ts` runs each record through the Sheet's field list on purpose, so `taskType`
+  and `custom` are re-attached by record id after it (`extrasOf`) — the one deliberate
+  divergence, only for records that carry them, so the parity test is unaffected. **The
+  Apps Script fallback (`?backend=sheet`) still drops them**, accepted: it is dev's safety net.
+- **Rules are the asset ones**: a field's kind is fixed once created; required is per type
+  and enforced at the form only; a field a type names but has no definition for is ignored
+  at read time; emptiness never falsiness (`validateCustomValues`, built on
+  `validateColumnValue`). Removing a field definition unticks it from every type and leaves
+  stored values alone.
+- Managed in Settings > Task types (`WorkTypesManager`, written for either kind). The task
+  dialog shows a Type picker only once a type exists, then that type's fields, and Save is
+  disabled with the reason on screen. Edits audit the type and each custom value.
+  A choice-list custom field and the Type picker avoid `<label>` wrappers on purpose
+  (the `PickerField` re-open bug in `BUGS.md`).
+- **Logged work works the same way** (Settings > Work types & fields): a work type's
+  settings are keyed by its NAME (the `changeTypes` entry), the type list itself still being
+  managed under Lists. The Log work dialog and the task completion form both show the type's
+  fields, enforce required ones, and write `custom`; edits audit each changed value; History
+  rows and search show them. A removed work type's settings are left in place, so adding the
+  same name back restores its fields. **The Excel export does not carry custom values yet.**
+- **Every task and work entry HAS a type: the built-in DEFAULT** (2026-10-11). A record naming
+  none -- or a task naming a removed type -- resolves to `__default` (`resolveWorkTypeId`). It is
+  virtual (never in `taskTypes`/`changeTypes`), cannot be renamed or removed, and its settings
+  live in the model like any type's, so custom fields can be put on it and reach every untyped
+  record. A fresh model hides nothing, so nothing changed for existing data.
+- **The built-in fields are switchable per type** via `hiddenFields` beside `fieldKeys` in a
+  type's settings (`WORK_BUILTIN_FIELDS`): task Notes and Owner; work Vendor, Cost, Linked task
+  and Details. Structural fields (a task's name, kind, schedule/due date, completion; a work
+  entry's type, performed date, files) are not switchable. Hiding only hides: stored values are
+  never touched, and the hidden list is preserved by every settings edit. The task dialog and
+  both work forms (Log work, completion) read `workBuiltinShown`.
+- **Any type can be made the default** ("Use as default" in Settings, 2026-10-11): `defaultTaskType` / `defaultWorkType` on the `workModel` blob (a property, so no release). `resolveWorkTypeId` sends blank and removed types there instead of to `__default`; the built-in stays reachable by its id and is restored by choosing it again. Removing the chosen task type clears the setting; a removed work type (a bare name) just has no fields.
+- Covered by `test-frontend-work-model.js`.
+
 **A scheduled task can repeat on a CUSTOM rule (backend v52, 2026-10-07).** The Frequency
 picker keeps its five presets and adds **Custom…**, which offers "every N days / weeks /
 months / years" or "the first/second/third/fourth/last <weekday>, every N months".
@@ -3572,6 +4037,10 @@ SEGMENTS of a plan space's outline, selected on the map as ONE thing the way a R
   segments on it in the wall colour — tapping one opens that
   wall while nothing has been changed. While a wall is being worked on the spaces are inert (no
   hover, no tap) and a tap on empty map does nothing.
+- **Tapping a wall that is already on screen leaves the view alone** (2026-10-10). Re-framing
+  a long thin wall zoomed OUT, and selections then framed differently depending on the view
+  they started from. `zoomToBbox` now measures "keep the current zoom" against the whole-plan
+  fit when the current view is wider than it, so the same space always lands the same way.
 - **Filing assets under a wall needs the type to allow it**: the type editor's "Can sit
   inside" must name Wall. Only `Other` ships doing so; the rest are the school's to tick.
 - **The Floor Plan count badge excludes segment rows** (`floorPlanIsSegmentId`) so walls do not
@@ -3597,6 +4066,47 @@ each row carries a **⋮ menu** (`rowActions`, built by `mapRowActions` in
   is not offered placement. The Contents tab is unchanged (IDs, no menu).
 - Covered by `test-frontend-map-row-menu.js`; the menu, Show on map, Move pin and Remove
   pin were driven in Chromium against Sandbox.
+
+### The Map panel's list switch: Assets / Tasks / History (2026-10-08)
+
+Every card under the plan (nothing selected, a space or wall, an open group, a
+selected pin, and the no-plan card) carries an **Assets / Tasks / History** pill row.
+It changes WHAT is listed, never the scope: Tasks and History cover the selected
+place and everything beneath it (a group: each of its rooms; a pin: that asset
+alone), archived assets excluded to match the site-wide tables. Defaults to Assets;
+view state only, and it stays put as the selection moves. Frontend only.
+- All cards render through one `panelList()` in `FloorPlanTabContent`, so the switch
+  and the row menu cannot reach one card and miss another.
+- Tasks sort like the Tasks tab (`maintenanceSortKey`) with completed one-offs behind
+  "Show completed"; History is newest first.
+- A task row opens the task dialog for editors (`openMaintenanceEdit(item, asset)`),
+  else the asset's Tasks tab; a History row opens the asset's History, as the
+  site-wide History table does (`openChangeEdit` only knows the open asset).
+- Covered by `test-frontend-map-list.js` (runs the real scope/sort helpers); driven in
+  Chromium against Sandbox.
+- **Back from an asset opened off this list lands on the list that was left**
+  (2026-10-08). The map UNMOUNTS while an asset is open, so its own state was rebuilt
+  from scratch on Back: Assets mode, nothing selected, page at the top. The mode and
+  filters now live on the page (`mapListMode`, `mapListFilters`), the selected space or
+  wall is remembered in `mapSelectionMemoRef` and re-selected when the map remounts on
+  the same plan, and the scroll offset at the moment of opening (`mapReturnScrollRef`)
+  is put back once the plan has loaded. **The browser cannot restore that scroll
+  itself**: the plan loads after the remount, so the page is too short when it tries.
+  The selection memo is deliberately NOT cleared on unmount — surviving it is the point.
+
+### Which pins the map draws (2026-10-08)
+
+The map menu's **Pins** row opens in place (like Configure) with **All pins**, **No pins**,
+and a checkbox per asset type that has a pin on THIS plan ("Only these types"). View only,
+never saved, and still defaults to no pins. Frontend only.
+- **A ticked type is a type ID**, compared against `a.type`, and the list is A→Z by name.
+  Types with nothing pinned on the plan are not offered: a checkbox there changes nothing.
+- **"Show on map" and placement still draw their pin whatever the filter says** — the same
+  bypass the old Show/Hide toggle had (`focusPinId`, `revealPinId`, `placing`). Changing
+  the filter drops the reveal, and drops the info card if its pin was filtered away.
+- Unticking the last type falls back to No pins rather than an empty "types" state.
+- `MOCK_SNAPSHOT` pins BCA0098 (Electrical Panel, now `mapPin`) in the Kitchen beside the
+  Mini Split, so Sandbox has two types to choose between. Driven in Chromium against Sandbox.
 
 ### The floor plan SVG upload: image route, and NO signed allowed_formats (2026-10-04, backend v51)
 

@@ -16,6 +16,28 @@ version that fixed them.
 
 ## Open
 
+### A save adopts revisions it did not earn, so a later save can overwrite someone silently
+**Found:** 2026-10-09, while building per-record saves.
+**Needs a deploy:** no; frontend only (`finishWrite`).
+**Confirmed:** from the code, not reproduced. After a successful save `finishWrite` adopts
+EVERY revision the backend returns, including domains this save did not write and domains
+someone else bumped while it was in flight. Say this device saves an asset while another
+person saves the managed lists: this device now holds their config revision without their
+data, so its next config save passes the check and writes its old lists over theirs. Fixed
+on the Supabase per-record path (`adoptSavedRevisions`, which adopts a written domain only
+when it moved by exactly one). Still open on the whole-snapshot path, which every Apps
+Script tenant uses. Applying the same rule there is a small change.
+
+### The QR sticker sheet page loads no panels
+**Found:** 2026-10-09, while moving the dev tenant to Supabase.
+**Needs a deploy:** no; frontend only, but it needs a decision (below).
+**Confirmed:** from the code, not driven in a browser. `panel-qr-sheet.html` fetches the
+bare backend URL and reads `data.assets`. Since v18 a bare GET answers only
+`authFailed` + `scriptVersion` (the read is a signed-in POST), so `assets` is always
+empty and the page has nothing to print, on every tenant and on both backends. The fix
+needs either a sign-in on that page or a new anonymous "list panels" read, and the second
+publishes the list of a school's panels to anyone, which is Eric's call.
+
 ### A save ran ~6 minutes holding the lock; everything behind it was refused as "busy"
 **Found:** 2026-09-30, from Eric's dev diagnostics export (app 2026-09-30.9, backend v47):
 `save_failed ... busy ... (43484ms)`, and the Diagnostics window's backend half refused as busy
@@ -434,6 +456,15 @@ say when a sign-in attempt fails for a transport reason rather than an auth one.
 ---
 
 ## Fixed
+
+### Walls disappear on a plan where every building is surrounded by other spaces — fixed 2026-10-09
+**Found:** 2026-10-09, while putting the new 3C campus plan on dev. The new drawing tiles
+courtyard and parking shapes around every building, and an edge counted as a wall only when
+the point just beyond it lay in no other space, so the Worship Center, CEB and Sanctuary had
+zero exterior edges and their 8 wall assets drew nothing.
+**Fixed:** 2026-10-09, PR #41 (frontend, `floorPlanExteriorSegments`): on a site plan only a
+building counts as the far side of a wall. The connector's `set_plan_walls` (PR #42) uses the
+same building-cover rule.
 
 ### Choosing a type in the Add asset form also opens "Manage asset types" — fixed 2026-10-07
 **Found:** 2026-09-28, while adding search to the Type picker.

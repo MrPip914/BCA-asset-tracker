@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect Claude</title>
+<!--
+  The Claude connector's sign-in page (supabase/functions/mcp/oauth.js).
+  Claude sends people here with a signed `req`; they sign in with Google, the
+  connector checks the token and the site allowlists, and this page hands them
+  back to Claude with a one-time code.
+
+  It lives on the app's origin because that is the only origin Google sign-in
+  is registered for. THE CONNECTOR URL BELOW IS PINNED, NOT READ FROM THE LINK:
+  a page that posted the Google token wherever a link told it to would let
+  anyone with a crafted link collect a token that also signs into the app.
+-->
+<script src="clients.js"></script>
+<script src="https://accounts.google.com/gsi/client" async></script>
+<style>
+  body { margin: 0; background: #f5f5f4; color: #1c1917; font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 420px; margin: 0 auto; padding: 48px 16px; }
+  .card { background: #fff; border: 1px solid #e7e5e4; border-radius: 12px; padding: 24px; }
+  h1 { font-size: 20px; margin: 0 0 8px; color: var(--brand-dark, #1c1917); }
+  p { margin: 0 0 16px; color: #57534e; }
+  #signin { min-height: 44px; margin: 8px 0 4px; }
+  #status { margin-top: 12px; }
+  .error { color: #b91c1c; }
+  .ok { color: #15803d; }
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1>Connect Claude to the asset tracker</h1>
+    <p>Sign in with the Google account you use for the app. Claude will be able to read the inventory of the sites you have access to. It cannot change anything.</p>
+    <div id="signin"></div>
+    <div id="status" role="status"></div>
+  </div>
+</main>
+<script>
+  // Same OAuth client as the app (GOOGLE_CLIENT_ID in index.html).
+  var GOOGLE_CLIENT_ID = "512657381831-4so7t5t2shqn8nbgrgktsg6s37podqji.apps.googleusercontent.com";
+  var CONNECTOR_URL = "https://offremfwubxetpdkxtcy.supabase.co/functions/v1/mcp";
+
+  var statusEl = document.getElementById("status");
+  function say(text, cls) { statusEl.textContent = text; statusEl.className = cls || ""; }
+
+  // Only ever hand a code back to Claude. The connector already refuses any
+  // other address; this is the second lock on the same door.
+  function allowedRedirect(href) {
+    var u;
+    try { u = new URL(href); } catch (e) { return false; }
+    if (u.protocol === "https:" && (u.host === "claude.ai" || u.host === "claude.com") && u.pathname === "/api/mcp/auth_callback") return true;
+    return u.protocol === "http:" && (u.hostname === "localhost" || u.hostname === "127.0.0.1");
+  }
+
+  var req = new URLSearchParams(location.search).get("req");
+
+  function onCredential(resp) {
+    say("Checking…");
+    fetch(CONNECTOR_URL + "/authorize/complete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ req: req, credential: resp.credential }),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (out) {
+        if (!out || !out.ok) return say((out && out.error) || "Sign-in failed.", "error");
+        if (!allowedRedirect(out.redirect)) return say("Refusing to send this sign-in anywhere but Claude.", "error");
+        say("Signed in as " + out.email + " (" + out.sites.join(", ") + "). Returning to Claude…", "ok");
+        location.replace(out.redirect);
+      })
+      .catch(function () { say("Couldn't reach the connector. Check your connection and try again.", "error"); });
+  }
+
+  function start() {
+    if (!req) return say("This page is opened by Claude when you add the connector. Start from Claude's connector settings.", "error");
+    if (!window.google || !google.accounts || !google.accounts.id) return setTimeout(start, 100);
+    google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: onCredential, use_fedcm_for_prompt: true });
+    google.accounts.id.renderButton(document.getElementById("signin"), {
+      theme: "outline", size: "large", text: "signin_with", shape: "pill", width: 260,
+    });
+  }
+  start();
+</script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 # Moving the backend from Apps Script + Sheets to Postgres — Phase 1 design
 
-Status: **design; Rollout step 1 (schema migrations, `db/`) started 2026-10-07.** Written 2026-10-06 after saves against the Google
+Status: **Rollout step 1 (schema, `db/migrations/`) applied to dev 2026-10-07; step 2 (importer, `db/import-from-sheet.mjs`) run against dev 2026-10-08; step 3 (API, `supabase/functions/asset-api/`) started 2026-10-08 with `signin`, `read` and `signout`; the save, `auditFull`, upload signing, `diagnostics` and the public panel read were added 2026-10-09, which completes the port.** Written 2026-10-06 after saves against the Google
 backend proved unreliable (see "Google's layer in front of Apps Script fails
 intermittently" in CLAUDE.md, and the v42/v49/v50 diagnostics work).
 
@@ -234,6 +234,32 @@ Everything below exists to make that safe. None of it is optional.
     a second pause happens despite the ping; the restore drill fails; egress passes 60% or
     storage 70% of the free limit; or a school asks for an uptime/backup commitment.
 
+**What was built for dev (2026-10-10).** Items 1–3 exist for the dev tenant, with three
+deliberate departures from the text above:
+- **Keep-alive** is `.github/workflows/db-keepalive.yml`: `psql` runs a real query over
+  `SUPABASE_DB_URL` at 03:17 and 15:17 UTC. Same DATABASE activity, no `/health` endpoint
+  needed (that is still worth adding for item 6).
+- **Backups** are `.github/workflows/db-backup.yml` at 10:23 UTC (3:23am Pacific), via
+  `db/backup.sh`. Encrypted with a **passphrase** (`BACKUP_PASSPHRASE` on the GitHub
+  environment `supabase-dev`, gpg AES-256) rather than an age keypair: the drill has to
+  decrypt in CI, which would put the private key in CI anyway. Stored as **GitHub Actions
+  artifacts**, not R2 or a private repo: off the Supabase project, nothing new to sign up
+  for, and expiry does the pruning — every night kept 30 days, Sundays also 90 days (GitHub's
+  ceiling for a public repo; that is the "12 weeklies"). No per-tenant JSON export yet; dev is
+  one tenant.
+- **The restore drill runs every night, not monthly**, inside the backup run: the dump is
+  decrypted, restored into a throwaway Postgres and every table's row count compared
+  (`db/restore.sh --check`). A failed drill fails the run, so GitHub emails.
+
+**Restoring dev**: run the "Database restore (dev)" workflow on `dev` with `confirm` set to
+`restore dev` and, optionally, the backup run's id (blank = newest). It first backs up the
+database as it stands (`dev-db-before-restore-<time>`, 90 days), then replaces the
+`asset_tracker` schema in one transaction and runs pending migrations. By hand:
+download the artifact from the run's page, then
+`DATABASE_URL=… BACKUP_PASSPHRASE=… db/restore.sh --replace <unzipped folder>`.
+**Scheduled and manual runs only exist once the workflow files are on `main`** — GitHub runs
+schedules from the default branch only.
+
 Residual risk, stated plainly: a missed ping still pauses everyone until someone clicks
 Resume, and between nightly exports up to a day of edits is unprotected. Both are accepted
 for the free tier; Pro's 7 daily backups and no-pause guarantee are what removes them.
@@ -247,6 +273,69 @@ for the free tier; Pro's 7 daily backups and no-pause guarantee are what removes
    repeatedly against dev while building.
 3. **API**: port op by op, in this order — `read`/`signin`/`signout`, then save, then
    `auditFull`, photo/floor-plan signing, diagnostics, public panel.
+   - **Where it is**: `supabase/functions/asset-api/` — `api.ts` routes, `auth.ts` is the
+     session/allowlist port, `inventory.ts` reassembles the read payload, `db.ts` holds
+     `withTenant`. The tenant is named by `?tenant=` (or `client`/`c`). `deploy-api` in
+     `db-migrate.yml` deploys it to the dev project on every push to `dev` and asks it two
+     questions; it needs `SUPABASE_ACCESS_TOKEN` on the `supabase-dev` GitHub environment.
+   - **One change from "Row-level security" above**: the function connects with the
+     project's own `SUPABASE_DB_URL` (which bypasses RLS) and every transaction runs
+     `set local role asset_api` in `withTenant`, rather than a separate login role holding a
+     password. Same isolation, no password to create or rotate. The cost is a rule: NOTHING
+     queries outside `withTenant`. Migration 0005 grants the membership that `set role` needs.
+   - **Parity is already tested for the read**: `api_test.ts` runs the `.gs` file's own read
+     over the shared fixture Sheet (`db/fixture-grids.mjs`) and requires this API's answer to
+     equal it, except for the two differences the import makes on purpose (a duplicate
+     asset id keeps its first row; a blank work-entry id gets a stable minted one).
+   - The allowlist gained a `position` (migration 0004) so the Access screen keeps its order.
+   - **The save (2026-10-09)** is `save.ts`, in the transaction shape above. Three things
+     about it worth knowing before touching it:
+     - **What it stores is shaped by the `.gs`'s own write and read, not by a field list.**
+       `save-shape.ts` runs each record through doPost's projection, the Sheet's cell rule
+       (a missing or null value is `""`) and handleAuthenticatedRead_'s mapping, so a field
+       doPost drops is dropped here too, and the stored `data` is exactly what the `.gs` read
+       would answer next. `ASSET_FIELDS` and `AUDIT_FIELDS` are copies, pinned to the `.gs`.
+     - **The rows come from the importer's own `snapshotToRows`**, which moved to
+       `supabase/functions/_shared/` so a deploy bundles it (`db/snapshot-rows.mjs`
+       re-exports it). An import and a save cannot store a record differently.
+     - **Parity is tested for the save too**: `save_test.ts` posts the same body through
+       this API and through the `.gs` doPost running against a writable fake Sheet
+       (`saveThroughSheet` in `db/sheet-snapshot.mjs`), and requires the two answers and the
+       two reads afterwards to agree.
+     - Deliberate differences from the `.gs`: a config save KEEPS stored config keys it does
+       not restate (the `.gs` rewrote the tab and dropped them; nothing read them); a posted
+       duplicate id keeps its first record and logs `save_adjusted`; only rows that differ
+       are written, so an unchanged save touches no row. The first save after an import
+       rewrites every asset once, widening it to the full column list, as the Sheet's first
+       rewrite of its tab did.
+     - The lock is `FOR UPDATE` on the tenant's four revision rows, taken by every save
+       (an audit-only save included), with a 10s `lock_timeout` answered as `busy`.
+   - **`auditFull` (2026-10-09)** is `readAuditFull` in `inventory.ts`: the whole log in
+     `seq` order, any signed-in role, no lock (one transaction is one instant). The `.gs`
+     answers it through `pickPublic_`, which names every audit field and writes `""` for a
+     blank, while the ordinary read leaves blanks out, so the blanks are put back. Its
+     parity test runs the `.gs` handler through `saveThroughSheet` and requires equality.
+   - **Upload signing (2026-10-09)**, `photoSign` and `floorPlanSign`, is `sign.ts`: editor
+     only, the folder and object name chosen server-side, a photo's allowed formats signed,
+     a floor plan's not (v51). The Cloudinary account is shared by every tenant, so its three
+     credentials are Edge Function secrets (`CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`,
+     `CLOUDINARY_API_SECRET`, under Supabase > Edge Functions > Secrets); the per-tenant folder
+     is `tenants.cloudinary_folder`, falling back to `"assets"` as `CLOUDINARY_FOLDER` does.
+     **Until those secrets are set the ops answer by naming them**, which is harmless before
+     the cutover and a blocker at it. `sign_test.ts` runs the `.gs` handlers with the same
+     clock, ids and credentials and requires byte-identical answers.
+   - **`diagnostics` (2026-10-09)** is `readDiag` in `db.ts`: editors only, the newest 300
+     rows newest first, every field a string as the Sheet's `getDisplayValues` hands them
+     over, plus the true count. `diag_test.ts` puts the same rows in the table and in a
+     fake Diagnostics tab and requires equal answers.
+   - **The public panel read (2026-10-09)**, `GET ?panel=<code>&tenant=<id>`, is `panel.ts`:
+     anonymous, the `.gs`'s five whitelists copied and pinned, photos scoped to the panel's
+     own ids with hidden ones and documents dropped first. `panel_test.ts` runs the `.gs`'s
+     own `publicPanelPayload_` (through `getThroughSheet`) for every way into a panel, a
+     sub-panel fed from another, a room loop and codes that name no panel, and requires
+     equality. **One thing for the cutover:** `panel.html` builds its URL as
+     `SHEET_API_URL + "?panel="`, which breaks once the URL already carries `?tenant=`; it
+     must append with `&` (or `URLSearchParams`) when it moves.
 4. **Parity tests** (the important part): a **replay harness** that feeds the same recorded
    request sequence to the Apps Script backend (dev tenant) and the new API and compares the
    responses field for field. The existing `test-backend-*.js` suites, which slice `.gs`
@@ -254,6 +343,15 @@ for the free tier; Pro's 7 daily backups and no-pause guarantee are what removes
    deletion, audit offset, public whitelist, photo signing). Mutation-check them as before.
 5. **Dev tenant cutover**: point `dev` at the new API, import, use it for a week. The old Sheet
    stays untouched and shareable with the service account as the fallback.
+   - **Done 2026-10-09.** `clients.js` gives dev `apiUrl` = the Edge Function and keeps the
+     old `/exec` as `sheetApiUrl`, which `deploy.mjs` deploys and verifies against, and which
+     `/dev/?backend=sheet` drives the app against (the only place a `.gs` change can be
+     tried before a school). `panel.html` appends `&panel=` once the URL carries a query.
+     The importer no longer runs on a push (it would erase app saves); a manual run of
+     `Database migrations` with `reimport` = `replace dev` is the only way to start it.
+   - **Switching back is a one-line `apiUrl` change, and it is lossy**: anything saved in
+     Supabase since does not reach the Sheet. The root build (`main`) still points dev at
+     the Sheet until this reaches `main`, so `assets.stama.tech/?client=dev` writes there.
 6. **First school** (ask Eric, per the client-dispatch rule): import, freeze edits for the
    few minutes the import takes (revision bump on the Sheet side so any open browser is
    refused), flip `clients.js`, keep the Sheet read-only for several weeks.
@@ -291,9 +389,108 @@ for the free tier; Pro's 7 daily backups and no-pause guarantee are what removes
 3. ~~Losing spreadsheet-style editing~~ — DECIDED 2026-10-06: acceptable. The nightly export remains the only Sheet-like artifact.
 4. ~~Paid tier from the start~~ — DECIDED: free tier for now, with the safeguards in "Running on the free tier".
 
-## Phase 2 (for later, not designed here)
+## Phase 2 (scheduled 2026-10-09, Eric's call)
 
-Per-record writes: `persist()` sends only changed records; the revision domains become
-per-record versions; conflicts shrink from "anyone saved any asset" to "someone saved THIS
-asset". Large (touches every save site) and optional once Phase 1 has removed the reliability
-problem.
+Two pieces, built on the dev tenant only, in this order. Live refresh first, because it is
+small and stands on its own; per-record writes second.
+
+### 2a. Live refresh: other people's changes appear without reloading
+
+**Built 2026-10-09** (see CLAUDE.md, "Live refresh"). What follows is the design it built.
+
+The app picks up another user's save on its own. Built on the revision counters Phase 1
+already keeps -- nothing new has to be tracked.
+
+- **A cheap check, not a reload.** A new `op:"revisions"` answers only the per-domain
+  revision numbers (plus the session's validity), a few dozen bytes. The client compares them
+  with what it holds; only when one has moved does it run the ordinary `loadData()` read.
+- **When it checks:** every ~60s while the tab is VISIBLE, and immediately when the tab
+  becomes visible again or the window regains focus. Never while hidden, which is most of
+  the cost saved: a backgrounded tab costs nothing.
+- **Never under someone's hands.** If an edit form, a dialog or a write is in flight, a moved
+  revision is held and applied when it closes (or shown as a "New changes" pill to tap).
+  Swapping data under an open draft is the one thing this must not do -- it is the
+  conflict-reload case without the conflict.
+- **A refresh is a read, so it inherits every guard `loadData()` has**: the snapshot cache,
+  the session handling, the "Saved copy" state on failure. A failed check is silent and
+  retried next tick; it never signs anyone out (`backendPost`'s rules).
+- **Budget.** ~1,000 checks per open device per day at 60s. Fine for dev on the free tier's
+  500k function calls a month; re-measure before a school moves (see the free-tier budget
+  section). The interval is one constant.
+- **Supabase only.** Apps Script tenants keep manual refresh: the op could be added to the
+  `.gs`, but a ~1.5s round trip per check against a 90-minute daily quota is the wrong
+  trade. The client skips the check when the backend does not answer it.
+- Not Supabase Realtime: the portability rule (no Supabase-only features in the data path).
+
+### 2b. Per-record writes
+
+`persist()` sends only the assets that changed, and a save is refused only when someone
+else changed THE SAME asset. Today any two saves of any assets in the same moment
+conflict. Designed 2026-10-09; Supabase tenants only, like 2a.
+
+**Built 2026-10-09** (see CLAUDE.md, "Per-record saves"). What follows is the design it built.
+
+**What a save names.** `persist()` already gets the previous and the next asset list,
+and every call site builds the next one by replacing only the objects it changed (the
+convention `_dirty` already relies on). So the client diffs by reference, per id, with
+no call-site change:
+- `assetChanges.upsert`: every asset whose object is new or changed, sent WHOLE with
+  its nested children, as today's snapshot sends it.
+- `assetChanges.remove`: the ids that are gone.
+- Each entry carries `_rev`, the version of that asset this device last saw, read at
+  SEND time from a map (`assetRevsRef`) rather than off the object. This is the
+  `revisionsRef` lesson: a save queued behind one of this device's own must post the
+  version that one came back with, or it conflicts with itself.
+- A handler that rebuilds every object (a bulk move, the user conversion) just sends
+  every asset. That is correct, only bigger.
+
+**Per-asset versions.** Migration 0007 adds `assets.rev`, and **triggers, not the save
+code, bump it.** A BEFORE UPDATE trigger on `assets` bumps it when the row's content
+changes (not its `position`, which shifts whenever an earlier asset is deleted).
+Statement-level triggers on every child table (comments, allocations, changes,
+maintenance, breakers, circuits, space links and groups) bump the owning asset's `rev`
+for any row inserted, updated or deleted. That one mechanism covers every writer: the
+per-record save, a full-snapshot save from an older build, the Claude connector's
+write functions, the importer, and a hand edit in SQL. A writer that forgot to bump
+would otherwise be the silent hole.
+
+**The server check**, in the same transaction and lock as today:
+- An upsert posting `_rev` conflicts when the asset is gone or its stored `rev`
+  differs. An upsert posting none (a new asset) conflicts when the id already exists.
+  That is also what makes a retried request harmless.
+- A remove conflicts on a moved `rev`. One that is already gone is fine.
+- On conflict, nothing is written and the answer is the existing
+  `{ ok: false, conflict: ["assets"] }` plus `conflictIds`, so the client's
+  reload-and-offer-the-draft path is unchanged.
+- The `assets` DOMAIN check is skipped for such a save, which is the point. The domain
+  counter is still bumped on every asset write, because live refresh and older
+  full-snapshot clients both key off it.
+- Config, breaker types and photos keep their domain checks and are sent only when
+  dirty. They are small, and two people editing the same list is the case they guard.
+
+**Writing it.** Rows are built by the same `snapshotToRows` code from just the named
+assets, then synced SCOPED to those owners: a child row is deleted only when its owner
+is in the save and it was not sent. An existing asset keeps its stored `position`, and
+a new one goes on the end. Removing every asset still needs `confirmEmptyAssets`.
+
+**Audit.** A per-record save sends only the entries it added and the server appends
+them as sent. `auditBase` cannot work here: two saves of different assets now both
+land, so "how many rows sit before mine" goes stale between them and would skip
+entries. A retry is still safe, because the per-asset check refuses it.
+
+**After a save**, the server answers each named asset's new `rev` (`assetRevs`). The
+client adopts a DOMAIN revision only when it is exactly what its own write produced.
+When someone else's write is in the number too, the client keeps the old one, so the
+live refresh sees it moved and fetches their change. Adopting it would mean never
+fetching that change, and, for a domain-checked list, overwriting it on the next save.
+
+**Keeping full-snapshot clients working.** A body with `assets` takes today's path
+untouched: domain-checked, so after any per-record save an older build's next save is
+refused and it reloads, exactly as now. The Sheet backend and Sandbox keep full
+snapshots. Nothing about the stored data changes, so dropping back to full snapshots is
+a client revert.
+
+**What does not get better.** Two people CREATING assets at once still conflict,
+because both advance `nextAssetNumber`, a config value. The same goes for two people
+attaching photos at once (photos domain). Neither was asked for, and each is the next
+narrowing if it ever matters.
