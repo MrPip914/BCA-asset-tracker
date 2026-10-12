@@ -1064,6 +1064,11 @@ onboard one.
   diagnostics file names the backend kind after its version. `navUrl()` keeps every param,
   so one link carrying `?backend=sheet` held a session on Apps Script with 5–7s saves and
   nothing on screen saying so (2026-10-09).
+- **`/dev/?c=<school>&backend=prod` opens a school's copy in the prod Supabase project**
+  (2026-10-12; `prodApiUrl` on `bca` and `3c`). Honoured on the /dev/ build only, so a link
+  cannot send a school's live app there; the header shows a `Prod copy` pill and storage keys
+  get a `:prod` suffix. It is for looking at (and trying things on) the copy before a school
+  moves -- the school itself still runs on its Sheet until `apiUrl` is flipped on main.
 - **Every `localStorage` key is namespaced by tenant** (`CLIENT.storageKey()` →
   `asset-tracker-session:bca`). All tenants share one origin, so without it opening client B
   after client A hands B's backend A's session id — rejected correctly, so not a hole, but

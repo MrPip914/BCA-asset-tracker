@@ -118,6 +118,10 @@
       // never issued by it — there is no per-type prefix scheme.
       labelPrefix: "BCA",
       apiUrl: "https://script.google.com/macros/s/AKfycbzXaKRuCrTesxobxP-b2me1TSn0YoGogoYhNPTWU4qWWjXANXGlPuDzJSKGClOTsfOXRQ/exec",
+      // This school's copy in the prod Supabase project. Reached ONLY from a /dev/
+      // build with ?backend=prod, to look at it before the school moves; see
+      // usePreview below. Not the school's backend until apiUrl says so.
+      prodApiUrl: "https://fdzrrrynttsbqofmbkja.supabase.co/functions/v1/asset-api?tenant=bca",
     },
 
     // Throwaway data, its own Sheet, its own Apps Script deployment. This is what
@@ -199,6 +203,8 @@
       orgName: "Carlsbad Community Church",
       labelPrefix: "3C",
       apiUrl: "https://script.google.com/macros/s/AKfycbxRVmaXDnIvEauIRXhotJwMC6TgFsRRWDBzfQzGfVdvm0aidrvb2V1geLkh3vpy7ZUh/exec",
+      // See the note on bca's prodApiUrl.
+      prodApiUrl: "https://fdzrrrynttsbqofmbkja.supabase.co/functions/v1/asset-api?tenant=3c",
     },
   };
 
@@ -312,7 +318,14 @@
   // Apps Script backend instead (see sheetApiUrl on the dev tenant). Ignored for
   // a tenant that has no sheetApiUrl, i.e. one that never moved.
   var useSheet = !!config.sheetApiUrl && (params.get("backend") || "").trim().toLowerCase() === "sheet";
-  var backend = config.sheetApiUrl && !useSheet ? "supabase" : "sheet";
+
+  // ?backend=prod, on a /dev/ build only, points a school that has a prodApiUrl at
+  // its copy in the prod Supabase project. It exists so a school's data can be
+  // looked at (and worked on) in the app before that school moves. The root site
+  // ignores it, so a link cannot send a school's live app to the preview.
+  var usePreview = isDevBuild && !!config.prodApiUrl
+    && (params.get("backend") || "").trim().toLowerCase() === "prod";
+  var backend = usePreview || (config.sheetApiUrl && !useSheet) ? "supabase" : "sheet";
 
   var theme = resolveTheme(config.theme);
   applyTheme(theme);
@@ -322,12 +335,15 @@
     appName: config.appName,
     orgName: config.orgName,
     labelPrefix: config.labelPrefix,
-    apiUrl: useSheet ? config.sheetApiUrl : config.apiUrl,
+    apiUrl: usePreview ? config.prodApiUrl : useSheet ? config.sheetApiUrl : config.apiUrl,
     // "sheet" (Apps Script) or "supabase": which backend apiUrl is.
     backend: backend,
     // True only when ?backend=sheet moved a tenant that HAS a database backend
     // onto its Apps Script fallback. index.html badges the header with it.
     onSheetFallback: useSheet,
+    // True when ?backend=prod put this /dev/ build on the school's prod copy.
+    // index.html badges the header with it.
+    onProdPreview: usePreview,
     isDefault: id === DEFAULT_CLIENT_ID,
 
     // The merged palette. index.html reads this straight into `C`; the two
@@ -362,7 +378,7 @@
       // The Sheet fallback of a moved tenant gets keys of its own: its sessions
       // mean nothing to Supabase, and sharing a key would read as a broken
       // sign-in every time someone switched between the two.
-      return base + ":" + id + (useSheet ? ":sheet" : "");
+      return base + ":" + id + (useSheet ? ":sheet" : "") + (usePreview ? ":prod" : "");
     },
 
     /**
