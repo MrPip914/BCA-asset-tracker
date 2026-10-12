@@ -668,8 +668,12 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
 
 {
   const page = fs.readFileSync(path.join(here, "mcp-connect.html"), "utf8");
-  check("the connect page pins the connector URL rather than reading it from the link",
-    /var CONNECTOR_URL = "https:\/\/[a-z0-9]+\.supabase\.co\/functions\/v1\/mcp";/.test(page) && !/searchParams\.get\("(api|url|connector)"\)/.test(page));
+  const pinned = [...page.matchAll(/"(https:\/\/[a-z0-9]+\.supabase\.co\/functions\/v1\/mcp)"/g)].map((m) => m[1]);
+  check("the connect page names exactly two fixed connectors (dev and prod) rather than reading one from the link",
+    pinned.length === 2 && /var CONNECTOR_URL = /.test(page) && !/searchParams\.get\("(api|url|connector)"\)/.test(page));
+  const pick = new Function("location", page.match(/var CONNECTOR_URL = [\s\S]*?;\n/)[0] + "return CONNECTOR_URL;");
+  check("/dev/ pages use the dev connector, the main site the prod one",
+    pick({ pathname: "/dev/mcp-connect.html" }) === pinned[0] && pick({ pathname: "/mcp-connect.html" }) === pinned[1]);
   const appId = /const GOOGLE_CLIENT_ID = "([^"]+)"/.exec(fs.readFileSync(path.join(here, "index.html"), "utf8"))[1];
   check("the connect page uses the app's Google client", page.includes(`"${appId}"`));
 }
