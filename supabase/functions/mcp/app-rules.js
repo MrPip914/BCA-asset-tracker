@@ -538,6 +538,12 @@ const DEFAULT_COLUMN_DATA_TYPES = {
   notes: "textarea",
 };
 
+function isChoiceKind(kind) { return kind === "select" || kind === "multiselect"; }
+
+function multiValues(value) {
+  return String(value == null ? "" : value).split(";").map(x => x.trim()).filter(Boolean);
+}
+
 function columnDataType(col) {
   if (!col) return "text";
   if (col.dataType && COLUMN_DATA_TYPE_VALUES.has(col.dataType)) return col.dataType;
@@ -1401,4 +1407,4 @@ function runRelationshipQuery(asset, query, assets, columns, typesList) {
 // Each tenant's asset-ID prefix, from clients.js.
 export const TENANT_LABEL_PREFIX = {"3c":"3C","bca":"BCA","dev":"BCA"};
 
-export { TYPE_REGISTRY, DEFAULT_TYPES, applyTypeSettings, adoptLegacyTypesList, ensureLockedTypes, typeNameOf, typeTakesParent, parentTypesFor, isPlaceType, fieldAppliesTo, isPersonType, personMatchKey, nameOf, personLabelsOf, personNamesOf, UNASSIGNED_LABEL, pathOf, fullPathOf, parentNameFor, relate, dateOnly, adoptPersonNames, adoptLegacyNames, columnDataType, columnOptions, validateColumnValue, DEFAULT_COLUMNS, RENAMED_COLUMN_KEYS, RETIRED_COLUMN_KEYS, IMPORT_KEY_HEADER, importHeadersFor, planAssetImport, PATH_SEPARATOR, assetToImportRow, resolveImportType, isLockedType, nearestAncestorOfType, columnReferenceTypes, referenceColumns, RELATIONSHIP_FOLLOWS, relationshipFollowMeta, relationshipQueriesFor, relationshipQueriesShownFor, runRelationshipQuery };
+export { TYPE_REGISTRY, DEFAULT_TYPES, applyTypeSettings, adoptLegacyTypesList, ensureLockedTypes, typeNameOf, typeTakesParent, parentTypesFor, isPlaceType, fieldAppliesTo, isPersonType, personMatchKey, nameOf, personLabelsOf, personNamesOf, UNASSIGNED_LABEL, pathOf, fullPathOf, parentNameFor, relate, dateOnly, adoptPersonNames, adoptLegacyNames, isChoiceKind, multiValues, columnDataType, columnOptions, validateColumnValue, DEFAULT_COLUMNS, RENAMED_COLUMN_KEYS, RETIRED_COLUMN_KEYS, IMPORT_KEY_HEADER, importHeadersFor, planAssetImport, PATH_SEPARATOR, assetToImportRow, resolveImportType, isLockedType, nearestAncestorOfType, columnReferenceTypes, referenceColumns, RELATIONSHIP_FOLLOWS, relationshipFollowMeta, relationshipQueriesFor, relationshipQueriesShownFor, runRelationshipQuery };
