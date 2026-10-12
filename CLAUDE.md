@@ -580,7 +580,7 @@ but a task; editing a work entry is not offered.
     since the supabase.co root is not ours; the 401 names it in `WWW-Authenticate`.
   - The signing key derives from the service role key unless `MCP_SIGNING_KEY` is set
     (Supabase > Edge Functions > Secrets). Changing either signs everyone out of Claude.
-  - Deployed by `deploy-api-dev` beside `asset-api`, from the same commit, since it imports
+  - Deployed by `deploy-api` beside `asset-api`, from the same commit, since it imports
     `asset-api/auth.ts`.
 - **Built on the Phase 1 tables, never on Apps Script.** Apps Script cannot send the status
   codes and headers an MCP sign-in needs, and every Claude request would meet Google's
