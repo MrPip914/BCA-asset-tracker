@@ -1585,9 +1585,18 @@ const COLUMN_DATA_TYPES = [
   { value: "number", label: "Number" },
   { value: "date", label: "Date" },
   { value: "select", label: "Choice list" },
+  { value: "multiselect", label: "Multiple choice" },
   { value: "reference", label: "Reference" },
 ];
 const COLUMN_DATA_TYPE_VALUES = new Set(COLUMN_DATA_TYPES.map(t => t.value));
+// Both choice kinds carry an option list. A multiple-choice VALUE is stored as
+// its picks joined by "; " in one string (a choice may not contain ";"), so every
+// place that stores, searches or exports a field value keeps working unchanged.
+function isChoiceKind(kind) { return kind === "select" || kind === "multiselect"; }
+function multiValues(value) {
+  return String(value == null ? "" : value).split(";").map(x => x.trim()).filter(Boolean);
+}
+function joinMulti(list) { return list.join("; "); }
 // What a kind is CALLED. Falls back to the raw value, so a stored kind this
 // build doesn't know still reads as something rather than as blank.
 function kindLabel(value) {
@@ -1763,6 +1772,12 @@ function validateColumnValue(col, raw) {
     }
     return "";
   }
+  if (kind === "multiselect") {
+    const opts = columnOptions(col);
+    const bad = multiValues(value).filter(v => !opts.includes(v));
+    if (opts.length && bad.length) return `${col.label} must be from: ${opts.join(", ")}.`;
+    return "";
+  }
   if (kind === "select") {
     const opts = columnOptions(col);
     // An empty option list means the column is misconfigured, not that every
@@ -1932,8 +1947,9 @@ function addWorkField(model, kind, def) {
   if (!label) return { model, error: "Give the field a name." };
   if (fields.some(f => f.label.toLowerCase() === label.toLowerCase())) return { model, error: `There is already a field called "${label}".` };
   const dataType = COLUMN_DATA_TYPE_VALUES.has(def.dataType) && def.dataType !== "reference" ? def.dataType : "text";
-  const options = dataType === "select" ? (def.options || []).map(o => String(o).trim()).filter(Boolean) : [];
-  if (dataType === "select" && !options.length) return { model, error: "A choice list needs at least one choice." };
+  const options = isChoiceKind(dataType) ? (def.options || []).map(o => String(o).trim()).filter(Boolean) : [];
+  if (isChoiceKind(dataType) && !options.length) return { model, error: "A choice list needs at least one choice." };
+  if (dataType === "multiselect" && options.some(o => o.includes(";"))) return { model, error: "A choice can't contain a semicolon." };
   const key = newWorkFieldKey(fields, label);
   return { model: { ...model, [k.fields]: [...fields, { key, label, dataType, options }] }, key };
 }
@@ -1945,7 +1961,7 @@ function addWorkFieldChoice(model, kind, key, choice) {
   const k = workModelKey(kind);
   const text = String(choice || "").trim();
   const f = (model[k.fields] || []).find(x => x.key === key);
-  if (!text || !f || f.dataType !== "select" || f.options.includes(text)) return model;
+  if (!text || !f || !isChoiceKind(f.dataType) || f.options.includes(text) || (f.dataType === "multiselect" && text.includes(";"))) return model;
   return { ...model, [k.fields]: model[k.fields].map(x => x.key === key ? { ...x, options: [...x.options, text] } : x) };
 }
 function removeWorkField(model, kind, key) {
@@ -5621,7 +5637,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-12.1";
+const APP_VERSION = "2026-10-12.2";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -12668,8 +12684,9 @@ function AssetTracker() {
     const chosen = COLUMN_DATA_TYPE_VALUES.has(kind) ? kind : shipped;
     if (chosen === shipped) delete col.dataType;
     else col.dataType = chosen;
-    if (chosen === "select") {
-      const opts = String(choicesText || "").split("\n").map(o => o.trim()).filter(Boolean);
+    if (isChoiceKind(chosen)) {
+      const semi = chosen === "multiselect" ? (o => o.replace(/;/g, ",")) : (o => o);
+      const opts = String(choicesText || "").split("\n").map(o => semi(o.trim())).filter(Boolean);
       // De-duplicated: two identical rows in the picker are indistinguishable,
       // and the second could never be selected in a way that reads differently.
       col.options = [...new Set(opts)];
@@ -12734,9 +12751,10 @@ function AssetTracker() {
     // draft was seeded from the column's own options, so anything new is at the
     // end; existing choices are never dropped or reordered.
     nextColumns = nextColumns.map(c => {
-      if (createdKeys.includes(c.key) || columnDataType(c) !== "select") return c;
+      if (createdKeys.includes(c.key) || !isChoiceKind(columnDataType(c))) return c;
       const have = columnOptions(c);
-      const extra = String((draft.fieldChoices || {})[c.key] || "").split("\n").map(o => o.trim()).filter(o => o && !have.includes(o));
+      const multi = columnDataType(c) === "multiselect";
+      const extra = String((draft.fieldChoices || {})[c.key] || "").split("\n").map(o => (multi ? o.replace(/;/g, ",") : o).trim()).filter(o => o && !have.includes(o));
       return extra.length ? { ...c, options: [...have, ...[...new Set(extra)]] } : c;
     });
 
@@ -18908,11 +18926,11 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
                 {f.label}
                 <span style={{ fontSize: 12, color: C.muted, marginLeft: 8 }}>
                   {(COLUMN_DATA_TYPES.find(t => t.value === f.dataType) || {}).label || ""}
-                  {f.dataType === "select" && f.options.length ? ` (${f.options.join(", ")})` : ""}
+                  {isChoiceKind(f.dataType) && f.options.length ? ` (${f.options.join(", ")})` : ""}
                 </span>
               </span>
               <button onClick={() => onModel(removeWorkField(model, kind, f.key))} className="icon-btn" aria-label={`Remove ${f.label}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}><Trash2 size={14} color={C.danger} /></button>
-              {f.dataType === "select" && (
+              {isChoiceKind(f.dataType) && (
                 <div style={{ flexBasis: "100%", display: "flex", gap: 6, marginTop: 4 }}>
                   <input value={choiceDraft.key === f.key ? choiceDraft.text : ""} onChange={e => setChoiceDraft({ key: f.key, text: e.target.value })}
                     onKeyDown={e => { if (e.key === "Enter") { onModel(addWorkFieldChoice(model, kind, f.key, choiceDraft.text)); setChoiceDraft({ key: "", text: "" }); } }}
@@ -18933,7 +18951,7 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
                 labelForOption={v => (COLUMN_DATA_TYPES.find(t => t.value === v) || {}).label || v} title="Kind of value" />
             </div>
           </div>
-          {fieldDraft.dataType === "select" && (
+          {isChoiceKind(fieldDraft.dataType) && (
             <input value={fieldDraft.optionsText} onChange={e => setFieldDraft({ ...fieldDraft, optionsText: e.target.value })} placeholder="Choices, separated by commas" aria-label="Choices" style={inputStyle} />
           )}
           <button onClick={() => {
@@ -18972,7 +18990,13 @@ function CustomFieldInputs({ model, kind, typeId, values, onChange }) {
   const required = new Set(requiredCustomFieldsFor(model, kind, typeId));
   return (
     <>
-      {fields.map(f => f.dataType === "select" ? (
+      {fields.map(f => f.dataType === "multiselect" ? (
+        <div key={f.key} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>{f.label}<RequiredMark on={required.has(f.key)} /></span>
+          <PickerField label={f.label} hideLabel multi value={multiValues(values && values[f.key])} onChange={v => onChange({ ...(values || {}), [f.key]: joinMulti(v) })}
+            options={f.options} title={`Select ${f.label}`} placeholder="Select…" />
+        </div>
+      ) : f.dataType === "select" ? (
         // Field's select sits inside a <label>, which re-opens the picker after a
         // choice (BUGS.md); a choice-list custom field gets a div and its own heading.
         <div key={f.key} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -19022,6 +19046,25 @@ function Field({ label, value, onChange, placeholder, wide, dataType, options, e
   const foot = <FieldError message={error} />;
   const inputStyle = { padding: "8px 10px", border: `1.5px solid ${border}`, fontSize: 14, borderRadius: 10, color: C.ink, fontFamily: "inherit" };
 
+  if (kind === "multiselect") {
+    // A div, not a <label>: a picker inside one re-opens after a choice.
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: fullWidth ? "1 / -1" : undefined }}>
+        {head}
+        <PickerField
+          label={label}
+          hideLabel
+          multi
+          value={multiValues(value)}
+          onChange={v => onChange(joinMulti(v))}
+          options={options || []}
+          title={`Select ${label}`}
+          emptyLabel="No choices configured for this field yet."
+        />
+        {foot}
+      </div>
+    );
+  }
   if (kind === "select") {
     return (
       <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: fullWidth ? "1 / -1" : undefined }}>
@@ -20509,7 +20552,7 @@ function TypeManagerModal({
             assets holding a value the field no longer offers, the same hazard
             as changing the kind. Shown at all because "Choice list" with no
             choices tells you nothing about what the field accepts. */}
-        {kind === "select" && on && (
+        {isChoiceKind(kind) && on && (
           <div style={{ marginLeft: 24, fontSize: 12, color: C.empty }}>
             {(draft.fieldChoices || {})[key]
               ? String(draft.fieldChoices[key]).split("\n").filter(Boolean).join(" · ")
@@ -20519,7 +20562,7 @@ function TypeManagerModal({
         {/* Choices can be ADDED to a choice list at any time, never removed or
             renamed: a stored value would be left naming a choice the field no
             longer offers. Appended choices are saved with the type. */}
-        {kind === "select" && on && !pending && !bespoke && (
+        {isChoiceKind(kind) && on && !pending && !bespoke && (
           <div style={{ marginLeft: 24, display: "flex", gap: 6 }}>
             <input
               value={choiceAdd && choiceAdd.key === key ? choiceAdd.text : ""}
@@ -21050,7 +21093,7 @@ function TypeManagerModal({
                     </span>
                   </div>
 
-                  {newFieldDraft.kind === "select" && (
+                  {isChoiceKind(newFieldDraft.kind) && (
                     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Choices</span>
                       <textarea
