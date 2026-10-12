@@ -1626,6 +1626,37 @@ const DEFAULT_COLUMN_DATA_TYPES = {
 // as plain text and refuse saves nothing on screen explains.
 const BESPOKE_FORM_FIELDS = new Set(["type", "parent", "person", "peripherals", "subType"]);
 
+// How a NUMBER is shown (2026-10-12). Display only: the stored value is always
+// the plain number the person typed, so a format can be changed at any time
+// without touching data (unlike the kind, which is fixed at creation). `plain`
+// is the absence of the key. Works on asset columns and on task/work fields,
+// both of which carry `format` beside `dataType`.
+const NUMBER_FORMATS = [
+  { value: "plain", label: "Plain number" },
+  { value: "dollars", label: "Dollars ($1,234.50)" },
+];
+function numberFormatLabel(value) {
+  return (NUMBER_FORMATS.find(f => f.value === value) || NUMBER_FORMATS[0]).label;
+}
+function fieldNumberFormat(field, kind) {
+  return field && field.format === "dollars" && kind === "number" ? "dollars" : "plain";
+}
+// A stored value as text under a format. Anything that is not a number is
+// returned as typed: a hand-edited cell must stay visible, not turn into $NaN.
+function formatNumberValue(format, value) {
+  const raw = value === null || value === undefined ? "" : String(value).trim();
+  if (raw === "" || format !== "dollars") return value === null || value === undefined ? "" : String(value);
+  const n = Number(raw);
+  if (!isFinite(n)) return String(value);
+  return n.toLocaleString("en-US", { style: "currency", currency: "USD" });
+}
+// Sets or clears a field's format, mutating the object it is given (the same
+// shape as applyFieldKind's writes on a copy). Only a number can be formatted.
+function applyNumberFormat(field, kind, format) {
+  if (kind === "number" && format === "dollars") field.format = "dollars";
+  else delete field.format;
+}
+
 function columnDataType(col) {
   if (!col) return "text";
   if (col.dataType && COLUMN_DATA_TYPE_VALUES.has(col.dataType)) return col.dataType;
@@ -1847,6 +1878,7 @@ function adoptWorkModel(raw) {
     key: f.key, label: f.label || f.key,
     dataType: COLUMN_DATA_TYPE_VALUES.has(f.dataType) ? f.dataType : "text",
     options: list(f.options).map(String),
+    ...(f.format === "dollars" && f.dataType === "number" ? { format: "dollars" } : {}),
   }));
   const settings = v => {
     const out = {};
@@ -1915,6 +1947,7 @@ function newWorkFieldKey(fields, label) {
 
 // A custom value as text: a date reads in the app's date style, the rest as typed.
 function dataTypeDisplay(field, value) {
+  if (field.dataType === "number") return formatNumberValue(fieldNumberFormat(field, "number"), value);
   return field.dataType === "date" ? (formatDateOnly(value) || String(value)) : String(value);
 }
 
@@ -1935,7 +1968,20 @@ function addWorkField(model, kind, def) {
   const options = dataType === "select" ? (def.options || []).map(o => String(o).trim()).filter(Boolean) : [];
   if (dataType === "select" && !options.length) return { model, error: "A choice list needs at least one choice." };
   const key = newWorkFieldKey(fields, label);
-  return { model: { ...model, [k.fields]: [...fields, { key, label, dataType, options }] }, key };
+  const field = { key, label, dataType, options };
+  if (dataType === "number" && def.format === "dollars") field.format = "dollars";
+  return { model: { ...model, [k.fields]: [...fields, field] }, key };
+}
+// A format can change after a field exists (the kind cannot): it alters how a
+// stored number reads, never what is stored.
+function setWorkFieldFormat(model, kind, key, format) {
+  const k = workModelKey(kind);
+  return { ...model, [k.fields]: (model[k.fields] || []).map(f => {
+    if (f.key !== key) return f;
+    const next = { ...f };
+    applyNumberFormat(next, f.dataType, format);
+    return next;
+  }) };
 }
 // Removing a definition also unticks it from every type, so no type names a
 // field that no longer exists. Values already stored on records are left alone.
@@ -5612,7 +5658,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-11.13";
+const APP_VERSION = "2026-10-12.1";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -8156,6 +8202,7 @@ function AssetTracker() {
   const [showColManager, setShowColManager] = useState(false);
   const [newColName, setNewColName] = useState("");
   const [newColType, setNewColType] = useState("text");
+  const [newColFormat, setNewColFormat] = useState("plain");
 
   // Loads the full snapshot — either from the Sheet backend, or (sandboxMode)
   // from localStorage/MOCK_SNAPSHOT, never touching the network. Never falls
@@ -12454,12 +12501,26 @@ function AssetTracker() {
     // A new key has no shipped default, so "text" is its default and anything
     // else is a real override — applyFieldKind works that out rather than this
     // deciding for itself, so there is one rule about when a dataType is stored.
-    applyFieldKind(created, newColType, "");
+    applyFieldKind(created, newColType, "", undefined, newColFormat);
     const nextColumns = [...columns, created];
     const nextAssets = assets.map(a => ({ ...a, [key]: "" }));
     persist(nextAssets, { columns: nextColumns });
     setNewColName("");
     setNewColType("text");
+    setNewColFormat("plain");
+  }
+
+  // A number column's format is display only, so unlike the kind it may change
+  // on a column that already holds data. Config domain only: no asset moves.
+  function setColumnFormat(key, format) {
+    if (savingRef.current) return; // double-submit guard, see savingRef
+    const nextColumns = columns.map(c => {
+      if (c.key !== key) return c;
+      const next = { ...c };
+      applyNumberFormat(next, columnDataType(c), format);
+      return next;
+    });
+    persist(assets, { columns: nextColumns });
   }
 
   function removeColumn(key) {
@@ -12654,7 +12715,7 @@ function AssetTracker() {
   // Choices are dropped entirely unless the field is actually a choice list, so
   // switching a column to Text and back doesn't quietly resurrect a stale list.
   // referenceTypes follows the same rule for a reference field's target types.
-  function applyFieldKind(col, kind, choicesText, referenceTypes) {
+  function applyFieldKind(col, kind, choicesText, referenceTypes, format) {
     const shipped = DEFAULT_COLUMN_DATA_TYPES[col.key] || "text";
     const chosen = COLUMN_DATA_TYPE_VALUES.has(kind) ? kind : shipped;
     if (chosen === shipped) delete col.dataType;
@@ -12667,6 +12728,9 @@ function AssetTracker() {
     } else {
       delete col.options;
     }
+    // Display only, so unlike the kind it is also editable later (setColumnFormat).
+    if (chosen === "number" && format === "dollars") col.format = "dollars";
+    else delete col.format;
     if (chosen === "reference") {
       const list = [...new Set((Array.isArray(referenceTypes) ? referenceTypes : [referenceTypes]).filter(Boolean))];
       col.referenceTypes = list;
@@ -12705,7 +12769,7 @@ function AssetTracker() {
       const created = { key, label, width: 160, visible: false, custom: true, restricted: true };
       // The kind was chosen on the pending row, keyed by tempId — the real key
       // doesn't exist until this loop invents it.
-      applyFieldKind(created, (draft.fieldTypes || {})[f.tempId], (draft.fieldChoices || {})[f.tempId], (draft.fieldReferenceTypes || {})[f.tempId]);
+      applyFieldKind(created, (draft.fieldTypes || {})[f.tempId], (draft.fieldChoices || {})[f.tempId], (draft.fieldReferenceTypes || {})[f.tempId], (draft.fieldFormats || {})[f.tempId]);
       nextColumns = [...nextColumns, created];
       createdKeys.push(key);
     });
@@ -14727,6 +14791,12 @@ function AssetTracker() {
                     {c.label}
                     <span style={{ fontSize: 12, color: C.muted, marginLeft: 8 }}>{(COLUMN_DATA_TYPES.find(t => t.value === columnDataType(c)) || {}).label || ""}</span>
                   </span>
+                  {columnDataType(c) === "number" && (
+                    <div style={{ width: 150, marginLeft: "auto", marginRight: 8 }}>
+                      <PickerField label={`${c.label} format`} hideLabel value={fieldNumberFormat(c, "number")} onChange={v => setColumnFormat(c.key, v)}
+                        options={NUMBER_FORMATS.map(f => f.value)} labelForOption={numberFormatLabel} title="How the number is shown" />
+                    </div>
+                  )}
                   <button onClick={() => setConfirmDeleteCol(c.key)} className="icon-btn" aria-label={`Remove ${c.label}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}>
                     <Trash2 size={14} color={C.danger} />
                   </button>
@@ -14755,6 +14825,12 @@ function AssetTracker() {
                   title="Kind of value"
                 />
               </div>
+              {newColType === "number" && (
+                <div style={{ width: 120, flexShrink: 0 }}>
+                  <PickerField label="New column format" hideLabel value={newColFormat} onChange={setNewColFormat}
+                    options={NUMBER_FORMATS.map(f => f.value)} labelForOption={numberFormatLabel} title="How the number is shown" />
+                </div>
+              )}
               <button onClick={addColumn} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600, flexShrink: 0 }}>Add</button>
             </div>
           </div>
@@ -15080,6 +15156,7 @@ function AssetTracker() {
                     // which was the only field that could be complained about.
                     onChange={v => setDraft({ ...draft, [c.key]: v, ...clearedError(draft, c.key) })}
                     dataType={columnDataType(c)}
+                    numberFormat={fieldNumberFormat(c, columnDataType(c))}
                     options={columnOptions(c)}
                     referenceTypes={columnReferenceTypes(c)}
                     assets={assets}
@@ -16087,6 +16164,7 @@ function AssetTracker() {
                           // as parentId — resolve it the same way rather than
                           // printing the raw id.
                           : columnDataType(c) === "reference" ? (parentNameFor(selectedAsset[c.key], assets) || "—")
+                          : columnDataType(c) === "number" ? (formatNumberValue(fieldNumberFormat(c, "number"), selectedAsset[c.key]) || selectedAsset[c.key])
                           : selectedAsset[c.key]
                         }
                         wide={c.key === "notes" || c.key === "parent"}
@@ -16206,6 +16284,7 @@ function AssetTracker() {
                       value={draft[c.key] || ""}
                       onChange={v => setDraft({ ...draft, [c.key]: v, ...clearedError(draft, c.key) })}
                       dataType={columnDataType(c)}
+                      numberFormat={fieldNumberFormat(c, columnDataType(c))}
                       options={columnOptions(c)}
                       referenceTypes={columnReferenceTypes(c)}
                       assets={assets}
@@ -18170,7 +18249,7 @@ function AssetTracker() {
                         // column the list is scanned by.
                         nameOf(a, typesList) || "—"
                       ) : (
-                        applies ? (a[c.key] || "—") : ""
+                        applies ? ((columnDataType(c) === "number" ? formatNumberValue(fieldNumberFormat(c, "number"), a[c.key]) : a[c.key]) || "—") : ""
                       )}
                     </div>
                   );
@@ -18789,7 +18868,7 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
   const [renameVal, setRenameVal] = useState(null);
   const [error, setError] = useState("");
   const [fieldError, setFieldError] = useState("");
-  const [fieldDraft, setFieldDraft] = useState({ label: "", dataType: "text", optionsText: "" });
+  const [fieldDraft, setFieldDraft] = useState({ label: "", dataType: "text", optionsText: "", format: "plain" });
   const selected = types.find(t => t.id === selId) || null;
   const defaultId = defaultWorkTypeId(model, kind);
   const st = selected ? ((model[fieldsKey.settings] || {})[selected.id] || { fieldKeys: [], requiredFields: [], hiddenFields: [] }) : null;
@@ -18891,6 +18970,12 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
                   {f.dataType === "select" && f.options.length ? ` (${f.options.join(", ")})` : ""}
                 </span>
               </span>
+              {f.dataType === "number" && (
+                <div style={{ width: 150, marginLeft: "auto", marginRight: 8 }}>
+                  <PickerField label={`${f.label} format`} hideLabel value={fieldNumberFormat(f, "number")} onChange={v => onModel(setWorkFieldFormat(model, kind, f.key, v))}
+                    options={NUMBER_FORMATS.map(x => x.value)} labelForOption={numberFormatLabel} title="How the number is shown" />
+                </div>
+              )}
               <button onClick={() => onModel(removeWorkField(model, kind, f.key))} className="icon-btn" aria-label={`Remove ${f.label}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}><Trash2 size={14} color={C.danger} /></button>
             </div>
           ))}
@@ -18904,16 +18989,20 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
                 labelForOption={v => (COLUMN_DATA_TYPES.find(t => t.value === v) || {}).label || v} title="Kind of value" />
             </div>
           </div>
+          {fieldDraft.dataType === "number" && (
+            <PickerField label="New field format" hideLabel value={fieldDraft.format || "plain"} onChange={v => setFieldDraft({ ...fieldDraft, format: v })}
+              options={NUMBER_FORMATS.map(x => x.value)} labelForOption={numberFormatLabel} title="How the number is shown" />
+          )}
           {fieldDraft.dataType === "select" && (
             <input value={fieldDraft.optionsText} onChange={e => setFieldDraft({ ...fieldDraft, optionsText: e.target.value })} placeholder="Choices, separated by commas" aria-label="Choices" style={inputStyle} />
           )}
           <button onClick={() => {
-            const r = addWorkField(model, kind, { label: fieldDraft.label, dataType: fieldDraft.dataType, options: fieldDraft.optionsText.split(",") });
+            const r = addWorkField(model, kind, { label: fieldDraft.label, dataType: fieldDraft.dataType, options: fieldDraft.optionsText.split(","), format: fieldDraft.format });
             if (r.error) { setFieldError(r.error); return; }
             // Ticked on the open type straight away: the usual reason to make a field.
             let next = r.model;
             if (selected) next = setTypeHasField(next, kind, selected.id, r.key, true);
-            setFieldError(""); setFieldDraft({ label: "", dataType: "text", optionsText: "" }); onModel(next);
+            setFieldError(""); setFieldDraft({ label: "", dataType: "text", optionsText: "", format: "plain" }); onModel(next);
           }} style={{ alignSelf: "flex-start", padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600 }}>Add field</button>
           {fieldError && <div role="alert" style={{ fontSize: 12, color: C.danger }}>{fieldError}</div>}
         </div>
@@ -18958,6 +19047,7 @@ function CustomFieldInputs({ model, kind, typeId, values, onChange }) {
           value={(values && values[f.key]) ?? ""}
           onChange={e => onChange({ ...(values || {}), [f.key]: e && e.target ? e.target.value : e })}
           dataType={f.dataType}
+          numberFormat={fieldNumberFormat(f, f.dataType)}
           options={f.options}
           required={required.has(f.key)}
         />
@@ -18977,7 +19067,7 @@ function CustomFieldInputs({ model, kind, typeId, values, onChange }) {
 // FORM-level one, repeated here (see fieldErrorFor) rather than a second copy —
 // a save is refused once, for one reason, and saying it twice in two wordings is
 // how the two drift.
-function Field({ label, value, onChange, placeholder, wide, dataType, options, error, invalid, required, referenceTypes, assets, typesList, excludeId }) {
+function Field({ label, value, onChange, placeholder, wide, dataType, options, error, invalid, required, referenceTypes, assets, typesList, excludeId, numberFormat }) {
   const kind = dataType || "text";
   // A long-text field always takes the full row: a textarea in a 180px grid cell
   // is narrower than the text it holds. `wide` stays an explicit override for a
@@ -19075,6 +19165,26 @@ function Field({ label, value, onChange, placeholder, wide, dataType, options, e
   // before writeTable_ forced plain text is exactly that — so normalize on the
   // way in rather than showing an empty box over a stored value.
   const shown = kind === "date" ? dateOnly(value || "") : (value || "");
+  if (kind === "number" && numberFormat === "dollars") {
+    // The stored value stays a plain number; the dollar sign is only drawn
+    // beside the box, and step lets the spinner move in cents.
+    return (
+      <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: fullWidth ? "1 / -1" : undefined }}>
+        {head}
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span aria-hidden="true" style={{ fontSize: 14, color: C.muted }}>$</span>
+          <input
+            type="number" step="0.01" inputMode="decimal"
+            value={shown}
+            onChange={e => onChange(e.target.value)}
+            placeholder={placeholder}
+            style={{ ...inputStyle, flex: 1, minWidth: 0 }}
+          />
+        </div>
+        {foot}
+      </label>
+    );
+  }
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: fullWidth ? "1 / -1" : undefined }}>
       {head}
@@ -20356,6 +20466,7 @@ function TypeManagerModal({
       fieldTypes: { ...(draft.fieldTypes || {}), [tempId]: newFieldDraft.kind || "text" },
       fieldChoices: { ...(draft.fieldChoices || {}), [tempId]: newFieldDraft.choices || "" },
       fieldReferenceTypes: { ...(draft.fieldReferenceTypes || {}), [tempId]: newFieldDraft.referenceTypes || [] },
+      fieldFormats: { ...(draft.fieldFormats || {}), [tempId]: newFieldDraft.format || "plain" },
     });
     setNewFieldDraft(null);
   };
@@ -20935,7 +21046,7 @@ function TypeManagerModal({
               <div style={{ display: "flex", marginTop: 2 }}>
                 <button
                   type="button"
-                  onClick={() => setNewFieldDraft({ label: "", kind: "text", choices: "", referenceTypes: [], error: "" })}
+                  onClick={() => setNewFieldDraft({ label: "", kind: "text", choices: "", referenceTypes: [], format: "plain", error: "" })}
                   style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 10px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12, color: C.ink, fontWeight: 600 }}
                 >
                   <Plus size={13} /> Add field
@@ -20995,6 +21106,24 @@ function TypeManagerModal({
                       This can't be changed after the field is created.
                     </span>
                   </div>
+
+                  {newFieldDraft.kind === "number" && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Show as</span>
+                      <PickerField
+                        label="Show as"
+                        hideLabel
+                        value={newFieldDraft.format || "plain"}
+                        onChange={v => setNewFieldDraft({ ...newFieldDraft, format: v })}
+                        options={NUMBER_FORMATS.map(f => f.value)}
+                        labelForOption={numberFormatLabel}
+                        title="How the number is shown"
+                      />
+                      <span style={{ fontSize: 12, color: C.empty }}>
+                        Dollars shows $1,234.50. The stored value stays a plain number, and this can be changed later in Settings.
+                      </span>
+                    </div>
+                  )}
 
                   {newFieldDraft.kind === "select" && (
                     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
