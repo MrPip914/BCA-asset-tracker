@@ -1,4 +1,4 @@
-# Nightly backup of the DEV Supabase database. See DATABASE_BACKEND_PLAN.md,
+# Nightly backup of the DEV and PROD Supabase databases. See DATABASE_BACKEND_PLAN.md,
 # "Running on the free tier", items 2 and 3: the free plan keeps no backups at
 # all, so this is the only one.
 #
@@ -22,7 +22,9 @@
 #
 # ---------------------------------------------------------------- ONE-TIME SETUP
 #
-# On the `supabase-dev` environment (Settings > Environments), add a secret
+# On BOTH the `supabase-dev` and `supabase-prod` environments (Settings >
+# Environments; prod must have no required reviewers, a schedule cannot wait for
+# one), add a secret
 #
 #   BACKUP_PASSPHRASE   a long random passphrase. KEEP A COPY OUTSIDE GITHUB
 #                       (a password manager): GitHub will not show it again, and
@@ -55,7 +57,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: supabase-dev-backup
+  group: supabase-backup
   cancel-in-progress: false
 
 jobs:
@@ -105,11 +107,15 @@ jobs:
             echo "::error::A backup opened with the wrong passphrase."; exit 1
           fi
 
-  backup-dev:
+  backup:
     if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [dev, prod]
     runs-on: ubuntu-latest
     environment:
-      name: supabase-dev
+      name: supabase-${{ matrix.target }}
     services:
       drill:
         image: postgres:17
@@ -127,7 +133,7 @@ jobs:
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y > /dev/null
           sudo apt-get install -y -qq postgresql-client-17 > /dev/null
           echo /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
-      - name: Back up the dev database
+      - name: Back up the ${{ matrix.target }} database
         env:
           DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
           BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
@@ -135,7 +141,7 @@ jobs:
           set -euo pipefail
           for v in DATABASE_URL BACKUP_PASSPHRASE; do
             if [ -z "${!v:-}" ]; then
-              echo "::error::$v is missing. Add it on the supabase-dev environment (see the top of this workflow)."
+              echo "::error::$v is missing. Add it on the supabase-${{ matrix.target }} environment (see the top of this workflow)."
               exit 1
             fi
           done
@@ -151,8 +157,8 @@ jobs:
         id: name
         run: |
           day="$(date -u +%F)"
-          echo "daily=dev-db-daily-$day" >> "$GITHUB_OUTPUT"
-          echo "weekly=dev-db-weekly-$day" >> "$GITHUB_OUTPUT"
+          echo "daily=${{ matrix.target }}-db-daily-$day" >> "$GITHUB_OUTPUT"
+          echo "weekly=${{ matrix.target }}-db-weekly-$day" >> "$GITHUB_OUTPUT"
           echo "sunday=$([ "$(date -u +%u)" = 7 ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
       - name: Keep it for 30 days
         uses: actions/upload-artifact@v4
@@ -172,7 +178,7 @@ jobs:
       - name: Summary
         run: |
           {
-            echo "### Dev database backed up"
+            echo "### ${{ matrix.target }} database backed up"
             echo "Artifact \`${{ steps.name.outputs.daily }}\` (30 days)$([ '${{ steps.name.outputs.sunday }}' = yes ] && echo " and \`${{ steps.name.outputs.weekly }}\` (90 days)")."
             echo '```'
             cat "$RUNNER_TEMP/drill.txt"

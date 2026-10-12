@@ -275,7 +275,7 @@ for the free tier; Pro's 7 daily backups and no-pause guarantee are what removes
    `auditFull`, photo/floor-plan signing, diagnostics, public panel.
    - **Where it is**: `supabase/functions/asset-api/` — `api.ts` routes, `auth.ts` is the
      session/allowlist port, `inventory.ts` reassembles the read payload, `db.ts` holds
-     `withTenant`. The tenant is named by `?tenant=` (or `client`/`c`). `deploy-api-dev` in
+     `withTenant`. The tenant is named by `?tenant=` (or `client`/`c`). `deploy-api` in
      `db-migrate.yml` deploys it to the dev project on every push to `dev` and asks it two
      questions; it needs `SUPABASE_ACCESS_TOKEN` on the `supabase-dev` GitHub environment.
    - **One change from "Row-level security" above**: the function connects with the
