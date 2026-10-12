@@ -117,11 +117,13 @@
       // BCR/BCB labels on the live sheet, but those predate the counter and are
       // never issued by it — there is no per-type prefix scheme.
       labelPrefix: "BCA",
-      apiUrl: "https://script.google.com/macros/s/AKfycbzXaKRuCrTesxobxP-b2me1TSn0YoGogoYhNPTWU4qWWjXANXGlPuDzJSKGClOTsfOXRQ/exec",
-      // This school's copy in the prod Supabase project. Reached ONLY from a /dev/
-      // build with ?backend=prod, to look at it before the school moves; see
-      // usePreview below. Not the school's backend until apiUrl says so.
-      prodApiUrl: "https://fdzrrrynttsbqofmbkja.supabase.co/functions/v1/asset-api?tenant=bca",
+      // ON SUPABASE since 2026-10-12 (prod project): the asset-api Edge Function,
+      // which names the tenant in its query string. Both schools moved together.
+      apiUrl: "https://fdzrrrynttsbqofmbkja.supabase.co/functions/v1/asset-api?tenant=bca",
+      // The Apps Script /exec this school used before, KEPT as the fallback:
+      // open the site with ?backend=sheet to run against it. The two never share
+      // data, so it is for looking at the old copy or for an emergency.
+      sheetApiUrl: "https://script.google.com/macros/s/AKfycbzXaKRuCrTesxobxP-b2me1TSn0YoGogoYhNPTWU4qWWjXANXGlPuDzJSKGClOTsfOXRQ/exec",
     },
 
     // Throwaway data, its own Sheet, its own Apps Script deployment. This is what
@@ -202,9 +204,11 @@
       appName: "3C Asset Tracker",
       orgName: "Carlsbad Community Church",
       labelPrefix: "3C",
-      apiUrl: "https://script.google.com/macros/s/AKfycbxRVmaXDnIvEauIRXhotJwMC6TgFsRRWDBzfQzGfVdvm0aidrvb2V1geLkh3vpy7ZUh/exec",
-      // See the note on bca's prodApiUrl.
-      prodApiUrl: "https://fdzrrrynttsbqofmbkja.supabase.co/functions/v1/asset-api?tenant=3c",
+      apiUrl: "https://fdzrrrynttsbqofmbkja.supabase.co/functions/v1/asset-api?tenant=3c",
+      // The Apps Script /exec this school used before, KEPT as the fallback:
+      // open the site with ?backend=sheet to run against it. The two never share
+      // data, so it is for looking at the old copy or for an emergency.
+      sheetApiUrl: "https://script.google.com/macros/s/AKfycbxRVmaXDnIvEauIRXhotJwMC6TgFsRRWDBzfQzGfVdvm0aidrvb2V1geLkh3vpy7ZUh/exec",
     },
   };
 

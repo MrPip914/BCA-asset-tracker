@@ -1064,6 +1064,11 @@ onboard one.
   diagnostics file names the backend kind after its version. `navUrl()` keeps every param,
   so one link carrying `?backend=sheet` held a session on Apps Script with 5–7s saves and
   nothing on screen saying so (2026-10-09).
+- **bca and 3c moved to Supabase together on 2026-10-12** (the prod project, ref
+  `fdzrrrynttsbqofmbkja`). Their `apiUrl` is the prod `asset-api`; their old `/exec` is kept as
+  `sheetApiUrl`, so `?backend=sheet` is the fallback (the two never share data). Reverting a school
+  is a one-line `clients.js` edit on main; there is no database-to-Sheet copy-back yet. The
+  `prodApiUrl` / `?backend=prod` preview below stays in the code for any later tenant.
 - **`/dev/?c=<school>&backend=prod` opens a school's copy in the prod Supabase project**
   (2026-10-12; `prodApiUrl` on `bca` and `3c`). Honoured on the /dev/ build only, so a link
   cannot send a school's live app there; the header shows a `Prod copy` pill and storage keys
