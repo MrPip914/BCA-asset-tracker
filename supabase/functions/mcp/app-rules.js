@@ -5,6 +5,7 @@
 // deno-lint-ignore-file
 
 // The registry names icon components; the connector draws none.
+const Blinds = null;
 const Building2 = null;
 const Camera = null;
 const DoorOpen = null;
@@ -128,6 +129,18 @@ const TYPE_REGISTRY = {
   Wall: {
     locked: true, icon: Fence, categoryIds: ["Places"], parentTypes: ["Campus", "Building", "Floor", "Room"], location: true,
     excludedFields: ["tag", "brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
+  },
+  // A window (or a wall of them) with a PANE LAYOUT: an uploaded SVG whose shapes
+  // are the panes, which can be grouped and named for maintenance ("Bay 1 lower
+  // windows"). Tasks on the window name groups and the layout shows which panes
+  // they mean. The layout is the asset's own floorPlanUrl/floorPlanGroups, so it
+  // needs no new column -- see the windowLayout module and plans/window-tracking.md.
+  // Locked so every tenant gets it, as Floor did; floorPlan stays OFF (a window's
+  // drawing is not a map plan and must never be offered on the Map).
+  Window: {
+    locked: true, icon: Blinds, categoryIds: ["Facilities"], parentTypes: ["Wall", "Room"],
+    excludedFields: ["hostname", "screenSize", "peripherals"],
+    modules: ["windowLayout"],
   },
   Other: { parentTypes: ["Room", "Wall"] },
 };

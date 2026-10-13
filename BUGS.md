@@ -16,6 +16,14 @@ version that fixed them.
 
 ## Open
 
+### A floor-plan group's audit rows read "undefined changed from ..." on the Audit tab
+**Found:** 2026-10-13, while building window pane groups.
+**Needs a deploy:** no; frontend only (`describeAudit`).
+**Confirmed:** from the code. `space_group_created`, `space_group_edited`, `space_group_deleted`
+(and `floor_plan_replaced`) have no branch in `describeAudit`, so they fall through to the
+generic "X changed from A to B" sentence with no `field`. Window pane groups use their own
+`pane_group_*` actions, which are worded; the Map's groups were left as they are.
+
 ### A save adopts revisions it did not earn, so a later save can overwrite someone silently
 **Found:** 2026-10-09, while building per-record saves.
 **Needs a deploy:** no; frontend only (`finishWrite`).

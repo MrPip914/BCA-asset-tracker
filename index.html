@@ -287,6 +287,18 @@ const TYPE_REGISTRY = {
     locked: true, icon: Fence, categoryIds: ["Places"], parentTypes: ["Campus", "Building", "Floor", "Room"], location: true,
     excludedFields: ["tag", "brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
   },
+  // A window (or a wall of them) with a PANE LAYOUT: an uploaded SVG whose shapes
+  // are the panes, which can be grouped and named for maintenance ("Bay 1 lower
+  // windows"). Tasks on the window name groups and the layout shows which panes
+  // they mean. The layout is the asset's own floorPlanUrl/floorPlanGroups, so it
+  // needs no new column -- see the windowLayout module and plans/window-tracking.md.
+  // Locked so every tenant gets it, as Floor did; floorPlan stays OFF (a window's
+  // drawing is not a map plan and must never be offered on the Map).
+  Window: {
+    locked: true, icon: Blinds, categoryIds: ["Facilities"], parentTypes: ["Wall", "Room"],
+    excludedFields: ["hostname", "screenSize", "peripherals"],
+    modules: ["windowLayout"],
+  },
   Other: { parentTypes: ["Room", "Wall"] },
 };
 
@@ -877,6 +889,13 @@ const ASSET_MODULES = {
     // content is a pile of circuits waiting to be wired.
     label: "Layout",
     count: asset => (asset.breakers || []).length + (asset.unassignedCircuits || []).length,
+  },
+  // A window's pane layout. The key is the module's own name; the stored data
+  // is the asset's floorPlan* fields. Counts GROUPS: panes are the drawing's
+  // business, groups are what a person made.
+  windowLayout: {
+    label: "Panes",
+    count: asset => (asset.floorPlanGroups || []).length,
   },
 };
 
@@ -2414,6 +2433,9 @@ function describeAudit(entry) {
   if (entry.action === "noted") return `Note: ${entry.note}`;
   if (entry.action === "maintenance_completed") return `Completed maintenance "${entry.field}" — last done ${entry.to}`;
   if (entry.action === "maintenance_removed") return `Removed scheduled maintenance: ${entry.field}`;
+  if (entry.action === "pane_group_created") return `Created pane group "${entry.to}"`;
+  if (entry.action === "pane_group_edited") return `Edited pane group "${entry.to}"`;
+  if (entry.action === "pane_group_deleted") return `Deleted pane group "${entry.from}"`;
   if (entry.action === "breaker_added") return `Added breaker at ${entry.field} (${entry.to})`;
   if (entry.action === "breaker_swapped") return `Swapped breaker at ${entry.field} — serial changed from "${entry.from}" to "${entry.to}"`;
   if (entry.action === "breaker_removed") return `Removed breaker at ${entry.field}`;
@@ -3834,7 +3856,7 @@ function taskMatchesSearch(r, assets, typesList, q, model) {
   if (!q) return true;
   // The task's type name and custom values are searchable once a work model is given.
   const extra = model ? [taskTypeNameOf(model, r.item.taskType), ...Object.values(r.item.custom || {}).map(String)] : [];
-  return [...extra, r.item.task, r.item.notes, r.item.owner, r.asset.tag, nameOf(r.asset, typesList), roomNameOf(r.asset, assets), typeNameOf(r.asset.type, typesList)]
+  return [...extra, ...taskPaneGroupsOf(r.asset, r.item).map(g => g.name), r.item.task, r.item.notes, r.item.owner, r.asset.tag, nameOf(r.asset, typesList), roomNameOf(r.asset, assets), typeNameOf(r.asset.type, typesList)]
     .some(v => (v || "").toLowerCase().includes(q));
 }
 // The History tab's search over one work row ({ asset, change }).
@@ -5683,7 +5705,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-13.2";
+const APP_VERSION = "2026-10-13.3";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -7461,6 +7483,23 @@ const MOCK_SNAPSHOT = {
     // The thermostat for Room 102's mini split, pointing at it through the
     // Controls reference field (see the Room "HVAC" query above).
     { label: "BCA0120", type: "Thermostat", name: "Room 102 Thermostat", parentId: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", controls: "BCA0086", brand: "Mitsubishi", model: "PAR-40MAA", serial: "", notes: "", status: "Active" },
+    // A window with a pane layout, a pane group per bay and level, and two tasks
+    // naming groups (weekly lowers, quarterly uppers). Grouped ids follow
+    // MOCK_WINDOW_SVG: pane-1..4 upper row, pane-5..8 lower row.
+    { label: "BCA0121", type: "Window", name: "Room 102 East Windows", parentId: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", brand: "", model: "", serial: "", notes: "Two bays, upper and lower sash", status: "Active",
+      // A pane layout, read as an uploaded file is (a data: URI): two bays, an upper row
+      // (pane-1..4) and a lower row (pane-5..8) of two panes each.
+      floorPlanUrl: "data:image/svg+xml;utf8," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300"><g id="pane-1"><title>Space.1</title><rect x="20" y="20" width="85" height="120"/></g><g id="pane-2"><title>Space.2</title><rect x="105" y="20" width="85" height="120"/></g><g id="pane-3"><title>Space.3</title><rect x="210" y="20" width="85" height="120"/></g><g id="pane-4"><title>Space.4</title><rect x="295" y="20" width="85" height="120"/></g><g id="pane-5"><title>Space.5</title><rect x="20" y="160" width="85" height="120"/></g><g id="pane-6"><title>Space.6</title><rect x="105" y="160" width="85" height="120"/></g><g id="pane-7"><title>Space.7</title><rect x="210" y="160" width="85" height="120"/></g><g id="pane-8"><title>Space.8</title><rect x="295" y="160" width="85" height="120"/></g></svg>'), floorPlanStorageKey: "", floorPlanFileName: "east-windows.svg",
+      floorPlanGroups: [
+        { id: "wg-b1-upper", name: "Bay 1 upper windows", hideLabel: false, memberShapeIds: ["pane-1", "pane-2"], at: "2026-10-13T15:00:00.000Z", by: "Eric" },
+        { id: "wg-b2-upper", name: "Bay 2 upper windows", hideLabel: false, memberShapeIds: ["pane-3", "pane-4"], at: "2026-10-13T15:00:00.000Z", by: "Eric" },
+        { id: "wg-b1-lower", name: "Bay 1 lower windows", hideLabel: false, memberShapeIds: ["pane-5", "pane-6"], at: "2026-10-13T15:00:00.000Z", by: "Eric" },
+        { id: "wg-b2-lower", name: "Bay 2 lower windows", hideLabel: false, memberShapeIds: ["pane-7", "pane-8"], at: "2026-10-13T15:00:00.000Z", by: "Eric" },
+      ],
+      maintenanceItems: [
+        { id: "mt-win-lower", kind: "scheduled", task: "Clean lower windows", frequencyLabel: "Weekly", frequencyDays: 7, lastPerformed: "", owner: "Custodial", at: "", by: "", paneGroupIds: ["wg-b1-lower", "wg-b2-lower"] },
+        { id: "mt-win-upper", kind: "scheduled", task: "Clean upper windows", frequencyLabel: "Quarterly", frequencyDays: 90, lastPerformed: "", owner: "Contractor", at: "", by: "", paneGroupIds: ["wg-b1-upper", "wg-b2-upper"] },
+      ] },
     { label: "BCA0087", type: "Mini Split", parentId: "BCR0008", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
       { task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "", owner: "", at: "", by: "" },
       { task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
@@ -7905,7 +7944,7 @@ function AssetTracker() {
   // The draft behind the task dialog, filled by BOTH modes -- `id` is the item
   // the dialog acts on, minted on open in add mode so a photo can name the task
   // while the form is still being filled in.
-  const [maintenanceDraft, setMaintenanceDraft] = useState({ id: "", kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {} });
+  const [maintenanceDraft, setMaintenanceDraft] = useState({ id: "", kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [] });
   // null when closed; { mode: "add" } or { mode: "edit", itemId }. ONE dialog
   // for both, the shape changeModal already uses and for the same reason: a
   // separate edit form is a second copy of the same fields to keep in step, and
@@ -10036,7 +10075,7 @@ function AssetTracker() {
     setConfirmArchive(null);
     setAllocationDraft({ roomId: "", quantity: "", error: "" });
     setConfirmAllocationRemove(null);
-    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {} });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [] });
     setConfirmMaintenanceDelete(null);
     setMaintenanceCompleteModal(null);
     setOpenMaintenanceHistory(null);
@@ -11162,7 +11201,7 @@ function AssetTracker() {
       let nextGroups = targetAsset.floorPlanGroups || [];
       try {
         const newSpaces = parseFloorPlanSvg(text).spaces;
-        const remapped = floorPlanRemapLinksAndGroups(nextLinks, nextGroups, oldSpaces, newSpaces);
+        const remapped = floorPlanRemapLinksAndGroups(nextLinks, nextGroups, oldSpaces, newSpaces, isWindowLayoutType(targetAsset.type) ? 1 : 2);
         nextLinks = remapped.links;
         nextGroups = remapped.groups;
       } catch { /* see above -- upload proceeds regardless */ }
@@ -11281,6 +11320,47 @@ function AssetTracker() {
     };
     persist(
       assets.map(a => (a.id === assetId ? { ...a, floorPlanGroups: next } : a)),
+      { auditLog: logAudit([entry]) },
+    );
+  }
+
+  // ---------- Window pane groups (a Window's Panes tab) ----------
+  // Same storage as a plan's groups (floorPlanGroups), different rules: a pane is
+  // in ONE group (see windowGroupsAfterSave) and a group of one pane is fine.
+  // Returns false when the save was refused so the tab keeps the selection.
+  function saveWindowGroup(assetId, draft) {
+    if (savingRef.current) return false; // double-submit guard, see savingRef
+    const target = assets.find(a => a.id === assetId);
+    if (!target) return false;
+    const stamp = { at: new Date().toISOString(), by: currentUser || "" };
+    const newId = crypto.randomUUID ? crypto.randomUUID() : "grp_" + Math.random().toString(36).slice(2);
+    const { groups: next, saved } = windowGroupsAfterSave(target.floorPlanGroups || [], draft, newId, stamp);
+    const entry = {
+      ...stamp, assetLabel: assetId, assetType: target.type,
+      action: draft.id ? "pane_group_edited" : "pane_group_created", to: saved.name,
+    };
+    persist(
+      assets.map(a => (a.id === assetId ? { ...a, floorPlanGroups: next } : a)),
+      { auditLog: logAudit([entry]) },
+    );
+    return true;
+  }
+  // Takes the group off every task that named it in the SAME save, so no task is
+  // left pointing at a group that is gone.
+  function deleteWindowGroup(assetId, groupId) {
+    if (savingRef.current) return;
+    const target = assets.find(a => a.id === assetId);
+    if (!target) return;
+    const grp = (target.floorPlanGroups || []).find(g => g.id === groupId);
+    if (!grp) return;
+    const entry = {
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: assetId, assetType: target.type,
+      action: "pane_group_deleted", from: grp.name,
+    };
+    persist(
+      assets.map(a => (a.id === assetId
+        ? { ...a, floorPlanGroups: (a.floorPlanGroups || []).filter(g => g.id !== groupId), maintenanceItems: tasksWithoutPaneGroup(a.maintenanceItems, groupId) }
+        : a)),
       { auditLog: logAudit([entry]) },
     );
   }
@@ -11712,7 +11792,7 @@ function AssetTracker() {
     setWorkDialogAssetId(assetId === undefined ? null : assetId);
     // Minted on OPEN so a photo can name this schedule while the form is still
     // being filled in -- the same rule openChangeAdd follows.
-    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {} });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [] });
     setMaintenanceModal({ mode: "add" });
   }
 
@@ -11744,6 +11824,7 @@ function AssetTracker() {
       owner: item.owner || "",
       taskType: item.taskType || "",
       custom: item.custom && typeof item.custom === "object" ? { ...item.custom } : {},
+      paneGroupIds: Array.isArray(item.paneGroupIds) ? [...item.paneGroupIds] : [],
     });
     setMaintenanceModal({ mode: "edit", itemId });
   }
@@ -11775,13 +11856,14 @@ function AssetTracker() {
       owner: maintenanceDraft.owner.trim(),
       taskType: maintenanceDraft.taskType || "",
       custom: { ...(maintenanceDraft.custom || {}) },
+      ...(livePaneGroupIds(workTarget, maintenanceDraft.paneGroupIds).length ? { paneGroupIds: livePaneGroupIds(workTarget, maintenanceDraft.paneGroupIds) } : {}),
       at: new Date().toISOString(),
       by: currentUser || "",
     };
     if (validateCustomValues(workModel, "task", item.taskType, item.custom)) return; // Save is disabled on it, with the reason on screen
     const next = assets.map(a => (a.id === workTargetId ? { ...a, maintenanceItems: [...(a.maintenanceItems || []), item] } : a));
     await persist(next, { columns });
-    setMaintenanceDraft({ id: crypto.randomUUID(), kind: maintenanceDraft.kind, task: "", notes: "", frequency: maintenanceDraft.frequency, recurrence: maintenanceDraft.recurrence, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {} });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: maintenanceDraft.kind, task: "", notes: "", frequency: maintenanceDraft.frequency, recurrence: maintenanceDraft.recurrence, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [] });
     setMaintenanceModal(null);
   }
 
@@ -11819,6 +11901,8 @@ function AssetTracker() {
       owner: maintenanceDraft.owner.trim(),
       taskType: maintenanceDraft.taskType || "",
       custom: { ...(maintenanceDraft.custom || {}) },
+      ...(livePaneGroupIds(workTarget, maintenanceDraft.paneGroupIds).length || original.paneGroupIds
+        ? { paneGroupIds: livePaneGroupIds(workTarget, maintenanceDraft.paneGroupIds) } : {}),
     };
     if (validateCustomValues(workModel, "task", updated.taskType, updated.custom)) return;
     const mkEntry = (field, from, to) => ({
@@ -11837,6 +11921,11 @@ function AssetTracker() {
     if ((original.owner || "") !== (updated.owner || "")) entries.push(mkEntry("Owner", original.owner || "—", updated.owner || "—"));
     if ((original.taskType || "") !== (updated.taskType || "")) {
       entries.push(mkEntry("Type", taskTypeNameOf(workModel, original.taskType) || "—", taskTypeNameOf(workModel, updated.taskType) || "—"));
+    }
+    {
+      const names = ids => { const gs = windowGroupsOf(workTarget); return (ids || []).map(id => (gs.find(g => g.id === id) || {}).name).filter(Boolean).join(", "); };
+      const before = names(original.paneGroupIds), after = names(updated.paneGroupIds);
+      if (before !== after) entries.push(mkEntry("Pane groups", before || "—", after || "—"));
     }
     // Per custom field, for the fields the type now carries or carried: an edit
     // rewrites a record, and the audit row is the only trail of what it said.
@@ -15610,6 +15699,30 @@ function AssetTracker() {
                   )}
                   <CustomFieldInputs model={workModel} kind="task" typeId={maintenanceDraft.taskType} values={maintenanceDraft.custom}
                     onChange={custom => setMaintenanceDraft({ ...maintenanceDraft, custom })} />
+                  {/* Which panes this task covers: only a window with at least one
+                      group has anything to pick. Chips rather than a PickerField --
+                      a window has a handful of groups and the choice is "which of
+                      these", several at once, with the layout lighting up below. */}
+                  {workTarget && isWindowLayoutType(workTarget.type) && windowGroupsOf(workTarget).length > 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6, gridColumn: "1 / -1" }}>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Pane groups</span>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        {windowGroupsOf(workTarget).map(g => {
+                          const on = (maintenanceDraft.paneGroupIds || []).includes(g.id);
+                          return (
+                            <button key={g.id} type="button" aria-pressed={on}
+                              onClick={() => setMaintenanceDraft({ ...maintenanceDraft, paneGroupIds: on ? maintenanceDraft.paneGroupIds.filter(id => id !== g.id) : [...(maintenanceDraft.paneGroupIds || []), g.id] })}
+                              style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 11px", borderRadius: 999, fontSize: 13, fontWeight: on ? 700 : 500,
+                                border: `1.5px solid ${on ? windowGroupColor(windowGroupsOf(workTarget), g.id) : C.border}`, background: on ? C.bg : C.surface, color: C.ink }}>
+                              <span aria-hidden="true" style={{ width: 10, height: 10, borderRadius: 3, background: windowGroupColor(windowGroupsOf(workTarget), g.id) }} />
+                              {g.name}{on && <Check size={13} />}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <TaskPaneLayout asset={workTarget} groupIds={maintenanceDraft.paneGroupIds} maxHeight={200} />
+                    </div>
+                  )}
                 </div>
                 {taskCustomError && <div role="alert" style={{ fontSize: 12, color: C.danger, marginTop: 8 }}>{taskCustomError}</div>}
                 <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
@@ -16494,6 +16607,22 @@ function AssetTracker() {
             </>
           )}
 
+          {detailTab === "windowLayout" && hasModule(selectedAsset.type, "windowLayout") && (
+            <WindowLayoutTabContent
+              asset={selectedAsset}
+              canEdit={canEdit}
+              uploadBusy={floorPlanUploadBusy}
+              uploadError={floorPlanUploadError}
+              onUploadPlan={(file, oldSpaces) => uploadFloorPlanSvg(selectedAsset.id, file, oldSpaces)}
+              onSaveGroup={draft => saveWindowGroup(selectedAsset.id, draft)}
+              onDeleteGroup={groupId => deleteWindowGroup(selectedAsset.id, groupId)}
+              taskCountByGroup={(selectedAsset.maintenanceItems || []).filter(m => m && !taskIsDone(m)).reduce((acc, m) => {
+                (Array.isArray(m.paneGroupIds) ? m.paneGroupIds : []).forEach(id => { acc[id] = (acc[id] || 0) + 1; });
+                return acc;
+              }, {})}
+            />
+          )}
+
           {detailTab === "allocations" && hasModule(selectedAsset.type, "allocations") && (
             <>
               <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 16, fontSize: 13 }}>
@@ -16747,6 +16876,12 @@ function AssetTracker() {
                         {customFieldsFor(workModel, "task", item.taskType).filter(f => String((item.custom || {})[f.key] ?? "") !== "").map(f => (
                           <div key={f.key} style={{ fontSize: 13, color: C.ink, marginBottom: 2 }}><span style={{ color: C.muted }}>{f.label}:</span> {dataTypeDisplay(f, item.custom[f.key])}</div>
                         ))}
+                        {isWindowLayoutType(selectedAsset.type) && taskPaneGroupsOf(selectedAsset, item).length > 0 && (
+                          <div style={{ marginBottom: 8 }}>
+                            <div style={{ fontSize: 13, color: C.muted }}>Pane groups:</div>
+                            <TaskPaneLayout asset={selectedAsset} groupIds={item.paneGroupIds} maxHeight={150} />
+                          </div>
+                        )}
                         {/* The same stored field reads differently by kind:
                             a schedule's lastPerformed is the start of its next
                             interval, a one-off's is the end of it. */}
@@ -18484,7 +18619,7 @@ function AssetTracker() {
                     onClick={() => (canEdit ? openMaintenanceEdit(item.id, asset.id) : openDetail(asset, "maintenance"))}
                     style={{ display: "grid", gridTemplateColumns: "220px 170px 100px 110px 130px 130px 130px 120px", alignItems: "center", cursor: "pointer", background: C.surface, borderTop: `1px solid ${C.border}` }}
                   >
-                    <div style={{ padding: "12px 14px", fontSize: 13, color: C.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.task}{taskTypeNameOf(workModel, item.taskType) && <span style={{ color: C.muted }}> · {taskTypeNameOf(workModel, item.taskType)}</span>}</div>
+                    <div style={{ padding: "12px 14px", fontSize: 13, color: C.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.task}{taskTypeNameOf(workModel, item.taskType) && <span style={{ color: C.muted }}> · {taskTypeNameOf(workModel, item.taskType)}</span>}{(() => { const pg = taskPaneGroupsOf(asset, item); return pg.length ? <span style={{ color: C.muted }}> · {pg.map(g => g.name).join(", ")}</span> : null; })()}</div>
                     <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted, display: "flex", alignItems: "center", gap: 6, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       <AssetIcon size={14} style={{ flexShrink: 0, color: C.brand }} />
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{assetName}</span>
@@ -22956,7 +23091,7 @@ function floorPlanRemapShapeIds(oldSpaces, newSpaces) {
 // drops below two surviving members is dropped whole -- the same "fewer than
 // two is not a group" rule saveGroupEditNow already applies when a member is
 // removed by hand.
-function floorPlanRemapLinksAndGroups(links, groups, oldSpaces, newSpaces) {
+function floorPlanRemapLinksAndGroups(links, groups, oldSpaces, newSpaces, minGroupSize) {
   const remap = floorPlanRemapShapeIds(oldSpaces, newSpaces);
   // A wall's segment id is its SPACE's id plus a suffix (see floorPlanSegmentId):
   // the space survives the replace by the same rule a room link does, and the
@@ -22974,8 +23109,82 @@ function floorPlanRemapLinksAndGroups(links, groups, oldSpaces, newSpaces) {
     .filter(l => l.shapeId);
   const nextGroups = (groups || [])
     .map(g => ({ ...g, memberShapeIds: (g.memberShapeIds || []).map(remap).filter(Boolean) }))
-    .filter(g => g.memberShapeIds.length >= 2);
+    .filter(g => g.memberShapeIds.length >= (minGroupSize || 2));
   return { links: nextLinks, groups: nextGroups };
+}
+
+// ---------- Window pane layouts ----------
+// A Window's layout is an SVG whose "Space" shapes are PANES, stored in the same
+// floorPlan* fields a place's plan uses, so upload, Replace (groups carried by
+// shape id, then title) and the group list need no new storage. See
+// plans/window-tracking.md. Everything below is pure.
+function isWindowLayoutType(type) {
+  return hasModule(type, "windowLayout");
+}
+// Is this a plan the MAP should know about? A window's layout is a drawing of
+// panes, not a floor plan: a Room containing a Window must not read as "has a
+// plan", or the Map offers to navigate into a window.
+function hasMapPlan(asset) {
+  return !!(asset && asset.floorPlanUrl && !isWindowLayoutType(asset.type));
+}
+// The groups that exist on a window, in stored order (colours follow this order).
+function windowGroupsOf(asset) {
+  return ((asset && asset.floorPlanGroups) || []).filter(g => g && g.id);
+}
+// The group a pane belongs to, or null. A pane is in at most one.
+function windowGroupOfPane(groups, paneId) {
+  return (groups || []).find(g => (g.memberShapeIds || []).includes(paneId)) || null;
+}
+// Groups after saving ONE group (draft.id absent = create). A pane belongs to at
+// most one group, so panes the draft claims are taken out of every other group,
+// and a group left with no panes is dropped. Returns what moved so the form can
+// say so. Unlike the Map's groups, a group of ONE pane is legitimate here.
+function windowGroupsAfterSave(groups, draft, newId, stamp) {
+  const members = [...new Set(draft.memberShapeIds || [])];
+  const id = draft.id || newId;
+  const taken = new Set(members);
+  const moved = [];
+  const others = (groups || []).filter(g => g.id !== id).map(g => {
+    const lost = (g.memberShapeIds || []).filter(m => taken.has(m));
+    if (lost.length) moved.push({ from: g.name, count: lost.length });
+    return lost.length ? { ...g, memberShapeIds: (g.memberShapeIds || []).filter(m => !taken.has(m)) } : g;
+  }).filter(g => (g.memberShapeIds || []).length > 0);
+  const saved = {
+    id, name: (draft.name || "").trim() || "Group of " + members.length, hideLabel: false,
+    memberShapeIds: members, ...(stamp || {}),
+  };
+  const existed = (groups || []).some(g => g.id === id);
+  // Keep the saved group where it was (colours follow order); a new one goes last.
+  const next = existed
+    ? (groups || []).map(g => (g.id === id ? saved : others.find(o => o.id === g.id))).filter(Boolean)
+    : [...others, saved];
+  return { groups: next, saved, moved };
+}
+// Tasks hold group ids; a group that has since been deleted is ignored, never
+// shown as a raw id. Returns the live groups a task names, in the window's order.
+function taskPaneGroupsOf(asset, item) {
+  const ids = (item && Array.isArray(item.paneGroupIds)) ? item.paneGroupIds : [];
+  if (!ids.length) return [];
+  return windowGroupsOf(asset).filter(g => ids.includes(g.id));
+}
+// What a task saves: only groups this window really has. Call sites omit the key
+// when there are none, so a task that never used panes is stored exactly as before.
+function livePaneGroupIds(asset, ids) {
+  const live = new Set(windowGroupsOf(asset).map(g => g.id));
+  return (ids || []).filter(id => live.has(id));
+}
+// Deleting a group takes it off every task that named it, in the same save, so a
+// task never points at nothing.
+function tasksWithoutPaneGroup(items, groupId) {
+  return (items || []).map(m => (m && Array.isArray(m.paneGroupIds) && m.paneGroupIds.includes(groupId)
+    ? { ...m, paneGroupIds: m.paneGroupIds.filter(id => id !== groupId) } : m));
+}
+// A distinct colour per group, by position. Data colours rather than theme
+// tokens: they only have to tell groups apart, in light and dark alike.
+const WINDOW_GROUP_COLORS = ["#2f7ec2", "#d4852a", "#3f9a5f", "#9a56b8", "#c2415a", "#2a9d9d", "#8a7a1c", "#6b7bd6"];
+function windowGroupColor(groups, groupId) {
+  const i = (groups || []).findIndex(g => g.id === groupId);
+  return i < 0 ? "" : WINDOW_GROUP_COLORS[i % WINDOW_GROUP_COLORS.length];
 }
 
 // ---------- Exterior walls ----------
@@ -23175,6 +23384,284 @@ function fetchFloorPlanSvgText(url) {
     if (!res.ok) throw new Error("Could not load the floor plan file (HTTP " + res.status + ").");
     return res.text();
   });
+}
+
+// ---------- Window pane layout (a Window's "Panes" tab) ----------
+// Draws a window's panes: every Space shape of its SVG, filled by the group it is
+// in. `highlightGroupIds` (a task's groups) dims everything else and outlines the
+// named groups -- the "which windows does this task mean" view, used by the tab,
+// the task dialog and the task card. `selectedIds` + `onPaneClick` make it
+// editable. The frame is the PANES' bounding box, not the file's viewBox: an
+// export is often drawn on a much larger page than the window itself.
+function WindowLayoutView({ spaces, groups, highlightGroupIds, selectedIds, onPaneClick, maxHeight, showNumbers, ariaLabel }) {
+  const list = (spaces || []).filter(sp => sp && sp.pts && sp.pts.length >= 3);
+  if (!list.length) return null;
+  const bb = floorPlanBbox(list.flatMap(sp => sp.pts));
+  const big = Math.max(bb.w, bb.h) || 1;
+  const pad = big * 0.03;
+  const sw = big / 400;
+  const fontSize = big / 28;
+  const hl = new Set(highlightGroupIds || []);
+  const dimming = hl.size > 0;
+  const editable = typeof onPaneClick === "function";
+  return (
+    <svg
+      viewBox={`${bb.x - pad} ${bb.y - pad} ${bb.w + pad * 2} ${bb.h + pad * 2}`}
+      role="img" aria-label={ariaLabel || "Window pane layout"}
+      style={{ width: "100%", height: "auto", maxHeight: maxHeight || 420, display: "block" }}
+    >
+      {list.map((sp, i) => {
+        const grp = windowGroupOfPane(groups, sp.gid);
+        const color = grp ? windowGroupColor(groups, grp.id) : "";
+        const lit = !dimming || (grp && hl.has(grp.id));
+        const selected = !!(selectedIds && selectedIds.has(sp.gid));
+        const points = sp.pts.map(p => p.join(",")).join(" ");
+        const label = "Pane " + (i + 1) + (grp ? " — " + grp.name : " — not in a group");
+        return (
+          <g key={sp.gid}
+            role={editable ? "button" : undefined} tabIndex={editable ? 0 : undefined} aria-label={editable ? label : undefined}
+            aria-pressed={editable ? selected : undefined}
+            onClick={editable ? () => onPaneClick(sp.gid) : undefined}
+            onKeyDown={editable ? e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPaneClick(sp.gid); } } : undefined}
+            style={{ cursor: editable ? "pointer" : "default" }}>
+            <title>{label}</title>
+            <polygon points={points}
+              fill={color || "#c9d2d6"}
+              fillOpacity={lit ? (color ? (dimming ? 0.85 : 0.55) : 0.35) : 0.12}
+              stroke={selected ? C.ink : lit && dimming && color ? color : C.muted}
+              strokeWidth={selected ? sw * 4 : lit && dimming && grp ? sw * 3 : sw * 1.5}
+              strokeDasharray={!grp && !selected ? sw * 4 + " " + sw * 3 : undefined}
+              strokeLinejoin="round" />
+            {showNumbers && sp.bbox && sp.bbox.w > fontSize * 1.4 && sp.bbox.h > fontSize * 1.4 && (
+              <text x={sp.pole.x} y={sp.pole.y} fontSize={fontSize} textAnchor="middle" dominantBaseline="central"
+                fill={C.ink} style={{ pointerEvents: "none", userSelect: "none" }}>{i + 1}</text>
+            )}
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+// The group chips a task shows, coloured as the layout colours them.
+function PaneGroupChips({ groups, shown }) {
+  return (
+    <span style={{ display: "inline-flex", flexWrap: "wrap", gap: 4 }}>
+      {(shown || []).map(g => (
+        <span key={g.id} style={{ display: "inline-flex", alignItems: "center", gap: 5, border: `1px solid ${C.border}`, borderRadius: 999, padding: "1px 8px", fontSize: 11, color: C.ink }}>
+          <span aria-hidden="true" style={{ width: 8, height: 8, borderRadius: 2, background: windowGroupColor(groups, g.id) }} />
+          {g.name}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+// A task's panes, read-only: its group chips and the layout with those groups
+// lit. Loads the window's SVG itself, so the task dialog and the task card can
+// drop it in with just the asset and the groups.
+function TaskPaneLayout({ asset, groupIds, maxHeight }) {
+  const plan = useFloorPlanSvg(asset && asset.floorPlanUrl);
+  const groups = windowGroupsOf(asset);
+  const shown = groups.filter(g => (groupIds || []).includes(g.id));
+  if (!shown.length) return null;
+  return (
+    <div style={{ marginTop: 8 }}>
+      <PaneGroupChips groups={groups} shown={shown} />
+      {plan.status === "ready" && (
+        <div style={{ marginTop: 8, border: `1px solid ${C.border}`, borderRadius: 8, background: C.surface, padding: 8 }}>
+          <WindowLayoutView spaces={plan.spaces} groups={groups} highlightGroupIds={shown.map(g => g.id)} maxHeight={maxHeight || 160}
+            ariaLabel={"Panes this task covers: " + shown.map(g => g.name).join(", ")} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The Panes tab of a Window: upload / replace the layout, tap panes to group
+// them, name the group, and see which tasks use each group. All writes go
+// through the callbacks (saveWindowGroup, deleteWindowGroup), so this holds only
+// view state.
+function WindowLayoutTabContent({ asset, canEdit, uploadBusy, uploadError, onUploadPlan, onSaveGroup, onDeleteGroup, taskCountByGroup }) {
+  const plan = useFloorPlanSvg(asset.floorPlanUrl);
+  const fileInputRef = useRef(null);
+  const [selected, setSelected] = useState(() => new Set());
+  const [editingId, setEditingId] = useState(null);
+  const [name, setName] = useState("");
+  const [viewGroupId, setViewGroupId] = useState(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const groups = windowGroupsOf(asset);
+  const spaces = plan.status === "ready" ? plan.spaces.filter(sp => sp && sp.pts && sp.pts.length >= 3) : [];
+  const validIds = new Set(spaces.map(sp => sp.gid));
+  const countIn = g => (g.memberShapeIds || []).filter(id => validIds.has(id)).length;
+  const grouped = spaces.filter(sp => windowGroupOfPane(groups, sp.gid)).length;
+  const trimmed = name.trim();
+  const clash = trimmed && groups.some(g => g.id !== editingId && g.name.trim().toLowerCase() === trimmed.toLowerCase());
+  const movedFrom = {};
+  selected.forEach(id => {
+    const g = windowGroupOfPane(groups, id);
+    if (g && g.id !== editingId) movedFrom[g.name] = (movedFrom[g.name] || 0) + 1;
+  });
+  const movedText = Object.keys(movedFrom).map(n => movedFrom[n] + (movedFrom[n] === 1 ? " pane" : " panes") + " from “" + n + "”").join(", ");
+  const dirty = selected.size > 0 || editingId !== null;
+
+  function clearEditor() { setSelected(new Set()); setEditingId(null); setName(""); }
+  function togglePane(id) {
+    if (!canEdit) {
+      const g = windowGroupOfPane(groups, id);
+      setViewGroupId(g ? (viewGroupId === g.id ? null : g.id) : null);
+      return;
+    }
+    setViewGroupId(null);
+    setSelected(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+  }
+  function startEdit(g) {
+    setViewGroupId(null); setConfirmDeleteId(null);
+    setEditingId(g.id); setName(g.name);
+    setSelected(new Set((g.memberShapeIds || []).filter(id => validIds.has(id))));
+  }
+  function save() {
+    if (!selected.size || clash) return;
+    const ok = onSaveGroup({ id: editingId || undefined, name: trimmed, memberShapeIds: [...selected] });
+    if (ok !== false) clearEditor();
+  }
+
+  const headerRow = (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+      <span style={{ fontSize: 13, color: C.muted }}>{asset.floorPlanFileName ? asset.floorPlanFileName : "Pane layout"}</span>
+      {canEdit && (
+        <>
+          <button type="button" disabled={uploadBusy} onClick={() => fileInputRef.current && fileInputRef.current.click()}
+            style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 10, border: `1px solid ${C.border}`, background: C.surface, color: C.ink, fontSize: 12, fontWeight: 600, opacity: uploadBusy ? 0.6 : 1 }}>
+            <Upload size={13} />{uploadBusy ? "Uploading…" : asset.floorPlanUrl ? "Replace layout…" : "Upload layout…"}
+          </button>
+          <input ref={fileInputRef} type="file" accept={FLOORPLAN_FILE_ACCEPT} style={{ display: "none" }}
+            onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (f) onUploadPlan(f, plan.status === "ready" ? plan.spaces : []); }} />
+        </>
+      )}
+    </div>
+  );
+
+  if (!asset.floorPlanUrl) {
+    return (
+      <div className="card" style={{ padding: 18 }}>
+        <p style={{ margin: "0 0 10px", fontSize: 14, color: C.ink }}>No pane layout uploaded yet.</p>
+        <p style={{ margin: "0 0 14px", fontSize: 13, color: C.empty }}>
+          Upload an SVG drawing of this window with each pane drawn as a shape titled
+          “Space” (the same convention as a floor plan). Then group the panes by how
+          they are maintained, and point tasks at the groups.
+        </p>
+        {canEdit && (
+          <>
+            <button type="button" disabled={uploadBusy} onClick={() => fileInputRef.current && fileInputRef.current.click()}
+              style={{ padding: "8px 14px", borderRadius: 10, border: "none", background: C.brand, color: "#fff", fontSize: 13, fontWeight: 600, opacity: uploadBusy ? 0.6 : 1 }}>
+              {uploadBusy ? "Uploading…" : "Upload layout…"}
+            </button>
+            <input ref={fileInputRef} type="file" accept={FLOORPLAN_FILE_ACCEPT} style={{ display: "none" }}
+              onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (f) onUploadPlan(f, []); }} />
+          </>
+        )}
+        {uploadError && <p style={{ margin: "10px 0 0", fontSize: 13, color: C.danger }}>{uploadError}</p>}
+      </div>
+    );
+  }
+  if (plan.status !== "ready" && plan.status !== "error") {
+    return <div className="card" style={{ padding: 18, fontSize: 13, color: C.empty }}>Loading the pane layout…</div>;
+  }
+  if (plan.status === "error") {
+    return (
+      <div className="card" style={{ padding: 18 }}>
+        {headerRow}
+        <p style={{ margin: 0, fontSize: 14, color: C.danger }}>{plan.error}</p>
+        {uploadError && <p style={{ margin: "10px 0 0", fontSize: 13, color: C.danger }}>{uploadError}</p>}
+      </div>
+    );
+  }
+  if (!spaces.length) {
+    return (
+      <div className="card" style={{ padding: 18 }}>
+        {headerRow}
+        <p style={{ margin: 0, fontSize: 14, color: C.ink }}>That file has no panes in it.</p>
+        <p style={{ margin: "6px 0 0", fontSize: 13, color: C.empty }}>Each pane needs to be a shape titled “Space”. Replace the layout with one that has them.</p>
+        {uploadError && <p style={{ margin: "10px 0 0", fontSize: 13, color: C.danger }}>{uploadError}</p>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="card" style={{ padding: 14 }}>
+      {headerRow}
+      {uploadError && <p style={{ margin: "0 0 10px", fontSize: 13, color: C.danger }}>{uploadError}</p>}
+      <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 10 }}>
+        <WindowLayoutView spaces={spaces} groups={groups} selectedIds={selected} showNumbers={canEdit}
+          highlightGroupIds={viewGroupId ? [viewGroupId] : []}
+          onPaneClick={togglePane} maxHeight={460} />
+      </div>
+      <p style={{ margin: "8px 0 0", fontSize: 12, color: C.muted }}>
+        {spaces.length} {spaces.length === 1 ? "pane" : "panes"}, {grouped} in a group{spaces.length - grouped > 0 ? " · " + (spaces.length - grouped) + " not grouped (dashed)" : ""}.
+        {canEdit ? " Tap panes to select them." : " Tap a pane to see its group."}
+      </p>
+
+      {canEdit && dirty && (
+        <div style={{ marginTop: 12, border: `1px solid ${C.border}`, borderRadius: 10, background: C.bg, padding: 12 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 6 }}>
+            {editingId ? "Editing group" : "New group"} · {selected.size} {selected.size === 1 ? "pane" : "panes"} selected
+          </div>
+          <input type="text" value={name} onChange={e => setName(e.target.value)} placeholder="Group name, e.g. Bay 1 lower windows"
+            aria-label="Group name" maxLength={80}
+            style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: `1px solid ${clash ? C.danger : C.border}`, fontSize: 14, boxSizing: "border-box" }} />
+          {clash && <div role="alert" style={{ fontSize: 12, color: C.danger, marginTop: 6 }}>This window already has a group called “{trimmed}”.</div>}
+          {movedText && <div style={{ fontSize: 12, color: C.muted, marginTop: 6 }}>Moves {movedText} into this group (a pane is in one group at a time).</div>}
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button type="button" onClick={save} disabled={!selected.size || !!clash}
+              style={{ padding: "7px 14px", borderRadius: 10, border: "none", background: C.brand, color: "#fff", fontSize: 13, fontWeight: 600, opacity: !selected.size || clash ? 0.5 : 1 }}>
+              {editingId ? "Save group" : "Create group"}
+            </button>
+            <button type="button" onClick={clearEditor}
+              style={{ padding: "7px 14px", borderRadius: 10, border: `1px solid ${C.border}`, background: C.surface, color: C.ink, fontSize: 13, fontWeight: 600 }}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ marginTop: 16 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 8 }}>Groups ({groups.length})</div>
+        {groups.length === 0 && <p style={{ margin: 0, fontSize: 13, color: C.empty }}>{canEdit ? "No groups yet. Select panes above and name the group." : "No groups yet."}</p>}
+        {groups.map(g => {
+          const uses = (taskCountByGroup && taskCountByGroup[g.id]) || 0;
+          const viewing = viewGroupId === g.id;
+          const n = countIn(g);
+          return (
+            <div key={g.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderTop: `1px solid ${C.border}`, flexWrap: "wrap" }}>
+              <span aria-hidden="true" style={{ width: 12, height: 12, borderRadius: 3, background: windowGroupColor(groups, g.id), flexShrink: 0 }} />
+              <button type="button" onClick={() => setViewGroupId(viewing ? null : g.id)} aria-pressed={viewing}
+                style={{ background: "none", border: "none", padding: 0, fontSize: 14, fontWeight: viewing ? 700 : 600, color: C.brandDark, textAlign: "left" }}>{g.name}</button>
+              <span style={{ fontSize: 12, color: C.muted }}>
+                {n} {n === 1 ? "pane" : "panes"}{n === 0 ? " (none in this layout)" : ""}{uses ? " · " + uses + (uses === 1 ? " task" : " tasks") : ""}
+              </span>
+              {canEdit && (
+                <span style={{ marginLeft: "auto", display: "inline-flex", gap: 6 }}>
+                  {confirmDeleteId === g.id ? (
+                    <>
+                      <span style={{ fontSize: 12, color: C.danger, alignSelf: "center" }}>{uses ? "Remove from " + uses + (uses === 1 ? " task" : " tasks") + " too?" : "Delete this group?"}</span>
+                      <button type="button" onClick={() => { onDeleteGroup(g.id); setConfirmDeleteId(null); if (editingId === g.id) clearEditor(); if (viewing) setViewGroupId(null); }}
+                        style={{ padding: "3px 10px", borderRadius: 8, border: "none", background: C.danger, color: "#fff", fontSize: 12, fontWeight: 600 }}>Delete</button>
+                      <button type="button" onClick={() => setConfirmDeleteId(null)}
+                        style={{ padding: "3px 10px", borderRadius: 8, border: `1px solid ${C.border}`, background: C.surface, color: C.ink, fontSize: 12 }}>Keep</button>
+                    </>
+                  ) : (
+                    <>
+                      <button type="button" aria-label={"Edit group " + g.name} onClick={() => startEdit(g)} style={{ background: "none", border: "none", padding: 4 }}><Pencil size={14} color={C.muted} /></button>
+                      <button type="button" aria-label={"Delete group " + g.name} onClick={() => setConfirmDeleteId(g.id)} style={{ background: "none", border: "none", padding: 4 }}><Trash2 size={14} color={C.muted} /></button>
+                    </>
+                  )}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 // ---------- Map "On selection" options (per location) ----------
@@ -24085,7 +24572,7 @@ function FloorPlanTabContent({
     // inside it (a Building whose floors carry the drawings). A type that
     // merely COULD carry a plan, with none uploaded, is a dead end that
     // lands on "No floor plan uploaded yet".
-    if (navAsset.floorPlanUrl || descendantsOf(navAsset, assets).some(d => d.floorPlanUrl)) {
+    if (navAsset.floorPlanUrl || descendantsOf(navAsset, assets).some(hasMapPlan)) {
       setSelectedShapeId(null); setSelectedWallId(null); setOpenGroupId(null);
       onNavigateToPlan(navAsset.id);
       return true;

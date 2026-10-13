@@ -212,7 +212,7 @@ function floorPlanRemapShapeIds(oldSpaces, newSpaces) {
   };
 }
 
-function floorPlanRemapLinksAndGroups(links, groups, oldSpaces, newSpaces) {
+function floorPlanRemapLinksAndGroups(links, groups, oldSpaces, newSpaces, minGroupSize) {
   const remap = floorPlanRemapShapeIds(oldSpaces, newSpaces);
   // A wall's segment id is its SPACE's id plus a suffix (see floorPlanSegmentId):
   // the space survives the replace by the same rule a room link does, and the
@@ -230,7 +230,7 @@ function floorPlanRemapLinksAndGroups(links, groups, oldSpaces, newSpaces) {
     .filter(l => l.shapeId);
   const nextGroups = (groups || [])
     .map(g => ({ ...g, memberShapeIds: (g.memberShapeIds || []).map(remap).filter(Boolean) }))
-    .filter(g => g.memberShapeIds.length >= 2);
+    .filter(g => g.memberShapeIds.length >= (minGroupSize || 2));
   return { links: nextLinks, groups: nextGroups };
 }
 
