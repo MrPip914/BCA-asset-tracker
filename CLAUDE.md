@@ -896,6 +896,39 @@ change, no version bump, no deploy.**
 - The rest of the connector's query support is queued in
   `/mnt/project-files/connector-queue.md`.
 
+## Window pane layouts (2026-10-13)
+
+A **Window** asset (built-in, locked, can sit in a Wall or a Room) carries a **Panes** tab:
+an uploaded SVG whose `Space` shapes are the panes, which can be grouped and named for
+maintenance ("Bay 1 lower windows"). A task on the window names one or more groups and the
+layout lights up those panes (task dialog, task card). The plan is
+`/mnt/project-files/plans/window-tracking.md`.
+
+- **The layout is the asset's own floor-plan fields**: `floorPlanUrl`/`FileName`/`StorageKey`
+  and `floorPlanGroups`. Upload, Replace (groups carried by shape id, then title) and the
+  Cloudinary signing are the Map's own code (`uploadFloorPlanSvg`), so there is **no new
+  column, no migration and no `.gs` change**. `typeHasFloorPlan` stays false for Window.
+- **A Window's drawing is NOT a map plan.** The Map's "does anything inside have a plan" test
+  uses `hasMapPlan`, which skips window layouts; a bare `.floorPlanUrl` check there would make
+  a Room containing a window look like it has a floor plan. Use `hasMapPlan` for any new test
+  of that kind.
+- **A pane is in at most one group** (`windowGroupsAfterSave` moves claimed panes out of other
+  groups and drops an emptied group), and **a group of one pane is legitimate** — unlike the
+  Map, where fewer than two is not a group. Replace on a window therefore keeps one-pane groups
+  (the remap takes a minimum size). Colours follow group ORDER, which is why an edit keeps the
+  group in its place.
+- **Tasks name groups in `paneGroupIds`** (array, omitted when empty). A deleted group is
+  ignored when read (`taskPaneGroupsOf`) and `deleteWindowGroup` takes it off every task in the
+  same save. **Supabase keeps the field through `TASK_EXTRA_KEYS` in `save-shape.ts`, which is
+  the one backend change here** (an `asset-api` deploy, done by the `Database migrations`
+  workflow on a push to dev). The Apps Script fallback (`?backend=sheet`) drops it, as it
+  already drops `taskType`/`custom`.
+- Group edits are audited as `pane_group_created/edited/deleted`; changing a task's groups is
+  a "Pane groups" row on that task's edit.
+- Covered by `test-frontend-windows.js` (the real helpers plus source wiring). Driven in
+  Chromium against Sandbox: grouping, the move notice, a duplicate name, highlight, the task
+  dialog and card, deleting a group, Replace.
+
 ## Local Sandbox mode
 
 Sandbox swaps the real Google Sheet for a local fixture (`MOCK_SNAPSHOT` in

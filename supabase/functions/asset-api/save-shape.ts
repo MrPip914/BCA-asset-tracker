@@ -93,8 +93,8 @@ export function customColumnKeys(bodyColumns: unknown, storedColumns: unknown): 
   return keys;
 }
 
-// The ONE deliberate divergence from the .gs write projection: a task's `taskType`
-// and `custom` values, and a work entry's `custom` values, ride along on their
+// The ONE deliberate divergence from the .gs write projection: a task's `taskType`,
+// `custom` values and `paneGroupIds` (the window pane groups it covers), and a work entry's `custom` values, ride along on their
 // records. The Sheet has no column for them (the Apps Script fallback drops
 // them, accepted -- plans/task-work-custom-fields.md), but here a record is a
 // jsonb document and dropping them would silently lose what the new Task types
@@ -107,11 +107,12 @@ const extrasOf = (r: Row, keys: string[]): Row => {
     const v = r[k];
     if (v === undefined || v === null || v === "") continue;
     if (typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 0) continue;
+    if (Array.isArray(v) && v.length === 0) continue;
     out[k] = v;
   }
   return out;
 };
-const TASK_EXTRA_KEYS = ["taskType", "custom"];
+const TASK_EXTRA_KEYS = ["taskType", "custom", "paneGroupIds"];
 const WORK_EXTRA_KEYS = ["custom"];
 
 // The assets, with every child array, as the .gs read would answer them.
