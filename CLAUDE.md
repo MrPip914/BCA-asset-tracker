@@ -923,6 +923,13 @@ layout lights up those panes (task dialog, task card). The plan is
   the one backend change here** (an `asset-api` deploy, done by the `Database migrations`
   workflow on a push to dev). The Apps Script fallback (`?backend=sheet`) drops it, as it
   already drops `taskType`/`custom`.
+- **Everything in the SVG that is not a pane is drawn behind the panes as a backdrop**
+  (2026-10-13): the wall, a spandrel, mullions, a floor line, a door for scale. Read by
+  `windowBackdropOf` (a second pass over the same SVG text, only when a window view asks:
+  `useFloorPlanSvg(url, true)`), never stored, never selectable. Elements inside a
+  `Space`/`Sheet` group are the panes' own geometry and are skipped. The frame fits panes
+  plus backdrop, but `windowBackdropNear` drops shapes more than 6x the panes' extent so a
+  page border cannot shrink them. Frontend only.
 - Group edits are audited as `pane_group_created/edited/deleted`; changing a task's groups is
   a "Pane groups" row on that task's edit.
 - Covered by `test-frontend-windows.js` (the real helpers plus source wiring). Driven in

@@ -41,7 +41,9 @@ const H = new Function(`
   ${sliceFn('function tasksWithoutPaneGroup(items, groupId) {')}
   ${sliceConst('const WINDOW_GROUP_COLORS = [')}
   ${sliceFn('function windowGroupColor(groups, groupId) {')}
-  return { isWindowLayoutType, hasMapPlan, windowGroupsOf, windowGroupOfPane, windowGroupsAfterSave, taskPaneGroupsOf, livePaneGroupIds, tasksWithoutPaneGroup, windowGroupColor, WINDOW_GROUP_COLORS };
+  ${sliceFn('function windowBackdropNear(backdrop, spaces) {')}
+  const floorPlanBbox = pts => { const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]); const x = Math.min(...xs), y = Math.min(...ys); return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y }; };
+  return { isWindowLayoutType, hasMapPlan, windowGroupsOf, windowGroupOfPane, windowGroupsAfterSave, taskPaneGroupsOf, livePaneGroupIds, tasksWithoutPaneGroup, windowGroupColor, WINDOW_GROUP_COLORS, windowBackdropNear };
 `)();
 
 // --- the type -----------------------------------------------------------------
@@ -124,6 +126,17 @@ check('the edge function keeps paneGroupIds on a task',
 check('Sandbox carries a Window with a layout, groups and tasks that name them',
   /label: "BCA0121", type: "Window"/.test(src) && /floorPlanUrl: "data:image\/svg\+xml;utf8,"/.test(src)
   && /id: "wg-b1-lower"/.test(src) && /paneGroupIds: \["wg-b1-lower", "wg-b2-lower"\]/.test(src));
+
+const panes = [{ pts: [[0,0],[10,0],[10,10],[0,10]] }];
+const wall = { pts: [[-5,-5],[30,-5],[30,30],[-5,30]], closed: true };
+const page = { pts: [[-500,-500],[500,-500],[500,500],[-500,500]], closed: true };
+const kept = H.windowBackdropNear([wall, page], panes);
+check('a wall around the panes is kept as backdrop', kept.length === 1 && kept[0] === wall);
+check('a page-sized border is dropped so it cannot shrink the panes', !kept.includes(page));
+check('no backdrop is fine', H.windowBackdropNear(undefined, panes).length === 0);
+check('both window views get the backdrop and the hook asks for it',
+  (src.match(/useFloorPlanSvg\([^)]*, true\)/g) || []).length === 2 && (src.match(/backdrop=\{plan\.backdrop\}/g) || []).length === 2);
+check('a backdrop shape is never clickable', /strokeLinejoin="round" style=\{\{ pointerEvents: "none" \}\}/.test(src));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

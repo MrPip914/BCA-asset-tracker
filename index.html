@@ -5705,7 +5705,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-13.3";
+const APP_VERSION = "2026-10-13.4";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -7488,8 +7488,8 @@ const MOCK_SNAPSHOT = {
     // MOCK_WINDOW_SVG: pane-1..4 upper row, pane-5..8 lower row.
     { label: "BCA0121", type: "Window", name: "Room 102 East Windows", parentId: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", brand: "", model: "", serial: "", notes: "Two bays, upper and lower sash", status: "Active",
       // A pane layout, read as an uploaded file is (a data: URI): two bays, an upper row
-      // (pane-1..4) and a lower row (pane-5..8) of two panes each.
-      floorPlanUrl: "data:image/svg+xml;utf8," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300"><g id="pane-1"><title>Space.1</title><rect x="20" y="20" width="85" height="120"/></g><g id="pane-2"><title>Space.2</title><rect x="105" y="20" width="85" height="120"/></g><g id="pane-3"><title>Space.3</title><rect x="210" y="20" width="85" height="120"/></g><g id="pane-4"><title>Space.4</title><rect x="295" y="20" width="85" height="120"/></g><g id="pane-5"><title>Space.5</title><rect x="20" y="160" width="85" height="120"/></g><g id="pane-6"><title>Space.6</title><rect x="105" y="160" width="85" height="120"/></g><g id="pane-7"><title>Space.7</title><rect x="210" y="160" width="85" height="120"/></g><g id="pane-8"><title>Space.8</title><rect x="295" y="160" width="85" height="120"/></g></svg>'), floorPlanStorageKey: "", floorPlanFileName: "east-windows.svg",
+      // (pane-1..4) and a lower row (pane-5..8) of two panes each, on a wall with a spandrel and floor line (the backdrop).
+      floorPlanUrl: "data:image/svg+xml;utf8," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300"><rect id="wall" x="0" y="0" width="400" height="300"/><rect id="spandrel" x="0" y="140" width="400" height="20"/><line id="floor" x1="0" y1="298" x2="400" y2="298"/><g id="pane-1"><title>Space.1</title><rect x="20" y="20" width="85" height="120"/></g><g id="pane-2"><title>Space.2</title><rect x="105" y="20" width="85" height="120"/></g><g id="pane-3"><title>Space.3</title><rect x="210" y="20" width="85" height="120"/></g><g id="pane-4"><title>Space.4</title><rect x="295" y="20" width="85" height="120"/></g><g id="pane-5"><title>Space.5</title><rect x="20" y="160" width="85" height="120"/></g><g id="pane-6"><title>Space.6</title><rect x="105" y="160" width="85" height="120"/></g><g id="pane-7"><title>Space.7</title><rect x="210" y="160" width="85" height="120"/></g><g id="pane-8"><title>Space.8</title><rect x="295" y="160" width="85" height="120"/></g></svg>'), floorPlanStorageKey: "", floorPlanFileName: "east-windows.svg",
       floorPlanGroups: [
         { id: "wg-b1-upper", name: "Bay 1 upper windows", hideLabel: false, memberShapeIds: ["pane-1", "pane-2"], at: "2026-10-13T15:00:00.000Z", by: "Eric" },
         { id: "wg-b2-upper", name: "Bay 2 upper windows", hideLabel: false, memberShapeIds: ["pane-3", "pane-4"], at: "2026-10-13T15:00:00.000Z", by: "Eric" },
@@ -23118,6 +23118,73 @@ function floorPlanRemapLinksAndGroups(links, groups, oldSpaces, newSpaces, minGr
 // floorPlan* fields a place's plan uses, so upload, Replace (groups carried by
 // shape id, then title) and the group list need no new storage. See
 // plans/window-tracking.md. Everything below is pure.
+// Everything in a window's SVG that is NOT a pane or a label, as points: the wall,
+// frames, mullions, a floor line, a door for scale. Drawn behind the panes so a
+// pane has surroundings. Never selectable, never stored. Elements inside a
+// "Space"/"Sheet" group are the panes' own geometry and are skipped. Curves are
+// read at their end points only (floorPlanPathToPoints), which is plenty for a
+// backdrop. Capped so a busy drawing cannot stall the tab.
+const WINDOW_BACKDROP_MAX = 1500;
+function windowBackdropOf(svgText) {
+  const doc = new DOMParser().parseFromString(svgText || "", "image/svg+xml");
+  const root = doc.querySelector("svg");
+  if (!root || doc.querySelector("parsererror")) return [];
+  const own = el => {
+    for (let cur = el.parentElement; cur && cur !== root; cur = cur.parentElement) {
+      const tag = cur.tagName.toLowerCase();
+      if (tag === "defs" || tag === "clippath" || tag === "mask" || tag === "symbol") return false;
+      if (tag === "g") {
+        const t = cur.querySelector("title");
+        if (t && t.parentElement === cur && /^(Space|Sheet)/i.test((t.textContent || "").trim())) return false;
+      }
+    }
+    return true;
+  };
+  const num = (el, a) => parseFloat(el.getAttribute(a) || "0") || 0;
+  const out = [];
+  for (const el of root.querySelectorAll("path, rect, polygon, polyline, line, circle, ellipse")) {
+    if (out.length >= WINDOW_BACKDROP_MAX) break;
+    if (!own(el)) continue;
+    const tag = el.tagName.toLowerCase();
+    let pts = [], closed = true;
+    if (tag === "rect") {
+      const x = num(el, "x"), y = num(el, "y"), w = num(el, "width"), h = num(el, "height");
+      pts = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
+    } else if (tag === "path") {
+      const d = el.getAttribute("d") || "";
+      pts = floorPlanPathToPoints(d);
+      closed = /z\s*$/i.test(d.trim());
+    } else if (tag === "polygon" || tag === "polyline") {
+      const n = (el.getAttribute("points") || "").match(/-?\d*\.?\d+(?:[eE]-?\d+)?/g) || [];
+      for (let i = 0; i + 1 < n.length; i += 2) pts.push([Number(n[i]), Number(n[i + 1])]);
+      closed = tag === "polygon";
+    } else if (tag === "line") {
+      pts = [[num(el, "x1"), num(el, "y1")], [num(el, "x2"), num(el, "y2")]];
+      closed = false;
+    } else {
+      const cx = num(el, "cx"), cy = num(el, "cy");
+      const rx = tag === "circle" ? num(el, "r") : num(el, "rx"), ry = tag === "circle" ? num(el, "r") : num(el, "ry");
+      for (let i = 0; i < 16; i++) { const a = i * Math.PI / 8; pts.push([cx + rx * Math.cos(a), cy + ry * Math.sin(a)]); }
+    }
+    if (pts.length < 2) continue;
+    const ownT = el.getAttribute("transform");
+    const chain = (ownT ? [floorPlanParseTransform(ownT)] : []).concat(floorPlanTransformChain(el, root));
+    const mapped = pts.map(([x, y]) => floorPlanApplyChain(chain, x, y)).map(([x, y]) => [floorPlanRound2(x), floorPlanRound2(y)]);
+    if (mapped.some(([x, y]) => !isFinite(x) || !isFinite(y))) continue;
+    out.push({ pts: mapped, closed: closed && mapped.length >= 3 });
+  }
+  return out;
+}
+// The backdrop worth drawing for a set of panes: shapes far larger than the panes
+// themselves (a page border, a title block) would shrink the panes to nothing.
+function windowBackdropNear(backdrop, spaces) {
+  const panes = floorPlanBbox((spaces || []).flatMap(sp => sp.pts || []));
+  const limit = Math.max(panes.w, panes.h) * 6;
+  return (backdrop || []).filter(b => {
+    const bb = floorPlanBbox(b.pts);
+    return Math.max(bb.w, bb.h) <= limit;
+  });
+}
 function isWindowLayoutType(type) {
   return hasModule(type, "windowLayout");
 }
@@ -23352,7 +23419,7 @@ function floorPlanShapeMatches(room, assets, typesList, query) {
 // inline in FloorPlanTabContent's body, so the fetch/parse lifecycle (and its
 // cancellation on a fast asset switch) is in one place, testable in isolation
 // from the render tree that consumes it.
-function useFloorPlanSvg(url) {
+function useFloorPlanSvg(url, withBackdrop) {
   const [state, setState] = useState(() => (url ? { status: "loading" } : { status: "empty" }));
   useEffect(() => {
     let cancelled = false;
@@ -23362,14 +23429,14 @@ function useFloorPlanSvg(url) {
       .then(text => {
         if (cancelled) return;
         const parsed = parseFloorPlanSvg(text);
-        setState({ url, status: "ready", spaces: parsed.spaces, labels: parsed.labels });
+        setState({ url, status: "ready", spaces: parsed.spaces, labels: parsed.labels, backdrop: withBackdrop ? windowBackdropOf(text) : undefined });
       })
       .catch(err => {
         if (cancelled) return;
         setState({ url, status: "error", error: (err && err.message) || "Could not load the floor plan." });
       });
     return () => { cancelled = true; };
-  }, [url]);
+  }, [url, withBackdrop]);
   // The state belongs to the URL it was loaded for. On the render where the url
   // changes, the effect above has not run yet, so `state` is still the PREVIOUS
   // plan's -- reporting it as ready made a one-shot "select this shape" run against
@@ -23393,10 +23460,11 @@ function fetchFloorPlanSvgText(url) {
 // the task dialog and the task card. `selectedIds` + `onPaneClick` make it
 // editable. The frame is the PANES' bounding box, not the file's viewBox: an
 // export is often drawn on a much larger page than the window itself.
-function WindowLayoutView({ spaces, groups, highlightGroupIds, selectedIds, onPaneClick, maxHeight, showNumbers, ariaLabel }) {
+function WindowLayoutView({ spaces, backdrop, groups, highlightGroupIds, selectedIds, onPaneClick, maxHeight, showNumbers, ariaLabel }) {
   const list = (spaces || []).filter(sp => sp && sp.pts && sp.pts.length >= 3);
   if (!list.length) return null;
-  const bb = floorPlanBbox(list.flatMap(sp => sp.pts));
+  const shapes = windowBackdropNear(backdrop, list);
+  const bb = floorPlanBbox(list.flatMap(sp => sp.pts).concat(shapes.flatMap(b => b.pts)));
   const big = Math.max(bb.w, bb.h) || 1;
   const pad = big * 0.03;
   const sw = big / 400;
@@ -23410,6 +23478,13 @@ function WindowLayoutView({ spaces, groups, highlightGroupIds, selectedIds, onPa
       role="img" aria-label={ariaLabel || "Window pane layout"}
       style={{ width: "100%", height: "auto", maxHeight: maxHeight || 420, display: "block" }}
     >
+      {shapes.map((b, i) => (
+        b.closed
+          ? <polygon key={"bd" + i} points={b.pts.map(p => p.join(",")).join(" ")} fill={C.border} fillOpacity={0.35}
+              stroke={C.muted} strokeOpacity={0.6} strokeWidth={sw} strokeLinejoin="round" style={{ pointerEvents: "none" }} />
+          : <polyline key={"bd" + i} points={b.pts.map(p => p.join(",")).join(" ")} fill="none"
+              stroke={C.muted} strokeOpacity={0.6} strokeWidth={sw} strokeLinejoin="round" style={{ pointerEvents: "none" }} />
+      ))}
       {list.map((sp, i) => {
         const grp = windowGroupOfPane(groups, sp.gid);
         const color = grp ? windowGroupColor(groups, grp.id) : "";
@@ -23461,7 +23536,7 @@ function PaneGroupChips({ groups, shown }) {
 // lit. Loads the window's SVG itself, so the task dialog and the task card can
 // drop it in with just the asset and the groups.
 function TaskPaneLayout({ asset, groupIds, maxHeight }) {
-  const plan = useFloorPlanSvg(asset && asset.floorPlanUrl);
+  const plan = useFloorPlanSvg(asset && asset.floorPlanUrl, true);
   const groups = windowGroupsOf(asset);
   const shown = groups.filter(g => (groupIds || []).includes(g.id));
   if (!shown.length) return null;
@@ -23470,7 +23545,7 @@ function TaskPaneLayout({ asset, groupIds, maxHeight }) {
       <PaneGroupChips groups={groups} shown={shown} />
       {plan.status === "ready" && (
         <div style={{ marginTop: 8, border: `1px solid ${C.border}`, borderRadius: 8, background: C.surface, padding: 8 }}>
-          <WindowLayoutView spaces={plan.spaces} groups={groups} highlightGroupIds={shown.map(g => g.id)} maxHeight={maxHeight || 160}
+          <WindowLayoutView spaces={plan.spaces} backdrop={plan.backdrop} groups={groups} highlightGroupIds={shown.map(g => g.id)} maxHeight={maxHeight || 160}
             ariaLabel={"Panes this task covers: " + shown.map(g => g.name).join(", ")} />
         </div>
       )}
@@ -23483,7 +23558,7 @@ function TaskPaneLayout({ asset, groupIds, maxHeight }) {
 // through the callbacks (saveWindowGroup, deleteWindowGroup), so this holds only
 // view state.
 function WindowLayoutTabContent({ asset, canEdit, uploadBusy, uploadError, onUploadPlan, onSaveGroup, onDeleteGroup, taskCountByGroup }) {
-  const plan = useFloorPlanSvg(asset.floorPlanUrl);
+  const plan = useFloorPlanSvg(asset.floorPlanUrl, true);
   const fileInputRef = useRef(null);
   const [selected, setSelected] = useState(() => new Set());
   const [editingId, setEditingId] = useState(null);
@@ -23593,7 +23668,7 @@ function WindowLayoutTabContent({ asset, canEdit, uploadBusy, uploadError, onUpl
       {headerRow}
       {uploadError && <p style={{ margin: "0 0 10px", fontSize: 13, color: C.danger }}>{uploadError}</p>}
       <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 10 }}>
-        <WindowLayoutView spaces={spaces} groups={groups} selectedIds={selected} showNumbers={canEdit}
+        <WindowLayoutView spaces={spaces} backdrop={plan.backdrop} groups={groups} selectedIds={selected} showNumbers={canEdit}
           highlightGroupIds={viewGroupId ? [viewGroupId] : []}
           onPaneClick={togglePane} maxHeight={460} />
       </div>
