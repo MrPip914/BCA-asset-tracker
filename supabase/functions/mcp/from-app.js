@@ -248,11 +248,17 @@ const floorPlanRound2 = n => Math.round(n * 100) / 100;
 function floorPlanParseTransform(attrValue) {
   const tr = /translate\(\s*([-\d.eE]+)[ ,]+([-\d.eE]+)\s*\)/.exec(attrValue || "");
   const ro = /rotate\(\s*([-\d.eE]+)/.exec(attrValue || "");
-  return { tx: tr ? +tr[1] : 0, ty: tr ? +tr[2] : 0, rot: ro ? +ro[1] : 0 };
+  // scale(sx) or scale(sx,sy): Visio writes scale(-1,1) for a shape flipped in the
+  // drawing, and ignoring it draws the shape the wrong way round. Applied first,
+  // then rotate, then translate, which is the order the SVG spec composes them.
+  const sc = /scale\(\s*([-\d.eE]+)(?:[ ,]+([-\d.eE]+))?\s*\)/.exec(attrValue || "");
+  return { tx: tr ? +tr[1] : 0, ty: tr ? +tr[2] : 0, rot: ro ? +ro[1] : 0, sx: sc ? +sc[1] : 1, sy: sc ? (sc[2] !== undefined ? +sc[2] : +sc[1]) : 1 };
 }
 
 function floorPlanApplyTransform(t, x, y) {
   const r = (t.rot * Math.PI) / 180;
+  const sx = t.sx === undefined ? 1 : t.sx, sy = t.sy === undefined ? 1 : t.sy;
+  x *= sx; y *= sy;
   return [t.tx + x * Math.cos(r) - y * Math.sin(r), t.ty + x * Math.sin(r) + y * Math.cos(r)];
 }
 
