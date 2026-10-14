@@ -30,8 +30,14 @@ import {
   TASK_KIND_SCHEDULED, TASK_KIND_ONEOFF, MAINTENANCE_FREQUENCIES, WEEKDAY_NAMES,
   parseRecurrence, formatRecurrence, describeRecurrence, recurrenceApproxDays, floorPlanWallCoverSet,
 } from "./from-app.js";
+import { attachPaneGroups, paneGroupsOut, taskPaneGroupNames, resolvePaneGroupIds, paneGroupNamesText } from "./window-panes.js";
 
 export class ToolError extends Error {}
+
+const PANE_GROUPS = {
+  type: "array", items: { type: "string" },
+  description: "Windows only: the pane groups this task covers, by name or id (get_asset on the window lists them). A name the window has no group for is refused.",
+};
 
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 // Additive: nothing a write tool does removes or overwrites a person's data
@@ -240,6 +246,7 @@ const WRITE_TOOLS = [
         due_date: { type: "string", description: "One-off only: when it is due, yyyy-mm-dd." },
         owner: { type: "string", description: "Who is responsible." },
         notes: { type: "string" },
+        pane_groups: PANE_GROUPS,
       },
       required: ["asset", "task"],
       additionalProperties: false,
@@ -308,6 +315,7 @@ const TASK_FIELDS = {
   due_date: { type: "string", description: "One-off only: when it is due, yyyy-mm-dd." },
   owner: { type: "string", description: "Who is responsible." },
   notes: { type: "string" },
+  pane_groups: PANE_GROUPS,
 };
 
 // Changing or removing what is already there. Each one is checked against the
@@ -403,6 +411,7 @@ const MANAGE_TOOLS = [
         due_date: { type: "string", description: "One-off only: yyyy-mm-dd, or empty to clear." },
         owner: TASK_FIELDS.owner,
         notes: TASK_FIELDS.notes,
+        pane_groups: { ...PANE_GROUPS, description: PANE_GROUPS.description + " Replaces the task's groups; an empty list clears them." },
       },
       required: ["task"],
       additionalProperties: false,
@@ -529,7 +538,9 @@ async function openSite(ctx, args, tables) {
   if (tables.includes("revisions")) rows.revisions = await ctx.load(site.id, "revisions");
   const want = Array.from(new Set(["assets", "config", ...tables])).filter((t) => t !== "revisions");
   await Promise.all(want.map(async (t) => { rows[t] = await ctx.load(site.id, t); }));
-  return { site, rows, inv: buildInventory(rows) };
+  const inv = buildInventory(rows);
+  if (rows.space_groups) attachPaneGroups(rows, inv);
+  return { site, rows, inv };
 }
 
 // A management write: ONE call to connector_apply with the revisions this
@@ -627,6 +638,7 @@ function taskRow(inv, asset, m) {
     lastDone: dateOnly(m.lastPerformed) || undefined,
     owner: m.owner || undefined,
     notes: m.notes || undefined,
+    paneGroups: taskPaneGroupNames(asset, m).length ? taskPaneGroupNames(asset, m) : undefined,
     asset: inv.summary(asset),
   };
 }
@@ -714,7 +726,7 @@ function workFields(inv, args, dfltType) {
 
 // A new task as addMaintenanceItem builds it. Both halves are always written,
 // the unused one blank, so flipping the kind later cannot resurrect either.
-function taskItem(args) {
+function taskItem(args, asset, nameOf) {
   const task = String(args.task ?? "").trim();
   if (!task) throw new ToolError("Say what the task is.");
   const oneOff = args.kind === "one-off";
@@ -736,7 +748,14 @@ function taskItem(args) {
     dueDate: oneOff ? realDate(args.due_date, "due_date") : "",
     lastPerformed: oneOff ? "" : realDate(args.last_done, "last_done"),
     owner: String(args.owner ?? "").trim(),
+    // Omitted when none, so a task that never used panes is stored as before.
+    ...paneGroupField(asset, args.pane_groups, nameOf),
   };
+}
+
+function paneGroupField(asset, refs, nameOf) {
+  const ids = resolvePaneGroupIds(asset, refs ?? [], nameOf, ToolError);
+  return ids.length ? { paneGroupIds: ids } : {};
 }
 
 function frequencyOrThrow(text) {
@@ -840,7 +859,7 @@ const handlers = {
   },
 
   async get_asset(args, ctx) {
-    const { site, rows, inv } = await openSite(ctx, args, ["maintenance", "changes", "comments", "photos"]);
+    const { site, rows, inv } = await openSite(ctx, args, ["maintenance", "changes", "comments", "photos", "space_groups"]);
     const a = resolveOrThrow(inv, args.asset);
     const own = (t) => rows[t].filter((r) => r.asset_id === a.id).sort((x, y) => x.position - y.position).map((r) => r.data);
     const inside = inv.children.get(a.id) || [];
@@ -853,6 +872,7 @@ const handlers = {
       contains: inside.length
         ? { count: inside.length, items: inside.slice(0, 50).map(inv.summary) }
         : undefined,
+      paneGroups: paneGroupsOut(a).length ? paneGroupsOut(a) : undefined,
       tasks: own("maintenance").map((m) => taskRow(inv, a, m)).map(({ asset, ...t }) => t),
       recentWork: work.slice(0, 10).map((c) => ({
         date: changePerformedOn(c), type: c.changeType || undefined, vendor: c.vendor || undefined,
@@ -910,7 +930,7 @@ const handlers = {
   },
 
   async list_tasks(args, ctx) {
-    const { site, rows, inv } = await openSite(ctx, args, ["maintenance"]);
+    const { site, rows, inv } = await openSite(ctx, args, ["maintenance", "space_groups"]);
     const scope = args.within ? resolveOrThrow(inv, args.within) : null;
     const want = args.status || "open";
     const horizon = Number.isInteger(args.due_within_days) ? Date.now() + args.due_within_days * 86400000 : null;
@@ -1043,17 +1063,17 @@ const handlers = {
   // ---------------------------------------------------------------- writes
 
   async add_task(args, ctx) {
-    const { site, inv } = await openSite(ctx, args, []);
+    const { site, inv } = await openSite(ctx, args, ["space_groups"]);
     requireEditor(site);
     const a = liveAsset(inv, args.asset);
-    const item = taskItem(args);
+    const item = taskItem(args, a, inv.nameOf);
     const out = await ctx.write(site.id, "add_task", [a.id, item]);
     ctx.log?.("write", { tool: "add_task", site: site.id, asset: a.id, id: out.id });
     return { site: site.id, added: taskRow(inv, a, { ...item, id: out.id }) };
   },
 
   async complete_task(args, ctx) {
-    const { site, rows, inv } = await openSite(ctx, args, ["maintenance"]);
+    const { site, rows, inv } = await openSite(ctx, args, ["maintenance", "space_groups"]);
     requireEditor(site);
     const r = findTask(inv, rows.maintenance, String(args.task ?? "").trim(), args.asset);
     const a = inv.byId.get(r.asset_id);
@@ -1140,7 +1160,7 @@ const handlers = {
   },
 
   async add_tasks(args, ctx) {
-    const { site, rows, inv } = await openSite(ctx, args, ["revisions"]);
+    const { site, rows, inv } = await openSite(ctx, args, ["revisions", "space_groups"]);
     requireEditor(site);
     const list = Array.isArray(args.tasks) ? args.tasks : [];
     if (!list.length) throw new ToolError("Give at least one task.");
@@ -1151,7 +1171,7 @@ const handlers = {
     list.forEach((t, i) => {
       try {
         const a = liveAsset(inv, t.asset);
-        const item = taskItem(t);
+        const item = taskItem(t, a, inv.nameOf);
         const id = crypto.randomUUID();
         ops.push({ op: "task_insert", id, assetId: a.id, data: item });
         added.push(taskRow(inv, a, { ...item, id }));
@@ -1170,7 +1190,7 @@ const handlers = {
   },
 
   async edit_task(args, ctx) {
-    const { site, rows, inv } = await openSite(ctx, args, ["maintenance", "revisions"]);
+    const { site, rows, inv } = await openSite(ctx, args, ["maintenance", "revisions", "space_groups"]);
     requireEditor(site);
     const r = findTask(inv, rows.maintenance, String(args.task ?? "").trim(), args.asset);
     const a = inv.byId.get(r.asset_id);
@@ -1198,6 +1218,11 @@ const handlers = {
       lastPerformed: given("last_done") ? realDate(args.last_done, "last_done") : (orig.lastPerformed || ""),
       owner: given("owner") ? String(args.owner).trim() : (orig.owner || ""),
     };
+    if (given("pane_groups")) {
+      // The app omits the key when a task names no group.
+      const ids = resolvePaneGroupIds(a, args.pane_groups, inv.nameOf, ToolError);
+      if (ids.length) updated.paneGroupIds = ids; else delete updated.paneGroupIds;
+    }
     const audit = taskEditAudit(a, orig, updated, taskKindOf);
     if (!audit.length) return { site: site.id, unchanged: taskRow(inv, a, orig), note: "Nothing to change." };
     const out = await apply(ctx, site, appViewRevisions(rows), [

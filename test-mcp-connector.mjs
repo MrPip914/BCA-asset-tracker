@@ -45,7 +45,8 @@ const eq = (name, got, want) => check(name, JSON.stringify(got) === JSON.stringi
       // The outside-wall rule, and the geometry it runs on: set_plan_walls must
       // offer exactly the edges the Map tab draws.
       "floorPlanParseTransform", "floorPlanApplyTransform", "floorPlanApplyChain", "floorPlanPointInPoly", "floorPlanBbox",
-      "floorPlanRotatePoint", "floorPlanRotateSpaces", "floorPlanIsSegmentId", "floorPlanExteriorSegments", "floorPlanWallCoverSet", "floorPlanSetWallSegments"].map(fn),
+      "floorPlanRotatePoint", "floorPlanRotateSpaces", "floorPlanIsSegmentId", "floorPlanExteriorSegments", "floorPlanWallCoverSet", "floorPlanSetWallSegments",
+      "windowGroupsOf", "taskPaneGroupsOf", "livePaneGroupIds"].map(fn),
   ];
   const missing = pieces.filter((p) => !p || !copy.includes(p)).map((p) => p.split("\n")[0]);
   check("from-app.js matches index.html, piece for piece", missing.length === 0, `stale or missing: ${missing.join(" | ")}`);
@@ -1119,6 +1120,61 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   c = uctx(preview("changed"), [{ id: "dev", name: "Development", role: "viewer" }]);
   r = await call("undo_change", { backup: 7 }, c);
   check("undo_change refuses a viewer", r.isError && /view-only/.test(r.text) && c.writes.length === 0 && c.previews.length === 0, r.text);
+}
+
+// ---------------------------------------------------------------- window pane groups
+
+{
+  const dev = SITES.dev;
+  dev.assets.push(A("win1", 90, "r101", { type: "Window", name: "Bay window", floorPlanUrl: "https://res.cloudinary.com/demo/raw/upload/win.svg" }));
+  dev.space_groups.push(
+    { id: "wg-lo", plan_asset_id: "win1", position: 0, data: { id: "wg-lo", name: "Lower panes", memberShapeIds: ["p1", "p2", "p3"] } },
+    { id: "wg-up", plan_asset_id: "win1", position: 1, data: { id: "wg-up", name: "Upper panes", memberShapeIds: ["p4"] } },
+  );
+  dev.maintenance.push({ id: "mw1", asset_id: "win1", position: 0, data: { id: "mw1", task: "Clean lowers", kind: "scheduled", frequencyLabel: "Quarterly", frequencyDays: 90, paneGroupIds: ["wg-lo", "wg-gone"] } });
+  const writes = (c) => c.writes.flatMap((w) => (Array.isArray(w.args[1]) ? w.args[1] : []));
+
+  let r = await call("get_asset", { asset: "win1" });
+  eq("get_asset: a window lists its groups with pane counts", r.data.paneGroups, [{ id: "wg-lo", name: "Lower panes", panes: 3 }, { id: "wg-up", name: "Upper panes", panes: 1 }]);
+  eq("get_asset: a task names its live groups; a deleted group is ignored", r.data.tasks[0].paneGroups, ["Lower panes"]);
+  r = await call("get_asset", { asset: "ms1" });
+  check("get_asset: an asset that is not a window shows no groups", r.data.paneGroups === undefined && r.data.tasks[0].paneGroups === undefined, r.text);
+  r = await call("list_tasks", { status: "all" });
+  eq("list_tasks: carries the group names", r.data.tasks.find((t) => t.id === "mw1").paneGroups, ["Lower panes"]);
+  r = await call("get_schema", {});
+  check("get_schema: the Window type is listed with its pane layout", r.data.types.find((t) => t.name === "Window")?.hasPaneLayout === true, r.text);
+
+  let c = ctxFor(ONE);
+  r = await call("add_task", { asset: "win1", task: "Wash", frequency: "Monthly", pane_groups: ["upper panes", "wg-lo"] }, c);
+  check("add_task: groups by name or id are stored as ids, in the window's order", !r.isError && JSON.stringify(c.writes[0].args[1].paneGroupIds) === '["wg-lo","wg-up"]' && r.data.added.paneGroups.join() === "Lower panes,Upper panes", r.text);
+  c = ctxFor(ONE);
+  r = await call("add_task", { asset: "win1", task: "Wash", frequency: "Monthly" }, c);
+  check("add_task: no groups stores no key", !r.isError && !("paneGroupIds" in c.writes[0].args[1]), r.text);
+  r = await call("add_task", { asset: "win1", task: "Wash", frequency: "Monthly", pane_groups: ["Middle"] }, c);
+  check("add_task: an unknown group is refused, listing the real ones", r.isError && /Lower panes, Upper panes/.test(r.text) && c.writes.length === 1, r.text);
+  r = await call("add_task", { asset: "ms1", task: "Wash", frequency: "Monthly", pane_groups: ["Lower panes"] }, c);
+  check("add_task: groups on a non-window are refused", r.isError && /not a Window/.test(r.text), r.text);
+
+  c = ctxFor(ONE);
+  r = await call("add_tasks", { tasks: [{ asset: "win1", task: "A", frequency: "Monthly", pane_groups: ["Upper panes"] }, { asset: "win1", task: "B", frequency: "Monthly" }] }, c);
+  const ins = writes(c).filter((o) => o.op === "task_insert");
+  check("add_tasks: per-task groups", !r.isError && JSON.stringify(ins[0].data.paneGroupIds) === '["wg-up"]' && !("paneGroupIds" in ins[1].data), r.text);
+
+  c = ctxFor(ONE);
+  r = await call("edit_task", { task: "mw1", pane_groups: ["Upper panes"] }, c);
+  const upd = writes(c).find((o) => o.op === "task_update");
+  check("edit_task: replaces the groups", !r.isError && JSON.stringify(upd.data.paneGroupIds) === '["wg-up"]', r.text);
+  eq("edit_task: audited as Pane groups, by name", writes(c).filter((o) => o.op === "audit").map((o) => [o.data.field, o.data.from, o.data.to]), [["Clean lowers — Pane groups", "Lower panes", "Upper panes"]]);
+  c = ctxFor(ONE);
+  r = await call("edit_task", { task: "mw1", pane_groups: [] }, c);
+  check("edit_task: an empty list clears them and drops the key", !r.isError && !("paneGroupIds" in writes(c).find((o) => o.op === "task_update").data), r.text);
+  c = ctxFor(ONE);
+  r = await call("edit_task", { task: "mw1", owner: "Custodial" }, c);
+  check("edit_task: other edits leave the groups alone", !r.isError && JSON.stringify(writes(c).find((o) => o.op === "task_update").data.paneGroupIds) === '["wg-lo","wg-gone"]', r.text);
+
+  dev.maintenance.pop();
+  dev.space_groups.splice(-2);
+  dev.assets.pop();
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

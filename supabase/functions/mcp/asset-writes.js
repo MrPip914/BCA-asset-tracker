@@ -22,6 +22,7 @@
 // could be in force. Every caller here is synchronous.
 
 import * as R from "./app-rules.js";
+import { paneGroupNamesText } from "./window-panes.js";
 
 // save-shape.ts ASSET_FIELDS (AssetTrackerSync.gs's): what a stored asset row
 // holds, plus the custom columns. Pinned to that list by test-mcp-connector.mjs.
@@ -154,6 +155,7 @@ export function schemaOf(view) {
       fields: fields.map((c) => fieldLabel(c)),
       canSitInside: R.typeTakesParent(t.id) ? R.parentTypesFor(t.id).map((p) => R.typeNameOf(p, view.typesList)) : [],
       canContainThings: R.isPlaceType(t.id) || undefined,
+      hasPaneLayout: R.hasModule(t.id, "windowLayout") || undefined,
       isPerson: R.isPersonType(t.id) || undefined,
       usesAssetId: R.fieldAppliesTo("tag", t.id) || undefined,
       count: view.assets.filter((a) => a.type === t.id && a.status !== "Archived").length,
@@ -465,6 +467,10 @@ export function taskEditAudit(asset, original, updated, kindOf) {
   if ((original.frequencyLabel || "") !== (updated.frequencyLabel || "")) add("Frequency", original.frequencyLabel || "—", updated.frequencyLabel || "—");
   if ((original.dueDate || "") !== (updated.dueDate || "")) add("Due date", fmtDate(original.dueDate) || "—", fmtDate(updated.dueDate) || "—");
   if ((original.owner || "") !== (updated.owner || "")) add("Owner", original.owner || "—", updated.owner || "—");
+  {
+    const before = paneGroupNamesText(asset, original.paneGroupIds), after = paneGroupNamesText(asset, updated.paneGroupIds);
+    if (before !== after) add("Pane groups", before || "—", after || "—");
+  }
   if ((original.lastPerformed || "") !== (updated.lastPerformed || "")) {
     add(kindOf(updated) === "oneoff" ? "Completed" : "Last performed", fmtDate(original.lastPerformed) || "—", fmtDate(updated.lastPerformed) || "—");
   }
