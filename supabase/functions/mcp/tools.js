@@ -428,7 +428,7 @@ const MANAGE_TOOLS = [
   {
     name: "replace_floor_plan",
     title: "Replace floor plan",
-    description: "Put a new floor plan (an SVG drawing, as exported from Visio) on a place: a campus, building, floor or room. Works for a place's first plan too. As in the app's Replace, every room and wall already linked to a shape on the old plan stays linked when the new plan has a shape with the same id or the same title (Space.N), and a link whose shape is gone is dropped and listed. The file is stored on the app's file host. Recorded in the change history as this person, via Claude. Run with dry_run first and tell the person which links carry over and which would be dropped.",
+    description: "Put a new floor plan (an SVG drawing, as exported from Visio) on a place: a campus, building, floor or room, or the pane layout of a Window (its pane groups carry over by shape id or title the same way; a pane group may be a single pane). Works for a first plan too. As in the app's Replace, every room and wall already linked to a shape on the old plan stays linked when the new plan has a shape with the same id or the same title (Space.N), and a link whose shape is gone is dropped and listed. The file is stored on the app's file host. Recorded in the change history as this person, via Claude. Run with dry_run first and tell the person which links carry over and which would be dropped.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1240,8 +1240,10 @@ const handlers = {
     requireEditor(site);
     const a = liveAsset(inv, args.asset);
     appView(rows, site.id); // applies this site's type settings, which isPlaceType reads
-    if (!isPlaceType(a.type)) {
-      throw new ToolError(`${inv.nameOf(a)} is a ${inv.typeName(a.type)}, which is not a place. A floor plan goes on a campus, building, floor or room.`);
+    // A Window's pane layout is stored as a plan is; its pane groups may hold a single pane.
+    const isWindow = a.type === "Window";
+    if (!isWindow && !isPlaceType(a.type)) {
+      throw new ToolError(`${inv.nameOf(a)} is a ${inv.typeName(a.type)}, which is not a place. A floor plan goes on a campus, building, floor or room, and a pane layout on a window.`);
     }
     const svg = String(args.svg ?? "");
     if (!svg.trim()) throw new ToolError("The SVG is empty.");
@@ -1277,7 +1279,7 @@ const handlers = {
         oldPlanNote = "The current plan could not be read, so only shapes whose id is unchanged keep their links.";
       }
     }
-    const plan = planFloorPlanReplace({ links, groups, oldSpaces, newSpaces });
+    const plan = planFloorPlanReplace({ links, groups, oldSpaces, newSpaces, minGroupSize: isWindow ? 1 : 2 });
     const linkOut = (l) => {
       const room = inv.byId.get(l.roomId);
       return { shape: l.shapeId, linkedTo: room ? inv.summary(room) : l.roomId };

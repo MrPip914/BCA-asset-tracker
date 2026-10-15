@@ -134,8 +134,8 @@ function walkSpaces(svgText, withGeometry) {
 // when the current plan could not be read, in which case only a shape whose id
 // is unchanged carries over -- the app's own rule with nothing to match titles
 // against.
-export function planFloorPlanReplace({ links, groups, oldSpaces, newSpaces }) {
-  const { links: kept, groups: keptGroups } = floorPlanRemapLinksAndGroups(links, groups, oldSpaces || [], newSpaces);
+export function planFloorPlanReplace({ links, groups, oldSpaces, newSpaces, minGroupSize }) {
+  const { links: kept, groups: keptGroups } = floorPlanRemapLinksAndGroups(links, groups, oldSpaces || [], newSpaces, minGroupSize);
   const survives = (l) => floorPlanRemapLinksAndGroups([l], [], oldSpaces || [], newSpaces).links.length > 0;
   return {
     links: kept,

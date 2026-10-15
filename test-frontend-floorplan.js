@@ -467,11 +467,15 @@ new Function('module', [
 const { floorPlanParseTransform, floorPlanApplyTransform } = tMod.exports;
 
 check('a translate-only transform reads its tx/ty and no rotation',
-  JSON.stringify(floorPlanParseTransform('translate(10,20)')) === JSON.stringify({ tx: 10, ty: 20, rot: 0 }));
+  JSON.stringify(floorPlanParseTransform('translate(10,20)')) === JSON.stringify({ tx: 10, ty: 20, rot: 0, sx: 1, sy: 1 }));
 check('a rotate-only transform reads its angle and no translation',
-  JSON.stringify(floorPlanParseTransform('rotate(90)')) === JSON.stringify({ tx: 0, ty: 0, rot: 90 }));
+  JSON.stringify(floorPlanParseTransform('rotate(90)')) === JSON.stringify({ tx: 0, ty: 0, rot: 90, sx: 1, sy: 1 }));
 check('a missing/unrecognized transform is the identity, not a throw',
-  JSON.stringify(floorPlanParseTransform('')) === JSON.stringify({ tx: 0, ty: 0, rot: 0 }));
+  JSON.stringify(floorPlanParseTransform('')) === JSON.stringify({ tx: 0, ty: 0, rot: 0, sx: 1, sy: 1 }));
+check('scale(-1,1) mirrors x only, applied before the translate',
+  JSON.stringify(floorPlanApplyTransform(floorPlanParseTransform('translate(100,50) scale(-1,1)'), 10, 5)) === JSON.stringify([90, 55]));
+check('a single-number scale applies to both axes',
+  JSON.stringify(floorPlanParseTransform('scale(2)')) === JSON.stringify({ tx: 0, ty: 0, rot: 0, sx: 2, sy: 2 }));
 
 const rotated = floorPlanApplyTransform({ tx: 0, ty: 0, rot: 90 }, 10, 0);
 check('a 90-degree rotation sends (10,0) to (~0,10)', approx(rotated[0], 0) && approx(rotated[1], 10),
@@ -890,8 +894,8 @@ const { floorPlanShapeMatches } = matchMod.exports;
   const m = src.match(/const FLOORPLAN_FILE_ACCEPT = ("[^"]*");/);
   check('Floor plan picker: the accept value is declared once and is not an image type',
     !!m && !/image|svg/i.test(m[1]));
-  check('Floor plan picker: every plan file input uses it (3 sites), none names an image type',
-    (src.match(/type="file" accept=\{FLOORPLAN_FILE_ACCEPT\}/g) || []).length === 3
+  check('Floor plan picker: every plan file input uses it (5 sites), none names an image type',
+    (src.match(/type="file" accept=\{FLOORPLAN_FILE_ACCEPT\}/g) || []).length === 5
     && !/type="file" accept="\.svg/.test(src));
   check('Floor plan upload still refuses a non-SVG before reading it',
     /looksLikeSvg = file\.type === "image\/svg\+xml" \|\| \/\\\.svg\$\/i\.test\(file\.name/.test(src));
