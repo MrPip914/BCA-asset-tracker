@@ -5705,7 +5705,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-14.1";
+const APP_VERSION = "2026-10-15.1";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -7495,6 +7495,7 @@ const MOCK_SNAPSHOT = {
         { id: "wg-b2-upper", name: "Bay 2 upper windows", hideLabel: false, memberShapeIds: ["pane-3", "pane-4"], at: "2026-10-13T15:00:00.000Z", by: "Eric" },
         { id: "wg-b1-lower", name: "Bay 1 lower windows", hideLabel: false, memberShapeIds: ["pane-5", "pane-6"], at: "2026-10-13T15:00:00.000Z", by: "Eric" },
         { id: "wg-b2-lower", name: "Bay 2 lower windows", hideLabel: false, memberShapeIds: ["pane-7", "pane-8"], at: "2026-10-13T15:00:00.000Z", by: "Eric" },
+        { id: "wg-operable", name: "Operable windows", hideLabel: false, memberShapeIds: ["pane-2", "pane-5"], at: "2026-10-15T15:00:00.000Z", by: "Eric" },
       ],
       maintenanceItems: [
         { id: "mt-win-lower", kind: "scheduled", task: "Clean lower windows", frequencyLabel: "Weekly", frequencyDays: 7, lastPerformed: "", owner: "Custodial", at: "", by: "", paneGroupIds: ["wg-b1-lower", "wg-b2-lower"] },
@@ -11326,7 +11327,7 @@ function AssetTracker() {
 
   // ---------- Window pane groups (a Window's Panes tab) ----------
   // Same storage as a plan's groups (floorPlanGroups), different rules: a pane is
-  // in ONE group (see windowGroupsAfterSave) and a group of one pane is fine.
+  // can be in SEVERAL groups (see windowGroupsAfterSave) and a group of one pane is fine.
   // Returns false when the save was refused so the tab keeps the selection.
   function saveWindowGroup(assetId, draft) {
     if (savingRef.current) return false; // double-submit guard, see savingRef
@@ -23204,34 +23205,25 @@ function hasMapPlan(asset) {
 function windowGroupsOf(asset) {
   return ((asset && asset.floorPlanGroups) || []).filter(g => g && g.id);
 }
-// The group a pane belongs to, or null. A pane is in at most one.
-function windowGroupOfPane(groups, paneId) {
-  return (groups || []).find(g => (g.memberShapeIds || []).includes(paneId)) || null;
+// Every group a pane belongs to, in the window's order (empty when none). A pane
+// may be in several groups: "Bay 1 lower" and "Operable windows" can share panes.
+function windowGroupsOfPane(groups, paneId) {
+  return (groups || []).filter(g => (g.memberShapeIds || []).includes(paneId));
 }
-// Groups after saving ONE group (draft.id absent = create). A pane belongs to at
-// most one group, so panes the draft claims are taken out of every other group,
-// and a group left with no panes is dropped. Returns what moved so the form can
-// say so. Unlike the Map's groups, a group of ONE pane is legitimate here.
+// Groups after saving ONE group (draft.id absent = create). Other groups are left
+// exactly as they were: a pane in this group stays in any group it was already in.
+// Unlike the Map's groups, a group of ONE pane is legitimate here.
 function windowGroupsAfterSave(groups, draft, newId, stamp) {
   const members = [...new Set(draft.memberShapeIds || [])];
   const id = draft.id || newId;
-  const taken = new Set(members);
-  const moved = [];
-  const others = (groups || []).filter(g => g.id !== id).map(g => {
-    const lost = (g.memberShapeIds || []).filter(m => taken.has(m));
-    if (lost.length) moved.push({ from: g.name, count: lost.length });
-    return lost.length ? { ...g, memberShapeIds: (g.memberShapeIds || []).filter(m => !taken.has(m)) } : g;
-  }).filter(g => (g.memberShapeIds || []).length > 0);
   const saved = {
     id, name: (draft.name || "").trim() || "Group of " + members.length, hideLabel: false,
     memberShapeIds: members, ...(stamp || {}),
   };
   const existed = (groups || []).some(g => g.id === id);
   // Keep the saved group where it was (colours follow order); a new one goes last.
-  const next = existed
-    ? (groups || []).map(g => (g.id === id ? saved : others.find(o => o.id === g.id))).filter(Boolean)
-    : [...others, saved];
-  return { groups: next, saved, moved };
+  const next = existed ? (groups || []).map(g => (g.id === id ? saved : g)) : [...(groups || []), saved];
+  return { groups: next, saved };
 }
 // Tasks hold group ids; a group that has since been deleted is ignored, never
 // shown as a raw id. Returns the live groups a task names, in the window's order.
@@ -23466,7 +23458,10 @@ function fetchFloorPlanSvgText(url) {
 // the task dialog and the task card. `selectedIds` + `onPaneClick` make it
 // editable. The frame is the PANES' bounding box, not the file's viewBox: an
 // export is often drawn on a much larger page than the window itself.
+let windowPatternSeq = 0;
 function WindowLayoutView({ spaces, backdrop, groups, highlightGroupIds, selectedIds, onPaneClick, maxHeight, showNumbers, ariaLabel }) {
+  // Several instances can be on a page at once, so pattern ids must not collide.
+  const patternPrefix = useMemo(() => "wlp" + (++windowPatternSeq) + "-", []);
   const list = (spaces || []).filter(sp => sp && sp.pts && sp.pts.length >= 3);
   if (!list.length) return null;
   const shapes = windowBackdropNear(backdrop, list);
@@ -23491,13 +23486,40 @@ function WindowLayoutView({ spaces, backdrop, groups, highlightGroupIds, selecte
           : <polyline key={"bd" + i} points={b.pts.map(p => p.join(",")).join(" ")} fill="none"
               stroke={C.muted} strokeOpacity={0.6} strokeWidth={sw} strokeLinejoin="round" style={{ pointerEvents: "none" }} />
       ))}
+      {(() => {
+        // A pane in several groups is striped in their colours; one group is a flat fill.
+        // While a task's groups are lit, only those groups' colours count.
+        const combos = new Map();
+        list.forEach(sp => {
+          const gs = windowGroupsOfPane(groups, sp.gid);
+          const use = dimming && gs.some(g => hl.has(g.id)) ? gs.filter(g => hl.has(g.id)) : gs;
+          if (use.length > 1) {
+            const cols = use.map(g => windowGroupColor(groups, g.id));
+            combos.set(cols.join("|"), cols);
+          }
+        });
+        return combos.size ? (
+          <defs>
+            {[...combos.entries()].map(([key, cols]) => (
+              <pattern key={key} id={patternPrefix + key.replace(/[^0-9a-zA-Z]/g, "")} patternUnits="userSpaceOnUse"
+                width={sw * 3 * cols.length} height={sw * 3 * cols.length} patternTransform="rotate(45)">
+                {cols.map((c, ci) => <rect key={ci} x={ci * sw * 3} y="0" width={sw * 3} height={sw * 3 * cols.length} fill={c} />)}
+              </pattern>
+            ))}
+          </defs>
+        ) : null;
+      })()}
       {list.map((sp, i) => {
-        const grp = windowGroupOfPane(groups, sp.gid);
-        const color = grp ? windowGroupColor(groups, grp.id) : "";
-        const lit = !dimming || (grp && hl.has(grp.id));
+        const gs = windowGroupsOfPane(groups, sp.gid);
+        const use = dimming && gs.some(g => hl.has(g.id)) ? gs.filter(g => hl.has(g.id)) : gs;
+        const cols = use.map(g => windowGroupColor(groups, g.id));
+        const color = cols.length > 1 ? "url(#" + patternPrefix + cols.join("|").replace(/[^0-9a-zA-Z]/g, "") + ")" : (cols[0] || "");
+        const outline = cols[0] || "";
+        const grp = gs.length > 0;
+        const lit = !dimming || gs.some(g => hl.has(g.id));
         const selected = !!(selectedIds && selectedIds.has(sp.gid));
         const points = sp.pts.map(p => p.join(",")).join(" ");
-        const label = "Pane " + (i + 1) + (grp ? " — " + grp.name : " — not in a group");
+        const label = "Pane " + (i + 1) + (grp ? " — " + gs.map(g => g.name).join(", ") : " — not in a group");
         return (
           <g key={sp.gid}
             role={editable ? "button" : undefined} tabIndex={editable ? 0 : undefined} aria-label={editable ? label : undefined}
@@ -23509,7 +23531,7 @@ function WindowLayoutView({ spaces, backdrop, groups, highlightGroupIds, selecte
             <polygon points={points}
               fill={color || "#c9d2d6"}
               fillOpacity={lit ? (color ? (dimming ? 0.85 : 0.55) : 0.35) : 0.12}
-              stroke={selected ? C.ink : lit && dimming && color ? color : C.muted}
+              stroke={selected ? C.ink : lit && dimming && outline ? outline : C.muted}
               strokeWidth={selected ? sw * 4 : lit && dimming && grp ? sw * 3 : sw * 1.5}
               strokeDasharray={!grp && !selected ? sw * 4 + " " + sw * 3 : undefined}
               strokeLinejoin="round" />
@@ -23575,22 +23597,18 @@ function WindowLayoutTabContent({ asset, canEdit, uploadBusy, uploadError, onUpl
   const spaces = plan.status === "ready" ? plan.spaces.filter(sp => sp && sp.pts && sp.pts.length >= 3) : [];
   const validIds = new Set(spaces.map(sp => sp.gid));
   const countIn = g => (g.memberShapeIds || []).filter(id => validIds.has(id)).length;
-  const grouped = spaces.filter(sp => windowGroupOfPane(groups, sp.gid)).length;
+  const grouped = spaces.filter(sp => windowGroupsOfPane(groups, sp.gid).length > 0).length;
   const trimmed = name.trim();
   const clash = trimmed && groups.some(g => g.id !== editingId && g.name.trim().toLowerCase() === trimmed.toLowerCase());
-  const movedFrom = {};
-  selected.forEach(id => {
-    const g = windowGroupOfPane(groups, id);
-    if (g && g.id !== editingId) movedFrom[g.name] = (movedFrom[g.name] || 0) + 1;
-  });
-  const movedText = Object.keys(movedFrom).map(n => movedFrom[n] + (movedFrom[n] === 1 ? " pane" : " panes") + " from “" + n + "”").join(", ");
   const dirty = selected.size > 0 || editingId !== null;
 
   function clearEditor() { setSelected(new Set()); setEditingId(null); setName(""); }
   function togglePane(id) {
     if (!canEdit) {
-      const g = windowGroupOfPane(groups, id);
-      setViewGroupId(g ? (viewGroupId === g.id ? null : g.id) : null);
+      // Tap steps through the groups a pane is in, then back to none.
+      const gs = windowGroupsOfPane(groups, id);
+      const at = gs.findIndex(g => g.id === viewGroupId);
+      setViewGroupId(!gs.length ? null : at < 0 ? gs[0].id : at + 1 < gs.length ? gs[at + 1].id : null);
       return;
     }
     setViewGroupId(null);
@@ -23692,7 +23710,6 @@ function WindowLayoutTabContent({ asset, canEdit, uploadBusy, uploadError, onUpl
             aria-label="Group name" maxLength={80}
             style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: `1px solid ${clash ? C.danger : C.border}`, fontSize: 14, boxSizing: "border-box" }} />
           {clash && <div role="alert" style={{ fontSize: 12, color: C.danger, marginTop: 6 }}>This window already has a group called “{trimmed}”.</div>}
-          {movedText && <div style={{ fontSize: 12, color: C.muted, marginTop: 6 }}>Moves {movedText} into this group (a pane is in one group at a time).</div>}
           <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
             <button type="button" onClick={save} disabled={!selected.size || !!clash}
               style={{ padding: "7px 14px", borderRadius: 10, border: "none", background: C.brand, color: "#fff", fontSize: 13, fontWeight: 600, opacity: !selected.size || clash ? 0.5 : 1 }}>

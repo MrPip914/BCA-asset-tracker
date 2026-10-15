@@ -34,7 +34,7 @@ const H = new Function(`
   ${sliceFn('function isWindowLayoutType(type) {')}
   ${sliceFn('function hasMapPlan(asset) {')}
   ${sliceFn('function windowGroupsOf(asset) {')}
-  ${sliceFn('function windowGroupOfPane(groups, paneId) {')}
+  ${sliceFn('function windowGroupsOfPane(groups, paneId) {')}
   ${sliceFn('function windowGroupsAfterSave(groups, draft, newId, stamp) {')}
   ${sliceFn('function taskPaneGroupsOf(asset, item) {')}
   ${sliceFn('function livePaneGroupIds(asset, ids) {')}
@@ -43,7 +43,7 @@ const H = new Function(`
   ${sliceFn('function windowGroupColor(groups, groupId) {')}
   ${sliceFn('function windowBackdropNear(backdrop, spaces) {')}
   const floorPlanBbox = pts => { const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]); const x = Math.min(...xs), y = Math.min(...ys); return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y }; };
-  return { isWindowLayoutType, hasMapPlan, windowGroupsOf, windowGroupOfPane, windowGroupsAfterSave, taskPaneGroupsOf, livePaneGroupIds, tasksWithoutPaneGroup, windowGroupColor, WINDOW_GROUP_COLORS, windowBackdropNear };
+  return { isWindowLayoutType, hasMapPlan, windowGroupsOf, windowGroupsOfPane, windowGroupsAfterSave, taskPaneGroupsOf, livePaneGroupIds, tasksWithoutPaneGroup, windowGroupColor, WINDOW_GROUP_COLORS, windowBackdropNear };
 `)();
 
 // --- the type -----------------------------------------------------------------
@@ -57,7 +57,7 @@ check('Window is a locked built-in that sits in a Wall or a Room, with no floorP
   !!reg && /locked: true/.test(reg[0]) && /parentTypes: \["Wall", "Room"\]/.test(reg[0]) && /modules: \["windowLayout"\]/.test(reg[0]) && !/floorPlan:/.test(reg[0]));
 check('the Panes tab is a registered module', /windowLayout: \{\s*label: "Panes"/.test(src));
 
-// --- groups: one group per pane, a group of one is fine ------------------------
+// --- groups: a pane can be in several, a group of one is fine ------------------------
 const g0 = [
   { id: 'a', name: 'Bay 1 lower', memberShapeIds: ['p1', 'p2'] },
   { id: 'b', name: 'Bay 2 lower', memberShapeIds: ['p3', 'p4'] },
@@ -66,23 +66,25 @@ let r = H.windowGroupsAfterSave(g0, { name: ' Uppers ', memberShapeIds: ['p5'] }
 check('a new group goes last, trimmed, and may hold a single pane',
   r.groups.length === 3 && r.groups[2].id === 'new1' && r.groups[2].name === 'Uppers' && r.groups[2].memberShapeIds.length === 1 && r.groups[2].by === 'E');
 r = H.windowGroupsAfterSave(g0, { name: 'Mixed', memberShapeIds: ['p2', 'p3'] }, 'n');
-check('a pane claimed by a new group leaves its old group',
-  r.groups.find(g => g.id === 'a').memberShapeIds.join() === 'p1' && r.groups.find(g => g.id === 'b').memberShapeIds.join() === 'p4'
+check('a pane claimed by a new group STAYS in its old group',
+  r.groups.find(g => g.id === 'a').memberShapeIds.join() === 'p1,p2' && r.groups.find(g => g.id === 'b').memberShapeIds.join() === 'p3,p4'
   && r.groups.find(g => g.id === 'n').memberShapeIds.join() === 'p2,p3');
-check('what moved is reported, by group and count', r.moved.length === 2 && r.moved.every(m => m.count === 1));
+check('nothing is reported as moved', r.moved === undefined);
 r = H.windowGroupsAfterSave(g0, { name: 'All', memberShapeIds: ['p1', 'p2', 'p3', 'p4'] }, 'n');
-check('a group left with no panes is dropped', r.groups.length === 1 && r.groups[0].id === 'n');
+check('claiming every pane of other groups leaves those groups alone', r.groups.length === 3 && r.groups[0].memberShapeIds.length === 2);
 r = H.windowGroupsAfterSave(g0, { id: 'a', name: 'Renamed', memberShapeIds: ['p1', 'p2', 'p3'] }, 'unused');
-check('editing keeps the group in its place (so colours do not shuffle) and takes panes from others',
+check('editing keeps the group in its place (so colours do not shuffle) and does not touch others',
   r.groups[0].id === 'a' && r.groups[0].name === 'Renamed' && r.groups[0].memberShapeIds.length === 3
-  && r.groups.length === 2 && r.groups[1].memberShapeIds.join() === 'p4');
+  && r.groups.length === 2 && r.groups[1].memberShapeIds.join() === 'p3,p4');
 r = H.windowGroupsAfterSave(g0, { id: 'a', name: '', memberShapeIds: ['p1', 'p1', 'p2'] }, 'x');
 check('a blank name falls back to a count, and a pane listed twice counts once',
   r.saved.name === 'Group of 2' && r.saved.memberShapeIds.length === 2);
-check('a pane is in at most one group after any save',
-  (() => { const seen = new Set(); return r.groups.every(g => g.memberShapeIds.every(m => !seen.has(m) && seen.add(m))); })());
-check('the group of a pane is found, or null',
-  H.windowGroupOfPane(g0, 'p3').id === 'b' && H.windowGroupOfPane(g0, 'zz') === null);
+const gm = [{ id: 'a', name: 'A', memberShapeIds: ['p1', 'p2'] }, { id: 'b', name: 'B', memberShapeIds: ['p2', 'p3'] }];
+check('the groups of a pane are found in window order, or none',
+  H.windowGroupsOfPane(gm, 'p2').map(g => g.id).join() === 'a,b' && H.windowGroupsOfPane(gm, 'p3').map(g => g.id).join() === 'b'
+  && H.windowGroupsOfPane(gm, 'zz').length === 0);
+check('the layout view reads every group of a pane (striped when several) and the tab no longer reports moves',
+  /windowGroupsOfPane\(groups, sp\.gid\)/.test(src) && /<pattern /.test(src) && !/Moves \{movedText\}/.test(src) && !/windowGroupOfPane/.test(src));
 
 // --- tasks name groups -----------------------------------------------------------
 const win = { type: 'Window', floorPlanGroups: g0 };

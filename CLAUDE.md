@@ -912,11 +912,14 @@ layout lights up those panes (task dialog, task card). The plan is
   uses `hasMapPlan`, which skips window layouts; a bare `.floorPlanUrl` check there would make
   a Room containing a window look like it has a floor plan. Use `hasMapPlan` for any new test
   of that kind.
-- **A pane is in at most one group** (`windowGroupsAfterSave` moves claimed panes out of other
-  groups and drops an emptied group), and **a group of one pane is legitimate** — unlike the
-  Map, where fewer than two is not a group. Replace on a window therefore keeps one-pane groups
-  (the remap takes a minimum size). Colours follow group ORDER, which is why an edit keeps the
-  group in its place.
+- **A pane can be in SEVERAL groups** (2026-10-15, Eric; it was at most one until then).
+  `windowGroupsAfterSave` leaves other groups alone, so "Bay 1 lower" and "Operable windows"
+  can share panes, and a pane is found through `windowGroupsOfPane`. A pane in several groups is
+  drawn striped in their colours (a flat fill for one); while a task's groups are lit only those
+  groups' colours count. A viewer's tap on a pane steps through its groups. **A group of one pane
+  is legitimate** — unlike the Map, where fewer than two is not a group. Replace on a window
+  therefore keeps one-pane groups (the remap takes a minimum size). Colours follow group ORDER,
+  which is why an edit keeps the group in its place. Frontend only: the stored shape is unchanged.
 - **Tasks name groups in `paneGroupIds`** (array, omitted when empty). A deleted group is
   ignored when read (`taskPaneGroupsOf`) and `deleteWindowGroup` takes it off every task in the
   same save. **Supabase keeps the field through `TASK_EXTRA_KEYS` in `save-shape.ts`, which is
