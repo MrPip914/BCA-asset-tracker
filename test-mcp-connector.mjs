@@ -72,6 +72,7 @@ const SITES = {
       A("u1", 8, null, { type: "User", firstName: "Aaron", lastName: "Cantrell", name: "old name" }),
       A("panelA", 9, "b200", { type: "Electrical Panel", tag: "BCA0082", panelSlotCount: 24, panelPhases: "1" }),
       A("ms1", 10, "r101", { type: "uuid-ms", name: "Mini Split 1" }),
+      A("win1", 11, "r101b", { type: "Window", name: "West Windows", floorPlanUrl: "https://res.cloudinary.com/demo/raw/upload/win-old.svg", floorPlanFileName: "win-old.svg" }),
     ],
     space_links: [
       { plan_asset_id: "b300", shape_id: "shape-1", position: 0, data: { shapeId: "shape-1", roomId: "r101b", at: "2026-09-01T00:00:00Z", by: "Eric" } },
@@ -82,6 +83,7 @@ const SITES = {
     ],
     space_groups: [
       { id: "grp1", plan_asset_id: "b300", position: 0, data: { id: "grp1", name: "Wing", memberShapeIds: ["shape-1", "g-old-2"] } },
+      { id: "wg1", plan_asset_id: "win1", position: 0, data: { id: "wg1", name: "Lower", memberShapeIds: ["shape-1"] } },
       { id: "grp2", plan_asset_id: "b300", position: 1, data: { id: "grp2", name: "Gone", memberShapeIds: ["shape-1", "shape-9"] } },
     ],
     config: [
@@ -738,6 +740,13 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   ctx = pctx();
   r = await call("replace_floor_plan", { asset: "Main Campus", svg: NEW, file_name: "campus.svg" }, ctx);
   check("a first plan: nothing to carry, nothing fetched, written", !r.isError && ctx.fetched.length === 0 && ctx.writes.length === 1 && ctx.writes[0].args[3].length === 0, r.text);
+
+  // A Window takes a pane layout; a group of one pane survives where a map group would not.
+  ctx = pctx();
+  r = await call("replace_floor_plan", { asset: "West Windows", svg: NEW, file_name: "west.svg" }, ctx);
+  eq("a Window takes a layout, and its single-pane group is carried over",
+    [r.isError, r.data?.groupsCarriedOver, ctx.writes[0]?.args[1], ctx.writes[0]?.args[4].map((g) => g.memberShapeIds)],
+    [false, 1, "win1", [["shape-1"]]]);
 
   for (const [label, args, sites] of [
     ["a viewer", { site: "bca", asset: "x", svg: NEW, file_name: "a.svg" }, TWO],
