@@ -24,9 +24,12 @@ declare
   g     jsonb;
   n     integer := 0;
   bid   bigint;
+  min_grp integer;
 begin
   rev_a := connector_take_revision('assets', (p_expected->>'assets')::integer);
   atype := connector_live_asset(p_asset_id);
+  -- A pane group may be a single pane; a map group needs two.
+  min_grp := case when atype = 'Window' then 1 else 2 end;
 
   if jsonb_typeof(p_plan) is distinct from 'object'
      or coalesce(p_plan->>'url', '') !~ '^https://res\.cloudinary\.com/'
@@ -66,7 +69,7 @@ begin
   n := 0;
   for g in select value from jsonb_array_elements(p_groups) loop
     if coalesce(g->>'id', '') = '' or jsonb_typeof(g->'memberShapeIds') is distinct from 'array'
-       or jsonb_array_length(g->'memberShapeIds') < case when atype = 'Window' then 1 else 2 end then
+       or jsonb_array_length(g->'memberShapeIds') < min_grp then
       raise exception 'connector: A floor plan group was malformed.';
     end if;
     insert into space_groups (tenant_id, id, plan_asset_id, position, data)
