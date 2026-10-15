@@ -933,6 +933,10 @@ layout lights up those panes (task dialog, task card). The plan is
   `Space`/`Sheet` group are the panes' own geometry and are skipped. The frame fits panes
   plus backdrop, but `windowBackdropNear` drops shapes more than 6x the panes' extent so a
   page border cannot shrink them. Frontend only.
+- **A task's layout sits behind a chevron, collapsed by default** (2026-10-15, Eric): `TaskPaneLayout`
+  shows the task's group chips and a "Show window layout" toggle; the drawing, with the task's groups
+  lit and the rest dimmed, is only fetched once opened. It appears on the task dialog, the task card
+  and the completion form, so whoever is doing the job can see which panes.
 - Group edits are audited as `pane_group_created/edited/deleted`; changing a task's groups is
   a "Pane groups" row on that task's edit.
 - Covered by `test-frontend-windows.js` (the real helpers plus source wiring). Driven in

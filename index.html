@@ -5705,7 +5705,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-15.1";
+const APP_VERSION = "2026-10-15.2";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -15853,6 +15853,9 @@ function AssetTracker() {
                 <div style={{ fontSize: 13, color: C.muted, marginBottom: 16 }}>
                   {item.task}
                   {item.lastPerformed ? ` · last done ${formatDateOnly(item.lastPerformed)}` : " · never performed"}
+                  {workTarget && isWindowLayoutType(workTarget.type) && taskPaneGroupsOf(workTarget, item).length > 0 && (
+                    <TaskPaneLayout asset={workTarget} groupIds={item.paneGroupIds} maxHeight={200} />
+                  )}
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
                   <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -23561,22 +23564,37 @@ function PaneGroupChips({ groups, shown }) {
 }
 
 // A task's panes, read-only: its group chips and the layout with those groups
-// lit. Loads the window's SVG itself, so the task dialog and the task card can
-// drop it in with just the asset and the groups.
+// lit. Loads the window's SVG itself, so the task dialog, the task card and the
+// completion form can drop it in with just the asset and the groups. The layout
+// sits behind a chevron, COLLAPSED by default: the chips already say which groups,
+// and the drawing (which can be a large file) is fetched only once it is opened.
 function TaskPaneLayout({ asset, groupIds, maxHeight }) {
-  const plan = useFloorPlanSvg(asset && asset.floorPlanUrl, true);
+  const [open, setOpen] = useState(false);
+  const plan = useFloorPlanSvg(open && asset ? asset.floorPlanUrl : null, true);
   const groups = windowGroupsOf(asset);
   const shown = groups.filter(g => (groupIds || []).includes(g.id));
   if (!shown.length) return null;
+  const canShow = !!(asset && asset.floorPlanUrl);
   return (
     <div style={{ marginTop: 8 }}>
-      <PaneGroupChips groups={groups} shown={shown} />
-      {plan.status === "ready" && (
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <PaneGroupChips groups={groups} shown={shown} />
+        {canShow && (
+          <button type="button" aria-expanded={open} onClick={() => setOpen(o => !o)}
+            style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "none", border: "none", padding: "2px 4px", fontSize: 12, fontWeight: 600, color: C.brandDark }}>
+            {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            {open ? "Hide window layout" : "Show window layout"}
+          </button>
+        )}
+      </div>
+      {open && plan.status === "ready" && (
         <div style={{ marginTop: 8, border: `1px solid ${C.border}`, borderRadius: 8, background: C.surface, padding: 8 }}>
           <WindowLayoutView spaces={plan.spaces} backdrop={plan.backdrop} groups={groups} highlightGroupIds={shown.map(g => g.id)} maxHeight={maxHeight || 160}
             ariaLabel={"Panes this task covers: " + shown.map(g => g.name).join(", ")} />
         </div>
       )}
+      {open && plan.status === "error" && <div style={{ marginTop: 6, fontSize: 12, color: C.danger }}>{plan.error}</div>}
+      {open && plan.status !== "ready" && plan.status !== "error" && <div style={{ marginTop: 6, fontSize: 12, color: C.empty }}>Loading the window layout…</div>}
     </div>
   );
 }

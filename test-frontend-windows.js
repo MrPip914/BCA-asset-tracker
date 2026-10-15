@@ -140,5 +140,11 @@ check('both window views get the backdrop and the hook asks for it',
   (src.match(/useFloorPlanSvg\([^)]*, true\)/g) || []).length === 2 && (src.match(/backdrop=\{plan\.backdrop\}/g) || []).length === 2);
 check('a backdrop shape is never clickable', /strokeLinejoin="round" style=\{\{ pointerEvents: "none" \}\}/.test(src));
 
+const tpl = src.slice(src.indexOf('function TaskPaneLayout('), src.indexOf('function WindowLayoutTabContent('));
+check('a task\'s layout starts COLLAPSED behind a chevron and is only fetched once opened',
+  /useState\(false\)/.test(tpl) && /aria-expanded=\{open\}/.test(tpl) && /useFloorPlanSvg\(open && asset/.test(tpl) && /ChevronRight/.test(tpl));
+check('the layout is on the task dialog, the task card AND the completion form',
+  (src.match(/<TaskPaneLayout /g) || []).length === 3);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
