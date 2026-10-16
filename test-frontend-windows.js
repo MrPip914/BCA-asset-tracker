@@ -136,6 +136,11 @@ const kept = H.windowBackdropNear([wall, page], panes);
 check('a wall around the panes is kept as backdrop', kept.length === 1 && kept[0] === wall);
 check('a page-sized border is dropped so it cannot shrink the panes', !kept.includes(page));
 check('no backdrop is fine', H.windowBackdropNear(undefined, panes).length === 0);
+const photo = { pts: [[-500,-500],[500,-500],[500,500],[-500,500]], closed: true, image: 'data:image/jpeg;base64,AA' };
+check('an embedded photo is kept even when far larger than the panes', H.windowBackdropNear([photo, page], panes).length === 1);
+check('only data: images are read from a layout, never a remote href',
+  /data:image\\\/\(png\|jpe\?g\|gif\|webp\);/.test(src.replace(/\\\//g, '\\/')) || src.includes('/^data:image\\/(png|jpe?g|gif|webp);/i.test(href)'));
+check('the view draws the photo behind the shapes', /b\.image\s*\?[\s\S]{0,200}<image key=/.test(src));
 check('both window views get the backdrop and the hook asks for it',
   (src.match(/useFloorPlanSvg\([^)]*, true\)/g) || []).length === 2 && (src.match(/backdrop=\{plan\.backdrop\}/g) || []).length === 2);
 check('a backdrop shape is never clickable', /strokeLinejoin="round" style=\{\{ pointerEvents: "none" \}\}/.test(src));
