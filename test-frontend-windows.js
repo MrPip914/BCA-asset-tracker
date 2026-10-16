@@ -140,6 +140,9 @@ const photo = { pts: [[-500,-500],[500,-500],[500,500],[-500,500]], closed: true
 check('an embedded photo is kept even when far larger than the panes', H.windowBackdropNear([photo, page], panes).length === 1);
 check('only data: images are read from a layout, never a remote href',
   /data:image\\\/\(png\|jpe\?g\|gif\|webp\);/.test(src.replace(/\\\//g, '\\/')) || src.includes('/^data:image\\/(png|jpe?g|gif|webp);/i.test(href)'));
+check('a layout with a photo offers Photo and Shapes toggles, and never both off',
+  /hasPhoto && \(/.test(src) && /toggle\("Photo"/.test(src) && /toggle\("Shapes"/.test(src) && /if \(showPhoto && !showShapes\) setShowShapes\(true\)/.test(src) && /if \(showShapes && !showPhoto\) setShowPhoto\(true\)/.test(src));
+check('hiding the shapes removes the panes from the view', /\(!hasPhoto \|\| showShapes\) && list\.map/.test(src));
 check('the view draws the photo behind the shapes', /b\.image\s*\?[\s\S]{0,200}<image key=/.test(src));
 check('both window views get the backdrop and the hook asks for it',
   (src.match(/useFloorPlanSvg\([^)]*, true\)/g) || []).length === 2 && (src.match(/backdrop=\{plan\.backdrop\}/g) || []).length === 2);
