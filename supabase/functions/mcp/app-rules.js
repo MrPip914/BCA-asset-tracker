@@ -205,6 +205,14 @@ function isLockedType(typeId) {
   return !!TYPE_REGISTRY[typeId]?.locked;
 }
 
+function modulesFor(type) {
+  return typeEntryFor(type)?.modules || [];
+}
+
+function hasModule(type, moduleKey) {
+  return modulesFor(type).includes(moduleKey);
+}
+
 function ensureLockedTypes(list) {
   const have = new Set(list.map(t => t.id));
   // A type the school made itself and named the same (a uuid-id "Floor") stands
@@ -1420,4 +1428,4 @@ function runRelationshipQuery(asset, query, assets, columns, typesList) {
 // Each tenant's asset-ID prefix, from clients.js.
 export const TENANT_LABEL_PREFIX = {"3c":"3C","bca":"BCA","dev":"BCA"};
 
-export { TYPE_REGISTRY, DEFAULT_TYPES, applyTypeSettings, adoptLegacyTypesList, ensureLockedTypes, typeNameOf, typeTakesParent, parentTypesFor, isPlaceType, fieldAppliesTo, isPersonType, personMatchKey, nameOf, personLabelsOf, personNamesOf, UNASSIGNED_LABEL, pathOf, fullPathOf, parentNameFor, relate, dateOnly, adoptPersonNames, adoptLegacyNames, isChoiceKind, multiValues, columnDataType, columnOptions, validateColumnValue, DEFAULT_COLUMNS, RENAMED_COLUMN_KEYS, RETIRED_COLUMN_KEYS, IMPORT_KEY_HEADER, importHeadersFor, planAssetImport, PATH_SEPARATOR, assetToImportRow, resolveImportType, isLockedType, nearestAncestorOfType, columnReferenceTypes, referenceColumns, RELATIONSHIP_FOLLOWS, relationshipFollowMeta, relationshipQueriesFor, relationshipQueriesShownFor, runRelationshipQuery };
+export { TYPE_REGISTRY, DEFAULT_TYPES, applyTypeSettings, adoptLegacyTypesList, ensureLockedTypes, typeNameOf, typeTakesParent, parentTypesFor, isPlaceType, fieldAppliesTo, isPersonType, personMatchKey, nameOf, personLabelsOf, personNamesOf, UNASSIGNED_LABEL, pathOf, fullPathOf, parentNameFor, relate, dateOnly, adoptPersonNames, adoptLegacyNames, isChoiceKind, multiValues, columnDataType, columnOptions, validateColumnValue, DEFAULT_COLUMNS, RENAMED_COLUMN_KEYS, RETIRED_COLUMN_KEYS, IMPORT_KEY_HEADER, importHeadersFor, planAssetImport, PATH_SEPARATOR, assetToImportRow, resolveImportType, isLockedType, hasModule, nearestAncestorOfType, columnReferenceTypes, referenceColumns, RELATIONSHIP_FOLLOWS, relationshipFollowMeta, relationshipQueriesFor, relationshipQueriesShownFor, runRelationshipQuery };

@@ -38,6 +38,8 @@ const PIECES = [
   "applyTypeSettings",
   "typeEntryFor",
   "isLockedType",
+  "modulesFor",
+  "hasModule",
   "ensureLockedTypes",
   "typeNameOf",
   "typeTakesParent",
@@ -130,7 +132,7 @@ const EXPORTS = [
   "fullPathOf", "parentNameFor", "relate", "dateOnly", "adoptPersonNames", "adoptLegacyNames",
   "isChoiceKind", "multiValues", "columnDataType", "columnOptions", "validateColumnValue", "DEFAULT_COLUMNS", "RENAMED_COLUMN_KEYS",
   "RETIRED_COLUMN_KEYS", "IMPORT_KEY_HEADER", "importHeadersFor", "planAssetImport", "PATH_SEPARATOR",
-  "assetToImportRow", "resolveImportType", "isLockedType", "nearestAncestorOfType",
+  "assetToImportRow", "resolveImportType", "isLockedType", "hasModule", "nearestAncestorOfType",
   "columnReferenceTypes", "referenceColumns", "RELATIONSHIP_FOLLOWS", "relationshipFollowMeta",
   "relationshipQueriesFor", "relationshipQueriesShownFor", "runRelationshipQuery",
 ];

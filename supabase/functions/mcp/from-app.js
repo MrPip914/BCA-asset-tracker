@@ -368,6 +368,21 @@ function floorPlanSetWallSegments(links, wallId, segmentIds, stamp) {
   return { links: kept.concat(ok.map(shapeId => ({ shapeId, roomId: wallId, ...(stamp || {}) }))), taken };
 }
 
+function windowGroupsOf(asset) {
+  return ((asset && asset.floorPlanGroups) || []).filter(g => g && g.id);
+}
+
+function taskPaneGroupsOf(asset, item) {
+  const ids = (item && Array.isArray(item.paneGroupIds)) ? item.paneGroupIds : [];
+  if (!ids.length) return [];
+  return windowGroupsOf(asset).filter(g => ids.includes(g.id));
+}
+
+function livePaneGroupIds(asset, ids) {
+  const live = new Set(windowGroupsOf(asset).map(g => g.id));
+  return (ids || []).filter(id => live.has(id));
+}
+
 export {
   MAINTENANCE_FREQUENCIES, WEEKDAY_NAMES, formatRecurrence, describeRecurrence, recurrenceApproxDays,
   TASK_KIND_SCHEDULED, TASK_KIND_ONEOFF, parseRecurrence, dateOnly,
@@ -375,4 +390,5 @@ export {
   floorPlanRemapLinksAndGroups, floorPlanPathToPoints,
   floorPlanRound2, floorPlanParseTransform, floorPlanApplyChain, floorPlanBbox, floorPlanPointInPoly, floorPlanRotateSpaces,
   floorPlanSegmentId, floorPlanSegmentParts, floorPlanIsSegmentId, floorPlanExteriorSegments, floorPlanWallCoverSet, floorPlanSetWallSegments,
+  windowGroupsOf, taskPaneGroupsOf, livePaneGroupIds,
 };
