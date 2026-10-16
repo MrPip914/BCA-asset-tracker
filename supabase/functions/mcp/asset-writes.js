@@ -454,7 +454,7 @@ export function fmtDate(s) {
 
 // The app's saveMaintenanceEdit audit: one maintenance_edited row per field
 // that moved, worded as the app words it.
-export function taskEditAudit(asset, original, updated, kindOf) {
+export function taskEditAudit(asset, original, updated, kindOf, model) {
   const rows = [];
   const add = (field, from, to) => rows.push({
     assetLabel: asset.id, assetType: asset.type, action: "maintenance_edited",
@@ -467,6 +467,19 @@ export function taskEditAudit(asset, original, updated, kindOf) {
   if ((original.frequencyLabel || "") !== (updated.frequencyLabel || "")) add("Frequency", original.frequencyLabel || "—", updated.frequencyLabel || "—");
   if ((original.dueDate || "") !== (updated.dueDate || "")) add("Due date", fmtDate(original.dueDate) || "—", fmtDate(updated.dueDate) || "—");
   if ((original.owner || "") !== (updated.owner || "")) add("Owner", original.owner || "—", updated.owner || "—");
+  if (model) {
+    // The app's order: Type, then each custom field the type now carries or carried.
+    if ((original.taskType || "") !== (updated.taskType || "")) {
+      add("Type", R.taskTypeNameOf(model, original.taskType) || "—", R.taskTypeNameOf(model, updated.taskType) || "—");
+    }
+    const keys = new Set([...R.customFieldsFor(model, "task", original.taskType), ...R.customFieldsFor(model, "task", updated.taskType)].map((f) => f.key));
+    keys.forEach((key) => {
+      const def = (model.taskFields || []).find((f) => f.key === key);
+      const before = String((original.custom || {})[key] ?? "");
+      const after = String((updated.custom || {})[key] ?? "");
+      if (def && before !== after) add(def.label, before || "—", after || "—");
+    });
+  }
   {
     const before = paneGroupNamesText(asset, original.paneGroupIds), after = paneGroupNamesText(asset, updated.paneGroupIds);
     if (before !== after) add("Pane groups", before || "—", after || "—");
