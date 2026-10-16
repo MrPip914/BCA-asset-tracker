@@ -5705,7 +5705,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-15.2";
+const APP_VERSION = "2026-10-16.1";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -23152,6 +23152,22 @@ function windowBackdropOf(svgText) {
   };
   const num = (el, a) => parseFloat(el.getAttribute(a) || "0") || 0;
   const out = [];
+  // An embedded photo (<image> with a data: URL) goes first so it paints behind
+  // everything. Only data: images -- a remote href would make the file fetch from
+  // wherever its author pointed. Placement uses the corners' bounding box, so a
+  // scale or shift is honoured and a rotation is not.
+  for (const el of root.querySelectorAll("image")) {
+    if (out.length >= 4) break;
+    const href = el.getAttribute("href") || el.getAttribute("xlink:href") || "";
+    if (!/^data:image\/(png|jpe?g|gif|webp);/i.test(href) || !own(el)) continue;
+    const x = num(el, "x"), y = num(el, "y"), w = num(el, "width"), h = num(el, "height");
+    if (!(w > 0 && h > 0)) continue;
+    const ownT = el.getAttribute("transform");
+    const chain = (ownT ? [floorPlanParseTransform(ownT)] : []).concat(floorPlanTransformChain(el, root));
+    const pts = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]].map(([px, py]) => floorPlanApplyChain(chain, px, py)).map(([px, py]) => [floorPlanRound2(px), floorPlanRound2(py)]);
+    if (pts.some(([px, py]) => !isFinite(px) || !isFinite(py))) continue;
+    out.push({ pts, closed: true, image: href });
+  }
   for (const el of root.querySelectorAll("path, rect, polygon, polyline, line, circle, ellipse")) {
     if (out.length >= WINDOW_BACKDROP_MAX) break;
     if (!own(el)) continue;
@@ -23191,6 +23207,7 @@ function windowBackdropNear(backdrop, spaces) {
   const panes = floorPlanBbox((spaces || []).flatMap(sp => sp.pts || []));
   const limit = Math.max(panes.w, panes.h) * 6;
   return (backdrop || []).filter(b => {
+    if (b.image) return true; // a photo is meant to be bigger than the panes
     const bb = floorPlanBbox(b.pts);
     return Math.max(bb.w, bb.h) <= limit;
   });
@@ -23483,7 +23500,10 @@ function WindowLayoutView({ spaces, backdrop, groups, highlightGroupIds, selecte
       style={{ width: "100%", height: "auto", maxHeight: maxHeight || 420, display: "block" }}
     >
       {shapes.map((b, i) => (
-        b.closed
+        b.image
+          ? (() => { const ib = floorPlanBbox(b.pts); return <image key={"bd" + i} href={b.image} x={ib.x} y={ib.y} width={ib.w} height={ib.h}
+              preserveAspectRatio="none" style={{ pointerEvents: "none" }} />; })()
+        : b.closed
           ? <polygon key={"bd" + i} points={b.pts.map(p => p.join(",")).join(" ")} fill={C.border} fillOpacity={0.35}
               stroke={C.muted} strokeOpacity={0.6} strokeWidth={sw} strokeLinejoin="round" style={{ pointerEvents: "none" }} />
           : <polyline key={"bd" + i} points={b.pts.map(p => p.join(",")).join(" ")} fill="none"
