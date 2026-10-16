@@ -896,6 +896,18 @@ change, no version bump, no deploy.**
 - The rest of the connector's query support is queued in
   `/mnt/project-files/connector-queue.md`.
 
+## Sections drawings (generic window pane layouts, 2026-10-16)
+
+**The Panes tab is now the Sections tab and is a PER-TYPE SETTING**, not a property of the
+built-in Window: `typeSettings[id].sections`, ticked in the type editor ("Has a sections
+drawing"), so a "Paint surfaces" or "Windows (cleaning)" type gets the same drawing, groups
+and task highlighting. `modulesFor` adds the `windowLayout` module when the merged entry has
+`sections`; Window ships `sections: true` in the registry. **Labels only**: the module key
+`windowLayout`, `?tab=windowLayout`, `paneGroupIds`, the `pane_group_*` audit actions and the
+floor-plan fields are unchanged, so existing windows, drawings, groups and tasks need no
+migration. The audit sentences read "section group" at read time. Frontend only. The
+description below still says "panes"; read it as "sections".
+
 ## Window pane layouts (2026-10-13)
 
 A **Window** asset (built-in, locked, can sit in a Wall or a Room) carries a **Panes** tab:
