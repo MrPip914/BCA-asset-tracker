@@ -5709,7 +5709,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-16.3";
+const APP_VERSION = "2026-10-16.4";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -23510,9 +23510,49 @@ function fetchFloorPlanSvgText(url) {
 // editable. The frame is the PANES' bounding box, not the file's viewBox: an
 // export is often drawn on a much larger page than the window itself.
 let windowPatternSeq = 0;
-function WindowLayoutView({ spaces, backdrop, groups, highlightGroupIds, selectedIds, onPaneClick, maxHeight, showNumbers, ariaLabel }) {
+// Zoom state is { z, dx, dy }: a scale of 1 or more and the view centre's offset from the
+// drawing's centre, in drawing units. The window can never leave the drawing.
+function clampZoomView(box, v) {
+  const z = Math.min(SECTIONS_MAX_ZOOM, Math.max(1, v.z));
+  const lx = box.w * (1 - 1 / z) / 2, ly = box.h * (1 - 1 / z) / 2;
+  return { z, dx: Math.min(lx, Math.max(-lx, v.dx)), dy: Math.min(ly, Math.max(-ly, v.dy)) };
+}
+function zoomViewBox(box, v) {
+  const w = box.w / v.z, h = box.h / v.z;
+  const cx = box.x + box.w / 2 + v.dx, cy = box.y + box.h / 2 + v.dy;
+  return { x: cx - w / 2, y: cy - h / 2, w, h };
+}
+// Change the scale while the drawing point (ux, uy) stays under the same screen position.
+function zoomViewAround(box, v, nextZ, ux, uy) {
+  const vb = zoomViewBox(box, v);
+  const fx = (ux - (vb.x + vb.w / 2)) / vb.w, fy = (uy - (vb.y + vb.h / 2)) / vb.h;
+  const z = Math.min(SECTIONS_MAX_ZOOM, Math.max(1, nextZ));
+  const w = box.w / z, h = box.h / z;
+  return clampZoomView(box, { z, dx: ux - fx * w - (box.x + box.w / 2), dy: uy - fy * h - (box.y + box.h / 2) });
+}
+const SECTIONS_MAX_ZOOM = 8;
+// `zoomable` adds +/-/Reset buttons, drag to pan and pinch; `wheelZoom` (the full-screen
+// view) also lets a plain mouse wheel zoom, otherwise only Ctrl/Cmd + wheel does so that
+// scrolling the page past the drawing still works. The view is a viewBox window onto the
+// same drawing, so panes stay clickable; a drag never counts as a pane click.
+function WindowLayoutView({ spaces, backdrop, groups, highlightGroupIds, selectedIds, onPaneClick, maxHeight, showNumbers, ariaLabel, zoomable, wheelZoom }) {
   // Several instances can be on a page at once, so pattern ids must not collide.
   const patternPrefix = useMemo(() => "wlp" + (++windowPatternSeq) + "-", []);
+  const [zv, setZv] = useState({ z: 1, dx: 0, dy: 0 });
+  const zvRef = useRef(zv);
+  const svgRef = useRef(null);
+  const pointers = useRef(new Map());
+  const gesture = useRef(null);
+  const dragged = useRef(false);
+  const wheelFn = useRef(null);
+  const hasPanes = !!(spaces || []).some(sp => sp && sp.pts && sp.pts.length >= 3);
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el || !zoomable) return undefined;
+    const h = e => { if (wheelFn.current) wheelFn.current(e); };
+    el.addEventListener("wheel", h, { passive: false });
+    return () => el.removeEventListener("wheel", h);
+  }, [zoomable, hasPanes]);
   // View-only toggles, offered when the file carries a photo: the photo and the
   // traced shapes can each be hidden, but never both (an empty frame says nothing).
   const [showPhoto, setShowPhoto] = useState(true);
@@ -23535,18 +23575,96 @@ function WindowLayoutView({ spaces, backdrop, groups, highlightGroupIds, selecte
   const hl = new Set(highlightGroupIds || []);
   const dimming = hl.size > 0;
   const editable = typeof onPaneClick === "function";
+  zvRef.current = zv;
+  const baseBox = { x: bb.x - pad, y: bb.y - pad, w: bb.w + pad * 2, h: bb.h + pad * 2 };
+  const viewBox = zoomViewBox(baseBox, zv);
+  function applyZoom(next) { zvRef.current = next; setZv(next); }
+  // Client pixels -> drawing units under the CURRENT view. The drawing is letterboxed
+  // (preserveAspectRatio meet) when maxHeight clamps it, so units-per-pixel is the larger.
+  function unitAt(clientX, clientY) {
+    const r = svgRef.current.getBoundingClientRect();
+    const vb = zoomViewBox(baseBox, zvRef.current);
+    const scale = Math.max(vb.w / (r.width || 1), vb.h / (r.height || 1));
+    return { x: vb.x + vb.w / 2 + (clientX - (r.left + r.width / 2)) * scale, y: vb.y + vb.h / 2 + (clientY - (r.top + r.height / 2)) * scale, scale };
+  }
+  function zoomBy(factor, clientX, clientY) {
+    const cur = zvRef.current;
+    if (clientX === undefined && svgRef.current) {
+      const r = svgRef.current.getBoundingClientRect();
+      clientX = r.left + r.width / 2; clientY = r.top + r.height / 2;
+    }
+    const at = svgRef.current ? unitAt(clientX, clientY) : { x: baseBox.x + baseBox.w / 2, y: baseBox.y + baseBox.h / 2 };
+    applyZoom(zoomViewAround(baseBox, cur, cur.z * factor, at.x, at.y));
+  }
+  wheelFn.current = e => {
+    if (!(wheelZoom || e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    zoomBy(Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0025)), e.clientX, e.clientY);
+  };
+  function onPointerDown(e) {
+    if (!zoomable) return;
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY });
+    dragged.current = false;
+    if (pointers.current.size === 2) {
+      const [a, b] = [...pointers.current.values()];
+      gesture.current = { dist: Math.hypot(a.x - b.x, a.y - b.y) || 1 };
+      dragged.current = true;
+      try { svgRef.current.setPointerCapture(e.pointerId); } catch (err) { /* capture is a nicety */ }
+    }
+  }
+  function onPointerMove(e) {
+    const prev = pointers.current.get(e.pointerId);
+    if (!zoomable || !prev) return;
+    const now = { x: e.clientX, y: e.clientY, sx: prev.sx, sy: prev.sy };
+    pointers.current.set(e.pointerId, now);
+    if (pointers.current.size >= 2 && gesture.current) {
+      const [a, b] = [...pointers.current.values()];
+      const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+      zoomBy(dist / gesture.current.dist, (a.x + b.x) / 2, (a.y + b.y) / 2);
+      gesture.current.dist = dist;
+      return;
+    }
+    const cur = zvRef.current;
+    if (cur.z <= 1) return;
+    // A press that has not travelled is still a click on a pane.
+    if (!dragged.current) {
+      if (Math.hypot(now.x - prev.sx, now.y - prev.sy) < 5) return;
+      dragged.current = true;
+      try { svgRef.current.setPointerCapture(e.pointerId); } catch (err) { /* capture is a nicety */ }
+    }
+    const scale = unitAt(now.x, now.y).scale;
+    applyZoom(clampZoomView(baseBox, { z: cur.z, dx: cur.dx - (now.x - prev.x) * scale, dy: cur.dy - (now.y - prev.y) * scale }));
+  }
+  function onPointerEnd(e) {
+    pointers.current.delete(e.pointerId);
+    if (pointers.current.size < 2) gesture.current = null;
+  }
+  const zoomBtn = (label, aria, onClick, disabled) => (
+    <button type="button" aria-label={aria} onClick={onClick} disabled={disabled}
+      style={{ minWidth: 30, height: 30, padding: "0 8px", borderRadius: 8, border: `1px solid ${C.border}`, background: C.surface, color: C.ink, fontSize: 16, fontWeight: 700, lineHeight: 1, cursor: disabled ? "default" : "pointer", opacity: disabled ? 0.4 : 1 }}>{label}</button>
+  );
   return (
-    <div>
+    <div style={{ position: "relative" }}>
     {hasPhoto && (
       <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
         {toggle("Photo", showPhoto, () => { setShowPhoto(!showPhoto); if (showPhoto && !showShapes) setShowShapes(true); })}
         {toggle("Shapes", showShapes, () => { setShowShapes(!showShapes); if (showShapes && !showPhoto) setShowPhoto(true); })}
       </div>
     )}
-    <svg
-      viewBox={`${bb.x - pad} ${bb.y - pad} ${bb.w + pad * 2} ${bb.h + pad * 2}`}
+    {zoomable && (
+      <div style={{ position: "absolute", top: hasPhoto ? 36 : 6, right: 6, zIndex: 2, display: "flex", gap: 4 }}>
+        {zv.z > 1 && zoomBtn("Reset", "Reset zoom", () => applyZoom({ z: 1, dx: 0, dy: 0 }))}
+        {zoomBtn("−", "Zoom out", () => zoomBy(1 / 1.5), zv.z <= 1)}
+        {zoomBtn("+", "Zoom in", () => zoomBy(1.5), zv.z >= SECTIONS_MAX_ZOOM)}
+      </div>
+    )}
+    <svg ref={svgRef}
+      viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`}
       role="img" aria-label={ariaLabel || "Sections drawing"}
-      style={{ width: "100%", height: "auto", maxHeight: maxHeight || 420, display: "block" }}
+      onPointerDown={zoomable ? onPointerDown : undefined} onPointerMove={zoomable ? onPointerMove : undefined}
+      onPointerUp={zoomable ? onPointerEnd : undefined} onPointerCancel={zoomable ? onPointerEnd : undefined}
+      onClickCapture={zoomable ? (e => { if (dragged.current) { e.stopPropagation(); dragged.current = false; } }) : undefined}
+      style={{ width: "100%", height: "auto", maxHeight: maxHeight || 420, display: "block", touchAction: zoomable && (wheelZoom || zv.z > 1) ? "none" : undefined, cursor: zoomable && zv.z > 1 ? "grab" : undefined }}
     >
       {shapes.map((b, i) => (
         b.image
@@ -23619,6 +23737,36 @@ function WindowLayoutView({ spaces, backdrop, groups, highlightGroupIds, selecte
   );
 }
 
+// The full-screen, zoomable view of a sections drawing: opened from the tab's Enlarge
+// button and from a task's thumbnail. Portalled to the body (it sits inside dialogs whose
+// overflow would clip it) and it STOPS every click, because React bubbles portal events
+// through the component tree and a tap here would otherwise close the dialog behind it.
+function SectionsZoomModal({ spaces, backdrop, groups, highlightGroupIds, title, onClose }) {
+  useEffect(() => {
+    const onKey = e => { if (e.key === "Escape") { e.stopPropagation(); onClose(); } };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return createPortal(
+    <div role="dialog" aria-modal="true" aria-label={title || "Sections drawing"} onClick={e => { e.stopPropagation(); onClose(); }}
+      style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.86)", zIndex: 80, display: "flex", flexDirection: "column", padding: 12, boxSizing: "border-box" }}>
+      <div onClick={e => e.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, color: "#fff" }}>
+        <span style={{ fontSize: 14, fontWeight: 600, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title || "Sections drawing"}</span>
+        <span style={{ fontSize: 12, opacity: 0.8 }}>Pinch or scroll to zoom, drag to move</span>
+        <button type="button" aria-label="Close" onClick={onClose}
+          style={{ height: 32, padding: "0 12px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.5)", background: "transparent", color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>Close</button>
+      </div>
+      <div onClick={e => e.stopPropagation()} style={{ flex: 1, minHeight: 0, background: C.surface, borderRadius: 10, padding: 10, overflow: "hidden", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ width: "100%" }}>
+          <WindowLayoutView spaces={spaces} backdrop={backdrop} groups={groups} highlightGroupIds={highlightGroupIds}
+            maxHeight="calc(100vh - 130px)" zoomable wheelZoom ariaLabel={title || "Sections drawing"} />
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
 // The group chips a task shows, coloured as the layout colours them.
 function PaneGroupChips({ groups, shown }) {
   return (
@@ -23640,6 +23788,7 @@ function PaneGroupChips({ groups, shown }) {
 // and the drawing (which can be a large file) is fetched only once it is opened.
 function TaskPaneLayout({ asset, groupIds, maxHeight }) {
   const [open, setOpen] = useState(false);
+  const [enlarged, setEnlarged] = useState(false);
   const plan = useFloorPlanSvg(open && asset ? asset.floorPlanUrl : null, true);
   const groups = windowGroupsOf(asset);
   const shown = groups.filter(g => (groupIds || []).includes(g.id));
@@ -23658,10 +23807,20 @@ function TaskPaneLayout({ asset, groupIds, maxHeight }) {
         )}
       </div>
       {open && plan.status === "ready" && (
-        <div style={{ marginTop: 8, border: `1px solid ${C.border}`, borderRadius: 8, background: C.surface, padding: 8 }}>
+        <div role="button" tabIndex={0} aria-label="Enlarge the sections drawing" title="Tap to enlarge and zoom"
+          onClick={e => { e.stopPropagation(); setEnlarged(true); }}
+          onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); setEnlarged(true); } }}
+          style={{ position: "relative", marginTop: 8, border: `1px solid ${C.border}`, borderRadius: 8, background: C.surface, padding: 8, cursor: "zoom-in" }}>
           <WindowLayoutView spaces={plan.spaces} backdrop={plan.backdrop} groups={groups} highlightGroupIds={shown.map(g => g.id)} maxHeight={maxHeight || 160}
             ariaLabel={"Sections this task covers: " + shown.map(g => g.name).join(", ")} />
+          <span aria-hidden="true" style={{ position: "absolute", right: 6, bottom: 6, display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 8px", borderRadius: 999, background: "rgba(42,52,57,0.7)", color: "#fff", fontSize: 11 }}>
+            <Maximize size={11} /> Enlarge
+          </span>
         </div>
+      )}
+      {enlarged && plan.status === "ready" && (
+        <SectionsZoomModal spaces={plan.spaces} backdrop={plan.backdrop} groups={groups} highlightGroupIds={shown.map(g => g.id)}
+          title={"Sections this task covers: " + shown.map(g => g.name).join(", ")} onClose={() => setEnlarged(false)} />
       )}
       {open && plan.status === "error" && <div style={{ marginTop: 6, fontSize: 12, color: C.danger }}>{plan.error}</div>}
       {open && plan.status !== "ready" && plan.status !== "error" && <div style={{ marginTop: 6, fontSize: 12, color: C.empty }}>Loading the window layout…</div>}
@@ -23681,6 +23840,7 @@ function WindowLayoutTabContent({ asset, canEdit, uploadBusy, uploadError, onUpl
   const [name, setName] = useState("");
   const [viewGroupId, setViewGroupId] = useState(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [enlarged, setEnlarged] = useState(false);
   const groups = windowGroupsOf(asset);
   const spaces = plan.status === "ready" ? plan.spaces.filter(sp => sp && sp.pts && sp.pts.length >= 3) : [];
   const validIds = new Set(spaces.map(sp => sp.gid));
@@ -23716,6 +23876,12 @@ function WindowLayoutTabContent({ asset, canEdit, uploadBusy, uploadError, onUpl
   const headerRow = (
     <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
       <span style={{ fontSize: 13, color: C.muted }}>{asset.floorPlanFileName ? asset.floorPlanFileName : "Sections drawing"}</span>
+      {plan.status === "ready" && (
+        <button type="button" onClick={() => setEnlarged(true)}
+          style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 10, border: `1px solid ${C.border}`, background: C.surface, color: C.ink, fontSize: 12, fontWeight: 600 }}>
+          <Maximize size={13} />Enlarge
+        </button>
+      )}
       {canEdit && (
         <>
           <button type="button" disabled={uploadBusy} onClick={() => fileInputRef.current && fileInputRef.current.click()}
@@ -23782,8 +23948,12 @@ function WindowLayoutTabContent({ asset, canEdit, uploadBusy, uploadError, onUpl
       <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 10 }}>
         <WindowLayoutView spaces={spaces} backdrop={plan.backdrop} groups={groups} selectedIds={selected} showNumbers={canEdit}
           highlightGroupIds={viewGroupId ? [viewGroupId] : []}
-          onPaneClick={togglePane} maxHeight={460} />
+          onPaneClick={togglePane} maxHeight={460} zoomable />
       </div>
+      {enlarged && (
+        <SectionsZoomModal spaces={spaces} backdrop={plan.backdrop} groups={groups} highlightGroupIds={viewGroupId ? [viewGroupId] : []}
+          title={asset.floorPlanFileName || "Sections drawing"} onClose={() => setEnlarged(false)} />
+      )}
       <p style={{ margin: "8px 0 0", fontSize: 12, color: C.muted }}>
         {spaces.length} {spaces.length === 1 ? "section" : "sections"}, {grouped} in a group{spaces.length - grouped > 0 ? " · " + (spaces.length - grouped) + " not grouped (dashed)" : ""}.
         {canEdit ? " Tap sections to select them." : " Tap a section to see its group."}

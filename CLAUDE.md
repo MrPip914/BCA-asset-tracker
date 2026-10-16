@@ -908,6 +908,16 @@ floor-plan fields are unchanged, so existing windows, drawings, groups and tasks
 migration. The audit sentences read "section group" at read time. Frontend only. The
 description below still says "panes"; read it as "sections".
 
+**The drawing zooms (2026-10-16).** `WindowLayoutView` takes `zoomable` (and `wheelZoom`): +/-/Reset
+buttons, drag to pan once zoomed, two-finger pinch, and Ctrl/Cmd+wheel (a plain wheel only in the
+full-screen view, so scrolling the page past the drawing still works). The view is a window onto the
+same drawing (`{ z, dx, dy }` -> `zoomViewBox`, clamped inside it, max 8x), so panes stay clickable and
+a drag never counts as a pane click (`onClickCapture`). **`SectionsZoomModal` is the full-screen view**,
+opened by the tab's Enlarge button and by tapping a task's thumbnail in `TaskPaneLayout` (task dialog,
+card and completion form). It is portalled to the body and STOPS every click, or a tap would close the
+dialog it was opened from. Frontend only. Covered in `test-frontend-windows.js` (the zoom maths run for
+real, the wiring read as source); driven in Chromium against Sandbox (buttons, pan, reset, wheel, Escape).
+
 ## Window pane layouts (2026-10-13)
 
 A **Window** asset (built-in, locked, can sit in a Wall or a Room) carries a **Panes** tab:

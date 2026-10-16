@@ -42,8 +42,12 @@ const H = new Function(`
   ${sliceConst('const WINDOW_GROUP_COLORS = [')}
   ${sliceFn('function windowGroupColor(groups, groupId) {')}
   ${sliceFn('function windowBackdropNear(backdrop, spaces) {')}
+  ${sliceConst('const SECTIONS_MAX_ZOOM =')}
+  ${sliceFn('function clampZoomView(box, v) {')}
+  ${sliceFn('function zoomViewBox(box, v) {')}
+  ${sliceFn('function zoomViewAround(box, v, nextZ, ux, uy) {')}
   const floorPlanBbox = pts => { const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]); const x = Math.min(...xs), y = Math.min(...ys); return { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y }; };
-  return { isWindowLayoutType, hasMapPlan, windowGroupsOf, windowGroupsOfPane, windowGroupsAfterSave, taskPaneGroupsOf, livePaneGroupIds, tasksWithoutPaneGroup, windowGroupColor, WINDOW_GROUP_COLORS, windowBackdropNear };
+  return { isWindowLayoutType, hasMapPlan, windowGroupsOf, windowGroupsOfPane, windowGroupsAfterSave, taskPaneGroupsOf, livePaneGroupIds, tasksWithoutPaneGroup, windowGroupColor, WINDOW_GROUP_COLORS, windowBackdropNear, clampZoomView, zoomViewBox, zoomViewAround, SECTIONS_MAX_ZOOM };
 `)();
 
 // --- the type -----------------------------------------------------------------
@@ -145,7 +149,7 @@ check('a layout with a photo offers Photo and Shapes toggles, and never both off
 check('hiding the shapes removes the panes from the view', /\(!hasPhoto \|\| showShapes\) && list\.map/.test(src));
 check('the view draws the photo behind the shapes', /b\.image\s*\?[\s\S]{0,200}<image key=/.test(src));
 check('both window views get the backdrop and the hook asks for it',
-  (src.match(/useFloorPlanSvg\([^)]*, true\)/g) || []).length === 2 && (src.match(/backdrop=\{plan\.backdrop\}/g) || []).length === 2);
+  (src.match(/useFloorPlanSvg\([^)]*, true\)/g) || []).length === 2 && (src.match(/backdrop=\{plan\.backdrop\}/g) || []).length === 4);
 check('a backdrop shape is never clickable', /strokeLinejoin="round" style=\{\{ pointerEvents: "none" \}\}/.test(src));
 
 const tpl = src.slice(src.indexOf('function TaskPaneLayout('), src.indexOf('function WindowLayoutTabContent('));
@@ -153,6 +157,34 @@ check('a task\'s layout starts COLLAPSED behind a chevron and is only fetched on
   /useState\(false\)/.test(tpl) && /aria-expanded=\{open\}/.test(tpl) && /useFloorPlanSvg\(open && asset/.test(tpl) && /ChevronRight/.test(tpl));
 check('the layout is on the task dialog, the task card AND the completion form',
   (src.match(/<TaskPaneLayout /g) || []).length === 3);
+
+// --- zoom (2026-10-16) ----------------------------------------------------------------
+{
+  const box = { x: 0, y: 0, w: 200, h: 100 };
+  const near = (a, b) => Math.abs(a - b) < 1e-6;
+  const full = H.zoomViewBox(box, { z: 1, dx: 0, dy: 0 });
+  check('zoom 1 shows the whole drawing', near(full.x, 0) && near(full.w, 200) && near(full.h, 100));
+  const c = H.clampZoomView(box, { z: 99, dx: 9999, dy: -9999 });
+  check('zoom is capped and the view cannot leave the drawing',
+    c.z === H.SECTIONS_MAX_ZOOM && near(c.dx, 100 * (1 - 1 / c.z)) && near(c.dy, -50 * (1 - 1 / c.z)));
+  check('zoom cannot go below the whole drawing', H.clampZoomView(box, { z: 0.2, dx: 5, dy: 5 }).z === 1 && H.clampZoomView(box, { z: 0.2, dx: 5, dy: 5 }).dx === 0);
+  // The point under the cursor stays put: (150, 25) at zoom 1, then zoom to 2 around it.
+  const z2 = H.zoomViewAround(box, { z: 1, dx: 0, dy: 0 }, 2, 150, 25);
+  const vb = H.zoomViewBox(box, z2);
+  check('zooming around a point keeps that point at the same place on screen',
+    near((150 - vb.x) / vb.w, (150 - 0) / 200) && near((25 - vb.y) / vb.h, 25 / 100));
+  const back = H.zoomViewAround(box, z2, 1, 150, 25);
+  check('zooming back out returns to the whole drawing', back.z === 1 && near(back.dx, 0) && near(back.dy, 0));
+  check('the layout view is zoomable on the tab and in the full-screen view',
+    /<WindowLayoutView spaces=\{spaces\}[\s\S]*?zoomable \/>/.test(src) && /maxHeight="calc\(100vh - 130px\)" zoomable wheelZoom/.test(src));
+  const tl = src.slice(src.indexOf('function TaskPaneLayout('), src.indexOf('function WindowLayoutTabContent('));
+  check('a task\'s thumbnail opens the enlarged view without closing the dialog behind it',
+    /aria-label="Enlarge the sections drawing"/.test(tl) && /e\.stopPropagation\(\); setEnlarged\(true\)/.test(tl) && /<SectionsZoomModal/.test(tl));
+  const zm = src.slice(src.indexOf('function SectionsZoomModal('), src.indexOf('function PaneGroupChips('));
+  check('the enlarged view is portalled and stops clicks', /createPortal\(/.test(zm) && /e\.stopPropagation\(\); onClose\(\)/.test(zm));
+  check('a drag is never read as a pane click', /onClickCapture=\{zoomable \? \(e => \{ if \(dragged\.current\)/.test(src));
+  check('the tab offers an Enlarge button', /setEnlarged\(true\)\}[\s\S]{0,400}Enlarge\s*<\/button>/.test(src));
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
