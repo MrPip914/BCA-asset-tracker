@@ -287,6 +287,18 @@ const TYPE_REGISTRY = {
     locked: true, icon: Fence, categoryIds: ["Places"], parentTypes: ["Campus", "Building", "Floor", "Room"], location: true,
     excludedFields: ["tag", "brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
   },
+  // A window (or a wall of them) with a PANE LAYOUT: an uploaded SVG whose shapes
+  // are the panes, which can be grouped and named for maintenance ("Bay 1 lower
+  // windows"). Tasks on the window name groups and the layout shows which panes
+  // they mean. The layout is the asset's own floorPlanUrl/floorPlanGroups, so it
+  // needs no new column -- see the windowLayout module and plans/window-tracking.md.
+  // Locked so every tenant gets it, as Floor did; floorPlan stays OFF (a window's
+  // drawing is not a map plan and must never be offered on the Map).
+  Window: {
+    locked: true, icon: Blinds, categoryIds: ["Facilities"], parentTypes: ["Wall", "Room"],
+    excludedFields: ["hostname", "screenSize", "peripherals"],
+    modules: ["windowLayout"],
+  },
   Other: { parentTypes: ["Room", "Wall"] },
 };
 
@@ -877,6 +889,13 @@ const ASSET_MODULES = {
     // content is a pile of circuits waiting to be wired.
     label: "Layout",
     count: asset => (asset.breakers || []).length + (asset.unassignedCircuits || []).length,
+  },
+  // A window's pane layout. The key is the module's own name; the stored data
+  // is the asset's floorPlan* fields. Counts GROUPS: panes are the drawing's
+  // business, groups are what a person made.
+  windowLayout: {
+    label: "Panes",
+    count: asset => (asset.floorPlanGroups || []).length,
   },
 };
 
@@ -1585,9 +1604,18 @@ const COLUMN_DATA_TYPES = [
   { value: "number", label: "Number" },
   { value: "date", label: "Date" },
   { value: "select", label: "Choice list" },
+  { value: "multiselect", label: "Multiple choice" },
   { value: "reference", label: "Reference" },
 ];
 const COLUMN_DATA_TYPE_VALUES = new Set(COLUMN_DATA_TYPES.map(t => t.value));
+// Both choice kinds carry an option list. A multiple-choice VALUE is stored as
+// its picks joined by "; " in one string (a choice may not contain ";"), so every
+// place that stores, searches or exports a field value keeps working unchanged.
+function isChoiceKind(kind) { return kind === "select" || kind === "multiselect"; }
+function multiValues(value) {
+  return String(value == null ? "" : value).split(";").map(x => x.trim()).filter(Boolean);
+}
+function joinMulti(list) { return list.join("; "); }
 // What a kind is CALLED. Falls back to the raw value, so a stored kind this
 // build doesn't know still reads as something rather than as blank.
 function kindLabel(value) {
@@ -1625,6 +1653,37 @@ const DEFAULT_COLUMN_DATA_TYPES = {
 // drift: a sixth bespoke field added to one and not the other would be validated
 // as plain text and refuse saves nothing on screen explains.
 const BESPOKE_FORM_FIELDS = new Set(["type", "parent", "person", "peripherals", "subType"]);
+
+// How a NUMBER is shown (2026-10-12). Display only: the stored value is always
+// the plain number the person typed, so a format can be changed at any time
+// without touching data (unlike the kind, which is fixed at creation). `plain`
+// is the absence of the key. Works on asset columns and on task/work fields,
+// both of which carry `format` beside `dataType`.
+const NUMBER_FORMATS = [
+  { value: "plain", label: "Plain number" },
+  { value: "dollars", label: "Dollars ($1,234.50)" },
+];
+function numberFormatLabel(value) {
+  return (NUMBER_FORMATS.find(f => f.value === value) || NUMBER_FORMATS[0]).label;
+}
+function fieldNumberFormat(field, kind) {
+  return field && field.format === "dollars" && kind === "number" ? "dollars" : "plain";
+}
+// A stored value as text under a format. Anything that is not a number is
+// returned as typed: a hand-edited cell must stay visible, not turn into $NaN.
+function formatNumberValue(format, value) {
+  const raw = value === null || value === undefined ? "" : String(value).trim();
+  if (raw === "" || format !== "dollars") return value === null || value === undefined ? "" : String(value);
+  const n = Number(raw);
+  if (!isFinite(n)) return String(value);
+  return n.toLocaleString("en-US", { style: "currency", currency: "USD" });
+}
+// Sets or clears a field's format, mutating the object it is given (the same
+// shape as applyFieldKind's writes on a copy). Only a number can be formatted.
+function applyNumberFormat(field, kind, format) {
+  if (kind === "number" && format === "dollars") field.format = "dollars";
+  else delete field.format;
+}
 
 function columnDataType(col) {
   if (!col) return "text";
@@ -1763,6 +1822,12 @@ function validateColumnValue(col, raw) {
     }
     return "";
   }
+  if (kind === "multiselect") {
+    const opts = columnOptions(col);
+    const bad = multiValues(value).filter(v => !opts.includes(v));
+    if (opts.length && bad.length) return `${col.label} must be from: ${opts.join(", ")}.`;
+    return "";
+  }
   if (kind === "select") {
     const opts = columnOptions(col);
     // An empty option list means the column is misconfigured, not that every
@@ -1847,6 +1912,7 @@ function adoptWorkModel(raw) {
     key: f.key, label: f.label || f.key,
     dataType: COLUMN_DATA_TYPE_VALUES.has(f.dataType) ? f.dataType : "text",
     options: list(f.options).map(String),
+    ...(f.format === "dollars" && f.dataType === "number" ? { format: "dollars" } : {}),
   }));
   const settings = v => {
     const out = {};
@@ -1915,6 +1981,7 @@ function newWorkFieldKey(fields, label) {
 
 // A custom value as text: a date reads in the app's date style, the rest as typed.
 function dataTypeDisplay(field, value) {
+  if (field.dataType === "number") return formatNumberValue(fieldNumberFormat(field, "number"), value);
   return field.dataType === "date" ? (formatDateOnly(value) || String(value)) : String(value);
 }
 
@@ -1932,13 +1999,36 @@ function addWorkField(model, kind, def) {
   if (!label) return { model, error: "Give the field a name." };
   if (fields.some(f => f.label.toLowerCase() === label.toLowerCase())) return { model, error: `There is already a field called "${label}".` };
   const dataType = COLUMN_DATA_TYPE_VALUES.has(def.dataType) && def.dataType !== "reference" ? def.dataType : "text";
-  const options = dataType === "select" ? (def.options || []).map(o => String(o).trim()).filter(Boolean) : [];
-  if (dataType === "select" && !options.length) return { model, error: "A choice list needs at least one choice." };
+  const options = isChoiceKind(dataType) ? (def.options || []).map(o => String(o).trim()).filter(Boolean) : [];
+  if (isChoiceKind(dataType) && !options.length) return { model, error: "A choice list needs at least one choice." };
+  if (dataType === "multiselect" && options.some(o => o.includes(";"))) return { model, error: "A choice can't contain a semicolon." };
   const key = newWorkFieldKey(fields, label);
-  return { model: { ...model, [k.fields]: [...fields, { key, label, dataType, options }] }, key };
+  const field = { key, label, dataType, options };
+  if (dataType === "number" && def.format === "dollars") field.format = "dollars";
+  return { model: { ...model, [k.fields]: [...fields, field] }, key };
+}
+// A format can change after a field exists (the kind cannot): it alters how a
+// stored number reads, never what is stored.
+function setWorkFieldFormat(model, kind, key, format) {
+  const k = workModelKey(kind);
+  return { ...model, [k.fields]: (model[k.fields] || []).map(f => {
+    if (f.key !== key) return f;
+    const next = { ...f };
+    applyNumberFormat(next, f.dataType, format);
+    return next;
+  }) };
 }
 // Removing a definition also unticks it from every type, so no type names a
 // field that no longer exists. Values already stored on records are left alone.
+// Choices can be added to an existing choice-list field, never removed or
+// renamed (a stored value would be left naming a choice no longer offered).
+function addWorkFieldChoice(model, kind, key, choice) {
+  const k = workModelKey(kind);
+  const text = String(choice || "").trim();
+  const f = (model[k.fields] || []).find(x => x.key === key);
+  if (!text || !f || !isChoiceKind(f.dataType) || f.options.includes(text) || (f.dataType === "multiselect" && text.includes(";"))) return model;
+  return { ...model, [k.fields]: model[k.fields].map(x => x.key === key ? { ...x, options: [...x.options, text] } : x) };
+}
 function removeWorkField(model, kind, key) {
   const k = workModelKey(kind);
   const settings = {};
@@ -2343,6 +2433,9 @@ function describeAudit(entry) {
   if (entry.action === "noted") return `Note: ${entry.note}`;
   if (entry.action === "maintenance_completed") return `Completed maintenance "${entry.field}" — last done ${entry.to}`;
   if (entry.action === "maintenance_removed") return `Removed scheduled maintenance: ${entry.field}`;
+  if (entry.action === "pane_group_created") return `Created pane group "${entry.to}"`;
+  if (entry.action === "pane_group_edited") return `Edited pane group "${entry.to}"`;
+  if (entry.action === "pane_group_deleted") return `Deleted pane group "${entry.from}"`;
   if (entry.action === "breaker_added") return `Added breaker at ${entry.field} (${entry.to})`;
   if (entry.action === "breaker_swapped") return `Swapped breaker at ${entry.field} — serial changed from "${entry.from}" to "${entry.to}"`;
   if (entry.action === "breaker_removed") return `Removed breaker at ${entry.field}`;
@@ -3763,7 +3856,7 @@ function taskMatchesSearch(r, assets, typesList, q, model) {
   if (!q) return true;
   // The task's type name and custom values are searchable once a work model is given.
   const extra = model ? [taskTypeNameOf(model, r.item.taskType), ...Object.values(r.item.custom || {}).map(String)] : [];
-  return [...extra, r.item.task, r.item.notes, r.item.owner, r.asset.tag, nameOf(r.asset, typesList), roomNameOf(r.asset, assets), typeNameOf(r.asset.type, typesList)]
+  return [...extra, ...taskPaneGroupsOf(r.asset, r.item).map(g => g.name), r.item.task, r.item.notes, r.item.owner, r.asset.tag, nameOf(r.asset, typesList), roomNameOf(r.asset, assets), typeNameOf(r.asset.type, typesList)]
     .some(v => (v || "").toLowerCase().includes(q));
 }
 // The History tab's search over one work row ({ asset, change }).
@@ -5612,7 +5705,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-11.13";
+const APP_VERSION = "2026-10-16.2";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -7390,6 +7483,24 @@ const MOCK_SNAPSHOT = {
     // The thermostat for Room 102's mini split, pointing at it through the
     // Controls reference field (see the Room "HVAC" query above).
     { label: "BCA0120", type: "Thermostat", name: "Room 102 Thermostat", parentId: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", controls: "BCA0086", brand: "Mitsubishi", model: "PAR-40MAA", serial: "", notes: "", status: "Active" },
+    // A window with a pane layout, a pane group per bay and level, and two tasks
+    // naming groups (weekly lowers, quarterly uppers). Grouped ids follow
+    // MOCK_WINDOW_SVG: pane-1..4 upper row, pane-5..8 lower row.
+    { label: "BCA0121", type: "Window", name: "Room 102 East Windows", parentId: "3f2a91c4-7d55-4e18-9b02-6c1ae5d47f80", brand: "", model: "", serial: "", notes: "Two bays, upper and lower sash", status: "Active",
+      // A pane layout, read as an uploaded file is (a data: URI): two bays, an upper row
+      // (pane-1..4) and a lower row (pane-5..8) of two panes each, on a wall with a spandrel and floor line (the backdrop).
+      floorPlanUrl: "data:image/svg+xml;utf8," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300"><rect id="wall" x="0" y="0" width="400" height="300"/><rect id="spandrel" x="0" y="140" width="400" height="20"/><line id="floor" x1="0" y1="298" x2="400" y2="298"/><g id="pane-1"><title>Space.1</title><rect x="20" y="20" width="85" height="120"/></g><g id="pane-2"><title>Space.2</title><rect x="105" y="20" width="85" height="120"/></g><g id="pane-3"><title>Space.3</title><rect x="210" y="20" width="85" height="120"/></g><g id="pane-4"><title>Space.4</title><rect x="295" y="20" width="85" height="120"/></g><g id="pane-5"><title>Space.5</title><rect x="20" y="160" width="85" height="120"/></g><g id="pane-6"><title>Space.6</title><rect x="105" y="160" width="85" height="120"/></g><g id="pane-7"><title>Space.7</title><rect x="210" y="160" width="85" height="120"/></g><g id="pane-8"><title>Space.8</title><rect x="295" y="160" width="85" height="120"/></g></svg>'), floorPlanStorageKey: "", floorPlanFileName: "east-windows.svg",
+      floorPlanGroups: [
+        { id: "wg-b1-upper", name: "Bay 1 upper windows", hideLabel: false, memberShapeIds: ["pane-1", "pane-2"], at: "2026-10-13T15:00:00.000Z", by: "Eric" },
+        { id: "wg-b2-upper", name: "Bay 2 upper windows", hideLabel: false, memberShapeIds: ["pane-3", "pane-4"], at: "2026-10-13T15:00:00.000Z", by: "Eric" },
+        { id: "wg-b1-lower", name: "Bay 1 lower windows", hideLabel: false, memberShapeIds: ["pane-5", "pane-6"], at: "2026-10-13T15:00:00.000Z", by: "Eric" },
+        { id: "wg-b2-lower", name: "Bay 2 lower windows", hideLabel: false, memberShapeIds: ["pane-7", "pane-8"], at: "2026-10-13T15:00:00.000Z", by: "Eric" },
+        { id: "wg-operable", name: "Operable windows", hideLabel: false, memberShapeIds: ["pane-2", "pane-5"], at: "2026-10-15T15:00:00.000Z", by: "Eric" },
+      ],
+      maintenanceItems: [
+        { id: "mt-win-lower", kind: "scheduled", task: "Clean lower windows", frequencyLabel: "Weekly", frequencyDays: 7, lastPerformed: "", owner: "Custodial", at: "", by: "", paneGroupIds: ["wg-b1-lower", "wg-b2-lower"] },
+        { id: "mt-win-upper", kind: "scheduled", task: "Clean upper windows", frequencyLabel: "Quarterly", frequencyDays: 90, lastPerformed: "", owner: "Contractor", at: "", by: "", paneGroupIds: ["wg-b1-upper", "wg-b2-upper"] },
+      ] },
     { label: "BCA0087", type: "Mini Split", parentId: "BCR0008", brand: "Mitsubishi", model: "MSZ-GL15NA", serial: "", notes: "Wall-mounted indoor unit", status: "Active", maintenanceItems: [
       { task: "Filter clean", frequencyLabel: "Monthly", frequencyDays: 30, lastPerformed: "", owner: "", at: "", by: "" },
       { task: "Air handler coil clean", frequencyLabel: "Annually", frequencyDays: 365, lastPerformed: "", owner: "", at: "", by: "" },
@@ -7834,7 +7945,7 @@ function AssetTracker() {
   // The draft behind the task dialog, filled by BOTH modes -- `id` is the item
   // the dialog acts on, minted on open in add mode so a photo can name the task
   // while the form is still being filled in.
-  const [maintenanceDraft, setMaintenanceDraft] = useState({ id: "", kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {} });
+  const [maintenanceDraft, setMaintenanceDraft] = useState({ id: "", kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [] });
   // null when closed; { mode: "add" } or { mode: "edit", itemId }. ONE dialog
   // for both, the shape changeModal already uses and for the same reason: a
   // separate edit form is a second copy of the same fields to keep in step, and
@@ -8156,6 +8267,7 @@ function AssetTracker() {
   const [showColManager, setShowColManager] = useState(false);
   const [newColName, setNewColName] = useState("");
   const [newColType, setNewColType] = useState("text");
+  const [newColFormat, setNewColFormat] = useState("plain");
 
   // Loads the full snapshot — either from the Sheet backend, or (sandboxMode)
   // from localStorage/MOCK_SNAPSHOT, never touching the network. Never falls
@@ -9964,7 +10076,7 @@ function AssetTracker() {
     setConfirmArchive(null);
     setAllocationDraft({ roomId: "", quantity: "", error: "" });
     setConfirmAllocationRemove(null);
-    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {} });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [] });
     setConfirmMaintenanceDelete(null);
     setMaintenanceCompleteModal(null);
     setOpenMaintenanceHistory(null);
@@ -11090,7 +11202,7 @@ function AssetTracker() {
       let nextGroups = targetAsset.floorPlanGroups || [];
       try {
         const newSpaces = parseFloorPlanSvg(text).spaces;
-        const remapped = floorPlanRemapLinksAndGroups(nextLinks, nextGroups, oldSpaces, newSpaces);
+        const remapped = floorPlanRemapLinksAndGroups(nextLinks, nextGroups, oldSpaces, newSpaces, isWindowLayoutType(targetAsset.type) ? 1 : 2);
         nextLinks = remapped.links;
         nextGroups = remapped.groups;
       } catch { /* see above -- upload proceeds regardless */ }
@@ -11209,6 +11321,47 @@ function AssetTracker() {
     };
     persist(
       assets.map(a => (a.id === assetId ? { ...a, floorPlanGroups: next } : a)),
+      { auditLog: logAudit([entry]) },
+    );
+  }
+
+  // ---------- Window pane groups (a Window's Panes tab) ----------
+  // Same storage as a plan's groups (floorPlanGroups), different rules: a pane is
+  // can be in SEVERAL groups (see windowGroupsAfterSave) and a group of one pane is fine.
+  // Returns false when the save was refused so the tab keeps the selection.
+  function saveWindowGroup(assetId, draft) {
+    if (savingRef.current) return false; // double-submit guard, see savingRef
+    const target = assets.find(a => a.id === assetId);
+    if (!target) return false;
+    const stamp = { at: new Date().toISOString(), by: currentUser || "" };
+    const newId = crypto.randomUUID ? crypto.randomUUID() : "grp_" + Math.random().toString(36).slice(2);
+    const { groups: next, saved } = windowGroupsAfterSave(target.floorPlanGroups || [], draft, newId, stamp);
+    const entry = {
+      ...stamp, assetLabel: assetId, assetType: target.type,
+      action: draft.id ? "pane_group_edited" : "pane_group_created", to: saved.name,
+    };
+    persist(
+      assets.map(a => (a.id === assetId ? { ...a, floorPlanGroups: next } : a)),
+      { auditLog: logAudit([entry]) },
+    );
+    return true;
+  }
+  // Takes the group off every task that named it in the SAME save, so no task is
+  // left pointing at a group that is gone.
+  function deleteWindowGroup(assetId, groupId) {
+    if (savingRef.current) return;
+    const target = assets.find(a => a.id === assetId);
+    if (!target) return;
+    const grp = (target.floorPlanGroups || []).find(g => g.id === groupId);
+    if (!grp) return;
+    const entry = {
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: assetId, assetType: target.type,
+      action: "pane_group_deleted", from: grp.name,
+    };
+    persist(
+      assets.map(a => (a.id === assetId
+        ? { ...a, floorPlanGroups: (a.floorPlanGroups || []).filter(g => g.id !== groupId), maintenanceItems: tasksWithoutPaneGroup(a.maintenanceItems, groupId) }
+        : a)),
       { auditLog: logAudit([entry]) },
     );
   }
@@ -11640,7 +11793,7 @@ function AssetTracker() {
     setWorkDialogAssetId(assetId === undefined ? null : assetId);
     // Minted on OPEN so a photo can name this schedule while the form is still
     // being filled in -- the same rule openChangeAdd follows.
-    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {} });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [] });
     setMaintenanceModal({ mode: "add" });
   }
 
@@ -11672,6 +11825,7 @@ function AssetTracker() {
       owner: item.owner || "",
       taskType: item.taskType || "",
       custom: item.custom && typeof item.custom === "object" ? { ...item.custom } : {},
+      paneGroupIds: Array.isArray(item.paneGroupIds) ? [...item.paneGroupIds] : [],
     });
     setMaintenanceModal({ mode: "edit", itemId });
   }
@@ -11703,13 +11857,14 @@ function AssetTracker() {
       owner: maintenanceDraft.owner.trim(),
       taskType: maintenanceDraft.taskType || "",
       custom: { ...(maintenanceDraft.custom || {}) },
+      ...(livePaneGroupIds(workTarget, maintenanceDraft.paneGroupIds).length ? { paneGroupIds: livePaneGroupIds(workTarget, maintenanceDraft.paneGroupIds) } : {}),
       at: new Date().toISOString(),
       by: currentUser || "",
     };
     if (validateCustomValues(workModel, "task", item.taskType, item.custom)) return; // Save is disabled on it, with the reason on screen
     const next = assets.map(a => (a.id === workTargetId ? { ...a, maintenanceItems: [...(a.maintenanceItems || []), item] } : a));
     await persist(next, { columns });
-    setMaintenanceDraft({ id: crypto.randomUUID(), kind: maintenanceDraft.kind, task: "", notes: "", frequency: maintenanceDraft.frequency, recurrence: maintenanceDraft.recurrence, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {} });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: maintenanceDraft.kind, task: "", notes: "", frequency: maintenanceDraft.frequency, recurrence: maintenanceDraft.recurrence, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [] });
     setMaintenanceModal(null);
   }
 
@@ -11747,6 +11902,8 @@ function AssetTracker() {
       owner: maintenanceDraft.owner.trim(),
       taskType: maintenanceDraft.taskType || "",
       custom: { ...(maintenanceDraft.custom || {}) },
+      ...(livePaneGroupIds(workTarget, maintenanceDraft.paneGroupIds).length || original.paneGroupIds
+        ? { paneGroupIds: livePaneGroupIds(workTarget, maintenanceDraft.paneGroupIds) } : {}),
     };
     if (validateCustomValues(workModel, "task", updated.taskType, updated.custom)) return;
     const mkEntry = (field, from, to) => ({
@@ -11765,6 +11922,11 @@ function AssetTracker() {
     if ((original.owner || "") !== (updated.owner || "")) entries.push(mkEntry("Owner", original.owner || "—", updated.owner || "—"));
     if ((original.taskType || "") !== (updated.taskType || "")) {
       entries.push(mkEntry("Type", taskTypeNameOf(workModel, original.taskType) || "—", taskTypeNameOf(workModel, updated.taskType) || "—"));
+    }
+    {
+      const names = ids => { const gs = windowGroupsOf(workTarget); return (ids || []).map(id => (gs.find(g => g.id === id) || {}).name).filter(Boolean).join(", "); };
+      const before = names(original.paneGroupIds), after = names(updated.paneGroupIds);
+      if (before !== after) entries.push(mkEntry("Pane groups", before || "—", after || "—"));
     }
     // Per custom field, for the fields the type now carries or carried: an edit
     // rewrites a record, and the audit row is the only trail of what it said.
@@ -12454,12 +12616,26 @@ function AssetTracker() {
     // A new key has no shipped default, so "text" is its default and anything
     // else is a real override — applyFieldKind works that out rather than this
     // deciding for itself, so there is one rule about when a dataType is stored.
-    applyFieldKind(created, newColType, "");
+    applyFieldKind(created, newColType, "", undefined, newColFormat);
     const nextColumns = [...columns, created];
     const nextAssets = assets.map(a => ({ ...a, [key]: "" }));
     persist(nextAssets, { columns: nextColumns });
     setNewColName("");
     setNewColType("text");
+    setNewColFormat("plain");
+  }
+
+  // A number column's format is display only, so unlike the kind it may change
+  // on a column that already holds data. Config domain only: no asset moves.
+  function setColumnFormat(key, format) {
+    if (savingRef.current) return; // double-submit guard, see savingRef
+    const nextColumns = columns.map(c => {
+      if (c.key !== key) return c;
+      const next = { ...c };
+      applyNumberFormat(next, columnDataType(c), format);
+      return next;
+    });
+    persist(assets, { columns: nextColumns });
   }
 
   function removeColumn(key) {
@@ -12654,19 +12830,23 @@ function AssetTracker() {
   // Choices are dropped entirely unless the field is actually a choice list, so
   // switching a column to Text and back doesn't quietly resurrect a stale list.
   // referenceTypes follows the same rule for a reference field's target types.
-  function applyFieldKind(col, kind, choicesText, referenceTypes) {
+  function applyFieldKind(col, kind, choicesText, referenceTypes, format) {
     const shipped = DEFAULT_COLUMN_DATA_TYPES[col.key] || "text";
     const chosen = COLUMN_DATA_TYPE_VALUES.has(kind) ? kind : shipped;
     if (chosen === shipped) delete col.dataType;
     else col.dataType = chosen;
-    if (chosen === "select") {
-      const opts = String(choicesText || "").split("\n").map(o => o.trim()).filter(Boolean);
+    if (isChoiceKind(chosen)) {
+      const semi = chosen === "multiselect" ? (o => o.replace(/;/g, ",")) : (o => o);
+      const opts = String(choicesText || "").split("\n").map(o => semi(o.trim())).filter(Boolean);
       // De-duplicated: two identical rows in the picker are indistinguishable,
       // and the second could never be selected in a way that reads differently.
       col.options = [...new Set(opts)];
     } else {
       delete col.options;
     }
+    // Display only, so unlike the kind it is also editable later (setColumnFormat).
+    if (chosen === "number" && format === "dollars") col.format = "dollars";
+    else delete col.format;
     if (chosen === "reference") {
       const list = [...new Set((Array.isArray(referenceTypes) ? referenceTypes : [referenceTypes]).filter(Boolean))];
       col.referenceTypes = list;
@@ -12705,7 +12885,7 @@ function AssetTracker() {
       const created = { key, label, width: 160, visible: false, custom: true, restricted: true };
       // The kind was chosen on the pending row, keyed by tempId — the real key
       // doesn't exist until this loop invents it.
-      applyFieldKind(created, (draft.fieldTypes || {})[f.tempId], (draft.fieldChoices || {})[f.tempId], (draft.fieldReferenceTypes || {})[f.tempId]);
+      applyFieldKind(created, (draft.fieldTypes || {})[f.tempId], (draft.fieldChoices || {})[f.tempId], (draft.fieldReferenceTypes || {})[f.tempId], (draft.fieldFormats || {})[f.tempId]);
       nextColumns = [...nextColumns, created];
       createdKeys.push(key);
     });
@@ -12720,6 +12900,17 @@ function AssetTracker() {
     // the UI merely hid the picker would make the rule cosmetic: the draft still
     // carries a kind per field, and one stray write path would reintroduce the
     // whole problem silently.
+
+    // The one write to an existing column: choices ADDED to a choice list. The
+    // draft was seeded from the column's own options, so anything new is at the
+    // end; existing choices are never dropped or reordered.
+    nextColumns = nextColumns.map(c => {
+      if (createdKeys.includes(c.key) || !isChoiceKind(columnDataType(c))) return c;
+      const have = columnOptions(c);
+      const multi = columnDataType(c) === "multiselect";
+      const extra = String((draft.fieldChoices || {})[c.key] || "").split("\n").map(o => (multi ? o.replace(/;/g, ",") : o).trim()).filter(o => o && !have.includes(o));
+      return extra.length ? { ...c, options: [...have, ...[...new Set(extra)]] } : c;
+    });
 
     const fields = typeEditableFields(nextColumns).map(c => c.key);
     const wanted = new Set([...draft.fields, ...createdKeys]);
@@ -14727,6 +14918,12 @@ function AssetTracker() {
                     {c.label}
                     <span style={{ fontSize: 12, color: C.muted, marginLeft: 8 }}>{(COLUMN_DATA_TYPES.find(t => t.value === columnDataType(c)) || {}).label || ""}</span>
                   </span>
+                  {columnDataType(c) === "number" && (
+                    <div style={{ width: 150, marginLeft: "auto", marginRight: 8 }}>
+                      <PickerField label={`${c.label} format`} hideLabel value={fieldNumberFormat(c, "number")} onChange={v => setColumnFormat(c.key, v)}
+                        options={NUMBER_FORMATS.map(f => f.value)} labelForOption={numberFormatLabel} title="How the number is shown" />
+                    </div>
+                  )}
                   <button onClick={() => setConfirmDeleteCol(c.key)} className="icon-btn" aria-label={`Remove ${c.label}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}>
                     <Trash2 size={14} color={C.danger} />
                   </button>
@@ -14755,6 +14952,12 @@ function AssetTracker() {
                   title="Kind of value"
                 />
               </div>
+              {newColType === "number" && (
+                <div style={{ width: 120, flexShrink: 0 }}>
+                  <PickerField label="New column format" hideLabel value={newColFormat} onChange={setNewColFormat}
+                    options={NUMBER_FORMATS.map(f => f.value)} labelForOption={numberFormatLabel} title="How the number is shown" />
+                </div>
+              )}
               <button onClick={addColumn} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600, flexShrink: 0 }}>Add</button>
             </div>
           </div>
@@ -14854,7 +15057,7 @@ function AssetTracker() {
           />
           {renderPeripheralsManager(true)}
           {renderBulkItemTypesManager(true)}
-          {renderUsersManager(true)}
+          {!usersAreAssets && renderUsersManager(true)}
         </div>
       );
     }
@@ -15080,6 +15283,7 @@ function AssetTracker() {
                     // which was the only field that could be complained about.
                     onChange={v => setDraft({ ...draft, [c.key]: v, ...clearedError(draft, c.key) })}
                     dataType={columnDataType(c)}
+                    numberFormat={fieldNumberFormat(c, columnDataType(c))}
                     options={columnOptions(c)}
                     referenceTypes={columnReferenceTypes(c)}
                     assets={assets}
@@ -15496,6 +15700,30 @@ function AssetTracker() {
                   )}
                   <CustomFieldInputs model={workModel} kind="task" typeId={maintenanceDraft.taskType} values={maintenanceDraft.custom}
                     onChange={custom => setMaintenanceDraft({ ...maintenanceDraft, custom })} />
+                  {/* Which panes this task covers: only a window with at least one
+                      group has anything to pick. Chips rather than a PickerField --
+                      a window has a handful of groups and the choice is "which of
+                      these", several at once, with the layout lighting up below. */}
+                  {workTarget && isWindowLayoutType(workTarget.type) && windowGroupsOf(workTarget).length > 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6, gridColumn: "1 / -1" }}>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Pane groups</span>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        {windowGroupsOf(workTarget).map(g => {
+                          const on = (maintenanceDraft.paneGroupIds || []).includes(g.id);
+                          return (
+                            <button key={g.id} type="button" aria-pressed={on}
+                              onClick={() => setMaintenanceDraft({ ...maintenanceDraft, paneGroupIds: on ? maintenanceDraft.paneGroupIds.filter(id => id !== g.id) : [...(maintenanceDraft.paneGroupIds || []), g.id] })}
+                              style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 11px", borderRadius: 999, fontSize: 13, fontWeight: on ? 700 : 500,
+                                border: `1.5px solid ${on ? windowGroupColor(windowGroupsOf(workTarget), g.id) : C.border}`, background: on ? C.bg : C.surface, color: C.ink }}>
+                              <span aria-hidden="true" style={{ width: 10, height: 10, borderRadius: 3, background: windowGroupColor(windowGroupsOf(workTarget), g.id) }} />
+                              {g.name}{on && <Check size={13} />}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <TaskPaneLayout asset={workTarget} groupIds={maintenanceDraft.paneGroupIds} maxHeight={200} />
+                    </div>
+                  )}
                 </div>
                 {taskCustomError && <div role="alert" style={{ fontSize: 12, color: C.danger, marginTop: 8 }}>{taskCustomError}</div>}
                 <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
@@ -15625,6 +15853,9 @@ function AssetTracker() {
                 <div style={{ fontSize: 13, color: C.muted, marginBottom: 16 }}>
                   {item.task}
                   {item.lastPerformed ? ` · last done ${formatDateOnly(item.lastPerformed)}` : " · never performed"}
+                  {workTarget && isWindowLayoutType(workTarget.type) && taskPaneGroupsOf(workTarget, item).length > 0 && (
+                    <TaskPaneLayout asset={workTarget} groupIds={item.paneGroupIds} maxHeight={200} />
+                  )}
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginBottom: 10 }}>
                   <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -16087,6 +16318,7 @@ function AssetTracker() {
                           // as parentId — resolve it the same way rather than
                           // printing the raw id.
                           : columnDataType(c) === "reference" ? (parentNameFor(selectedAsset[c.key], assets) || "—")
+                          : columnDataType(c) === "number" ? (formatNumberValue(fieldNumberFormat(c, "number"), selectedAsset[c.key]) || selectedAsset[c.key])
                           : selectedAsset[c.key]
                         }
                         wide={c.key === "notes" || c.key === "parent"}
@@ -16206,6 +16438,7 @@ function AssetTracker() {
                       value={draft[c.key] || ""}
                       onChange={v => setDraft({ ...draft, [c.key]: v, ...clearedError(draft, c.key) })}
                       dataType={columnDataType(c)}
+                      numberFormat={fieldNumberFormat(c, columnDataType(c))}
                       options={columnOptions(c)}
                       referenceTypes={columnReferenceTypes(c)}
                       assets={assets}
@@ -16376,6 +16609,22 @@ function AssetTracker() {
                 </div>
               )}
             </>
+          )}
+
+          {detailTab === "windowLayout" && hasModule(selectedAsset.type, "windowLayout") && (
+            <WindowLayoutTabContent
+              asset={selectedAsset}
+              canEdit={canEdit}
+              uploadBusy={floorPlanUploadBusy}
+              uploadError={floorPlanUploadError}
+              onUploadPlan={(file, oldSpaces) => uploadFloorPlanSvg(selectedAsset.id, file, oldSpaces)}
+              onSaveGroup={draft => saveWindowGroup(selectedAsset.id, draft)}
+              onDeleteGroup={groupId => deleteWindowGroup(selectedAsset.id, groupId)}
+              taskCountByGroup={(selectedAsset.maintenanceItems || []).filter(m => m && !taskIsDone(m)).reduce((acc, m) => {
+                (Array.isArray(m.paneGroupIds) ? m.paneGroupIds : []).forEach(id => { acc[id] = (acc[id] || 0) + 1; });
+                return acc;
+              }, {})}
+            />
           )}
 
           {detailTab === "allocations" && hasModule(selectedAsset.type, "allocations") && (
@@ -16631,6 +16880,12 @@ function AssetTracker() {
                         {customFieldsFor(workModel, "task", item.taskType).filter(f => String((item.custom || {})[f.key] ?? "") !== "").map(f => (
                           <div key={f.key} style={{ fontSize: 13, color: C.ink, marginBottom: 2 }}><span style={{ color: C.muted }}>{f.label}:</span> {dataTypeDisplay(f, item.custom[f.key])}</div>
                         ))}
+                        {isWindowLayoutType(selectedAsset.type) && taskPaneGroupsOf(selectedAsset, item).length > 0 && (
+                          <div style={{ marginBottom: 8 }}>
+                            <div style={{ fontSize: 13, color: C.muted }}>Pane groups:</div>
+                            <TaskPaneLayout asset={selectedAsset} groupIds={item.paneGroupIds} maxHeight={150} />
+                          </div>
+                        )}
                         {/* The same stored field reads differently by kind:
                             a schedule's lastPerformed is the start of its next
                             interval, a one-off's is the end of it. */}
@@ -18051,9 +18306,11 @@ function AssetTracker() {
                 title="Select a user"
               />
             </div>
+            {!usersAreAssets && (
             <button onClick={() => setShowUsersManager(true)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label="Manage users">
               <Settings size={14} color={C.accent} />
             </button>
+            )}
             <button
               onClick={() => reassignFilteredTo(reassignTarget)}
               disabled={!reassignTarget.trim()}
@@ -18170,7 +18427,7 @@ function AssetTracker() {
                         // column the list is scanned by.
                         nameOf(a, typesList) || "—"
                       ) : (
-                        applies ? (a[c.key] || "—") : ""
+                        applies ? ((columnDataType(c) === "number" ? formatNumberValue(fieldNumberFormat(c, "number"), a[c.key]) : a[c.key]) || "—") : ""
                       )}
                     </div>
                   );
@@ -18366,7 +18623,7 @@ function AssetTracker() {
                     onClick={() => (canEdit ? openMaintenanceEdit(item.id, asset.id) : openDetail(asset, "maintenance"))}
                     style={{ display: "grid", gridTemplateColumns: "220px 170px 100px 110px 130px 130px 130px 120px", alignItems: "center", cursor: "pointer", background: C.surface, borderTop: `1px solid ${C.border}` }}
                   >
-                    <div style={{ padding: "12px 14px", fontSize: 13, color: C.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.task}{taskTypeNameOf(workModel, item.taskType) && <span style={{ color: C.muted }}> · {taskTypeNameOf(workModel, item.taskType)}</span>}</div>
+                    <div style={{ padding: "12px 14px", fontSize: 13, color: C.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.task}{taskTypeNameOf(workModel, item.taskType) && <span style={{ color: C.muted }}> · {taskTypeNameOf(workModel, item.taskType)}</span>}{(() => { const pg = taskPaneGroupsOf(asset, item); return pg.length ? <span style={{ color: C.muted }}> · {pg.map(g => g.name).join(", ")}</span> : null; })()}</div>
                     <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted, display: "flex", alignItems: "center", gap: 6, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       <AssetIcon size={14} style={{ flexShrink: 0, color: C.brand }} />
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{assetName}</span>
@@ -18789,7 +19046,8 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
   const [renameVal, setRenameVal] = useState(null);
   const [error, setError] = useState("");
   const [fieldError, setFieldError] = useState("");
-  const [fieldDraft, setFieldDraft] = useState({ label: "", dataType: "text", optionsText: "" });
+  const [fieldDraft, setFieldDraft] = useState({ label: "", dataType: "text", optionsText: "", format: "plain" });
+  const [choiceDraft, setChoiceDraft] = useState({ key: "", text: "" });
   const selected = types.find(t => t.id === selId) || null;
   const defaultId = defaultWorkTypeId(model, kind);
   const st = selected ? ((model[fieldsKey.settings] || {})[selected.id] || { fieldKeys: [], requiredFields: [], hiddenFields: [] }) : null;
@@ -18883,15 +19141,30 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
         {fields.length === 0 && <div style={{ fontSize: 13, color: C.empty, marginBottom: 12 }}>No custom fields yet.</div>}
         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
           {fields.map(f => (
-            <div key={f.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 14 }}>
+            <div key={f.key} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", fontSize: 14 }}>
               <span>
                 {f.label}
                 <span style={{ fontSize: 12, color: C.muted, marginLeft: 8 }}>
                   {(COLUMN_DATA_TYPES.find(t => t.value === f.dataType) || {}).label || ""}
-                  {f.dataType === "select" && f.options.length ? ` (${f.options.join(", ")})` : ""}
+                  {isChoiceKind(f.dataType) && f.options.length ? ` (${f.options.join(", ")})` : ""}
                 </span>
               </span>
+              {f.dataType === "number" && (
+                <div style={{ width: 150, marginLeft: "auto", marginRight: 8 }}>
+                  <PickerField label={`${f.label} format`} hideLabel value={fieldNumberFormat(f, "number")} onChange={v => onModel(setWorkFieldFormat(model, kind, f.key, v))}
+                    options={NUMBER_FORMATS.map(x => x.value)} labelForOption={numberFormatLabel} title="How the number is shown" />
+                </div>
+              )}
               <button onClick={() => onModel(removeWorkField(model, kind, f.key))} className="icon-btn" aria-label={`Remove ${f.label}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}><Trash2 size={14} color={C.danger} /></button>
+              {isChoiceKind(f.dataType) && (
+                <div style={{ flexBasis: "100%", display: "flex", gap: 6, marginTop: 4 }}>
+                  <input value={choiceDraft.key === f.key ? choiceDraft.text : ""} onChange={e => setChoiceDraft({ key: f.key, text: e.target.value })}
+                    onKeyDown={e => { if (e.key === "Enter") { onModel(addWorkFieldChoice(model, kind, f.key, choiceDraft.text)); setChoiceDraft({ key: "", text: "" }); } }}
+                    placeholder="Add a choice" aria-label={`Add a choice to ${f.label}`} style={{ ...inputStyle, flex: 1, minWidth: 0 }} />
+                  <button onClick={() => { onModel(addWorkFieldChoice(model, kind, f.key, choiceDraft.key === f.key ? choiceDraft.text : "")); setChoiceDraft({ key: "", text: "" }); }}
+                    style={{ padding: "6px 12px", background: C.brand, color: "#fff", border: "none", borderRadius: 8, fontSize: 13, fontWeight: 600 }}>Add</button>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -18904,16 +19177,20 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
                 labelForOption={v => (COLUMN_DATA_TYPES.find(t => t.value === v) || {}).label || v} title="Kind of value" />
             </div>
           </div>
-          {fieldDraft.dataType === "select" && (
+          {fieldDraft.dataType === "number" && (
+            <PickerField label="New field format" hideLabel value={fieldDraft.format || "plain"} onChange={v => setFieldDraft({ ...fieldDraft, format: v })}
+              options={NUMBER_FORMATS.map(x => x.value)} labelForOption={numberFormatLabel} title="How the number is shown" />
+          )}
+          {isChoiceKind(fieldDraft.dataType) && (
             <input value={fieldDraft.optionsText} onChange={e => setFieldDraft({ ...fieldDraft, optionsText: e.target.value })} placeholder="Choices, separated by commas" aria-label="Choices" style={inputStyle} />
           )}
           <button onClick={() => {
-            const r = addWorkField(model, kind, { label: fieldDraft.label, dataType: fieldDraft.dataType, options: fieldDraft.optionsText.split(",") });
+            const r = addWorkField(model, kind, { label: fieldDraft.label, dataType: fieldDraft.dataType, options: fieldDraft.optionsText.split(","), format: fieldDraft.format });
             if (r.error) { setFieldError(r.error); return; }
             // Ticked on the open type straight away: the usual reason to make a field.
             let next = r.model;
             if (selected) next = setTypeHasField(next, kind, selected.id, r.key, true);
-            setFieldError(""); setFieldDraft({ label: "", dataType: "text", optionsText: "" }); onModel(next);
+            setFieldError(""); setFieldDraft({ label: "", dataType: "text", optionsText: "", format: "plain" }); onModel(next);
           }} style={{ alignSelf: "flex-start", padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600 }}>Add field</button>
           {fieldError && <div role="alert" style={{ fontSize: 12, color: C.danger }}>{fieldError}</div>}
         </div>
@@ -18943,7 +19220,13 @@ function CustomFieldInputs({ model, kind, typeId, values, onChange }) {
   const required = new Set(requiredCustomFieldsFor(model, kind, typeId));
   return (
     <>
-      {fields.map(f => f.dataType === "select" ? (
+      {fields.map(f => f.dataType === "multiselect" ? (
+        <div key={f.key} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>{f.label}<RequiredMark on={required.has(f.key)} /></span>
+          <PickerField label={f.label} hideLabel multi value={multiValues(values && values[f.key])} onChange={v => onChange({ ...(values || {}), [f.key]: joinMulti(v) })}
+            options={f.options} title={`Select ${f.label}`} placeholder="Select…" />
+        </div>
+      ) : f.dataType === "select" ? (
         // Field's select sits inside a <label>, which re-opens the picker after a
         // choice (BUGS.md); a choice-list custom field gets a div and its own heading.
         <div key={f.key} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -18958,6 +19241,7 @@ function CustomFieldInputs({ model, kind, typeId, values, onChange }) {
           value={(values && values[f.key]) ?? ""}
           onChange={e => onChange({ ...(values || {}), [f.key]: e && e.target ? e.target.value : e })}
           dataType={f.dataType}
+          numberFormat={fieldNumberFormat(f, f.dataType)}
           options={f.options}
           required={required.has(f.key)}
         />
@@ -18977,7 +19261,7 @@ function CustomFieldInputs({ model, kind, typeId, values, onChange }) {
 // FORM-level one, repeated here (see fieldErrorFor) rather than a second copy —
 // a save is refused once, for one reason, and saying it twice in two wordings is
 // how the two drift.
-function Field({ label, value, onChange, placeholder, wide, dataType, options, error, invalid, required, referenceTypes, assets, typesList, excludeId }) {
+function Field({ label, value, onChange, placeholder, wide, dataType, options, error, invalid, required, referenceTypes, assets, typesList, excludeId, numberFormat }) {
   const kind = dataType || "text";
   // A long-text field always takes the full row: a textarea in a 180px grid cell
   // is narrower than the text it holds. `wide` stays an explicit override for a
@@ -18993,6 +19277,25 @@ function Field({ label, value, onChange, placeholder, wide, dataType, options, e
   const foot = <FieldError message={error} />;
   const inputStyle = { padding: "8px 10px", border: `1.5px solid ${border}`, fontSize: 14, borderRadius: 10, color: C.ink, fontFamily: "inherit" };
 
+  if (kind === "multiselect") {
+    // A div, not a <label>: a picker inside one re-opens after a choice.
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: fullWidth ? "1 / -1" : undefined }}>
+        {head}
+        <PickerField
+          label={label}
+          hideLabel
+          multi
+          value={multiValues(value)}
+          onChange={v => onChange(joinMulti(v))}
+          options={options || []}
+          title={`Select ${label}`}
+          emptyLabel="No choices configured for this field yet."
+        />
+        {foot}
+      </div>
+    );
+  }
   if (kind === "select") {
     return (
       <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: fullWidth ? "1 / -1" : undefined }}>
@@ -19075,6 +19378,26 @@ function Field({ label, value, onChange, placeholder, wide, dataType, options, e
   // before writeTable_ forced plain text is exactly that — so normalize on the
   // way in rather than showing an empty box over a stored value.
   const shown = kind === "date" ? dateOnly(value || "") : (value || "");
+  if (kind === "number" && numberFormat === "dollars") {
+    // The stored value stays a plain number; the dollar sign is only drawn
+    // beside the box, and step lets the spinner move in cents.
+    return (
+      <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: fullWidth ? "1 / -1" : undefined }}>
+        {head}
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span aria-hidden="true" style={{ fontSize: 14, color: C.muted }}>$</span>
+          <input
+            type="number" step="0.01" inputMode="decimal"
+            value={shown}
+            onChange={e => onChange(e.target.value)}
+            placeholder={placeholder}
+            style={{ ...inputStyle, flex: 1, minWidth: 0 }}
+          />
+        </div>
+        {foot}
+      </label>
+    );
+  }
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: fullWidth ? "1 / -1" : undefined }}>
       {head}
@@ -19388,6 +19711,7 @@ function SpaceRoomPickerField({ shapeId, value, onChange, assets, floorPlanLinks
       excluded={excluded}
       noneLabel="Not linked"
       searchable
+      autoFocusSearch
       headerAction={onCreateRoom && (
         <button type="button" onClick={onCreateRoom} aria-label="Create a new room" title="Create a new room" className="icon-btn"
           style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.brand, display: "flex" }}>
@@ -19613,6 +19937,7 @@ function HierarchyBrowserModal({
   // teaching this component a floor-plan-specific concept of its own.
   filterNote,
   searchable,
+  autoFocusSearch,
   // Optional: a node shown beside the close button (the floor plan room
   // picker's "create a new room" plus). undefined for every other caller.
   headerAction,
@@ -19764,6 +20089,7 @@ function HierarchyBrowserModal({
               type="text"
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
+              autoFocus={autoFocusSearch && !(typeof window !== "undefined" && window.matchMedia && window.matchMedia("(pointer: coarse)").matches)}
               placeholder="Search…"
               style={{ width: "100%", boxSizing: "border-box", padding: "8px 10px 8px 30px", borderRadius: 10, border: `1.5px solid ${C.border}`, fontSize: 14, color: C.ink, background: C.bg }}
             />
@@ -20062,13 +20388,15 @@ function UserField({ value, onChange, userOptions, userAssets, onManage, require
     <div style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 6 }}>
       <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>
         <span>User{selected.length > 1 ? "s" : ""}<RequiredMark on={required} /></span>
+        {!byAsset && (
         <button type="button" onClick={onManage} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4, display: "flex" }} aria-label="Manage users">
           <Settings size={12} color={C.accent} />
         </button>
+        )}
       </span>
       <FieldError message={error} />
       {allOptions.length === 0 ? (
-        <div style={{ fontSize: 13, color: C.empty }}>No users defined yet — add some with the gear icon above.</div>
+        <div style={{ fontSize: 13, color: C.empty }}>{byAsset ? "No users yet — add a User asset." : "No users defined yet — add some with the gear icon above."}</div>
       ) : (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
           {allOptions.map(opt => {
@@ -20237,6 +20565,8 @@ function TypeManagerModal({
   // them makes closing it `setNewFieldDraft(null)` and leaves nothing behind to
   // reset. Same shape as breakerModal and addBreakerDraft.
   const [newFieldDraft, setNewFieldDraft] = useState(null);
+  // Text typed into an existing choice-list field's "Add a choice" box: { key, text }.
+  const [choiceAdd, setChoiceAdd] = useState(null);
   // The relationship query builder, opened from the editor's Relationships
   // row. A dialog nested inside this modal's tree, like the new-field dialog.
   const [editingQueries, setEditingQueries] = useState(null);
@@ -20356,6 +20686,7 @@ function TypeManagerModal({
       fieldTypes: { ...(draft.fieldTypes || {}), [tempId]: newFieldDraft.kind || "text" },
       fieldChoices: { ...(draft.fieldChoices || {}), [tempId]: newFieldDraft.choices || "" },
       fieldReferenceTypes: { ...(draft.fieldReferenceTypes || {}), [tempId]: newFieldDraft.referenceTypes || [] },
+      fieldFormats: { ...(draft.fieldFormats || {}), [tempId]: newFieldDraft.format || "plain" },
     });
     setNewFieldDraft(null);
   };
@@ -20365,6 +20696,13 @@ function TypeManagerModal({
   // session and not yet a column — renders the same row, so the thing you just
   // created is configured the same way as the ones that already existed rather
   // than appearing as a differently-shaped chip.
+  const addChoiceToDraft = key => {
+    const text = (choiceAdd && choiceAdd.key === key ? choiceAdd.text : "").trim();
+    if (!text) return;
+    const cur = String((draft.fieldChoices || {})[key] || "").split("\n").filter(Boolean);
+    if (!cur.includes(text)) setDraft({ ...draft, fieldChoices: { ...(draft.fieldChoices || {}), [key]: [...cur, text].join("\n") } });
+    setChoiceAdd(null);
+  };
   const fieldRow = (key, label, pending) => {
     const on = pending || draft.fields.includes(key);
     // person, peripherals and subType are edited by their own components (a chip
@@ -20471,11 +20809,27 @@ function TypeManagerModal({
             assets holding a value the field no longer offers, the same hazard
             as changing the kind. Shown at all because "Choice list" with no
             choices tells you nothing about what the field accepts. */}
-        {kind === "select" && on && (
+        {isChoiceKind(kind) && on && (
           <div style={{ marginLeft: 24, fontSize: 12, color: C.empty }}>
             {(draft.fieldChoices || {})[key]
               ? String(draft.fieldChoices[key]).split("\n").filter(Boolean).join(" · ")
               : "No choices configured."}
+          </div>
+        )}
+        {/* Choices can be ADDED to a choice list at any time, never removed or
+            renamed: a stored value would be left naming a choice the field no
+            longer offers. Appended choices are saved with the type. */}
+        {isChoiceKind(kind) && on && !pending && !bespoke && (
+          <div style={{ marginLeft: 24, display: "flex", gap: 6 }}>
+            <input
+              value={choiceAdd && choiceAdd.key === key ? choiceAdd.text : ""}
+              onChange={e => setChoiceAdd({ key, text: e.target.value })}
+              onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addChoiceToDraft(key); } }}
+              placeholder="Add a choice"
+              aria-label={`Add a choice to ${label}`}
+              style={{ flex: 1, minWidth: 0, padding: "5px 8px", border: `1px solid ${C.border}`, borderRadius: 8, fontSize: 13, fontFamily: "inherit", background: C.surface, color: C.ink }}
+            />
+            <button type="button" onClick={() => addChoiceToDraft(key)} style={{ padding: "5px 10px", background: C.brand, color: "#fff", border: "none", borderRadius: 8, fontSize: 13, fontWeight: 600 }}>Add</button>
           </div>
         )}
         {kind === "reference" && on && (
@@ -20935,7 +21289,7 @@ function TypeManagerModal({
               <div style={{ display: "flex", marginTop: 2 }}>
                 <button
                   type="button"
-                  onClick={() => setNewFieldDraft({ label: "", kind: "text", choices: "", referenceTypes: [], error: "" })}
+                  onClick={() => setNewFieldDraft({ label: "", kind: "text", choices: "", referenceTypes: [], format: "plain", error: "" })}
                   style={{ display: "flex", alignItems: "center", gap: 5, padding: "5px 10px", background: "transparent", border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 12, color: C.ink, fontWeight: 600 }}
                 >
                   <Plus size={13} /> Add field
@@ -20996,7 +21350,25 @@ function TypeManagerModal({
                     </span>
                   </div>
 
-                  {newFieldDraft.kind === "select" && (
+                  {newFieldDraft.kind === "number" && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Show as</span>
+                      <PickerField
+                        label="Show as"
+                        hideLabel
+                        value={newFieldDraft.format || "plain"}
+                        onChange={v => setNewFieldDraft({ ...newFieldDraft, format: v })}
+                        options={NUMBER_FORMATS.map(f => f.value)}
+                        labelForOption={numberFormatLabel}
+                        title="How the number is shown"
+                      />
+                      <span style={{ fontSize: 12, color: C.empty }}>
+                        Dollars shows $1,234.50. The stored value stays a plain number, and this can be changed later in Settings.
+                      </span>
+                    </div>
+                  )}
+
+                  {isChoiceKind(newFieldDraft.kind) && (
                     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Choices</span>
                       <textarea
@@ -21675,6 +22047,9 @@ function SelectionModal({ title, options, value, onChange, onClose, labelForOpti
 // indefinitely -- with saves taking several seconds and nothing on screen to say
 // why. Found that way on 2026-10-09.
 const ON_SHEET_FALLBACK = !!CLIENT.onSheetFallback;
+// ?backend=prod on /dev/: this school's copy in the prod database. Marked so
+// nobody mistakes it for the school's live app, or for the dev tenant's data.
+const ON_PROD_PREVIEW = !!CLIENT.onProdPreview;
 function DevBuildBadge() {
   if (!CLIENT.isDevBuild && !ON_SHEET_FALLBACK) return null;
   const sheet = ON_SHEET_FALLBACK ? (
@@ -21687,6 +22062,17 @@ function DevBuildBadge() {
       }}
     >
       Sheet
+    </span>
+  ) : ON_PROD_PREVIEW ? (
+    <span
+      title="This school's copy in the prod database, opened with ?backend=prod. Changes made here stay in that copy; the school's live app is not affected."
+      style={{
+        fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 600,
+        letterSpacing: 0.5, textTransform: "uppercase", color: "#FFFFFF",
+        background: C.accent, borderRadius: 4, padding: "2px 6px", whiteSpace: "nowrap",
+      }}
+    >
+      Prod copy
     </span>
   ) : null;
   if (!CLIENT.isDevBuild) return sheet;
@@ -22561,10 +22947,16 @@ function floorPlanZoomAt(vb, factor, cx, cy, maxW) {
 function floorPlanParseTransform(attrValue) {
   const tr = /translate\(\s*([-\d.eE]+)[ ,]+([-\d.eE]+)\s*\)/.exec(attrValue || "");
   const ro = /rotate\(\s*([-\d.eE]+)/.exec(attrValue || "");
-  return { tx: tr ? +tr[1] : 0, ty: tr ? +tr[2] : 0, rot: ro ? +ro[1] : 0 };
+  // scale(sx) or scale(sx,sy): Visio writes scale(-1,1) for a shape flipped in the
+  // drawing, and ignoring it draws the shape the wrong way round. Applied first,
+  // then rotate, then translate, which is the order the SVG spec composes them.
+  const sc = /scale\(\s*([-\d.eE]+)(?:[ ,]+([-\d.eE]+))?\s*\)/.exec(attrValue || "");
+  return { tx: tr ? +tr[1] : 0, ty: tr ? +tr[2] : 0, rot: ro ? +ro[1] : 0, sx: sc ? +sc[1] : 1, sy: sc ? (sc[2] !== undefined ? +sc[2] : +sc[1]) : 1 };
 }
 function floorPlanApplyTransform(t, x, y) {
   const r = (t.rot * Math.PI) / 180;
+  const sx = t.sx === undefined ? 1 : t.sx, sy = t.sy === undefined ? 1 : t.sy;
+  x *= sx; y *= sy;
   return [t.tx + x * Math.cos(r) - y * Math.sin(r), t.ty + x * Math.sin(r) + y * Math.cos(r)];
 }
 // A real SVG path parser for the piece that matters here, not a "grab every
@@ -22709,7 +23101,7 @@ function floorPlanRemapShapeIds(oldSpaces, newSpaces) {
 // drops below two surviving members is dropped whole -- the same "fewer than
 // two is not a group" rule saveGroupEditNow already applies when a member is
 // removed by hand.
-function floorPlanRemapLinksAndGroups(links, groups, oldSpaces, newSpaces) {
+function floorPlanRemapLinksAndGroups(links, groups, oldSpaces, newSpaces, minGroupSize) {
   const remap = floorPlanRemapShapeIds(oldSpaces, newSpaces);
   // A wall's segment id is its SPACE's id plus a suffix (see floorPlanSegmentId):
   // the space survives the replace by the same rule a room link does, and the
@@ -22727,8 +23119,157 @@ function floorPlanRemapLinksAndGroups(links, groups, oldSpaces, newSpaces) {
     .filter(l => l.shapeId);
   const nextGroups = (groups || [])
     .map(g => ({ ...g, memberShapeIds: (g.memberShapeIds || []).map(remap).filter(Boolean) }))
-    .filter(g => g.memberShapeIds.length >= 2);
+    .filter(g => g.memberShapeIds.length >= (minGroupSize || 2));
   return { links: nextLinks, groups: nextGroups };
+}
+
+// ---------- Window pane layouts ----------
+// A Window's layout is an SVG whose "Space" shapes are PANES, stored in the same
+// floorPlan* fields a place's plan uses, so upload, Replace (groups carried by
+// shape id, then title) and the group list need no new storage. See
+// plans/window-tracking.md. Everything below is pure.
+// Everything in a window's SVG that is NOT a pane or a label, as points: the wall,
+// frames, mullions, a floor line, a door for scale. Drawn behind the panes so a
+// pane has surroundings. Never selectable, never stored. Elements inside a
+// "Space"/"Sheet" group are the panes' own geometry and are skipped. Curves are
+// read at their end points only (floorPlanPathToPoints), which is plenty for a
+// backdrop. Capped so a busy drawing cannot stall the tab.
+const WINDOW_BACKDROP_MAX = 1500;
+function windowBackdropOf(svgText) {
+  const doc = new DOMParser().parseFromString(svgText || "", "image/svg+xml");
+  const root = doc.querySelector("svg");
+  if (!root || doc.querySelector("parsererror")) return [];
+  const own = el => {
+    for (let cur = el.parentElement; cur && cur !== root; cur = cur.parentElement) {
+      const tag = cur.tagName.toLowerCase();
+      if (tag === "defs" || tag === "clippath" || tag === "mask" || tag === "symbol") return false;
+      if (tag === "g") {
+        const t = cur.querySelector("title");
+        if (t && t.parentElement === cur && /^(Space|Sheet)/i.test((t.textContent || "").trim())) return false;
+      }
+    }
+    return true;
+  };
+  const num = (el, a) => parseFloat(el.getAttribute(a) || "0") || 0;
+  const out = [];
+  // An embedded photo (<image> with a data: URL) goes first so it paints behind
+  // everything. Only data: images -- a remote href would make the file fetch from
+  // wherever its author pointed. Placement uses the corners' bounding box, so a
+  // scale or shift is honoured and a rotation is not.
+  for (const el of root.querySelectorAll("image")) {
+    if (out.length >= 4) break;
+    const href = el.getAttribute("href") || el.getAttribute("xlink:href") || "";
+    if (!/^data:image\/(png|jpe?g|gif|webp);/i.test(href) || !own(el)) continue;
+    const x = num(el, "x"), y = num(el, "y"), w = num(el, "width"), h = num(el, "height");
+    if (!(w > 0 && h > 0)) continue;
+    const ownT = el.getAttribute("transform");
+    const chain = (ownT ? [floorPlanParseTransform(ownT)] : []).concat(floorPlanTransformChain(el, root));
+    const pts = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]].map(([px, py]) => floorPlanApplyChain(chain, px, py)).map(([px, py]) => [floorPlanRound2(px), floorPlanRound2(py)]);
+    if (pts.some(([px, py]) => !isFinite(px) || !isFinite(py))) continue;
+    out.push({ pts, closed: true, image: href });
+  }
+  for (const el of root.querySelectorAll("path, rect, polygon, polyline, line, circle, ellipse")) {
+    if (out.length >= WINDOW_BACKDROP_MAX) break;
+    if (!own(el)) continue;
+    const tag = el.tagName.toLowerCase();
+    let pts = [], closed = true;
+    if (tag === "rect") {
+      const x = num(el, "x"), y = num(el, "y"), w = num(el, "width"), h = num(el, "height");
+      pts = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
+    } else if (tag === "path") {
+      const d = el.getAttribute("d") || "";
+      pts = floorPlanPathToPoints(d);
+      closed = /z\s*$/i.test(d.trim());
+    } else if (tag === "polygon" || tag === "polyline") {
+      const n = (el.getAttribute("points") || "").match(/-?\d*\.?\d+(?:[eE]-?\d+)?/g) || [];
+      for (let i = 0; i + 1 < n.length; i += 2) pts.push([Number(n[i]), Number(n[i + 1])]);
+      closed = tag === "polygon";
+    } else if (tag === "line") {
+      pts = [[num(el, "x1"), num(el, "y1")], [num(el, "x2"), num(el, "y2")]];
+      closed = false;
+    } else {
+      const cx = num(el, "cx"), cy = num(el, "cy");
+      const rx = tag === "circle" ? num(el, "r") : num(el, "rx"), ry = tag === "circle" ? num(el, "r") : num(el, "ry");
+      for (let i = 0; i < 16; i++) { const a = i * Math.PI / 8; pts.push([cx + rx * Math.cos(a), cy + ry * Math.sin(a)]); }
+    }
+    if (pts.length < 2) continue;
+    const ownT = el.getAttribute("transform");
+    const chain = (ownT ? [floorPlanParseTransform(ownT)] : []).concat(floorPlanTransformChain(el, root));
+    const mapped = pts.map(([x, y]) => floorPlanApplyChain(chain, x, y)).map(([x, y]) => [floorPlanRound2(x), floorPlanRound2(y)]);
+    if (mapped.some(([x, y]) => !isFinite(x) || !isFinite(y))) continue;
+    out.push({ pts: mapped, closed: closed && mapped.length >= 3 });
+  }
+  return out;
+}
+// The backdrop worth drawing for a set of panes: shapes far larger than the panes
+// themselves (a page border, a title block) would shrink the panes to nothing.
+function windowBackdropNear(backdrop, spaces) {
+  const panes = floorPlanBbox((spaces || []).flatMap(sp => sp.pts || []));
+  const limit = Math.max(panes.w, panes.h) * 6;
+  return (backdrop || []).filter(b => {
+    if (b.image) return true; // a photo is meant to be bigger than the panes
+    const bb = floorPlanBbox(b.pts);
+    return Math.max(bb.w, bb.h) <= limit;
+  });
+}
+function isWindowLayoutType(type) {
+  return hasModule(type, "windowLayout");
+}
+// Is this a plan the MAP should know about? A window's layout is a drawing of
+// panes, not a floor plan: a Room containing a Window must not read as "has a
+// plan", or the Map offers to navigate into a window.
+function hasMapPlan(asset) {
+  return !!(asset && asset.floorPlanUrl && !isWindowLayoutType(asset.type));
+}
+// The groups that exist on a window, in stored order (colours follow this order).
+function windowGroupsOf(asset) {
+  return ((asset && asset.floorPlanGroups) || []).filter(g => g && g.id);
+}
+// Every group a pane belongs to, in the window's order (empty when none). A pane
+// may be in several groups: "Bay 1 lower" and "Operable windows" can share panes.
+function windowGroupsOfPane(groups, paneId) {
+  return (groups || []).filter(g => (g.memberShapeIds || []).includes(paneId));
+}
+// Groups after saving ONE group (draft.id absent = create). Other groups are left
+// exactly as they were: a pane in this group stays in any group it was already in.
+// Unlike the Map's groups, a group of ONE pane is legitimate here.
+function windowGroupsAfterSave(groups, draft, newId, stamp) {
+  const members = [...new Set(draft.memberShapeIds || [])];
+  const id = draft.id || newId;
+  const saved = {
+    id, name: (draft.name || "").trim() || "Group of " + members.length, hideLabel: false,
+    memberShapeIds: members, ...(stamp || {}),
+  };
+  const existed = (groups || []).some(g => g.id === id);
+  // Keep the saved group where it was (colours follow order); a new one goes last.
+  const next = existed ? (groups || []).map(g => (g.id === id ? saved : g)) : [...(groups || []), saved];
+  return { groups: next, saved };
+}
+// Tasks hold group ids; a group that has since been deleted is ignored, never
+// shown as a raw id. Returns the live groups a task names, in the window's order.
+function taskPaneGroupsOf(asset, item) {
+  const ids = (item && Array.isArray(item.paneGroupIds)) ? item.paneGroupIds : [];
+  if (!ids.length) return [];
+  return windowGroupsOf(asset).filter(g => ids.includes(g.id));
+}
+// What a task saves: only groups this window really has. Call sites omit the key
+// when there are none, so a task that never used panes is stored exactly as before.
+function livePaneGroupIds(asset, ids) {
+  const live = new Set(windowGroupsOf(asset).map(g => g.id));
+  return (ids || []).filter(id => live.has(id));
+}
+// Deleting a group takes it off every task that named it, in the same save, so a
+// task never points at nothing.
+function tasksWithoutPaneGroup(items, groupId) {
+  return (items || []).map(m => (m && Array.isArray(m.paneGroupIds) && m.paneGroupIds.includes(groupId)
+    ? { ...m, paneGroupIds: m.paneGroupIds.filter(id => id !== groupId) } : m));
+}
+// A distinct colour per group, by position. Data colours rather than theme
+// tokens: they only have to tell groups apart, in light and dark alike.
+const WINDOW_GROUP_COLORS = ["#2f7ec2", "#d4852a", "#3f9a5f", "#9a56b8", "#c2415a", "#2a9d9d", "#8a7a1c", "#6b7bd6"];
+function windowGroupColor(groups, groupId) {
+  const i = (groups || []).findIndex(g => g.id === groupId);
+  return i < 0 ? "" : WINDOW_GROUP_COLORS[i % WINDOW_GROUP_COLORS.length];
 }
 
 // ---------- Exterior walls ----------
@@ -22896,7 +23437,7 @@ function floorPlanShapeMatches(room, assets, typesList, query) {
 // inline in FloorPlanTabContent's body, so the fetch/parse lifecycle (and its
 // cancellation on a fast asset switch) is in one place, testable in isolation
 // from the render tree that consumes it.
-function useFloorPlanSvg(url) {
+function useFloorPlanSvg(url, withBackdrop) {
   const [state, setState] = useState(() => (url ? { status: "loading" } : { status: "empty" }));
   useEffect(() => {
     let cancelled = false;
@@ -22906,14 +23447,14 @@ function useFloorPlanSvg(url) {
       .then(text => {
         if (cancelled) return;
         const parsed = parseFloorPlanSvg(text);
-        setState({ url, status: "ready", spaces: parsed.spaces, labels: parsed.labels });
+        setState({ url, status: "ready", spaces: parsed.spaces, labels: parsed.labels, backdrop: withBackdrop ? windowBackdropOf(text) : undefined });
       })
       .catch(err => {
         if (cancelled) return;
         setState({ url, status: "error", error: (err && err.message) || "Could not load the floor plan." });
       });
     return () => { cancelled = true; };
-  }, [url]);
+  }, [url, withBackdrop]);
   // The state belongs to the URL it was loaded for. On the render where the url
   // changes, the effect above has not run yet, so `state` is still the PREVIOUS
   // plan's -- reporting it as ready made a one-shot "select this shape" run against
@@ -22928,6 +23469,354 @@ function fetchFloorPlanSvgText(url) {
     if (!res.ok) throw new Error("Could not load the floor plan file (HTTP " + res.status + ").");
     return res.text();
   });
+}
+
+// ---------- Window pane layout (a Window's "Panes" tab) ----------
+// Draws a window's panes: every Space shape of its SVG, filled by the group it is
+// in. `highlightGroupIds` (a task's groups) dims everything else and outlines the
+// named groups -- the "which windows does this task mean" view, used by the tab,
+// the task dialog and the task card. `selectedIds` + `onPaneClick` make it
+// editable. The frame is the PANES' bounding box, not the file's viewBox: an
+// export is often drawn on a much larger page than the window itself.
+let windowPatternSeq = 0;
+function WindowLayoutView({ spaces, backdrop, groups, highlightGroupIds, selectedIds, onPaneClick, maxHeight, showNumbers, ariaLabel }) {
+  // Several instances can be on a page at once, so pattern ids must not collide.
+  const patternPrefix = useMemo(() => "wlp" + (++windowPatternSeq) + "-", []);
+  // View-only toggles, offered when the file carries a photo: the photo and the
+  // traced shapes can each be hidden, but never both (an empty frame says nothing).
+  const [showPhoto, setShowPhoto] = useState(true);
+  const [showShapes, setShowShapes] = useState(true);
+  const list = (spaces || []).filter(sp => sp && sp.pts && sp.pts.length >= 3);
+  if (!list.length) return null;
+  const allShapes = windowBackdropNear(backdrop, list);
+  const hasPhoto = allShapes.some(b => b.image);
+  const shapes = hasPhoto ? allShapes.filter(b => (b.image ? showPhoto : showShapes)) : allShapes;
+  const toggle = (label, on, flip) => (
+    <button type="button" aria-pressed={on} onClick={flip}
+      style={{ padding: "3px 10px", fontSize: 12, borderRadius: 999, cursor: "pointer", fontFamily: "inherit",
+        border: "1px solid " + (on ? C.brand : C.border), background: on ? C.brand : "transparent", color: on ? C.onBrand : C.muted }}>{label}</button>
+  );
+  const bb = floorPlanBbox(list.flatMap(sp => sp.pts).concat(shapes.flatMap(b => b.pts)));
+  const big = Math.max(bb.w, bb.h) || 1;
+  const pad = big * 0.03;
+  const sw = big / 400;
+  const fontSize = big / 28;
+  const hl = new Set(highlightGroupIds || []);
+  const dimming = hl.size > 0;
+  const editable = typeof onPaneClick === "function";
+  return (
+    <div>
+    {hasPhoto && (
+      <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+        {toggle("Photo", showPhoto, () => { setShowPhoto(!showPhoto); if (showPhoto && !showShapes) setShowShapes(true); })}
+        {toggle("Shapes", showShapes, () => { setShowShapes(!showShapes); if (showShapes && !showPhoto) setShowPhoto(true); })}
+      </div>
+    )}
+    <svg
+      viewBox={`${bb.x - pad} ${bb.y - pad} ${bb.w + pad * 2} ${bb.h + pad * 2}`}
+      role="img" aria-label={ariaLabel || "Window pane layout"}
+      style={{ width: "100%", height: "auto", maxHeight: maxHeight || 420, display: "block" }}
+    >
+      {shapes.map((b, i) => (
+        b.image
+          ? (() => { const ib = floorPlanBbox(b.pts); return <image key={"bd" + i} href={b.image} x={ib.x} y={ib.y} width={ib.w} height={ib.h}
+              preserveAspectRatio="none" style={{ pointerEvents: "none" }} />; })()
+        : b.closed
+          ? <polygon key={"bd" + i} points={b.pts.map(p => p.join(",")).join(" ")} fill={C.border} fillOpacity={0.35}
+              stroke={C.muted} strokeOpacity={0.6} strokeWidth={sw} strokeLinejoin="round" style={{ pointerEvents: "none" }} />
+          : <polyline key={"bd" + i} points={b.pts.map(p => p.join(",")).join(" ")} fill="none"
+              stroke={C.muted} strokeOpacity={0.6} strokeWidth={sw} strokeLinejoin="round" style={{ pointerEvents: "none" }} />
+      ))}
+      {(() => {
+        // A pane in several groups is striped in their colours; one group is a flat fill.
+        // While a task's groups are lit, only those groups' colours count.
+        const combos = new Map();
+        list.forEach(sp => {
+          const gs = windowGroupsOfPane(groups, sp.gid);
+          const use = dimming && gs.some(g => hl.has(g.id)) ? gs.filter(g => hl.has(g.id)) : gs;
+          if (use.length > 1) {
+            const cols = use.map(g => windowGroupColor(groups, g.id));
+            combos.set(cols.join("|"), cols);
+          }
+        });
+        return combos.size ? (
+          <defs>
+            {[...combos.entries()].map(([key, cols]) => (
+              <pattern key={key} id={patternPrefix + key.replace(/[^0-9a-zA-Z]/g, "")} patternUnits="userSpaceOnUse"
+                width={sw * 3 * cols.length} height={sw * 3 * cols.length} patternTransform="rotate(45)">
+                {cols.map((c, ci) => <rect key={ci} x={ci * sw * 3} y="0" width={sw * 3} height={sw * 3 * cols.length} fill={c} />)}
+              </pattern>
+            ))}
+          </defs>
+        ) : null;
+      })()}
+      {(!hasPhoto || showShapes) && list.map((sp, i) => {
+        const gs = windowGroupsOfPane(groups, sp.gid);
+        const use = dimming && gs.some(g => hl.has(g.id)) ? gs.filter(g => hl.has(g.id)) : gs;
+        const cols = use.map(g => windowGroupColor(groups, g.id));
+        const color = cols.length > 1 ? "url(#" + patternPrefix + cols.join("|").replace(/[^0-9a-zA-Z]/g, "") + ")" : (cols[0] || "");
+        const outline = cols[0] || "";
+        const grp = gs.length > 0;
+        const lit = !dimming || gs.some(g => hl.has(g.id));
+        const selected = !!(selectedIds && selectedIds.has(sp.gid));
+        const points = sp.pts.map(p => p.join(",")).join(" ");
+        const label = "Pane " + (i + 1) + (grp ? " — " + gs.map(g => g.name).join(", ") : " — not in a group");
+        return (
+          <g key={sp.gid}
+            role={editable ? "button" : undefined} tabIndex={editable ? 0 : undefined} aria-label={editable ? label : undefined}
+            aria-pressed={editable ? selected : undefined}
+            onClick={editable ? () => onPaneClick(sp.gid) : undefined}
+            onKeyDown={editable ? e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPaneClick(sp.gid); } } : undefined}
+            style={{ cursor: editable ? "pointer" : "default" }}>
+            <title>{label}</title>
+            <polygon points={points}
+              fill={color || "#c9d2d6"}
+              fillOpacity={lit ? (color ? (dimming ? 0.85 : 0.55) : 0.35) : 0.12}
+              stroke={selected ? C.ink : lit && dimming && outline ? outline : C.muted}
+              strokeWidth={selected ? sw * 4 : lit && dimming && grp ? sw * 3 : sw * 1.5}
+              strokeDasharray={!grp && !selected ? sw * 4 + " " + sw * 3 : undefined}
+              strokeLinejoin="round" />
+            {showNumbers && sp.bbox && sp.bbox.w > fontSize * 1.4 && sp.bbox.h > fontSize * 1.4 && (
+              <text x={sp.pole.x} y={sp.pole.y} fontSize={fontSize} textAnchor="middle" dominantBaseline="central"
+                fill={C.ink} style={{ pointerEvents: "none", userSelect: "none" }}>{i + 1}</text>
+            )}
+          </g>
+        );
+      })}
+    </svg>
+    </div>
+  );
+}
+
+// The group chips a task shows, coloured as the layout colours them.
+function PaneGroupChips({ groups, shown }) {
+  return (
+    <span style={{ display: "inline-flex", flexWrap: "wrap", gap: 4 }}>
+      {(shown || []).map(g => (
+        <span key={g.id} style={{ display: "inline-flex", alignItems: "center", gap: 5, border: `1px solid ${C.border}`, borderRadius: 999, padding: "1px 8px", fontSize: 11, color: C.ink }}>
+          <span aria-hidden="true" style={{ width: 8, height: 8, borderRadius: 2, background: windowGroupColor(groups, g.id) }} />
+          {g.name}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+// A task's panes, read-only: its group chips and the layout with those groups
+// lit. Loads the window's SVG itself, so the task dialog, the task card and the
+// completion form can drop it in with just the asset and the groups. The layout
+// sits behind a chevron, COLLAPSED by default: the chips already say which groups,
+// and the drawing (which can be a large file) is fetched only once it is opened.
+function TaskPaneLayout({ asset, groupIds, maxHeight }) {
+  const [open, setOpen] = useState(false);
+  const plan = useFloorPlanSvg(open && asset ? asset.floorPlanUrl : null, true);
+  const groups = windowGroupsOf(asset);
+  const shown = groups.filter(g => (groupIds || []).includes(g.id));
+  if (!shown.length) return null;
+  const canShow = !!(asset && asset.floorPlanUrl);
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <PaneGroupChips groups={groups} shown={shown} />
+        {canShow && (
+          <button type="button" aria-expanded={open} onClick={() => setOpen(o => !o)}
+            style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "none", border: "none", padding: "2px 4px", fontSize: 12, fontWeight: 600, color: C.brandDark }}>
+            {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            {open ? "Hide window layout" : "Show window layout"}
+          </button>
+        )}
+      </div>
+      {open && plan.status === "ready" && (
+        <div style={{ marginTop: 8, border: `1px solid ${C.border}`, borderRadius: 8, background: C.surface, padding: 8 }}>
+          <WindowLayoutView spaces={plan.spaces} backdrop={plan.backdrop} groups={groups} highlightGroupIds={shown.map(g => g.id)} maxHeight={maxHeight || 160}
+            ariaLabel={"Panes this task covers: " + shown.map(g => g.name).join(", ")} />
+        </div>
+      )}
+      {open && plan.status === "error" && <div style={{ marginTop: 6, fontSize: 12, color: C.danger }}>{plan.error}</div>}
+      {open && plan.status !== "ready" && plan.status !== "error" && <div style={{ marginTop: 6, fontSize: 12, color: C.empty }}>Loading the window layout…</div>}
+    </div>
+  );
+}
+
+// The Panes tab of a Window: upload / replace the layout, tap panes to group
+// them, name the group, and see which tasks use each group. All writes go
+// through the callbacks (saveWindowGroup, deleteWindowGroup), so this holds only
+// view state.
+function WindowLayoutTabContent({ asset, canEdit, uploadBusy, uploadError, onUploadPlan, onSaveGroup, onDeleteGroup, taskCountByGroup }) {
+  const plan = useFloorPlanSvg(asset.floorPlanUrl, true);
+  const fileInputRef = useRef(null);
+  const [selected, setSelected] = useState(() => new Set());
+  const [editingId, setEditingId] = useState(null);
+  const [name, setName] = useState("");
+  const [viewGroupId, setViewGroupId] = useState(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const groups = windowGroupsOf(asset);
+  const spaces = plan.status === "ready" ? plan.spaces.filter(sp => sp && sp.pts && sp.pts.length >= 3) : [];
+  const validIds = new Set(spaces.map(sp => sp.gid));
+  const countIn = g => (g.memberShapeIds || []).filter(id => validIds.has(id)).length;
+  const grouped = spaces.filter(sp => windowGroupsOfPane(groups, sp.gid).length > 0).length;
+  const trimmed = name.trim();
+  const clash = trimmed && groups.some(g => g.id !== editingId && g.name.trim().toLowerCase() === trimmed.toLowerCase());
+  const dirty = selected.size > 0 || editingId !== null;
+
+  function clearEditor() { setSelected(new Set()); setEditingId(null); setName(""); }
+  function togglePane(id) {
+    if (!canEdit) {
+      // Tap steps through the groups a pane is in, then back to none.
+      const gs = windowGroupsOfPane(groups, id);
+      const at = gs.findIndex(g => g.id === viewGroupId);
+      setViewGroupId(!gs.length ? null : at < 0 ? gs[0].id : at + 1 < gs.length ? gs[at + 1].id : null);
+      return;
+    }
+    setViewGroupId(null);
+    setSelected(prev => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+  }
+  function startEdit(g) {
+    setViewGroupId(null); setConfirmDeleteId(null);
+    setEditingId(g.id); setName(g.name);
+    setSelected(new Set((g.memberShapeIds || []).filter(id => validIds.has(id))));
+  }
+  function save() {
+    if (!selected.size || clash) return;
+    const ok = onSaveGroup({ id: editingId || undefined, name: trimmed, memberShapeIds: [...selected] });
+    if (ok !== false) clearEditor();
+  }
+
+  const headerRow = (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+      <span style={{ fontSize: 13, color: C.muted }}>{asset.floorPlanFileName ? asset.floorPlanFileName : "Pane layout"}</span>
+      {canEdit && (
+        <>
+          <button type="button" disabled={uploadBusy} onClick={() => fileInputRef.current && fileInputRef.current.click()}
+            style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 10, border: `1px solid ${C.border}`, background: C.surface, color: C.ink, fontSize: 12, fontWeight: 600, opacity: uploadBusy ? 0.6 : 1 }}>
+            <Upload size={13} />{uploadBusy ? "Uploading…" : asset.floorPlanUrl ? "Replace layout…" : "Upload layout…"}
+          </button>
+          <input ref={fileInputRef} type="file" accept={FLOORPLAN_FILE_ACCEPT} style={{ display: "none" }}
+            onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (f) onUploadPlan(f, plan.status === "ready" ? plan.spaces : []); }} />
+        </>
+      )}
+    </div>
+  );
+
+  if (!asset.floorPlanUrl) {
+    return (
+      <div className="card" style={{ padding: 18 }}>
+        <p style={{ margin: "0 0 10px", fontSize: 14, color: C.ink }}>No pane layout uploaded yet.</p>
+        <p style={{ margin: "0 0 14px", fontSize: 13, color: C.empty }}>
+          Upload an SVG drawing of this window with each pane drawn as a shape titled
+          “Space” (the same convention as a floor plan). Then group the panes by how
+          they are maintained, and point tasks at the groups.
+        </p>
+        {canEdit && (
+          <>
+            <button type="button" disabled={uploadBusy} onClick={() => fileInputRef.current && fileInputRef.current.click()}
+              style={{ padding: "8px 14px", borderRadius: 10, border: "none", background: C.brand, color: "#fff", fontSize: 13, fontWeight: 600, opacity: uploadBusy ? 0.6 : 1 }}>
+              {uploadBusy ? "Uploading…" : "Upload layout…"}
+            </button>
+            <input ref={fileInputRef} type="file" accept={FLOORPLAN_FILE_ACCEPT} style={{ display: "none" }}
+              onChange={e => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (f) onUploadPlan(f, []); }} />
+          </>
+        )}
+        {uploadError && <p style={{ margin: "10px 0 0", fontSize: 13, color: C.danger }}>{uploadError}</p>}
+      </div>
+    );
+  }
+  if (plan.status !== "ready" && plan.status !== "error") {
+    return <div className="card" style={{ padding: 18, fontSize: 13, color: C.empty }}>Loading the pane layout…</div>;
+  }
+  if (plan.status === "error") {
+    return (
+      <div className="card" style={{ padding: 18 }}>
+        {headerRow}
+        <p style={{ margin: 0, fontSize: 14, color: C.danger }}>{plan.error}</p>
+        {uploadError && <p style={{ margin: "10px 0 0", fontSize: 13, color: C.danger }}>{uploadError}</p>}
+      </div>
+    );
+  }
+  if (!spaces.length) {
+    return (
+      <div className="card" style={{ padding: 18 }}>
+        {headerRow}
+        <p style={{ margin: 0, fontSize: 14, color: C.ink }}>That file has no panes in it.</p>
+        <p style={{ margin: "6px 0 0", fontSize: 13, color: C.empty }}>Each pane needs to be a shape titled “Space”. Replace the layout with one that has them.</p>
+        {uploadError && <p style={{ margin: "10px 0 0", fontSize: 13, color: C.danger }}>{uploadError}</p>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="card" style={{ padding: 14 }}>
+      {headerRow}
+      {uploadError && <p style={{ margin: "0 0 10px", fontSize: 13, color: C.danger }}>{uploadError}</p>}
+      <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: 10 }}>
+        <WindowLayoutView spaces={spaces} backdrop={plan.backdrop} groups={groups} selectedIds={selected} showNumbers={canEdit}
+          highlightGroupIds={viewGroupId ? [viewGroupId] : []}
+          onPaneClick={togglePane} maxHeight={460} />
+      </div>
+      <p style={{ margin: "8px 0 0", fontSize: 12, color: C.muted }}>
+        {spaces.length} {spaces.length === 1 ? "pane" : "panes"}, {grouped} in a group{spaces.length - grouped > 0 ? " · " + (spaces.length - grouped) + " not grouped (dashed)" : ""}.
+        {canEdit ? " Tap panes to select them." : " Tap a pane to see its group."}
+      </p>
+
+      {canEdit && dirty && (
+        <div style={{ marginTop: 12, border: `1px solid ${C.border}`, borderRadius: 10, background: C.bg, padding: 12 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 6 }}>
+            {editingId ? "Editing group" : "New group"} · {selected.size} {selected.size === 1 ? "pane" : "panes"} selected
+          </div>
+          <input type="text" value={name} onChange={e => setName(e.target.value)} placeholder="Group name, e.g. Bay 1 lower windows"
+            aria-label="Group name" maxLength={80}
+            style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: `1px solid ${clash ? C.danger : C.border}`, fontSize: 14, boxSizing: "border-box" }} />
+          {clash && <div role="alert" style={{ fontSize: 12, color: C.danger, marginTop: 6 }}>This window already has a group called “{trimmed}”.</div>}
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button type="button" onClick={save} disabled={!selected.size || !!clash}
+              style={{ padding: "7px 14px", borderRadius: 10, border: "none", background: C.brand, color: "#fff", fontSize: 13, fontWeight: 600, opacity: !selected.size || clash ? 0.5 : 1 }}>
+              {editingId ? "Save group" : "Create group"}
+            </button>
+            <button type="button" onClick={clearEditor}
+              style={{ padding: "7px 14px", borderRadius: 10, border: `1px solid ${C.border}`, background: C.surface, color: C.ink, fontSize: 13, fontWeight: 600 }}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ marginTop: 16 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 8 }}>Groups ({groups.length})</div>
+        {groups.length === 0 && <p style={{ margin: 0, fontSize: 13, color: C.empty }}>{canEdit ? "No groups yet. Select panes above and name the group." : "No groups yet."}</p>}
+        {groups.map(g => {
+          const uses = (taskCountByGroup && taskCountByGroup[g.id]) || 0;
+          const viewing = viewGroupId === g.id;
+          const n = countIn(g);
+          return (
+            <div key={g.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderTop: `1px solid ${C.border}`, flexWrap: "wrap" }}>
+              <span aria-hidden="true" style={{ width: 12, height: 12, borderRadius: 3, background: windowGroupColor(groups, g.id), flexShrink: 0 }} />
+              <button type="button" onClick={() => setViewGroupId(viewing ? null : g.id)} aria-pressed={viewing}
+                style={{ background: "none", border: "none", padding: 0, fontSize: 14, fontWeight: viewing ? 700 : 600, color: C.brandDark, textAlign: "left" }}>{g.name}</button>
+              <span style={{ fontSize: 12, color: C.muted }}>
+                {n} {n === 1 ? "pane" : "panes"}{n === 0 ? " (none in this layout)" : ""}{uses ? " · " + uses + (uses === 1 ? " task" : " tasks") : ""}
+              </span>
+              {canEdit && (
+                <span style={{ marginLeft: "auto", display: "inline-flex", gap: 6 }}>
+                  {confirmDeleteId === g.id ? (
+                    <>
+                      <span style={{ fontSize: 12, color: C.danger, alignSelf: "center" }}>{uses ? "Remove from " + uses + (uses === 1 ? " task" : " tasks") + " too?" : "Delete this group?"}</span>
+                      <button type="button" onClick={() => { onDeleteGroup(g.id); setConfirmDeleteId(null); if (editingId === g.id) clearEditor(); if (viewing) setViewGroupId(null); }}
+                        style={{ padding: "3px 10px", borderRadius: 8, border: "none", background: C.danger, color: "#fff", fontSize: 12, fontWeight: 600 }}>Delete</button>
+                      <button type="button" onClick={() => setConfirmDeleteId(null)}
+                        style={{ padding: "3px 10px", borderRadius: 8, border: `1px solid ${C.border}`, background: C.surface, color: C.ink, fontSize: 12 }}>Keep</button>
+                    </>
+                  ) : (
+                    <>
+                      <button type="button" aria-label={"Edit group " + g.name} onClick={() => startEdit(g)} style={{ background: "none", border: "none", padding: 4 }}><Pencil size={14} color={C.muted} /></button>
+                      <button type="button" aria-label={"Delete group " + g.name} onClick={() => setConfirmDeleteId(g.id)} style={{ background: "none", border: "none", padding: 4 }}><Trash2 size={14} color={C.muted} /></button>
+                    </>
+                  )}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 // ---------- Map "On selection" options (per location) ----------
@@ -23838,7 +24727,7 @@ function FloorPlanTabContent({
     // inside it (a Building whose floors carry the drawings). A type that
     // merely COULD carry a plan, with none uploaded, is a dead end that
     // lands on "No floor plan uploaded yet".
-    if (navAsset.floorPlanUrl || descendantsOf(navAsset, assets).some(d => d.floorPlanUrl)) {
+    if (navAsset.floorPlanUrl || descendantsOf(navAsset, assets).some(hasMapPlan)) {
       setSelectedShapeId(null); setSelectedWallId(null); setOpenGroupId(null);
       onNavigateToPlan(navAsset.id);
       return true;

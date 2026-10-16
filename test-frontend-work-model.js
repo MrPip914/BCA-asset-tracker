@@ -17,7 +17,9 @@ function slice(decl) {
   return src.slice(start, end + NL.length + 1);
 }
 const code = [
-  'const COLUMN_DATA_TYPE_VALUES = new Set(["text","textarea","number","date","select","reference"]);',
+  'const COLUMN_DATA_TYPE_VALUES = new Set(["text","textarea","number","date","select","multiselect","reference"]);',
+  'function isChoiceKind(kind) { return kind === "select" || kind === "multiselect"; }',
+  'function multiValues(value) { return String(value == null ? "" : value).split(";").map(x => x.trim()).filter(Boolean); }',
   'const dateOnly = s => String(s).slice(0, 10);',
   slice('function columnDataType(col) {'),
   slice('function columnOptions(col) {'),
@@ -36,6 +38,7 @@ const code = [
   slice('function newWorkFieldKey(fields, label) {'),
   slice('function workModelKey(kind) {'),
   slice('function addWorkField(model, kind, def) {'),
+  slice('function addWorkFieldChoice(model, kind, key, choice) {'),
   slice('function removeWorkField(model, kind, key) {'),
   slice('function setTypeHasField(model, kind, typeId, key, on) {'),
   slice('function setTypeFieldRequired(model, kind, typeId, key, on) {'),
@@ -43,7 +46,7 @@ const code = [
   slice('function renameTaskType(model, id, name) {'),
   slice('function removeTaskType(model, id) {'),
   slice('function taskTypeNameOf(model, id) {'),
-  'return { defaultWorkTypeId, setDefaultWorkType, resolveWorkTypeId, workBuiltinShown, setWorkBuiltinShown, DEFAULT_WORK_TYPE_ID, addWorkField, removeWorkField, setTypeHasField, setTypeFieldRequired, addTaskType, renameTaskType, removeTaskType, taskTypeNameOf, adoptWorkModel, customFieldsFor, requiredCustomFieldsFor, validateCustomValues, newWorkFieldKey };',
+  'return { defaultWorkTypeId, setDefaultWorkType, resolveWorkTypeId, workBuiltinShown, setWorkBuiltinShown, DEFAULT_WORK_TYPE_ID, addWorkField, addWorkFieldChoice, removeWorkField, setTypeHasField, setTypeFieldRequired, addTaskType, renameTaskType, removeTaskType, taskTypeNameOf, adoptWorkModel, customFieldsFor, requiredCustomFieldsFor, validateCustomValues, newWorkFieldKey };',
 ].join('\n');
 const H = new Function('DEFAULT_COLUMN_DATA_TYPES', code)({});
 
@@ -119,7 +122,7 @@ check('both saves validate custom values', (src.match(/validateCustomValues\(wor
 check('the draft is seeded with taskType/custom when editing', /taskType: item\.taskType \|\| "",/.test(src));
 check('Save is disabled while a custom value is invalid', /\|\| !!taskCustomError\}/.test(src));
 check('the Task types settings section exists', /key: "tasktypes"/.test(src) && /key === "tasktypes"/.test(src));
-check('the edge function keeps taskType/custom on save', /TASK_EXTRA_KEYS = \["taskType", "custom"\]/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api/save-shape.ts'), 'utf8')));
+check('the edge function keeps taskType/custom on save', /TASK_EXTRA_KEYS = \["taskType", "custom", "paneGroupIds"\]/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api/save-shape.ts'), 'utf8')));
 
 // ---- work dialog wiring (source)
 check('add and edit work saves write custom', (src.match(/custom: \{ \.\.\.\(changeDraft\.custom \|\| \{\}\) \}/g) || []).length === 2);
@@ -159,6 +162,19 @@ check('work search covers custom values', /Object\.values\(r\.change\.custom/.te
   const dm = H.setTypeHasField(df.model, 'task', '__default', df.key, true);
   check('custom fields on the default type reach untyped tasks', H.customFieldsFor(dm, 'task', '').length === 1);
   check('the dialogs gate each built-in on the type', (src.match(/workBuiltinShown\(workModel, "(task|work)"/g) || []).length >= 9);
+}
+
+{
+  const mr = H.addWorkField(em, 'task', { label: 'Areas', dataType: 'multiselect', options: ['Roof', 'Gym'] });
+  check('a multiple-choice field is created with its choices', !mr.error && mr.model.taskFields.find(f => f.key === mr.key).dataType === 'multiselect');
+  check('a multiple-choice field needs a choice', !!H.addWorkField(em, 'task', { label: 'Z', dataType: 'multiselect' }).error);
+  const more = H.addWorkFieldChoice(mr.model, 'task', mr.key, 'Lab');
+  check('a choice can be added to a multiple-choice field', more.taskFields.find(f => f.key === mr.key).options.length === 3);
+  check('a choice with a semicolon is refused', H.addWorkFieldChoice(mr.model, 'task', mr.key, 'a;b') === mr.model);
+  const on = H.setTypeHasField(mr.model, 'task', '__default', mr.key, true);
+  check('several picks validate', H.validateCustomValues(on, 'task', '', { [mr.key]: 'Roof; Gym' }) === '' || !H.validateCustomValues(on, 'task', '', { [mr.key]: 'Roof; Gym' }));
+  const bad = H.validateCustomValues(on, 'task', '', { [mr.key]: 'Roof; Pool' });
+  check('a pick outside the list is refused', !!bad && bad.length > 0);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

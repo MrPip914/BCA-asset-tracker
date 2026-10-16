@@ -5,6 +5,7 @@
 // deno-lint-ignore-file
 
 // The registry names icon components; the connector draws none.
+const Blinds = null;
 const Building2 = null;
 const Camera = null;
 const DoorOpen = null;
@@ -129,6 +130,18 @@ const TYPE_REGISTRY = {
     locked: true, icon: Fence, categoryIds: ["Places"], parentTypes: ["Campus", "Building", "Floor", "Room"], location: true,
     excludedFields: ["tag", "brand", "model", "serial", "peripherals", "hostname", "screenSize", "purchaseDate", "warrantyUntil"],
   },
+  // A window (or a wall of them) with a PANE LAYOUT: an uploaded SVG whose shapes
+  // are the panes, which can be grouped and named for maintenance ("Bay 1 lower
+  // windows"). Tasks on the window name groups and the layout shows which panes
+  // they mean. The layout is the asset's own floorPlanUrl/floorPlanGroups, so it
+  // needs no new column -- see the windowLayout module and plans/window-tracking.md.
+  // Locked so every tenant gets it, as Floor did; floorPlan stays OFF (a window's
+  // drawing is not a map plan and must never be offered on the Map).
+  Window: {
+    locked: true, icon: Blinds, categoryIds: ["Facilities"], parentTypes: ["Wall", "Room"],
+    excludedFields: ["hostname", "screenSize", "peripherals"],
+    modules: ["windowLayout"],
+  },
   Other: { parentTypes: ["Room", "Wall"] },
 };
 
@@ -190,6 +203,14 @@ function typeEntryFor(typeId) {
 
 function isLockedType(typeId) {
   return !!TYPE_REGISTRY[typeId]?.locked;
+}
+
+function modulesFor(type) {
+  return typeEntryFor(type)?.modules || [];
+}
+
+function hasModule(type, moduleKey) {
+  return modulesFor(type).includes(moduleKey);
 }
 
 function ensureLockedTypes(list) {
@@ -525,6 +546,7 @@ const COLUMN_DATA_TYPES = [
   { value: "number", label: "Number" },
   { value: "date", label: "Date" },
   { value: "select", label: "Choice list" },
+  { value: "multiselect", label: "Multiple choice" },
   { value: "reference", label: "Reference" },
 ];
 
@@ -536,6 +558,12 @@ const DEFAULT_COLUMN_DATA_TYPES = {
   totalQuantity: "number",
   notes: "textarea",
 };
+
+function isChoiceKind(kind) { return kind === "select" || kind === "multiselect"; }
+
+function multiValues(value) {
+  return String(value == null ? "" : value).split(";").map(x => x.trim()).filter(Boolean);
+}
 
 function columnDataType(col) {
   if (!col) return "text";
@@ -578,6 +606,12 @@ function validateColumnValue(col, raw) {
     if (parsed.getUTCFullYear() !== yy || parsed.getUTCMonth() !== mm - 1 || parsed.getUTCDate() !== dd) {
       return `${col.label} is not a real date.`;
     }
+    return "";
+  }
+  if (kind === "multiselect") {
+    const opts = columnOptions(col);
+    const bad = multiValues(value).filter(v => !opts.includes(v));
+    if (opts.length && bad.length) return `${col.label} must be from: ${opts.join(", ")}.`;
     return "";
   }
   if (kind === "select") {
@@ -1428,6 +1462,7 @@ function adoptWorkModel(raw) {
     key: f.key, label: f.label || f.key,
     dataType: COLUMN_DATA_TYPE_VALUES.has(f.dataType) ? f.dataType : "text",
     options: list(f.options).map(String),
+    ...(f.format === "dollars" && f.dataType === "number" ? { format: "dollars" } : {}),
   }));
   const settings = v => {
     const out = {};
@@ -1489,4 +1524,4 @@ function taskTypeNameOf(model, id) {
 // Each tenant's asset-ID prefix, from clients.js.
 export const TENANT_LABEL_PREFIX = {"3c":"3C","bca":"BCA","dev":"BCA"};
 
-export { TYPE_REGISTRY, DEFAULT_TYPES, applyTypeSettings, adoptLegacyTypesList, ensureLockedTypes, typeNameOf, typeTakesParent, parentTypesFor, isPlaceType, fieldAppliesTo, isPersonType, personMatchKey, nameOf, personLabelsOf, personNamesOf, UNASSIGNED_LABEL, pathOf, fullPathOf, parentNameFor, relate, dateOnly, adoptPersonNames, adoptLegacyNames, columnDataType, columnOptions, validateColumnValue, DEFAULT_COLUMNS, RENAMED_COLUMN_KEYS, RETIRED_COLUMN_KEYS, IMPORT_KEY_HEADER, importHeadersFor, planAssetImport, PATH_SEPARATOR, assetToImportRow, resolveImportType, isLockedType, nearestAncestorOfType, columnReferenceTypes, referenceColumns, RELATIONSHIP_FOLLOWS, relationshipFollowMeta, relationshipQueriesFor, relationshipQueriesShownFor, runRelationshipQuery, DEFAULT_WORK_TYPE_ID, DEFAULT_WORK_TYPE_NAME, WORK_BUILTIN_FIELDS, defaultWorkTypeId, resolveWorkTypeId, workBuiltinShown, adoptWorkModel, customFieldsFor, requiredCustomFieldsFor, validateCustomValues, taskTypeNameOf };
+export { TYPE_REGISTRY, DEFAULT_TYPES, applyTypeSettings, adoptLegacyTypesList, ensureLockedTypes, typeNameOf, typeTakesParent, parentTypesFor, isPlaceType, fieldAppliesTo, isPersonType, personMatchKey, nameOf, personLabelsOf, personNamesOf, UNASSIGNED_LABEL, pathOf, fullPathOf, parentNameFor, relate, dateOnly, adoptPersonNames, adoptLegacyNames, isChoiceKind, multiValues, columnDataType, columnOptions, validateColumnValue, DEFAULT_COLUMNS, RENAMED_COLUMN_KEYS, RETIRED_COLUMN_KEYS, IMPORT_KEY_HEADER, importHeadersFor, planAssetImport, PATH_SEPARATOR, assetToImportRow, resolveImportType, isLockedType, hasModule, nearestAncestorOfType, columnReferenceTypes, referenceColumns, RELATIONSHIP_FOLLOWS, relationshipFollowMeta, relationshipQueriesFor, relationshipQueriesShownFor, runRelationshipQuery, DEFAULT_WORK_TYPE_ID, DEFAULT_WORK_TYPE_NAME, WORK_BUILTIN_FIELDS, defaultWorkTypeId, resolveWorkTypeId, workBuiltinShown, adoptWorkModel, customFieldsFor, requiredCustomFieldsFor, validateCustomValues, taskTypeNameOf };

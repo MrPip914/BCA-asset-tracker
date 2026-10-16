@@ -146,6 +146,8 @@ const sctx = new Function(`
   }
   const roomNameOf = (a, assets) => { const r = [a, ...ancestorsOf(a, assets)].find(x => x.type === "Room"); return r ? r.name : ""; };
   const buildingNameOf = () => "";
+  ${sliceFn('windowGroupsOf')}
+  ${sliceFn('taskPaneGroupsOf')}
   ${sliceFn('assetMatchesSearch')}
   ${sliceFn('taskMatchesSearch')}
   ${sliceFn('workMatchesSearch')}

@@ -14,7 +14,7 @@ import { snapshotToRows } from "../../../db/snapshot-rows.mjs";
 import { loadSql, TABLE_COLUMNS } from "../../../db/load-sql.mjs";
 import { grids as fixtureGrids } from "../../../db/fixture-grids.mjs";
 import { createApi } from "./api.ts";
-import { ASSET_FIELDS, AUDIT_FIELDS } from "./save-shape.ts";
+import { ASSET_FIELDS, AUDIT_FIELDS, shapeAssets } from "./save-shape.ts";
 import { SYNC_TABLES } from "./save.ts";
 
 const DATABASE_URL = Deno.env.get("DATABASE_URL");
@@ -39,6 +39,18 @@ Deno.test("every table a save rewrites has the importer's columns", () => {
     assertEquals(cols, (TABLE_COLUMNS as Any)[table], table);
     for (const k of key) assert(k in cols, `${table} key ${k}`);
   }
+});
+
+Deno.test("a task keeps the window pane groups it names, and an empty list is not stored", () => {
+  const [a] = shapeAssets([{
+    id: "w1", label: "w1", type: "Window",
+    maintenanceItems: [
+      { id: "m1", task: "Clean lowers", kind: "scheduled", paneGroupIds: ["g1", "g2"] },
+      { id: "m2", task: "Old task", kind: "scheduled", paneGroupIds: [] },
+    ],
+  }], []);
+  assertEquals(a.maintenanceItems[0].paneGroupIds, ["g1", "g2"]);
+  assert(!("paneGroupIds" in a.maintenanceItems[1]));
 });
 
 const OWNER = "mrpip914@gmail.com";

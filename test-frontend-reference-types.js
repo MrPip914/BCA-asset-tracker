@@ -24,10 +24,11 @@ function slice(decl, closer) {
 const code = [
   slice('function columnReferenceTypes(col) {', '\n}\n'),
   slice('function joinTypeNames(ids, typesList) {', '\n}\n'),
-  slice('  function applyFieldKind(col, kind, choicesText, referenceTypes) {', '\n  }\n'),
+  'function isChoiceKind(kind) { return kind === "select" || kind === "multiselect"; }',
+  slice('  function applyFieldKind(col, kind, choicesText, referenceTypes, format) {', '\n  }\n'),
 ].join('\n');
 const typeNameOf = (id, list) => ((list || []).find(t => t.id === id) || {}).name || id;
-const COLUMN_DATA_TYPE_VALUES = new Set(['text', 'textarea', 'number', 'date', 'select', 'reference']);
+const COLUMN_DATA_TYPE_VALUES = new Set(['text', 'textarea', 'number', 'date', 'select', 'multiselect', 'reference']);
 const DEFAULT_COLUMN_DATA_TYPES = {};
 const { columnReferenceTypes, joinTypeNames, applyFieldKind } = new Function(
   'typeNameOf', 'COLUMN_DATA_TYPE_VALUES', 'DEFAULT_COLUMN_DATA_TYPES',
