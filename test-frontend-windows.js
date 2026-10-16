@@ -54,8 +54,8 @@ check('the Map ignores a Window layout but still sees a Room plan',
   && !H.hasMapPlan({ type: 'Room', floorPlanUrl: '' }));
 const reg = src.match(/\n  Window: \{[\s\S]*?\n  \},/);
 check('Window is a locked built-in that sits in a Wall or a Room, with no floorPlan setting',
-  !!reg && /locked: true/.test(reg[0]) && /parentTypes: \["Wall", "Room"\]/.test(reg[0]) && /modules: \["windowLayout"\]/.test(reg[0]) && !/floorPlan:/.test(reg[0]));
-check('the Panes tab is a registered module', /windowLayout: \{\s*label: "Panes"/.test(src));
+  !!reg && /locked: true/.test(reg[0]) && /parentTypes: \["Wall", "Room"\]/.test(reg[0]) && /sections: true/.test(reg[0]) && !/floorPlan:/.test(reg[0]));
+check('the Sections tab is a registered module', /windowLayout: \{\s*label: "Sections"/.test(src));
 
 // --- groups: a pane can be in several, a group of one is fine ------------------------
 const g0 = [
@@ -110,16 +110,16 @@ check('deleting a group removes it from the tasks in the SAME persist',
   /function deleteWindowGroup[\s\S]*?tasksWithoutPaneGroup\(a\.maintenanceItems, groupId\)[\s\S]*?\n  \}\n/.test(src));
 check('the group save returns false when refused, so the tab keeps the selection',
   /function saveWindowGroup[\s\S]*?if \(savingRef\.current\) return false;/.test(src) && /if \(ok !== false\) clearEditor\(\)/.test(src));
-check('the tab is wired: Panes tab renders WindowLayoutTabContent only for a window',
+check('the tab is wired: Sections tab renders WindowLayoutTabContent only for a window',
   /detailTab === "windowLayout" && hasModule\(selectedAsset\.type, "windowLayout"\)/.test(src));
 check('all four task drafts carry paneGroupIds, and opening a task seeds them',
   (src.match(/taskType: "", custom: \{\}, paneGroupIds: \[\] \}/g) || []).length === 4
   && /paneGroupIds: Array\.isArray\(item\.paneGroupIds\) \? \[\.\.\.item\.paneGroupIds\] : \[\]/.test(src));
 check('add and edit both save only live groups',
   (src.match(/livePaneGroupIds\(workTarget, maintenanceDraft\.paneGroupIds\)/g) || []).length >= 4);
-check('editing a task audits the pane groups by name', /mkEntry\("Pane groups"/.test(src));
+check('editing a task audits the pane groups by name', /mkEntry\("Section groups"/.test(src));
 check('the audit log words the pane-group actions',
-  /pane_group_created"\) return `Created pane group/.test(src) && /pane_group_deleted"\) return `Deleted pane group/.test(src));
+  /pane_group_created"\) return `Created section group/.test(src) && /pane_group_deleted"\) return `Deleted section group/.test(src));
 check('the task preview only mounts for a window whose task names a group (no floor plan fetched per task row)',
   /isWindowLayoutType\(selectedAsset\.type\) && taskPaneGroupsOf\(selectedAsset, item\)\.length > 0/.test(src));
 check('the Tasks search finds a task by its group name', /\.\.\.taskPaneGroupsOf\(r\.asset, r\.item\)\.map\(g => g\.name\)/.test(src));
@@ -156,3 +156,8 @@ check('the layout is on the task dialog, the task card AND the completion form',
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
+
+check('modulesFor adds windowLayout from the per-type sections setting, not the type name',
+  /entry\?\.sections && !mods\.includes\("windowLayout"\)/.test(src) && !/type === "Window"/.test(src.slice(src.indexOf('function modulesFor'), src.indexOf('function modulesFor') + 500)));
+check('the type editor offers and saves the sections setting',
+  /sections: !!entry\.sections/.test(src) && /sections: !!draft\.sections/.test(src) && /setDraft\(\{ \.\.\.draft, sections: !draft\.sections \}\)/.test(src));

@@ -140,7 +140,7 @@ const TYPE_REGISTRY = {
   Window: {
     locked: true, icon: Blinds, categoryIds: ["Facilities"], parentTypes: ["Wall", "Room"],
     excludedFields: ["hostname", "screenSize", "peripherals"],
-    modules: ["windowLayout"],
+    sections: true,
   },
   Other: { parentTypes: ["Room", "Wall"] },
 };
@@ -206,7 +206,11 @@ function isLockedType(typeId) {
 }
 
 function modulesFor(type) {
-  return typeEntryFor(type)?.modules || [];
+  const entry = typeEntryFor(type);
+  const mods = entry?.modules || [];
+  // The Sections tab is a per-type SETTING (typeSettings[id].sections), not a
+  // property of one built-in: Window ships with it on, any type can switch it on.
+  return entry?.sections && !mods.includes("windowLayout") ? [...mods, "windowLayout"] : mods;
 }
 
 function hasModule(type, moduleKey) {

@@ -297,7 +297,7 @@ const TYPE_REGISTRY = {
   Window: {
     locked: true, icon: Blinds, categoryIds: ["Facilities"], parentTypes: ["Wall", "Room"],
     excludedFields: ["hostname", "screenSize", "peripherals"],
-    modules: ["windowLayout"],
+    sections: true,
   },
   Other: { parentTypes: ["Room", "Wall"] },
 };
@@ -894,7 +894,7 @@ const ASSET_MODULES = {
   // is the asset's floorPlan* fields. Counts GROUPS: panes are the drawing's
   // business, groups are what a person made.
   windowLayout: {
-    label: "Panes",
+    label: "Sections",
     count: asset => (asset.floorPlanGroups || []).length,
   },
 };
@@ -905,7 +905,11 @@ const ASSET_MODULES = {
 // can't be turned on by data alone. Read through the merged entry anyway, so
 // the day one becomes settable nothing here has to change.
 function modulesFor(type) {
-  return typeEntryFor(type)?.modules || [];
+  const entry = typeEntryFor(type);
+  const mods = entry?.modules || [];
+  // The Sections tab is a per-type SETTING (typeSettings[id].sections), not a
+  // property of one built-in: Window ships with it on, any type can switch it on.
+  return entry?.sections && !mods.includes("windowLayout") ? [...mods, "windowLayout"] : mods;
 }
 // Does this type own a given module? The one thing render sites should ask,
 // rather than naming the type that happens to own it today.
@@ -2433,9 +2437,9 @@ function describeAudit(entry) {
   if (entry.action === "noted") return `Note: ${entry.note}`;
   if (entry.action === "maintenance_completed") return `Completed maintenance "${entry.field}" — last done ${entry.to}`;
   if (entry.action === "maintenance_removed") return `Removed scheduled maintenance: ${entry.field}`;
-  if (entry.action === "pane_group_created") return `Created pane group "${entry.to}"`;
-  if (entry.action === "pane_group_edited") return `Edited pane group "${entry.to}"`;
-  if (entry.action === "pane_group_deleted") return `Deleted pane group "${entry.from}"`;
+  if (entry.action === "pane_group_created") return `Created section group "${entry.to}"`;
+  if (entry.action === "pane_group_edited") return `Edited section group "${entry.to}"`;
+  if (entry.action === "pane_group_deleted") return `Deleted section group "${entry.from}"`;
   if (entry.action === "breaker_added") return `Added breaker at ${entry.field} (${entry.to})`;
   if (entry.action === "breaker_swapped") return `Swapped breaker at ${entry.field} — serial changed from "${entry.from}" to "${entry.to}"`;
   if (entry.action === "breaker_removed") return `Removed breaker at ${entry.field}`;
@@ -5705,7 +5709,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-16.2";
+const APP_VERSION = "2026-10-16.3";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -11926,7 +11930,7 @@ function AssetTracker() {
     {
       const names = ids => { const gs = windowGroupsOf(workTarget); return (ids || []).map(id => (gs.find(g => g.id === id) || {}).name).filter(Boolean).join(", "); };
       const before = names(original.paneGroupIds), after = names(updated.paneGroupIds);
-      if (before !== after) entries.push(mkEntry("Pane groups", before || "—", after || "—"));
+      if (before !== after) entries.push(mkEntry("Section groups", before || "—", after || "—"));
     }
     // Per custom field, for the fields the type now carries or carried: an edit
     // rewrites a record, and the audit row is the only trail of what it said.
@@ -12947,6 +12951,7 @@ function AssetTracker() {
         requiredFields: (draft.requiredFields || []).filter(k => wanted.has(k)),
         floorPlan: !!draft.floorPlan,
         mapPin: !!draft.mapPin,
+        sections: !!draft.sections,
         // Carried, not rebuilt: this whole object is rewritten here, so a
         // query list left out would be deleted by an unrelated edit. Queries
         // are edited in Settings > Relationships, not through this draft.
@@ -15706,7 +15711,7 @@ function AssetTracker() {
                       these", several at once, with the layout lighting up below. */}
                   {workTarget && isWindowLayoutType(workTarget.type) && windowGroupsOf(workTarget).length > 0 && (
                     <div style={{ display: "flex", flexDirection: "column", gap: 6, gridColumn: "1 / -1" }}>
-                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Pane groups</span>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Section groups</span>
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                         {windowGroupsOf(workTarget).map(g => {
                           const on = (maintenanceDraft.paneGroupIds || []).includes(g.id);
@@ -16882,7 +16887,7 @@ function AssetTracker() {
                         ))}
                         {isWindowLayoutType(selectedAsset.type) && taskPaneGroupsOf(selectedAsset, item).length > 0 && (
                           <div style={{ marginBottom: 8 }}>
-                            <div style={{ fontSize: 13, color: C.muted }}>Pane groups:</div>
+                            <div style={{ fontSize: 13, color: C.muted }}>Section groups:</div>
                             <TaskPaneLayout asset={selectedAsset} groupIds={item.paneGroupIds} maxHeight={150} />
                           </div>
                         )}
@@ -20589,6 +20594,7 @@ function TypeManagerModal({
       // at all, seeded from the same merged entry every other override reads.
       floorPlan: !!entry.floorPlan,
       mapPin: !!entry.mapPin,
+      sections: !!entry.sections,
       // Whether new assets start as this type -- resolved, not read off the
       // flag, so Computer shows as the default on a list nobody has flagged.
       isDefault: defaultNewAssetType(types) === t.id,
@@ -21183,6 +21189,31 @@ function TypeManagerModal({
                   {draft.mapPin && <Check size={11} color="#fff" />}
                 </button>
                 <span style={{ fontSize: 13, color: C.ink }}>Can be placed at a point on a map</span>
+              </label>
+            </div>
+
+            {/* Type-level: whether assets of this type get a Sections tab, an
+                uploaded drawing whose shapes can be grouped and named, with tasks
+                that name groups. Window ships with it on. */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, display: "flex", alignItems: "center", gap: 6 }}>Sections<HelpTip label="About sections" text="Adds a Sections tab: upload a drawing (an SVG), group its shapes and name the groups, such as Bay 1 lower windows or North wall. Tasks on the asset can then name which sections they cover." /></span>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                <button
+                  type="button"
+                  role="checkbox"
+                  aria-checked={!!draft.sections}
+                  aria-label="Assets of this type have a Sections drawing"
+                  onClick={() => setDraft({ ...draft, sections: !draft.sections })}
+                  style={{
+                    width: 16, height: 16, flexShrink: 0, borderRadius: 4, padding: 0,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    border: `1.5px solid ${draft.sections ? C.brand : C.border}`,
+                    background: draft.sections ? C.brand : "transparent",
+                  }}
+                >
+                  {draft.sections && <Check size={11} color="#fff" />}
+                </button>
+                <span style={{ fontSize: 13, color: C.ink }}>Has a sections drawing (tasks can name sections)</span>
               </label>
             </div>
 
@@ -23514,7 +23545,7 @@ function WindowLayoutView({ spaces, backdrop, groups, highlightGroupIds, selecte
     )}
     <svg
       viewBox={`${bb.x - pad} ${bb.y - pad} ${bb.w + pad * 2} ${bb.h + pad * 2}`}
-      role="img" aria-label={ariaLabel || "Window pane layout"}
+      role="img" aria-label={ariaLabel || "Sections drawing"}
       style={{ width: "100%", height: "auto", maxHeight: maxHeight || 420, display: "block" }}
     >
       {shapes.map((b, i) => (
@@ -23560,7 +23591,7 @@ function WindowLayoutView({ spaces, backdrop, groups, highlightGroupIds, selecte
         const lit = !dimming || gs.some(g => hl.has(g.id));
         const selected = !!(selectedIds && selectedIds.has(sp.gid));
         const points = sp.pts.map(p => p.join(",")).join(" ");
-        const label = "Pane " + (i + 1) + (grp ? " — " + gs.map(g => g.name).join(", ") : " — not in a group");
+        const label = "Section " + (i + 1) + (grp ? " — " + gs.map(g => g.name).join(", ") : " — not in a group");
         return (
           <g key={sp.gid}
             role={editable ? "button" : undefined} tabIndex={editable ? 0 : undefined} aria-label={editable ? label : undefined}
@@ -23629,7 +23660,7 @@ function TaskPaneLayout({ asset, groupIds, maxHeight }) {
       {open && plan.status === "ready" && (
         <div style={{ marginTop: 8, border: `1px solid ${C.border}`, borderRadius: 8, background: C.surface, padding: 8 }}>
           <WindowLayoutView spaces={plan.spaces} backdrop={plan.backdrop} groups={groups} highlightGroupIds={shown.map(g => g.id)} maxHeight={maxHeight || 160}
-            ariaLabel={"Panes this task covers: " + shown.map(g => g.name).join(", ")} />
+            ariaLabel={"Sections this task covers: " + shown.map(g => g.name).join(", ")} />
         </div>
       )}
       {open && plan.status === "error" && <div style={{ marginTop: 6, fontSize: 12, color: C.danger }}>{plan.error}</div>}
@@ -23684,7 +23715,7 @@ function WindowLayoutTabContent({ asset, canEdit, uploadBusy, uploadError, onUpl
 
   const headerRow = (
     <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
-      <span style={{ fontSize: 13, color: C.muted }}>{asset.floorPlanFileName ? asset.floorPlanFileName : "Pane layout"}</span>
+      <span style={{ fontSize: 13, color: C.muted }}>{asset.floorPlanFileName ? asset.floorPlanFileName : "Sections drawing"}</span>
       {canEdit && (
         <>
           <button type="button" disabled={uploadBusy} onClick={() => fileInputRef.current && fileInputRef.current.click()}
@@ -23701,10 +23732,10 @@ function WindowLayoutTabContent({ asset, canEdit, uploadBusy, uploadError, onUpl
   if (!asset.floorPlanUrl) {
     return (
       <div className="card" style={{ padding: 18 }}>
-        <p style={{ margin: "0 0 10px", fontSize: 14, color: C.ink }}>No pane layout uploaded yet.</p>
+        <p style={{ margin: "0 0 10px", fontSize: 14, color: C.ink }}>No sections drawing uploaded yet.</p>
         <p style={{ margin: "0 0 14px", fontSize: 13, color: C.empty }}>
-          Upload an SVG drawing of this window with each pane drawn as a shape titled
-          “Space” (the same convention as a floor plan). Then group the panes by how
+          Upload an SVG drawing of this asset with each section drawn as a shape titled
+          “Space” (the same convention as a floor plan). Then group the sections by how
           they are maintained, and point tasks at the groups.
         </p>
         {canEdit && (
@@ -23722,7 +23753,7 @@ function WindowLayoutTabContent({ asset, canEdit, uploadBusy, uploadError, onUpl
     );
   }
   if (plan.status !== "ready" && plan.status !== "error") {
-    return <div className="card" style={{ padding: 18, fontSize: 13, color: C.empty }}>Loading the pane layout…</div>;
+    return <div className="card" style={{ padding: 18, fontSize: 13, color: C.empty }}>Loading the sections drawing…</div>;
   }
   if (plan.status === "error") {
     return (
@@ -23737,8 +23768,8 @@ function WindowLayoutTabContent({ asset, canEdit, uploadBusy, uploadError, onUpl
     return (
       <div className="card" style={{ padding: 18 }}>
         {headerRow}
-        <p style={{ margin: 0, fontSize: 14, color: C.ink }}>That file has no panes in it.</p>
-        <p style={{ margin: "6px 0 0", fontSize: 13, color: C.empty }}>Each pane needs to be a shape titled “Space”. Replace the layout with one that has them.</p>
+        <p style={{ margin: 0, fontSize: 14, color: C.ink }}>That file has no sections in it.</p>
+        <p style={{ margin: "6px 0 0", fontSize: 13, color: C.empty }}>Each section needs to be a shape titled “Space”. Replace the drawing with one that has them.</p>
         {uploadError && <p style={{ margin: "10px 0 0", fontSize: 13, color: C.danger }}>{uploadError}</p>}
       </div>
     );
@@ -23754,14 +23785,14 @@ function WindowLayoutTabContent({ asset, canEdit, uploadBusy, uploadError, onUpl
           onPaneClick={togglePane} maxHeight={460} />
       </div>
       <p style={{ margin: "8px 0 0", fontSize: 12, color: C.muted }}>
-        {spaces.length} {spaces.length === 1 ? "pane" : "panes"}, {grouped} in a group{spaces.length - grouped > 0 ? " · " + (spaces.length - grouped) + " not grouped (dashed)" : ""}.
-        {canEdit ? " Tap panes to select them." : " Tap a pane to see its group."}
+        {spaces.length} {spaces.length === 1 ? "section" : "sections"}, {grouped} in a group{spaces.length - grouped > 0 ? " · " + (spaces.length - grouped) + " not grouped (dashed)" : ""}.
+        {canEdit ? " Tap sections to select them." : " Tap a section to see its group."}
       </p>
 
       {canEdit && dirty && (
         <div style={{ marginTop: 12, border: `1px solid ${C.border}`, borderRadius: 10, background: C.bg, padding: 12 }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 6 }}>
-            {editingId ? "Editing group" : "New group"} · {selected.size} {selected.size === 1 ? "pane" : "panes"} selected
+            {editingId ? "Editing group" : "New group"} · {selected.size} {selected.size === 1 ? "section" : "sections"} selected
           </div>
           <input type="text" value={name} onChange={e => setName(e.target.value)} placeholder="Group name, e.g. Bay 1 lower windows"
             aria-label="Group name" maxLength={80}
@@ -23780,7 +23811,7 @@ function WindowLayoutTabContent({ asset, canEdit, uploadBusy, uploadError, onUpl
 
       <div style={{ marginTop: 16 }}>
         <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 8 }}>Groups ({groups.length})</div>
-        {groups.length === 0 && <p style={{ margin: 0, fontSize: 13, color: C.empty }}>{canEdit ? "No groups yet. Select panes above and name the group." : "No groups yet."}</p>}
+        {groups.length === 0 && <p style={{ margin: 0, fontSize: 13, color: C.empty }}>{canEdit ? "No groups yet. Select sections above and name the group." : "No groups yet."}</p>}
         {groups.map(g => {
           const uses = (taskCountByGroup && taskCountByGroup[g.id]) || 0;
           const viewing = viewGroupId === g.id;
@@ -23791,7 +23822,7 @@ function WindowLayoutTabContent({ asset, canEdit, uploadBusy, uploadError, onUpl
               <button type="button" onClick={() => setViewGroupId(viewing ? null : g.id)} aria-pressed={viewing}
                 style={{ background: "none", border: "none", padding: 0, fontSize: 14, fontWeight: viewing ? 700 : 600, color: C.brandDark, textAlign: "left" }}>{g.name}</button>
               <span style={{ fontSize: 12, color: C.muted }}>
-                {n} {n === 1 ? "pane" : "panes"}{n === 0 ? " (none in this layout)" : ""}{uses ? " · " + uses + (uses === 1 ? " task" : " tasks") : ""}
+                {n} {n === 1 ? "section" : "sections"}{n === 0 ? " (none in this layout)" : ""}{uses ? " · " + uses + (uses === 1 ? " task" : " tasks") : ""}
               </span>
               {canEdit && (
                 <span style={{ marginLeft: "auto", display: "inline-flex", gap: 6 }}>
