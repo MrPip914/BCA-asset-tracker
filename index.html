@@ -1960,9 +1960,11 @@ function requiredCustomFieldsFor(model, kind, typeId) {
 // The first problem with a record's custom values, or "". Emptiness is never
 // falsiness: 0 and "0" are filled in. Values of fields the type does not carry
 // are ignored (they stay on the record, untouched).
-function validateCustomValues(model, kind, typeId, values) {
+function validateCustomValues(model, kind, typeId, values, visibleKeys) {
   const v = values && typeof values === "object" ? values : {};
-  const fields = customFieldsFor(model, kind, typeId);
+  // A task opened from a view shows only the fields that view picked; a rule
+  // about one it hides would refuse the save with nothing on screen to fix.
+  const fields = customFieldsFor(model, kind, typeId).filter(f => !visibleKeys || visibleKeys.includes(f.key));
   const required = new Set(requiredCustomFieldsFor(model, kind, typeId));
   for (const f of fields) {
     const raw = v[f.key];
@@ -2365,6 +2367,205 @@ function maintenanceStatusMeta(status) {
     done: { label: "Done", color: C.success },
   }[status] || { label: status || "", color: C.muted };
 }
+// ---------- VIEWS (2026-10-17) ----------
+// A view is a saved, per-person task list an editor sets up: who sees it, which
+// tasks (a query), which columns, which fields show when a task is opened from
+// it, and a manual order. Plan: /mnt/project-files/plans/views.md. Stored in ONE
+// Config blob, `views` = { list: [view] } -- an object, because the Edge
+// Function only stores optional config keys that are objects.
+//   view = { id, name, userEmails, conditions, columns, dialogFields, order }
+//   condition = { field, op: "=" | "!=", value, token, join: "and" | "or" }
+// `join` links a condition to the one BEFORE it (ignored on the first), and AND
+// binds tighter than OR. `token` names a prebuilt value that stands in for
+// `value`. `order` holds task keys ("<assetId>::<taskId>"): ordered tasks come
+// first, in that order, and everything else follows in the normal due order.
+const VIEW_TOKEN_CURRENT_USER = "CURRENT_USERNAME";
+const VIEW_TOKENS = [{ value: VIEW_TOKEN_CURRENT_USER, label: "[CURRENT USERNAME]" }];
+const VIEW_BUILTIN_FIELDS = [
+  { key: "task", label: "Task" },
+  { key: "asset", label: "Asset" },
+  { key: "kind", label: "Kind" },
+  { key: "status", label: "Status" },
+  { key: "type", label: "Type" },
+  { key: "owner", label: "Owner" },
+  { key: "notes", label: "Notes" },
+  { key: "frequency", label: "Frequency" },
+  { key: "dueDate", label: "Due date" },
+  { key: "lastDone", label: "Last done" },
+];
+const VIEW_DEFAULT_COLUMNS = ["task", "asset", "dueDate", "status"];
+// What a task shows when opened FROM a view. The task's name is always shown.
+const VIEW_DIALOG_FIELDS = [
+  { key: "schedule", label: "Schedule and due date" },
+  { key: "notes", label: "Notes" },
+  { key: "owner", label: "Owner" },
+  { key: "type", label: "Type" },
+  { key: "sections", label: "Section groups" },
+  { key: "files", label: "Files" },
+  { key: "history", label: "Service history" },
+  { key: "asset", label: "Link to the asset" },
+];
+const VIEW_CUSTOM_PREFIX = "custom:";
+
+// Every task custom field, whatever type carries it. Keys are namespaced so a
+// custom key can never collide with a built-in one.
+function viewFieldsFor(model) {
+  const custom = ((model && model.taskFields) || []).map(f => ({ key: VIEW_CUSTOM_PREFIX + f.key, label: f.label, custom: f }));
+  return [...VIEW_BUILTIN_FIELDS, ...custom];
+}
+function viewDialogFieldsFor(model) {
+  const custom = ((model && model.taskFields) || []).map(f => ({ key: VIEW_CUSTOM_PREFIX + f.key, label: f.label }));
+  return [...VIEW_DIALOG_FIELDS, ...custom];
+}
+
+function adoptViews(raw) {
+  const list = Array.isArray(raw && raw.list) ? raw.list : [];
+  const strs = v => (Array.isArray(v) ? v.filter(x => typeof x === "string" && x) : []);
+  return {
+    list: list.filter(v => v && typeof v.id === "string" && v.id).map(v => ({
+      id: v.id,
+      name: String(v.name || "Untitled view"),
+      userEmails: strs(v.userEmails).map(e => e.trim().toLowerCase()),
+      conditions: (Array.isArray(v.conditions) ? v.conditions : []).filter(c => c && typeof c.field === "string" && c.field).map(c => ({
+        field: c.field,
+        op: c.op === "!=" ? "!=" : "=",
+        value: c.value == null ? "" : String(c.value),
+        token: VIEW_TOKENS.some(t => t.value === c.token) ? c.token : "",
+        join: c.join === "or" ? "or" : "and",
+      })),
+      columns: Array.isArray(v.columns) ? strs(v.columns) : [...VIEW_DEFAULT_COLUMNS],
+      dialogFields: strs(v.dialogFields),
+      order: strs(v.order),
+    })),
+  };
+}
+
+// Which views a person sees: the ones naming their email. Sandbox has no
+// sign-in, so it shows every view (one local person).
+function viewsVisibleTo(list, email, sandbox) {
+  if (sandbox) return list;
+  const e = String(email || "").trim().toLowerCase();
+  return e ? list.filter(v => v.userEmails.includes(e)) : [];
+}
+
+// What a task dialog opened FROM a view shows. No view means the ordinary
+// dialog, which shows everything. The task's name is always shown.
+function viewDialogShows(view, key) { return !view || view.dialogFields.includes(key); }
+function viewVisibleCustomKeys(view) {
+  return view ? view.dialogFields.filter(k => k.startsWith(VIEW_CUSTOM_PREFIX)).map(k => k.slice(VIEW_CUSTOM_PREFIX.length)) : null;
+}
+
+function viewTaskKey(row) { return row.asset.id + "::" + row.item.id; }
+
+// A field's value as comparable text. Dates are ISO (yyyy-mm-dd), which is what
+// someone types into a query; viewFieldDisplay is the reading form.
+function viewFieldValue(row, key, model) {
+  const item = row.item;
+  switch (key) {
+    case "task": return item.task || "";
+    case "asset": return row.assetName || "";
+    case "kind": return isOneOffTask(item) ? "One-off" : "Scheduled";
+    case "status": return maintenanceStatusMeta(row.status).label;
+    case "type": {
+      const id = resolveWorkTypeId(model, "task", item.taskType);
+      return id === DEFAULT_WORK_TYPE_ID ? DEFAULT_WORK_TYPE_NAME : (taskTypeNameOf(model, id) || "");
+    }
+    case "owner": return item.owner || "";
+    case "notes": return item.notes || "";
+    case "frequency": return isOneOffTask(item) ? "" : (item.frequencyLabel || "");
+    case "dueDate": return row.due ? localDateString(row.due) : "";
+    case "lastDone": return dateOnly(item.lastPerformed) || "";
+    default:
+      if (key.startsWith(VIEW_CUSTOM_PREFIX)) {
+        const v = (item.custom || {})[key.slice(VIEW_CUSTOM_PREFIX.length)];
+        return v == null ? "" : String(v);
+      }
+      return "";
+  }
+}
+function viewFieldDisplay(row, key, model) {
+  const v = viewFieldValue(row, key, model);
+  if (!v) return "—";
+  if (key === "dueDate" || key === "lastDone") return formatDateOnly(v) || v;
+  if (key.startsWith(VIEW_CUSTOM_PREFIX)) {
+    const f = ((model && model.taskFields) || []).find(x => x.key === key.slice(VIEW_CUSTOM_PREFIX.length));
+    return f ? dataTypeDisplay(f, v) : v;
+  }
+  return v;
+}
+
+function viewTokenValue(token, ctx) {
+  if (token === VIEW_TOKEN_CURRENT_USER) return String((ctx && ctx.userName) || "").trim();
+  return "";
+}
+function viewNorm(s) { return String(s == null ? "" : s).replace(/\s+/g, " ").trim().toLowerCase(); }
+
+// One condition against one task row. Text compare, case and spacing ignored; a
+// multiple-choice field matches when ANY pick does; a blank value matches blank.
+// A token that resolves to nothing (no name known) matches nothing for "=" --
+// otherwise an unnamed person would be shown every unowned task.
+function viewConditionMatches(cond, row, model, ctx) {
+  const target = cond.token ? viewTokenValue(cond.token, ctx) : cond.value;
+  if (cond.token && !viewNorm(target)) return cond.op === "!=";
+  const raw = viewFieldValue(row, cond.field, model);
+  const def = cond.field.startsWith(VIEW_CUSTOM_PREFIX) ? ((model && model.taskFields) || []).find(f => f.key === cond.field.slice(VIEW_CUSTOM_PREFIX.length)) : null;
+  let values = def && def.dataType === "multiselect" ? multiValues(raw) : [raw];
+  if (!values.length) values = [""];
+  const eq = values.some(v => viewNorm(v) === viewNorm(target));
+  return cond.op === "!=" ? !eq : eq;
+}
+// The conditions as OR-groups of AND-runs: "A and B or C" is (A and B) or C.
+function viewConditionGroups(conditions) {
+  const groups = [];
+  (conditions || []).forEach((c, i) => {
+    if (i === 0 || c.join === "or" || !groups.length) groups.push([c]);
+    else groups[groups.length - 1].push(c);
+  });
+  return groups;
+}
+function viewMatches(view, row, model, ctx) {
+  const groups = viewConditionGroups(view.conditions);
+  if (!groups.length) return true;
+  return groups.some(g => g.every(c => viewConditionMatches(c, row, model, ctx)));
+}
+// The query in words, for the editor and the preview.
+function describeViewQuery(view, model) {
+  const fields = viewFieldsFor(model);
+  const one = c => {
+    const f = fields.find(x => x.key === c.field);
+    const val = c.token ? (VIEW_TOKENS.find(t => t.value === c.token) || {}).label : (c.value === "" ? "blank" : `"${c.value}"`);
+    return `${f ? f.label : c.field} ${c.op === "!=" ? "is not" : "is"} ${val}`;
+  };
+  const groups = viewConditionGroups(view.conditions);
+  if (!groups.length) return "Every task";
+  return groups.map(g => (groups.length > 1 && g.length > 1 ? "(" + g.map(one).join(" and ") + ")" : g.map(one).join(" and "))).join(" or ");
+}
+
+// Ordered tasks first, in the order stored; the rest in the Tasks tab's
+// default due order. A key whose task is not in `rows` is simply skipped.
+function orderViewRows(rows, order) {
+  const pos = new Map();
+  (order || []).forEach((k, i) => { if (!pos.has(k)) pos.set(k, i); });
+  const ordered = rows.filter(r => pos.has(viewTaskKey(r))).sort((a, b) => pos.get(viewTaskKey(a)) - pos.get(viewTaskKey(b)));
+  const rest = rows.filter(r => !pos.has(viewTaskKey(r))).sort((a, b) => maintenanceSortKey(a) - maintenanceSortKey(b));
+  return { ordered, rest };
+}
+// Move one ordered task a step among the ones on screen (`visible` = their keys,
+// in order). Swaps with that neighbour in the FULL order, so slots held by tasks
+// not currently matching are untouched.
+function moveInViewOrder(order, visible, key, dir) {
+  const i = visible.indexOf(key), j = i + dir;
+  if (i < 0 || j < 0 || j >= visible.length) return order;
+  const a = order.indexOf(key), b = order.indexOf(visible[j]);
+  if (a < 0 || b < 0) return order;
+  const next = [...order];
+  next[a] = visible[j];
+  next[b] = key;
+  return next;
+}
+function addToViewOrder(order, key) { return order.includes(key) ? order : [...order, key]; }
+function removeFromViewOrder(order, key) { return order.filter(k => k !== key); }
+
 // ---------- AUDIT: ASSOCIATED RESOURCES ----------
 // An audit entry is stamped with the asset it happened TO (`assetLabel`), but
 // most entries also concern OTHER assets: the room something moved out of and
@@ -5709,7 +5910,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-16.4";
+const APP_VERSION = "2026-10-17.1";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -5924,7 +6125,7 @@ function persistScope(scopeId) {
 // localStorage as the fallback. Assets is the default and is never written, so an
 // ordinary URL stays clean. An unknown value is ignored rather than trusted.
 const MAIN_TAB_STORAGE_KEY = CLIENT.storageKey("asset-tracker-main-tab");
-const MAIN_TABS = ["assets", "maintenance", "map", "audit"];
+const MAIN_TABS = ["assets", "maintenance", "views", "map", "audit"];
 
 function readInitialMainTab() {
   try {
@@ -6105,7 +6306,7 @@ function auditAppendOf(prev, next) {
 // entries in place of the log, and each other domain only when it is written.
 // The `_rev`s are added at send time, not here.
 const CONFIG_PAYLOAD_KEYS = ["columns", "changeTypes", "vendors", "peripheralsList", "usersList", "bulkItemTypes",
-  "typesList", "typeSettings", "typeCategories", "workModel", "nextAssetNumber", "authUsers"];
+  "typesList", "typeSettings", "typeCategories", "workModel", "views", "nextAssetNumber", "authUsers"];
 function perRecordBody(payload, dirty, assetChanges, appended) {
   const body = {
     _dirty: { ...dirty, assets: !!assetChanges },
@@ -6926,6 +7127,16 @@ const MOCK_SNAPSHOT = {
     // so the Relationships tab's reverse-field step has data to find.
     "Thermostat",
   ],
+  // Two saved task lists. Sandbox shows every view (it has no sign-in), and
+  // [CURRENT USERNAME] reads the sandbox name tag, so "Eric" sees his own tasks.
+  views: { list: [
+    { id: "view-mine", name: "My tasks", userEmails: [], dialogFields: ["schedule", "notes", "asset"],
+      columns: ["task", "asset", "dueDate", "status"], order: ["BCA0086::mnt-0086-drain"],
+      conditions: [{ field: "owner", op: "=", value: "", token: "CURRENT_USERNAME", join: "and" }, { field: "status", op: "!=", value: "Done", token: "", join: "and" }] },
+    { id: "view-projects", name: "Open projects", userEmails: [], dialogFields: ["notes", "owner"],
+      columns: ["task", "asset", "owner", "dueDate"], order: [],
+      conditions: [{ field: "kind", op: "=", value: "One-off", token: "", join: "and" }, { field: "status", op: "!=", value: "Done", token: "", join: "and" }] },
+  ] },
   // A STORED label list that is deliberately INCOMPLETE and RE-ORDERED: it omits
   // "People" (a shipped label) and puts Facilities before Equipment. So the
   // sandbox exercises ensureShippedLabels topping a stored list up, and proves
@@ -7777,6 +7988,10 @@ function AssetTracker() {
   const [typeLabels, setTypeLabels] = useState(DEFAULT_TYPE_LABELS);
   // Task/work types and custom fields -- see WORK MODEL. Wire key `workModel`.
   const [workModel, setWorkModel] = useState(() => adoptWorkModel(null));
+  // Views (saved task lists) -- see VIEWS. Wire key `views`.
+  const [viewsCfg, setViewsCfg] = useState(() => adoptViews(null));
+  const [activeViewId, setActiveViewId] = useState(null);
+  const [viewEdit, setViewEdit] = useState(null); // null | { id } | { id: "new" } -- Settings > Views editor
   const [showTypesManager, setShowTypesManager] = useState(false);
   const [newTypeName, setNewTypeName] = useState("");
   const [breakerTypes, setBreakerTypes] = useState(SEEDED_BREAKER_TYPES);
@@ -8643,6 +8858,7 @@ function AssetTracker() {
         : DEFAULT_TYPE_LABELS
     ));
     setWorkModel(adoptWorkModel(data.workModel));
+    setViewsCfg(adoptViews(data.views));
     // Absent/0/garbage all mean "never stored" — peekAssetNumber() seeds it
     // from the loaded assets instead, and the first asset created writes it.
     const storedNextNumber = Number(data.nextAssetNumber);
@@ -9206,6 +9422,7 @@ function AssetTracker() {
       typeSettings: nextTypeSettings = typeSettings,
       typeCategories: nextTypeLabels = typeLabels,
       workModel: nextWorkModel = workModel,
+      views: nextViews = viewsCfg,
       breakerTypes: nextBreakerTypes = breakerTypes,
       photos: nextPhotos = photos,
       nextAssetNumber: nextNumberToIssue = nextAssetNumber,
@@ -9260,7 +9477,7 @@ function AssetTracker() {
       config: nextColumns !== columns || nextChangeTypes !== changeTypes || nextVendors !== vendors
         || nextPeripheralsList !== peripheralsList || nextUsersList !== usersList || nextBulkItemTypes !== bulkItemTypes
         || nextTypesList !== typesList || nextTypeSettings !== typeSettings
-        || nextTypeLabels !== typeLabels || nextWorkModel !== workModel
+        || nextTypeLabels !== typeLabels || nextWorkModel !== workModel || nextViews !== viewsCfg
         || nextNumberToIssue !== nextAssetNumber
         || nextAuthUsers !== undefined,
       breakerTypes: nextBreakerTypes !== breakerTypes,
@@ -9301,6 +9518,7 @@ function AssetTracker() {
       setTypeSettings(nextTypeSettings);
       setTypeLabels(nextTypeLabels);
       setWorkModel(nextWorkModel);
+      setViewsCfg(nextViews);
       setBreakerTypes(nextBreakerTypes);
       setPhotos(nextPhotos);
       setNextAssetNumber(nextNumberToIssue);
@@ -9317,6 +9535,7 @@ function AssetTracker() {
         bulkItemTypes: nextBulkItemTypes, typesList: nextTypesList,
         typeSettings: nextTypeSettings, typeCategories: nextTypeLabels,
         workModel: nextWorkModel,
+        views: nextViews,
         breakerTypes: nextBreakerTypes,
         photos: nextPhotos,
         nextAssetNumber: nextNumberToIssue, _dirty: dirty,
@@ -9688,6 +9907,37 @@ function AssetTracker() {
   // The top-level Tasks badge counts what is OPEN. A count that grew with every
   // finished job would stop answering the only question a badge is for.
   const allOpenMaintenanceRows = allMaintenanceRows.filter(r => r.status !== "done");
+
+  // ---- Views: the ones this person is assigned (Sandbox has no sign-in, so it
+  // shows them all), the open one, and its tasks. [CURRENT USERNAME] is the
+  // name the allowlist gives the person, else their email.
+  const viewerEmail = auth ? auth.email : "";
+  const visibleViews = useMemo(() => viewsVisibleTo(viewsCfg.list, viewerEmail, sandboxMode), [viewsCfg, viewerEmail, sandboxMode]);
+  const activeView = visibleViews.find(v => v.id === activeViewId) || visibleViews[0] || null;
+  const viewUserName = sandboxMode ? (currentUser || "") : (auth ? (auth.name || auth.email) : "");
+  const activeViewRows = useMemo(
+    () => (activeView ? allMaintenanceRows.filter(r => viewMatches(activeView, r, workModel, { userName: viewUserName })) : []),
+    [activeView, allMaintenanceRows, workModel, viewUserName]
+  );
+  // A remembered Views tab with nothing assigned (or not yet loaded) falls back
+  // to Assets rather than painting a blank page.
+  useEffect(() => {
+    if (mainTab === "views" && assets !== null && !visibleViews.length) setMainTab("assets");
+  }, [mainTab, assets, visibleViews.length]);
+  // The order is part of the view, so ordering saves the view blob (config
+  // domain, editors only), not the assets.
+  function saveViewOrder(viewId, order) {
+    persist(assets, { views: { list: viewsCfg.list.map(v => (v.id === viewId ? { ...v, order } : v)) } });
+  }
+  function saveViewDraft(view) {
+    const exists = viewsCfg.list.some(v => v.id === view.id);
+    persist(assets, { views: { list: exists ? viewsCfg.list.map(v => (v.id === view.id ? view : v)) : [...viewsCfg.list, view] } });
+    setViewEdit(null);
+  }
+  function deleteViewById(id) {
+    persist(assets, { views: { list: viewsCfg.list.filter(v => v.id !== id) } });
+    setViewEdit(null);
+  }
 
   // The History table's rows: every change entry on every active asset,
   // flattened the same way allMaintenanceRows flattens schedules. Archived
@@ -11809,7 +12059,7 @@ function AssetTracker() {
   // The draft's id is the ITEM's id, not a fresh one -- the dialog's gallery is
   // keyed on it, so minting one here would show an empty gallery and file the
   // next photo against a task that does not exist.
-  function openMaintenanceEdit(itemId, assetId) {
+  function openMaintenanceEdit(itemId, assetId, viewId) {
     const ownerId = assetId === undefined || assetId === null ? selectedId : assetId;
     const asset = assets ? assets.find(a => a.id === ownerId) : null;
     const item = asset ? (asset.maintenanceItems || []).find(m => m && m.id === itemId) : null;
@@ -11831,7 +12081,8 @@ function AssetTracker() {
       custom: item.custom && typeof item.custom === "object" ? { ...item.custom } : {},
       paneGroupIds: Array.isArray(item.paneGroupIds) ? [...item.paneGroupIds] : [],
     });
-    setMaintenanceModal({ mode: "edit", itemId });
+    // `viewId` set means opened from a view: the dialog shows only that view's fields.
+    setMaintenanceModal({ mode: "edit", itemId, ...(viewId ? { viewId } : {}) });
   }
 
   async function addMaintenanceItem() {
@@ -11909,7 +12160,7 @@ function AssetTracker() {
       ...(livePaneGroupIds(workTarget, maintenanceDraft.paneGroupIds).length || original.paneGroupIds
         ? { paneGroupIds: livePaneGroupIds(workTarget, maintenanceDraft.paneGroupIds) } : {}),
     };
-    if (validateCustomValues(workModel, "task", updated.taskType, updated.custom)) return;
+    if (validateCustomValues(workModel, "task", updated.taskType, updated.custom, viewVisibleCustomKeys(viewsCfg.list.find(v => v.id === maintenanceModal.viewId)))) return;
     const mkEntry = (field, from, to) => ({
       at: new Date().toISOString(), by: currentUser || "", assetLabel: workTargetId,
       assetType: workTarget.type, action: "maintenance_edited", field: `${original.task} — ${field}`, from, to,
@@ -14885,11 +15136,13 @@ function AssetTracker() {
     setSettingsSection(key);
   }
   function selectSettingsSection(key) {
+    setViewEdit(null);
     setRelationshipsEdit(null);
     try { window.history.replaceState(window.history.state, "", settingsUrl(key)); } catch (e) { /* no history API */ }
     setSettingsSection(key);
   }
   function closeSettings() {
+    setViewEdit(null);
     setRelationshipsEdit(null);
     // Pushed by openSettings: popping it is what closes (see the popstate
     // handler). Arrived on a ?settings= link instead: strip the param in place.
@@ -14992,6 +15245,52 @@ function AssetTracker() {
           types={[{ id: DEFAULT_WORK_TYPE_ID, name: DEFAULT_WORK_TYPE_NAME }, ...changeTypes.map(name => ({ id: name, name }))]}
           onModel={next => persist(assets, { workModel: next })}
         />
+      );
+    }
+    if (key === "views") {
+      const editing = viewEdit && viewEdit.id !== "new" ? viewsCfg.list.find(v => v.id === viewEdit.id) : null;
+      const nameFor = e => { const u = accessUsers.find(x => x.email === e); return (u && u.name) || e; };
+      return (
+        <div style={settingsCardStyle}>
+          <div style={settingsHeadingStyle}>
+            Views
+            <HelpTip label="About views" text="A view is a saved task list for particular people: you choose who sees it, which tasks it lists, which columns it has, and which fields show when they open a task from it. Each person sees only the views assigned to them, in the Views tab." />
+          </div>
+          {viewsCfg.list.length === 0 && <div style={{ fontSize: 13, color: C.empty, marginBottom: 12 }}>No views yet.</div>}
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            {viewsCfg.list.map((v, i) => (
+              <div key={v.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderTop: i === 0 ? "none" : `1px solid ${C.border}` }}>
+                <button type="button" onClick={() => setViewEdit({ id: v.id })} style={{ flex: 1, minWidth: 0, textAlign: "left", background: "none", border: "none", padding: 0, cursor: "pointer" }}>
+                  <div style={{ fontSize: 14, color: C.ink }}>{v.name}</div>
+                  <div style={{ fontSize: 12, color: C.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {v.userEmails.length ? "Shown to: " + v.userEmails.map(nameFor).join(", ") : "Not assigned to anyone"}
+                  </div>
+                </button>
+                <button onClick={() => setViewEdit({ id: v.id })} className="icon-btn" aria-label={`Edit ${v.name}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}>
+                  <Pencil size={14} color={C.muted} />
+                </button>
+              </div>
+            ))}
+          </div>
+          <button type="button" onClick={() => setViewEdit({ id: "new" })}
+            style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 4, padding: "6px 11px", borderRadius: 8, fontSize: 13, fontWeight: 600, border: `1.5px dashed ${C.border}`, background: "none", color: C.brandDark }}>
+            <Plus size={13} /> Add view
+          </button>
+          {viewEdit && (viewEdit.id === "new" || editing) && (
+            <ViewEditor
+              key={viewEdit.id}
+              initial={editing}
+              accessUsers={accessUsers}
+              sandbox={sandboxMode}
+              rows={allMaintenanceRows}
+              model={workModel}
+              previewUserName={viewUserName}
+              onSave={saveViewDraft}
+              onDelete={deleteViewById}
+              onCancel={() => setViewEdit(null)}
+            />
+          )}
+        </div>
       );
     }
     if (key === "relationships") {
@@ -15512,6 +15811,11 @@ function AssetTracker() {
               changeModal took it first, for the same reason. */}
           {maintenanceModal && (() => {
             const editing = maintenanceModal.mode === "edit";
+            // Opened from a view: only the fields that view picked are shown, there
+            // is no Delete, and a view-only person gets the same dialog read-only.
+            const dialogView = maintenanceModal.viewId ? (viewsCfg.list.find(v => v.id === maintenanceModal.viewId) || null) : null;
+            const vShow = key => viewDialogShows(dialogView, key);
+            const viewReadOnly = !!dialogView && !canEdit;
             // The stored record behind an edit. The draft holds what is being
             // typed; this is what is on the sheet, and it is what the status,
             // the dates and the completion button read.
@@ -15522,12 +15826,12 @@ function AssetTracker() {
             const taskDone = taskItem ? taskIsDone(taskItem) : false;
             // A Custom frequency must describe a real rule before Save lights.
             const maintenanceFrequencyOk = maintenanceDraft.kind === TASK_KIND_ONEOFF || !!frequencyFromDraft(maintenanceDraft);
-            const taskCustomError = validateCustomValues(workModel, "task", maintenanceDraft.taskType, maintenanceDraft.custom);
+            const taskCustomError = validateCustomValues(workModel, "task", maintenanceDraft.taskType, maintenanceDraft.custom, viewVisibleCustomKeys(dialogView));
             const taskStatusMeta = taskItem ? maintenanceStatusMeta(maintenanceStatusOf(taskItem)) : null;
             // Only ever shown for a dialog opened somewhere OTHER than the
             // asset's own page -- workDialogAssetId is null exactly when the
             // asset is already open, where a link to it would lead nowhere.
-            const linkAsset = editing && workDialogAssetId !== null ? workTarget : null;
+            const linkAsset = editing && workDialogAssetId !== null && vShow("asset") ? workTarget : null;
             const LinkAssetIcon = linkAsset ? iconFor(linkAsset.type) : null;
             // This item's own service history, newest first. Read off the
             // target asset rather than changesByMaintenance, which is built
@@ -15584,10 +15888,13 @@ function AssetTracker() {
                     task is described by an interval and its last completion, a
                     one-off by a single due date. Offering all four at once
                     would let someone fill in a pair the app then ignores. */}
+                <fieldset disabled={viewReadOnly} style={{ border: "none", padding: 0, margin: 0, minWidth: 0 }}>
+                {vShow("schedule") && (
                 <TaskKindToggle
                   value={maintenanceDraft.kind}
                   onChange={k => setMaintenanceDraft({ ...maintenanceDraft, kind: k })}
                 />
+                )}
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
                   <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
                     <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Task</span>
@@ -15600,7 +15907,7 @@ function AssetTracker() {
                   </label>
                   {/* A schedule survives on its task string because "Filter
                       clean" says everything. A project does not. */}
-                  {workBuiltinShown(workModel, "task", maintenanceDraft.taskType, "notes") && (
+                  {workBuiltinShown(workModel, "task", maintenanceDraft.taskType, "notes") && vShow("notes") && (
 <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
                     <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Notes</span>
                     <textarea
@@ -15612,7 +15919,7 @@ function AssetTracker() {
                     />
                   </label>
 )}
-                  {maintenanceDraft.kind === TASK_KIND_ONEOFF ? (
+                  {vShow("schedule") && (maintenanceDraft.kind === TASK_KIND_ONEOFF ? (
                     <>
                     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Due date</span>
@@ -15673,8 +15980,8 @@ function AssetTracker() {
                         />
                       )}
                     </>
-                  )}
-                  {workBuiltinShown(workModel, "task", maintenanceDraft.taskType, "owner") && (
+                  ))}
+                  {workBuiltinShown(workModel, "task", maintenanceDraft.taskType, "owner") && vShow("owner") && (
 <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Owner</span>
                     <input
@@ -15688,7 +15995,7 @@ function AssetTracker() {
                   {/* Task type: decides which custom fields follow. Only offered
                       once at least one type exists, so a school that never sets
                       any up sees the dialog exactly as before. */}
-                  {(workModel.taskTypes.length > 0 || maintenanceDraft.taskType) && (
+                  {(workModel.taskTypes.length > 0 || maintenanceDraft.taskType) && vShow("type") && (
                     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Type</span>
                       {/* hideLabel under our own heading: a labelled PickerField re-opens itself after a choice (BUGS.md). */}
@@ -15704,12 +16011,13 @@ function AssetTracker() {
                     </div>
                   )}
                   <CustomFieldInputs model={workModel} kind="task" typeId={maintenanceDraft.taskType} values={maintenanceDraft.custom}
+                    visibleKeys={viewVisibleCustomKeys(dialogView)}
                     onChange={custom => setMaintenanceDraft({ ...maintenanceDraft, custom })} />
                   {/* Which panes this task covers: only a window with at least one
                       group has anything to pick. Chips rather than a PickerField --
                       a window has a handful of groups and the choice is "which of
                       these", several at once, with the layout lighting up below. */}
-                  {workTarget && isWindowLayoutType(workTarget.type) && windowGroupsOf(workTarget).length > 0 && (
+                  {workTarget && vShow("sections") && isWindowLayoutType(workTarget.type) && windowGroupsOf(workTarget).length > 0 && (
                     <div style={{ display: "flex", flexDirection: "column", gap: 6, gridColumn: "1 / -1" }}>
                       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Section groups</span>
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -15730,7 +16038,9 @@ function AssetTracker() {
                     </div>
                   )}
                 </div>
+                </fieldset>
                 {taskCustomError && <div role="alert" style={{ fontSize: 12, color: C.danger, marginTop: 8 }}>{taskCustomError}</div>}
+                {vShow("files") && (
                 <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
                   <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 8 }}>Files</div>
                   <PhotoGallery
@@ -15747,10 +16057,11 @@ function AssetTracker() {
                     emptyText="No files on this task."
                   />
                 </div>
+                )}
                 {/* What has actually been done, read-only. A completion logged
                     from here lands in it, so the dialog answers "is this due?"
                     without having to leave for the asset's own card. */}
-                {taskHistory.length > 0 && (
+                {taskHistory.length > 0 && vShow("history") && (
                   <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
                     <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 8 }}>
                       Service history ({taskHistory.length})
@@ -15780,7 +16091,7 @@ function AssetTracker() {
                 <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "flex-end", marginTop: 16, flexWrap: "wrap" }}>
                   {/* Delete sits at the far left, away from Save, and still goes
                       through its own confirmation. */}
-                  {editing && (
+                  {editing && !dialogView && (
                     <button
                       onClick={() => setConfirmMaintenanceDelete(maintenanceModal.itemId)}
                       style={{ marginRight: "auto", padding: "8px 12px", background: "transparent", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.danger, cursor: "pointer" }}
@@ -15792,7 +16103,7 @@ function AssetTracker() {
                       button is: there is nothing left to complete, and offering
                       it would read as a way to log a SECOND completion of a job
                       that happens once. */}
-                  {editing && !taskDone && (
+                  {editing && !taskDone && !viewReadOnly && (
                     <button
                       onClick={() => openMaintenanceComplete(maintenanceModal.itemId, workDialogAssetId)}
                       style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brand}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.brand }}
@@ -15800,7 +16111,8 @@ function AssetTracker() {
                       {maintenanceDraft.kind === TASK_KIND_ONEOFF ? "Mark complete…" : "Log completion…"}
                     </button>
                   )}
-                  <button onClick={() => setMaintenanceModal(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                  <button onClick={() => setMaintenanceModal(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>{viewReadOnly ? "Close" : "Cancel"}</button>
+                  {!viewReadOnly && (
                   <button
                     onClick={editing ? saveMaintenanceEdit : addMaintenanceItem}
                     disabled={!maintenanceDraft.task.trim() || !workTarget || !maintenanceFrequencyOk || !!taskCustomError}
@@ -15808,6 +16120,7 @@ function AssetTracker() {
                   >
                     {editing ? "Save changes" : (maintenanceDraft.kind === TASK_KIND_ONEOFF ? "Add task" : "Schedule")}
                   </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -17992,6 +18305,9 @@ function AssetTracker() {
           {[
             { key: "assets", label: "Assets" },
             { key: "maintenance", label: "Tasks", count: allOpenMaintenanceRows.length, urgent: maintenanceOverdueTotal > 0 },
+            // Only for someone who has a view assigned; no count, since a view's
+            // list is whatever its query says.
+            ...(visibleViews.length ? [{ key: "views", label: "Views" }] : []),
             // No count, deliberately, same reasoning Audit already has below:
             // it answers "is there a plan here", not "how many", and there's
             // no natural number to put in parentheses at this scope anyway.
@@ -18652,6 +18968,33 @@ function AssetTracker() {
         </>
         )}
 
+        {mainTab === "views" && activeView && (
+        <>
+          {visibleViews.length > 1 && (
+            <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
+              {visibleViews.map(v => {
+                const active = v.id === activeView.id;
+                return (
+                  <button key={v.id} onClick={() => setActiveViewId(v.id)}
+                    style={{ padding: "5px 12px", borderRadius: 999, fontSize: 13, fontWeight: active ? 700 : 500, background: active ? C.brand : "transparent", color: active ? "#fff" : C.muted, border: `1px solid ${active ? C.brand : C.border}` }}>
+                    {v.name}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          <ViewTaskList
+            view={activeView}
+            rows={activeViewRows}
+            model={workModel}
+            canOrder={!!canEdit}
+            onOrder={order => saveViewOrder(activeView.id, order)}
+            onOpen={r => openMaintenanceEdit(r.item.id, r.asset.id, activeView.id)}
+            emptyText="No tasks match this view."
+          />
+        </>
+        )}
+
         {mainTab === "map" && (() => {
           const mapScopeAsset = scopeId ? assets.find(a => a.id === scopeId) : null;
           return (
@@ -19219,8 +19562,251 @@ function CustomValuesLine({ model, kind, typeId, values }) {
 
 // The custom-field inputs for one record, under a type. Used by the task dialog
 // (and the work dialog next). `values` is the record's `custom` object.
-function CustomFieldInputs({ model, kind, typeId, values, onChange }) {
-  const fields = customFieldsFor(model, kind, typeId);
+// ---------------------------------------------------------------- VIEWS UI
+// A view's task list. `rows` are the tasks that already matched the query. Ordered
+// tasks sit on top in their stored order, the rest below in the Tasks tab's due
+// order. `canOrder` shows the order controls (editors only); `onOpen` makes a row
+// open its task (left off in the Settings preview, where nothing opens).
+function ViewTaskList({ view, rows, model, canOrder, onOrder, onOpen, emptyText }) {
+  const fields = viewFieldsFor(model);
+  const cols = view.columns.map(k => fields.find(f => f.key === k)).filter(Boolean);
+  const shown = cols.length ? cols : [fields[0]];
+  const { ordered, rest } = orderViewRows(rows, view.order);
+  const visibleKeys = ordered.map(viewTaskKey);
+  const widthOf = f => (f.key === "task" ? 240 : f.key === "notes" ? 260 : f.key === "asset" ? 180 : 140);
+  const grid = (canOrder ? "104px " : "") + shown.map(f => widthOf(f) + "px").join(" ");
+  const iconBtn = { background: "none", border: "none", padding: 3, borderRadius: 4, display: "flex", cursor: "pointer" };
+  const renderRow = (r, i, isOrdered) => {
+    const key = viewTaskKey(r);
+    const pos = visibleKeys.indexOf(key);
+    return (
+      <div
+        key={key}
+        className={onOpen ? "row-body" : undefined}
+        onClick={onOpen ? () => onOpen(r) : undefined}
+        style={{ display: "grid", gridTemplateColumns: grid, alignItems: "center", cursor: onOpen ? "pointer" : "default", background: C.surface, borderTop: `1px solid ${C.border}`, minWidth: "max-content" }}
+      >
+        {canOrder && (
+          <div onClick={e => e.stopPropagation()} style={{ padding: "6px 10px", display: "flex", alignItems: "center", gap: 2 }}>
+            {isOrdered ? (
+              <>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted, width: 22 }}>{pos + 1}</span>
+                <button type="button" className="icon-btn" aria-label="Move up" disabled={pos === 0} onClick={() => onOrder(moveInViewOrder(view.order, visibleKeys, key, -1))} style={{ ...iconBtn, opacity: pos === 0 ? 0.3 : 1 }}><ChevronUp size={14} color={C.muted} /></button>
+                <button type="button" className="icon-btn" aria-label="Move down" disabled={pos === ordered.length - 1} onClick={() => onOrder(moveInViewOrder(view.order, visibleKeys, key, 1))} style={{ ...iconBtn, opacity: pos === ordered.length - 1 ? 0.3 : 1 }}><ChevronDown size={14} color={C.muted} /></button>
+                <button type="button" className="icon-btn" aria-label="Remove from the order" onClick={() => onOrder(removeFromViewOrder(view.order, key))} style={iconBtn}><X size={14} color={C.muted} /></button>
+              </>
+            ) : (
+              <button type="button" aria-label="Add to the order" onClick={() => onOrder(addToViewOrder(view.order, key))} style={{ padding: "3px 8px", fontSize: 11, fontWeight: 600, border: `1px dashed ${C.border}`, borderRadius: 6, background: "none", color: C.brandDark, cursor: "pointer" }}>Set order</button>
+            )}
+          </div>
+        )}
+        {shown.map(f => (
+          <div key={f.key} style={{ padding: "12px 14px", fontSize: 13, color: f.key === "task" ? C.ink : C.muted, fontWeight: f.key === "task" ? 600 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {f.key === "status"
+              ? <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: maintenanceStatusMeta(r.status).color }}>{viewFieldDisplay(r, f.key, model)}</span>
+              : viewFieldDisplay(r, f.key, model)}
+          </div>
+        ))}
+      </div>
+    );
+  };
+  return (
+    <div style={{ border: `1px solid ${C.border}`, background: C.surface, borderRadius: 10, overflowX: "auto" }}>
+      <div style={{ display: "grid", gridTemplateColumns: grid, background: C.brandDark, color: C.onBrand, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", minWidth: "max-content" }}>
+        {canOrder && <div style={{ padding: "12px 14px" }}>Order</div>}
+        {shown.map(f => <div key={f.key} style={{ padding: "12px 14px" }}>{f.label}</div>)}
+      </div>
+      {rows.length === 0 && <div style={{ padding: 28, textAlign: "center", color: C.empty, fontSize: 14 }}>{emptyText || "No tasks match."}</div>}
+      {ordered.map((r, i) => renderRow(r, i, true))}
+      {ordered.length > 0 && rest.length > 0 && (
+        <div style={{ padding: "6px 14px", fontSize: 11, color: C.muted, background: C.bg, borderTop: `1px solid ${C.border}`, minWidth: "max-content" }}>Not ordered yet</div>
+      )}
+      {rest.map((r, i) => renderRow(r, i, false))}
+    </div>
+  );
+}
+
+// The Settings > Views editor: who sees the view, which tasks (query), the
+// columns, the fields shown when a task opens from it, and the task order (with
+// a preview as one of the assigned people, since [CURRENT USERNAME] reads
+// differently for each). A draft, saved once.
+function ViewEditor({ initial, accessUsers, sandbox, rows, model, previewUserName, onSave, onDelete, onCancel }) {
+  const [draft, setDraft] = useState(() => initial || {
+    id: crypto.randomUUID(), name: "", userEmails: [], conditions: [],
+    columns: [...VIEW_DEFAULT_COLUMNS], dialogFields: ["schedule", "notes", "owner"], order: [],
+  });
+  const [previewAs, setPreviewAs] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const fields = viewFieldsFor(model);
+  const dialogFields = viewDialogFieldsFor(model);
+  const set = patch => setDraft(d => ({ ...d, ...patch }));
+  const setCond = (i, patch) => set({ conditions: draft.conditions.map((c, j) => (j === i ? { ...c, ...patch } : c)) });
+  const toggleIn = (list, v) => (list.includes(v) ? list.filter(x => x !== v) : [...list, v]);
+  const lbl = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent };
+  const sectionStyle = { marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.border}` };
+  const chip = on => ({ display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 11px", borderRadius: 999, fontSize: 13, fontWeight: on ? 700 : 500, border: `1.5px solid ${on ? C.brand : C.border}`, background: on ? C.bg : C.surface, color: C.ink, cursor: "pointer" });
+  const iconBtn = { background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex", cursor: "pointer" };
+  const people = [...accessUsers];
+  draft.userEmails.forEach(e => { if (!people.some(u => u.email === e)) people.push({ email: e, name: "" }); });
+  const nameOfEmail = e => { const u = people.find(x => x.email === e); return (u && u.name) || e; };
+  const previewEmail = draft.userEmails.includes(previewAs) ? previewAs : "";
+  const userName = previewEmail ? nameOfEmail(previewEmail) : previewUserName;
+  const matched = rows.filter(r => viewMatches(draft, r, model, { userName }));
+  const fieldLabel = k => (fields.find(f => f.key === k) || {}).label || k;
+  const cols = draft.columns.filter(k => fields.some(f => f.key === k));
+  const canSave = !!draft.name.trim();
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
+      <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 22, boxShadow: "0 8px 24px rgba(42,52,57,0.16)", width: "100%", maxWidth: 720, maxHeight: "92vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ fontWeight: 700, color: C.brandDark }}>{initial ? "Edit view" : "New view"}</div>
+          <button onClick={onCancel} aria-label="Close" className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+        </div>
+
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={lbl}>Name</span>
+          <input value={draft.name} onChange={e => set({ name: e.target.value })} placeholder="e.g. My open tasks"
+            style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }} />
+        </label>
+
+        <div style={sectionStyle}>
+          <div style={{ ...lbl, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
+            Shown to
+            <HelpTip label="About who sees a view" text="The view appears in the Views tab only for the people ticked here. Pick from the people who can sign in (Settings > Access)." />
+          </div>
+          {sandbox && <div style={{ fontSize: 12, color: C.muted, marginBottom: 6 }}>Sandbox has no sign-in, so every view shows in the Views tab here.</div>}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {people.length === 0 && <span style={{ fontSize: 13, color: C.empty }}>Nobody to pick.</span>}
+            {people.map(u => {
+              const on = draft.userEmails.includes(u.email);
+              return (
+                <button key={u.email} type="button" aria-pressed={on} onClick={() => set({ userEmails: toggleIn(draft.userEmails, u.email) })} style={chip(on)} title={u.email}>
+                  {u.name || u.email}{on && <Check size={13} />}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div style={sectionStyle}>
+          <div style={{ ...lbl, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
+            Tasks shown
+            <HelpTip label="About the query" text="Leave it empty to show every task. Each line compares one field to a value. And is applied before Or, so 'A and B or C' means (A and B) or C. [CURRENT USERNAME] stands for the name of whoever is signed in, so one view can show each person their own tasks." />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {draft.conditions.map((c, i) => (
+              <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+                <div style={{ width: 72, flexShrink: 0 }}>
+                  {i === 0
+                    ? <span style={{ fontSize: 13, color: C.muted }}>Where</span>
+                    : <PickerField label="Join" hideLabel value={c.join} onChange={v => setCond(i, { join: v })} options={["and", "or"]} labelForOption={v => (v === "and" ? "And" : "Or")} title="Join with the line above" />}
+                </div>
+                <div style={{ width: 160, flexShrink: 0 }}>
+                  <PickerField label="Field" hideLabel value={c.field} onChange={v => setCond(i, { field: v })} options={fields.map(f => f.key)} labelForOption={fieldLabel} title="Select field" />
+                </div>
+                <div style={{ width: 96, flexShrink: 0 }}>
+                  <PickerField label="Comparison" hideLabel value={c.op} onChange={v => setCond(i, { op: v })} options={["=", "!="]} labelForOption={v => (v === "=" ? "is" : "is not")} title="Select comparison" />
+                </div>
+                {c.token ? (
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "6px 6px 6px 11px", borderRadius: 10, background: C.bg, border: `1.5px solid ${C.border}`, fontSize: 13, fontWeight: 600, color: C.brandDark }}>
+                    {(VIEW_TOKENS.find(t => t.value === c.token) || {}).label}
+                    <button type="button" className="icon-btn" aria-label="Type a value instead" onClick={() => setCond(i, { token: "" })} style={iconBtn}><X size={13} color={C.muted} /></button>
+                  </span>
+                ) : (
+                  <>
+                    <input value={c.value} onChange={e => setCond(i, { value: e.target.value })} placeholder="value" aria-label="Value"
+                      style={{ flex: "1 1 120px", minWidth: 100, padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }} />
+                    {VIEW_TOKENS.map(t => (
+                      <button key={t.value} type="button" onClick={() => setCond(i, { token: t.value })}
+                        style={{ padding: "6px 9px", fontSize: 12, fontWeight: 600, border: `1px dashed ${C.border}`, borderRadius: 8, background: "none", color: C.brandDark, cursor: "pointer" }}>Use {t.label}</button>
+                    ))}
+                  </>
+                )}
+                <button type="button" className="icon-btn" aria-label="Remove this line" onClick={() => set({ conditions: draft.conditions.filter((_, j) => j !== i) })} style={iconBtn}><Trash2 size={14} color={C.danger} /></button>
+              </div>
+            ))}
+          </div>
+          <button type="button" onClick={() => set({ conditions: [...draft.conditions, { field: "owner", op: "=", value: "", token: "", join: "and" }] })}
+            style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 4, padding: "6px 11px", borderRadius: 8, fontSize: 13, fontWeight: 600, border: `1.5px dashed ${C.border}`, background: "none", color: C.brandDark }}>
+            <Plus size={13} /> Add a line
+          </button>
+          <div style={{ fontSize: 12, color: C.muted, marginTop: 8 }}>{describeViewQuery(draft, model)}</div>
+        </div>
+
+        <div style={sectionStyle}>
+          <div style={{ ...lbl, marginBottom: 8 }}>Columns in the list</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
+            {cols.map((k, i) => (
+              <div key={k} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13, color: C.ink }}>
+                <span style={{ flex: 1 }}>{fieldLabel(k)}</span>
+                <button type="button" className="icon-btn" aria-label={`Move ${fieldLabel(k)} left`} disabled={i === 0} onClick={() => { const n = [...cols]; [n[i - 1], n[i]] = [n[i], n[i - 1]]; set({ columns: n }); }} style={{ ...iconBtn, opacity: i === 0 ? 0.3 : 1 }}><ChevronUp size={14} color={C.muted} /></button>
+                <button type="button" className="icon-btn" aria-label={`Move ${fieldLabel(k)} right`} disabled={i === cols.length - 1} onClick={() => { const n = [...cols]; [n[i + 1], n[i]] = [n[i], n[i + 1]]; set({ columns: n }); }} style={{ ...iconBtn, opacity: i === cols.length - 1 ? 0.3 : 1 }}><ChevronDown size={14} color={C.muted} /></button>
+                <button type="button" className="icon-btn" aria-label={`Remove ${fieldLabel(k)}`} onClick={() => set({ columns: cols.filter(x => x !== k) })} style={iconBtn}><X size={14} color={C.muted} /></button>
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {fields.filter(f => !cols.includes(f.key)).map(f => (
+              <button key={f.key} type="button" onClick={() => set({ columns: [...cols, f.key] })} style={{ ...chip(false), padding: "4px 10px", fontSize: 12 }}>
+                <Plus size={11} /> {f.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div style={sectionStyle}>
+          <div style={{ ...lbl, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
+            Fields shown when a task is opened
+            <HelpTip label="About task fields" text="Opening a task from this view shows only the fields ticked here, to keep the person on what they need. The task's name is always shown. There is no Delete button on a task opened from a view." />
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {dialogFields.map(f => {
+              const on = draft.dialogFields.includes(f.key);
+              return (
+                <button key={f.key} type="button" aria-pressed={on} onClick={() => set({ dialogFields: toggleIn(draft.dialogFields, f.key) })} style={chip(on)}>
+                  {f.label}{on && <Check size={13} />}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div style={sectionStyle}>
+          <div style={{ ...lbl, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
+            Task order
+            <HelpTip label="About task order" text="Tasks you give an order sit at the top of the view, in that order. Everything else follows below, soonest due first, until it is given an order." />
+          </div>
+          {draft.userEmails.length > 0 && (
+            <div style={{ marginBottom: 10, maxWidth: 260 }}>
+              <PickerField label="Preview as" value={previewEmail} onChange={setPreviewAs}
+                options={["", ...draft.userEmails]} labelForOption={e => (e ? nameOfEmail(e) : "Me")} title="Preview as" />
+            </div>
+          )}
+          <ViewTaskList view={draft} rows={matched} model={model} canOrder onOrder={order => set({ order })} emptyText="No tasks match this view." />
+        </div>
+
+        <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "flex-end", marginTop: 20, flexWrap: "wrap" }}>
+          {initial && !confirmDelete && (
+            <button onClick={() => setConfirmDelete(true)} style={{ marginRight: "auto", padding: "8px 12px", background: "transparent", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.danger, cursor: "pointer" }}>Delete view</button>
+          )}
+          {initial && confirmDelete && (
+            <span style={{ marginRight: "auto", display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: C.danger }}>
+              Delete this view?
+              <button onClick={() => onDelete(draft.id)} style={{ padding: "6px 12px", background: C.danger, color: "#fff", border: "none", borderRadius: 8, fontWeight: 600, fontSize: 13 }}>Delete</button>
+              <button onClick={() => setConfirmDelete(false)} style={{ padding: "6px 12px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 8, fontWeight: 600, fontSize: 13, color: C.ink }}>Keep</button>
+            </span>
+          )}
+          <button onClick={onCancel} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+          <button onClick={() => canSave && onSave({ ...draft, name: draft.name.trim(), columns: cols })} disabled={!canSave}
+            style={{ padding: "8px 14px", background: canSave ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Save view</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CustomFieldInputs({ model, kind, typeId, values, onChange, visibleKeys }) {
+  const fields = customFieldsFor(model, kind, typeId).filter(f => !visibleKeys || visibleKeys.includes(f.key));
   if (!fields.length) return null;
   const required = new Set(requiredCustomFieldsFor(model, kind, typeId));
   return (
@@ -21649,6 +22235,7 @@ const SETTINGS_SECTIONS = [
   { key: "tasktypes", label: "Tasks", group: "Types & fields", icon: ClipboardList, editor: true },
   { key: "worktypes", label: "Work", group: "Types & fields", icon: Wrench, editor: true },
   { key: "relationships", label: "Relationships", icon: ArrowLeftRight, editor: true },
+  { key: "views", label: "Views", icon: Eye, editor: true },
   { key: "lists", label: "Lists", icon: FileText, editor: true },
   { key: "electrical", label: "Electrical", icon: Zap, editor: true },
   { key: "access", label: "Access", icon: Users, editor: true, live: true },

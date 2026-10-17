@@ -1506,9 +1506,11 @@ function requiredCustomFieldsFor(model, kind, typeId) {
   return st ? st.requiredFields.filter(k => have.has(k)) : [];
 }
 
-function validateCustomValues(model, kind, typeId, values) {
+function validateCustomValues(model, kind, typeId, values, visibleKeys) {
   const v = values && typeof values === "object" ? values : {};
-  const fields = customFieldsFor(model, kind, typeId);
+  // A task opened from a view shows only the fields that view picked; a rule
+  // about one it hides would refuse the save with nothing on screen to fix.
+  const fields = customFieldsFor(model, kind, typeId).filter(f => !visibleKeys || visibleKeys.includes(f.key));
   const required = new Set(requiredCustomFieldsFor(model, kind, typeId));
   for (const f of fields) {
     const raw = v[f.key];
