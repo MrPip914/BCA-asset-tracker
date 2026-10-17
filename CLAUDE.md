@@ -823,6 +823,18 @@ instead, and still is for anything that takes that path.
   Driven in Chromium against the real function on a local Postgres: two pages saving
   different assets both land; a third, stale on the same asset, gets the not-saved modal.
 
+## Views (2026-10-17)
+
+A **Views** main tab shows saved task lists an editor sets up in **Settings > Views**; each person sees only the views assigned to them. Tasks only for now. Plan: `/mnt/project-files/plans/views.md`. **Frontend plus one Edge Function key: an `asset-api` redeploy to dev, no Apps Script change, no version bump.**
+
+- **Stored in ONE Config key, `views` = `{ list: [view] }`** (an object, because the Edge Function only keeps optional config keys that are objects, as for `workModel`). A view is `{ id, name, userEmails, conditions, columns, dialogFields, order }`. The Apps Script fallback drops it, accepted as for `workModel`.
+- **Assigned by Google email** (`userEmails`, from the Access list). The tab appears only for someone with a view; Sandbox has no sign-in and shows all. An unassigned editor does not see the view in the tab: Settings > Views previews it "as" an assigned person.
+- **Query = lines of `field is / is not value`, joined AND/OR, AND binding tighter.** The value is typed text or a token; the only token is `[CURRENT USERNAME]` (`CURRENT_USERNAME`), the allowlist name of whoever is signed in, else their email. Compare ignores case and spacing; a multiple-choice custom field matches on any pick; **a token with no name known matches nothing for `is`**, or an unnamed person would see every unowned task. Owner is free text, so "Jane S." does not match "Jane Smith".
+- **Opening a task from a view** (`openMaintenanceEdit(..., viewId)`) shows only the view's `dialogFields` (name always shown), has no Delete, validates only the visible custom fields (a hidden required field must not block Save invisibly), and is read-only for a view-only person (`<fieldset disabled>`).
+- **Manual order** is `order: ["<assetId>::<taskId>"]` on the view. Ordered tasks first in that order, the rest below by due date. A key whose task no longer matches keeps its slot and is skipped, so it returns where it was. Saving an order is a config save, so two editors saving views at once get the usual conflict.
+- The relationship-query builder was not reused: it follows asset links, and a view is `field = value` over task rows.
+- Covered by `test-frontend-views.js` (the real helpers plus wiring). Driven in Chromium against Sandbox: the tab, ordering and its reload, the restricted dialog, the Settings editor.
+
 ## Relationships tab (2026-10-10)
 
 Each asset can show a **Relationships** tab listing assets related to it by named

@@ -44,7 +44,7 @@ const CONFIG_WRITES: [string, () => unknown][] = [
 // Config keys the Sheet backend never had: written only when the save carries one,
 // so an older client's config save cannot erase it, and the stored rows stay what
 // the .gs would hold until the feature is used (the parity tests compare them).
-const OPTIONAL_CONFIG_KEYS = ["workModel"];
+const OPTIONAL_CONFIG_KEYS = ["workModel", "views"];
 
 // Each table a save rewrites: its key, and its columns as jsonb_to_recordset
 // types (the same names as db/load-sql.mjs's TABLE_COLUMNS; api_test.ts checks).
