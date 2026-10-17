@@ -15,7 +15,7 @@ import {
   type Identity, readSession, readUsers, verifyGoogleIdToken,
 } from "./auth.ts";
 import { readAuditFull, readInventory, readRevisions } from "./inventory.ts";
-import { LOCK_TIMEOUT_MS, type SaveContext, saveInventory } from "./save.ts";
+import { LOCK_TIMEOUT_MS, type SaveContext, saveInventory, saveViewState } from "./save.ts";
 import { publicPanel } from "./panel.ts";
 import { type CloudinaryCreds, NOT_SET_UP, signFloorPlan, signPhotos } from "./sign.ts";
 
@@ -128,6 +128,7 @@ export function createApi({
       }
       if (op === "read") return await read({ sessionId: body.sessionId }, tenantId, diag, started);
       if (op === "save") return await save(body, tenantId, diag, started);
+      if (op === "viewState") return await save(body, tenantId, diag, started, saveViewState);
       if (op === "auditFull") return await auditFull(body, tenantId, diag);
       if (op === "revisions") return await revisions(body, tenantId, diag);
       if (op === "diagnostics") return await diagnostics(body, tenantId, diag);
@@ -286,7 +287,7 @@ export function createApi({
 
   // doPost's write path. Everything happens in ONE transaction, so a refusal,
   // a conflict or a failure part-way leaves the inventory exactly as it was.
-  async function save(body: Body, tenantId: string, diag: DiagEntry[], started: number) {
+  async function save(body: Body, tenantId: string, diag: DiagEntry[], started: number, write: typeof saveInventory = saveInventory) {
     const stages: string[] = [];
     try {
       // The diagnostics of a save that throws part-way are kept: they are
@@ -296,7 +297,7 @@ export function createApi({
         const [tenant] = await tx`select owner_email from tenants`;
         if (!tenant) return { ok: false, error: `There is no tenant "${tenantId}" on this backend.`, scriptVersion: SCRIPT_VERSION };
         ctx.ownerEmail = String(tenant.owner_email).toLowerCase();
-        return await saveInventory(tx, body, ctx);
+        return await write(tx, body, ctx);
       });
       const took = now() - started;
       if (answer.ok && took > DIAG_SLOW_MS) diag.push({ event: "slow_save", email: ctx.email, ms: took, detail: stages.join("; ") });
