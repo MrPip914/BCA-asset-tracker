@@ -2548,6 +2548,16 @@ function viewTokenValue(token, ctx) {
 }
 function viewNorm(s) { return String(s == null ? "" : s).replace(/\s+/g, " ").trim().toLowerCase(); }
 
+// "is" compares text, case and spacing ignored, and a * in the value stands for
+// any run of characters ("Room 1*", "*filter*"). A value of just * is any value
+// at all, but not a blank one, so "Owner is *" finds tasks that HAVE an owner.
+function viewValueEquals(v, target) {
+  const t = viewNorm(target);
+  if (t.indexOf("*") === -1) return viewNorm(v) === t;
+  if (/^\**$/.test(t)) return viewNorm(v) !== "";
+  const re = new RegExp("^" + t.split("*").map(x => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$");
+  return re.test(viewNorm(v));
+}
 // One condition against one task row. Text compare, case and spacing ignored; a
 // multiple-choice field matches when ANY pick does; a blank value matches blank.
 // A token that resolves to nothing (no name known) matches nothing for "=" --
@@ -2561,7 +2571,7 @@ function viewConditionMatches(cond, row, model, ctx) {
   if (!values.length) values = [""];
   // "has" (contains) is only offered by the live filter, never stored in a view.
   if (cond.op === "has") return values.some(v => viewNorm(v).includes(viewNorm(target)));
-  const eq = values.some(v => viewNorm(v) === viewNorm(target));
+  const eq = values.some(v => viewValueEquals(v, target));
   return cond.op === "!=" ? !eq : eq;
 }
 // The conditions as OR-groups of AND-runs: "A and B or C" is (A and B) or C.
@@ -2588,6 +2598,7 @@ function describeViewQuery(view, model, views) {
       const b = viewBuckets(f.kanban).find(x => x.id === c.value);
       val = c.value === "" ? "not on the board" : `"${b ? b.name : c.value}"`;
     }
+    if (!c.token && c.value === "*") val = "any value";
     return `${f ? f.label : c.field} ${c.op === "!=" ? "is not" : "is"} ${val}`;
   };
   const groups = viewConditionGroups(view.conditions);
@@ -6026,7 +6037,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-17.2";
+const APP_VERSION = "2026-10-18.1";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -15426,9 +15437,9 @@ function AssetTracker() {
             Views
             <HelpTip label="About views" text="A view is a saved task list for particular people: you choose who sees it, which tasks it lists (as a table or as a Kanban board), which columns it has, and which fields show when they open a task from it. Each person sees only the views assigned to them, in the Views tab, in the order set here." />
             {viewsCfg.list.length > 1 && (
-              <button type="button" aria-label={viewsReorder ? "Done ordering views" : "Order views"} aria-pressed={viewsReorder} onClick={() => setViewsReorder(o => !o)}
+              <button type="button" title={viewsReorder ? "Done ordering views" : "Order views"} aria-label={viewsReorder ? "Done ordering views" : "Order views"} aria-pressed={viewsReorder} onClick={() => setViewsReorder(o => !o)}
                 style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 5, padding: "5px 10px", borderRadius: 8, fontSize: 13, fontWeight: 600, border: `1.5px solid ${viewsReorder ? C.brand : C.border}`, background: viewsReorder ? C.bg : C.surface, color: C.ink, cursor: "pointer" }}>
-                {viewsReorder ? <Check size={14} /> : <ArrowUpDown size={14} />} {viewsReorder ? "Done" : "Order"}
+                {viewsReorder ? <Check size={16} /> : <ArrowUpDown size={16} />}
               </button>
             )}
           </div>
@@ -19939,7 +19950,7 @@ function ViewLiveFilterPanel({ filter, onChange, fields, kanbanLabel }) {
                   <PickerField label="Bucket" hideLabel value={c.value} onChange={v => setCond(i, { value: v })} options={["", ...viewBuckets(f.kanban).map(b => b.id)]} labelForOption={id => (id ? (viewBuckets(f.kanban).find(b => b.id === id) || {}).name : "(not on the board)")} title="Filter bucket" />
                 </div>
               ) : (
-                <input value={c.value} onChange={e => setCond(i, { value: e.target.value })} placeholder="value" aria-label="Filter value"
+                <input value={c.value} onChange={e => setCond(i, { value: e.target.value })} placeholder="value (* is any)" aria-label="Filter value"
                   style={{ flex: "1 1 120px", minWidth: 100, padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }} />
               )}
               <button type="button" className="icon-btn" aria-label="Remove this filter" onClick={() => set({ conds: filter.conds.filter((_, j) => j !== i) })} style={iconBtn}><Trash2 size={14} color={C.danger} /></button>
@@ -19968,38 +19979,55 @@ function ViewLiveFilterPanel({ filter, onChange, fields, kanbanLabel }) {
 function ViewBody({ view, rows, model, ctx, canArrange, onState, onOpen, emptyText }) {
   const [arrange, setArrange] = useState(false);
   const [filterOpen, setFilterOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [phone, setPhone] = useState(() => typeof window !== "undefined" && !!window.matchMedia && window.matchMedia(PHONE_MEDIA_QUERY).matches);
+  useEffect(() => {
+    if (!window.matchMedia) return undefined;
+    const mq = window.matchMedia(PHONE_MEDIA_QUERY);
+    const on = () => setPhone(mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
   const [live, setLive] = useState(EMPTY_LIVE_FILTER);
   const shownRows = useMemo(() => rows.filter(r => viewLiveMatches(live, r, view, model, ctx)), [rows, live, view, model, ctx]);
   const fields = viewFieldsFor(model, ctx && ctx.views, view.id);
   const kanban = view.type === VIEW_TYPE_KANBAN;
   const active = viewLiveActive(live);
   const filterCount = live.conds.filter(c => c.field).length;
-  const barBtn = on => ({ display: "flex", alignItems: "center", gap: 5, padding: "6px 11px", borderRadius: 8, fontSize: 13, fontWeight: 600, border: `1.5px solid ${on ? C.brand : C.border}`, background: on ? C.bg : C.surface, color: C.ink, cursor: "pointer" });
+  const barBtn = on => ({ display: "flex", alignItems: "center", gap: 4, padding: "7px 9px", borderRadius: 8, fontSize: 13, fontWeight: 600, border: `1.5px solid ${on ? C.brand : C.border}`, background: on ? C.bg : C.surface, color: C.ink, cursor: "pointer" });
   const inOrder = new Set(view.order);
   const anyOrdered = !kanban && shownRows.some(r => inOrder.has(viewTaskKey(r)));
-  const arranging = arrange && canArrange;
+  // A board can always be dragged by whoever may arrange it; only a list has an
+  // order mode, since a handle on every row would crowd the columns.
+  const arranging = canArrange && (kanban || arrange);
+  const searchShown = !phone || searchOpen || live.text !== "";
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-        <div style={{ position: "relative", flex: "1 1 180px", minWidth: 140 }}>
-          <Search size={14} color={C.muted} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)" }} />
-          <input value={live.text} onChange={e => setLive({ ...live, text: e.target.value })} placeholder="Filter this view…" aria-label="Filter this view"
-            style={{ width: "100%", boxSizing: "border-box", padding: "7px 10px 7px 30px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, background: C.surface }} />
-        </div>
-        <button type="button" aria-label="More filters" aria-pressed={filterOpen} onClick={() => setFilterOpen(o => !o)} style={barBtn(filterOpen || filterCount > 0)}>
-          <Filter size={14} /> Filters{filterCount > 0 ? ` (${filterCount})` : ""}
+        {searchShown ? (
+          <div style={{ position: "relative", flex: "1 1 180px", minWidth: 140 }}>
+            <Search size={14} color={C.muted} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)" }} />
+            <input value={live.text} onChange={e => setLive({ ...live, text: e.target.value })} placeholder="Filter this view…" aria-label="Filter this view"
+              autoFocus={phone && searchOpen}
+              style={{ width: "100%", boxSizing: "border-box", padding: "7px 10px 7px 30px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, background: C.surface }} />
+          </div>
+        ) : (
+          <button type="button" aria-label="Search this view" title="Search" onClick={() => setSearchOpen(true)} style={barBtn(false)}><Search size={16} /></button>
+        )}
+        <button type="button" aria-label="More filters" title="Filters" aria-pressed={filterOpen} onClick={() => setFilterOpen(o => !o)} style={barBtn(filterOpen || filterCount > 0)}>
+          <Filter size={16} />{filterCount > 0 && <span style={{ fontSize: 12 }}>{filterCount}</span>}
         </button>
-        {canArrange && (
-          <button type="button" aria-label={arranging ? "Done ordering" : (kanban ? "Arrange cards" : "Order tasks")} aria-pressed={arranging} onClick={() => setArrange(a => !a)} style={barBtn(arranging)}>
-            {arranging ? <Check size={14} /> : <ArrowUpDown size={14} />} {arranging ? "Done" : "Order"}
+        {canArrange && !kanban && (
+          <button type="button" aria-label={arranging ? "Done ordering" : "Order tasks"} title={arranging ? "Done ordering" : "Order tasks"} aria-pressed={arranging} onClick={() => setArrange(a => !a)} style={barBtn(arranging)}>
+            {arranging ? <Check size={16} /> : <ArrowUpDown size={16} />}
           </button>
         )}
       </div>
       {filterOpen && <ViewLiveFilterPanel filter={live} onChange={setLive} fields={fields} />}
       {active && <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>Showing {shownRows.length} of {rows.length}</div>}
-      {arranging && (
+      {arranging && !kanban && (
         <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12, color: C.muted, marginBottom: 8, flexWrap: "wrap" }}>
-          <span>{kanban ? "Drag a card to another bucket, or to a new place in its own." : "Drag a task by its handle. Ordered tasks sit at the top; the rest follow below."}</span>
+          <span>Drag a task by its handle. Ordered tasks sit at the top; the rest follow below.</span>
           {anyOrdered && (
             <button type="button" onClick={() => onState({ order: view.order.filter(k => !shownRows.some(r => viewTaskKey(r) === k)) })}
               style={{ padding: "3px 9px", fontSize: 12, fontWeight: 600, border: `1px solid ${C.border}`, borderRadius: 6, background: "none", color: C.brandDark, cursor: "pointer" }}>Clear order</button>
@@ -20242,7 +20270,7 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, rows, model, prev
                   </span>
                 ) : (
                   <>
-                    <input value={c.value} onChange={e => setCond(i, { value: e.target.value })} placeholder="value" aria-label="Value"
+                    <input value={c.value} onChange={e => setCond(i, { value: e.target.value })} placeholder="value (* is any)" aria-label="Value"
                       style={{ flex: "1 1 120px", minWidth: 100, padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }} />
                     {VIEW_TOKENS.map(t => (
                       <button key={t.value} type="button" onClick={() => setCond(i, { token: t.value })}
