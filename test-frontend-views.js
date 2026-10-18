@@ -178,10 +178,22 @@ check('"has" is contains, and a stored query can never use it', H.viewLiveMatche
 check('every live line must hold', !H.viewLiveMatches(lf("", [{ field: "owner", op: "=", value: "Bob" }, { field: "status", op: "=", value: "overdue" }]), row("t", { owner: "Bob" }), view([]), model, ctx));
 eq('editors always arrange; others only when the view allows', [H.viewCanArrange(view([]), true), H.viewCanArrange(view([]), false), H.viewCanArrange(view([], { viewersCanOrder: true }), false)], [true, false, true]);
 
+// wildcards: * is any run of characters; a lone * is any non-blank value
+const wc = (v, o = "=") => H.viewConditionMatches(cond("owner", o, v), row("t", { owner: "Jane Smith" }), model, ctx);
+check('a trailing * matches a prefix', wc("jane*") && !wc("bob*"));
+check('a leading and trailing * matches inside', wc("*e sm*"));
+check('a lone * matches any value but not a blank one', wc("*") && !H.viewConditionMatches(cond("owner", "=", "*"), row("t", { owner: "" }), model, ctx));
+check('is not with * flips it', !wc("jane*", "!=") && wc("bob*", "!="));
+check('regex characters in a value are literal', !H.viewConditionMatches(cond("owner", "=", "j.ne*"), row("t", { owner: "Jane" }), model, ctx));
+check('a value without * still has to match whole', !wc("jane"));
+
 // wiring
 check('the sidebar lists views with counts and is the first screen on a phone', /<nav aria-label="Views"/.test(src) && /aria-label="Back to views"/.test(src) && /viewPaneOpen/.test(src));
 check('no per-task Set order button remains', !/Set order/.test(src));
 check('tasks and views are ordered from an icon at the top right', /"Order tasks"/.test(src) && /"Order views"/.test(src));
+check('a Kanban has no order button and its cards always drag', /canArrange && !kanban && \(/.test(src) && /const arranging = canArrange && \(kanban \|\| arrange\)/.test(src));
+check('search is an icon on a phone until opened', /aria-label="Search this view"/.test(src) && /searchShown = !phone \|\| searchOpen/.test(src));
+check('filter and order buttons carry no text label', !/ Filters\{filterCount/.test(src) && !/\{arranging \? "Done" : "Order"\}/.test(src));
 check('a task from a view opens read-only with a pencil for editors', /editView/.test(src) && /Edit this task/.test(src) && /viewReadOnly = !!dialogView && \(!canEdit \|\| !maintenanceModal\.editView\)/.test(src));
 check('arranging goes through the viewState op on Supabase', /op: "viewState"/.test(src) && /"viewState"/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api/api.ts'), 'utf8')));
 check('the backend checks the permission from stored data', /viewersCanOrder === true/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api/save.ts'), 'utf8')));
