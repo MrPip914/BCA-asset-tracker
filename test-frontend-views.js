@@ -200,5 +200,18 @@ check('the backend checks the permission from stored data', /viewersCanOrder ===
 check('the editor offers the checkbox, the type and buckets', /Viewers can change task order/.test(src) && /VIEW_TYPE_KANBAN/.test(src));
 check('Sandbox carries a Kanban and a view that queries it', /type: "kanban"/.test(src) && /field: "kanban:view-week"/.test(src));
 
+
+// ---- Follow-up 2026-10-18 (b): card titles open, buffer, split schedule pieces, clean read view
+{
+  const html = src;
+  const kb = html.slice(html.indexOf('function KanbanBoard'), html.indexOf('function ViewLiveFilterPanel'));
+  check('a Kanban card title opens the task even while cards drag', /data-card-title/.test(kb) && /tappedIn\("\[data-card-title\]"\)/.test(kb));
+  check('a Kanban column keeps space below its last card', /paddingBottom: 72/.test(kb));
+  check('the sort hook drops only a real drag, not a tap', /s\.moved && t\.group !== null/.test(html));
+  eq('the old schedule tick expands to its pieces', H.adoptViews({ list: [{ id: 'a', dialogFields: ['schedule', 'notes', 'dueDate'] }] }).list[0].dialogFields, ['frequency', 'lastPerformed', 'dueDate', 'notes']);
+  check('schedule is no longer a tick of its own', !/key: "schedule"/.test(html));
+  check('the read-only task view has no kind toggle or inputs', /viewReadOnly \? \(\s*<div[^>]*>\s*<div[^>]*>\{maintenanceDraft\.task\}/.test(html));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
