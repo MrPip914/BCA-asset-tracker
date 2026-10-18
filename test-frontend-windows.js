@@ -155,8 +155,8 @@ check('a backdrop shape is never clickable', /strokeLinejoin="round" style=\{\{ 
 const tpl = src.slice(src.indexOf('function TaskPaneLayout('), src.indexOf('function WindowLayoutTabContent('));
 check('a task\'s layout starts COLLAPSED behind a chevron and is only fetched once opened',
   /useState\(false\)/.test(tpl) && /aria-expanded=\{open\}/.test(tpl) && /useFloorPlanSvg\(open && asset/.test(tpl) && /ChevronRight/.test(tpl));
-check('the layout is on the task dialog, the task card AND the completion form',
-  (src.match(/<TaskPaneLayout /g) || []).length === 3);
+check('the layout is on the task dialog (editing and reading), the task card AND the completion form',
+  (src.match(/<TaskPaneLayout /g) || []).length === 4);
 
 // --- zoom (2026-10-16) ----------------------------------------------------------------
 {

@@ -2402,7 +2402,9 @@ const VIEW_BUILTIN_FIELDS = [
 const VIEW_DEFAULT_COLUMNS = ["task", "asset", "dueDate", "status"];
 // What a task shows when opened FROM a view. The task's name is always shown.
 const VIEW_DIALOG_FIELDS = [
-  { key: "schedule", label: "Schedule and due date" },
+  { key: "frequency", label: "Repeats" },
+  { key: "lastPerformed", label: "Last performed / completed" },
+  { key: "dueDate", label: "Due date" },
   { key: "notes", label: "Notes" },
   { key: "owner", label: "Owner" },
   { key: "type", label: "Type" },
@@ -2437,6 +2439,15 @@ function viewDialogFieldsFor(model) {
   return [...VIEW_DIALOG_FIELDS, ...custom];
 }
 
+// "schedule" was one tick for the whole schedule block before it was split into
+// its pieces; a stored view that still carries it keeps showing all of them.
+const VIEW_SCHEDULE_PIECES = ["frequency", "lastPerformed", "dueDate"];
+function viewDialogFieldsAdopted(keys) {
+  const out = [];
+  keys.forEach(k => (k === "schedule" ? VIEW_SCHEDULE_PIECES : [k]).forEach(x => { if (!out.includes(x)) out.push(x); }));
+  return out;
+}
+
 function adoptViews(raw) {
   const list = Array.isArray(raw && raw.list) ? raw.list : [];
   const strs = v => (Array.isArray(v) ? v.filter(x => typeof x === "string" && x) : []);
@@ -2460,7 +2471,7 @@ function adoptViews(raw) {
         join: c.join === "or" ? "or" : "and",
       })),
       columns: Array.isArray(v.columns) ? strs(v.columns) : [...VIEW_DEFAULT_COLUMNS],
-      dialogFields: strs(v.dialogFields),
+      dialogFields: viewDialogFieldsAdopted(strs(v.dialogFields)),
       order: strs(v.order),
     })),
   };
@@ -6037,7 +6048,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-18.1";
+const APP_VERSION = "2026-10-18.2";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -7257,13 +7268,13 @@ const MOCK_SNAPSHOT = {
   // Two saved task lists. Sandbox shows every view (it has no sign-in), and
   // [CURRENT USERNAME] reads the sandbox name tag, so "Eric" sees his own tasks.
   views: { list: [
-    { id: "view-mine", name: "My tasks", userEmails: [], dialogFields: ["schedule", "notes", "asset"],
+    { id: "view-mine", name: "My tasks", userEmails: [], dialogFields: ["frequency", "lastPerformed", "dueDate", "notes", "asset"],
       columns: ["task", "asset", "dueDate", "status"], order: ["BCA0086::mnt-0086-drain"],
       conditions: [{ field: "owner", op: "=", value: "", token: "CURRENT_USERNAME", join: "and" }, { field: "status", op: "!=", value: "Done", token: "", join: "and" }] },
     // A Kanban: open tasks start in "To do" and are moved into a weekday. The
     // third view asks which bucket a task is in, so Sandbox shows a query naming
     // another view's board.
-    { id: "view-week", name: "Workweek", type: "kanban", userEmails: [], dialogFields: ["schedule", "notes", "owner"],
+    { id: "view-week", name: "Workweek", type: "kanban", userEmails: [], dialogFields: ["frequency", "lastPerformed", "dueDate", "notes", "owner"],
       defaultBucketName: "To do", buckets: [{ id: "bk-mon", name: "Monday" }, { id: "bk-tue", name: "Tuesday" }, { id: "bk-wed", name: "Wednesday" }],
       assignments: { "BCA0086::mnt-0086-filter": "bk-mon", "BCA0086::mnt-0086-drain": "bk-tue" },
       columns: ["task", "asset", "dueDate", "status"], order: [], viewersCanOrder: true,
@@ -7271,7 +7282,7 @@ const MOCK_SNAPSHOT = {
     { id: "view-notmon", name: "Not on Monday", userEmails: [], dialogFields: ["notes", "owner"],
       columns: ["task", "asset", "kanban:view-week", "status"], order: [],
       conditions: [{ field: "kanban:view-week", op: "!=", value: "bk-mon", token: "", join: "and" }, { field: "kanban:view-week", op: "!=", value: "", token: "", join: "and" }] },
-    { id: "view-projects", name: "Open projects", userEmails: [], dialogFields: ["notes", "owner"],
+    { id: "view-projects", name: "Open projects", userEmails: [], dialogFields: ["dueDate", "notes", "owner"],
       columns: ["task", "asset", "owner", "dueDate"], order: [],
       conditions: [{ field: "kind", op: "=", value: "One-off", token: "", join: "and" }, { field: "status", op: "!=", value: "Done", token: "", join: "and" }] },
   ] },
@@ -16017,6 +16028,30 @@ function AssetTracker() {
               ? (workTarget.changes || []).filter(c => c && c.maintenanceId === taskItem.id)
                   .sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")))
               : [];
+            // The read view: only the configured values that have something in them,
+            // as plain text. None of the controls that pick them.
+            const readRows = [];
+            if (viewReadOnly) {
+              const oneOff = maintenanceDraft.kind === TASK_KIND_ONEOFF;
+              const dayText = d => (d ? formatDateOnly(d) : "");
+              const isoOf = d => (d ? d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0") : "");
+              const addRow = (label, value) => { if (value) readRows.push({ label, value }); };
+              if (!oneOff && vShow("frequency")) addRow("Repeats", (taskItem && taskItem.frequencyLabel) || maintenanceDraft.frequency);
+              if (vShow("lastPerformed")) addRow(oneOff ? "Completed" : "Last performed", dayText(dateOnly(maintenanceDraft.lastPerformed)));
+              if (vShow("dueDate")) {
+                addRow(oneOff ? "Due" : "Next due", dayText(oneOff ? dateOnly(maintenanceDraft.dueDate) : isoOf(taskItem ? taskDueDate(taskItem) : null)));
+              }
+              if (vShow("type") && maintenanceDraft.taskType) addRow("Type", taskTypeNameOf(workModel, maintenanceDraft.taskType));
+              if (workBuiltinShown(workModel, "task", maintenanceDraft.taskType, "owner") && vShow("owner")) addRow("Owner", maintenanceDraft.owner);
+              const keep = viewVisibleCustomKeys(dialogView) || [];
+              customFieldsFor(workModel, "task", maintenanceDraft.taskType).filter(f => keep.includes(f.key)).forEach(f => {
+                const v = (maintenanceDraft.custom || {})[f.key];
+                if (String(v ?? "") !== "") addRow(f.label, dataTypeDisplay(f, v));
+              });
+              if (workBuiltinShown(workModel, "task", maintenanceDraft.taskType, "notes") && vShow("notes") && maintenanceDraft.notes) addRow("Notes", <span style={{ whiteSpace: "pre-wrap" }}>{maintenanceDraft.notes}</span>);
+            }
+            const readGroups = viewReadOnly && workTarget && vShow("sections") && isWindowLayoutType(workTarget.type)
+              ? windowGroupsOf(workTarget).filter(g => (maintenanceDraft.paneGroupIds || []).includes(g.id)) : [];
             return (
             <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20, padding: 16 }}>
               <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 520, maxHeight: "90vh", overflowY: "auto" }}>
@@ -16068,8 +16103,32 @@ function AssetTracker() {
                     task is described by an interval and its last completion, a
                     one-off by a single due date. Offering all four at once
                     would let someone fill in a pair the app then ignores. */}
+                {viewReadOnly ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                    <div style={{ fontSize: 17, fontWeight: 700, color: C.ink, wordBreak: "break-word" }}>{maintenanceDraft.task}</div>
+                    {readRows.map(r => (
+                      <div key={r.label}>
+                        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>{r.label}</div>
+                        <div style={{ fontSize: 14, color: C.ink, marginTop: 2, wordBreak: "break-word" }}>{r.value}</div>
+                      </div>
+                    ))}
+                    {readGroups.length > 0 && (
+                      <div>
+                        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Section groups</div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
+                          {readGroups.map(g => (
+                            <span key={g.id} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 999, fontSize: 13, border: `1.5px solid ${windowGroupColor(windowGroupsOf(workTarget), g.id)}`, color: C.ink }}>
+                              <span aria-hidden="true" style={{ width: 10, height: 10, borderRadius: 3, background: windowGroupColor(windowGroupsOf(workTarget), g.id) }} />{g.name}
+                            </span>
+                          ))}
+                        </div>
+                        <TaskPaneLayout asset={workTarget} groupIds={maintenanceDraft.paneGroupIds} maxHeight={200} />
+                      </div>
+                    )}
+                  </div>
+                ) : (
                 <fieldset disabled={viewReadOnly} style={{ border: "none", padding: 0, margin: 0, minWidth: 0 }}>
-                {vShow("schedule") && (
+                {(vShow("frequency") || vShow("lastPerformed") || vShow("dueDate")) && (
                 <TaskKindToggle
                   value={maintenanceDraft.kind}
                   onChange={k => setMaintenanceDraft({ ...maintenanceDraft, kind: k })}
@@ -16099,8 +16158,9 @@ function AssetTracker() {
                     />
                   </label>
 )}
-                  {vShow("schedule") && (maintenanceDraft.kind === TASK_KIND_ONEOFF ? (
+                  {(maintenanceDraft.kind === TASK_KIND_ONEOFF ? (
                     <>
+                    {vShow("dueDate") && (
                     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Due date</span>
                       <input
@@ -16114,6 +16174,7 @@ function AssetTracker() {
                           rather than being refused. */}
                       <span style={{ fontSize: 11, color: C.placeholder }}>Optional</span>
                     </label>
+                    )}
                     {/* Editing only: a task being created has no completion to
                         record, and offering the field would invite someone to
                         log a job as done in the act of adding it.
@@ -16122,7 +16183,7 @@ function AssetTracker() {
                         flag to unset -- the date is the whole of "is this
                         done" -- so the field that records the completion is
                         also the control that undoes it. */}
-                    {editing && (
+                    {editing && vShow("lastPerformed") && (
                     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Completed</span>
                       <input
@@ -16137,6 +16198,7 @@ function AssetTracker() {
                     </>
                   ) : (
                     <>
+                      {vShow("frequency") && (
                       <PickerField
                         label="Frequency"
                         value={maintenanceDraft.frequency}
@@ -16144,6 +16206,8 @@ function AssetTracker() {
                         options={[...MAINTENANCE_FREQUENCIES.map(f => f.label), MAINTENANCE_FREQUENCY_CUSTOM]}
                         title="Select frequency"
                       />
+                      )}
+                      {vShow("lastPerformed") && (
                       <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                         <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Last performed</span>
                         <input
@@ -16153,7 +16217,8 @@ function AssetTracker() {
                           style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
                         />
                       </label>
-                      {maintenanceDraft.frequency === MAINTENANCE_FREQUENCY_CUSTOM && (
+                      )}
+                      {vShow("frequency") && maintenanceDraft.frequency === MAINTENANCE_FREQUENCY_CUSTOM && (
                         <RecurrenceEditor
                           value={maintenanceDraft.recurrence || DEFAULT_RECURRENCE_DRAFT}
                           onChange={r => setMaintenanceDraft({ ...maintenanceDraft, recurrence: r })}
@@ -16219,8 +16284,9 @@ function AssetTracker() {
                   )}
                 </div>
                 </fieldset>
+                )}
                 {taskCustomError && <div role="alert" style={{ fontSize: 12, color: C.danger, marginTop: 8 }}>{taskCustomError}</div>}
-                {vShow("files") && (
+                {vShow("files") && (!viewReadOnly || photosForOwner("maintenance", maintenanceDraft.id).length > 0) && (
                 <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
                   <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 8 }}>Files</div>
                   <PhotoGallery
@@ -19758,6 +19824,9 @@ function CustomValuesLine({ model, kind, typeId, values }) {
 function usePointerSort(onDrop) {
   const [drag, setDrag] = useState(null); // { key, dx, dy, group, index }
   const st = useRef(null);
+  // What the last press was, for a click that follows it: a drag captures the
+  // pointer on the item, so the click lands on the item whatever was tapped.
+  const last = useRef({ moved: false, target: null });
   const find = (x, y, key) => {
     const els = document.elementsFromPoint(x, y);
     const g = els.find(el => el.getAttribute && el.getAttribute("data-drop-group") !== null);
@@ -19772,12 +19841,14 @@ function usePointerSort(onDrop) {
       if (e.button !== undefined && e.button !== 0) return;
       e.preventDefault();
       try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) { /* a synthetic event has no pointer to capture */ }
-      st.current = { key, x: e.clientX, y: e.clientY };
+      st.current = { key, x: e.clientX, y: e.clientY, moved: false };
+      last.current = { moved: false, target: e.target };
       setDrag({ key, dx: 0, dy: 0, ...find(e.clientX, e.clientY, key) });
     },
     onPointerMove: e => {
       const s = st.current;
       if (!s) return;
+      if (Math.abs(e.clientX - s.x) + Math.abs(e.clientY - s.y) > 6) { s.moved = true; last.current.moved = true; }
       setDrag({ key: s.key, dx: e.clientX - s.x, dy: e.clientY - s.y, ...find(e.clientX, e.clientY, s.key) });
     },
     onPointerUp: e => {
@@ -19786,7 +19857,7 @@ function usePointerSort(onDrop) {
       st.current = null;
       const t = find(e.clientX, e.clientY, s.key);
       setDrag(null);
-      if (t.group !== null) onDrop(s.key, t.group, t.index);
+      if (s.moved && t.group !== null) onDrop(s.key, t.group, t.index);
     },
     onPointerCancel: () => { st.current = null; setDrag(null); },
     style: { touchAction: "none", cursor: "grab" },
@@ -19797,7 +19868,9 @@ function usePointerSort(onDrop) {
     : null);
   // Whether the drop line belongs before slot `index` of `group` right now.
   const lineAt = (group, index) => !!drag && drag.group === group && drag.index === index;
-  return { drag, handle, lift, lineAt };
+  // True when the press that just ended was a tap (no drag) that began inside `selector`.
+  const tappedIn = selector => !last.current.moved && !!(last.current.target && last.current.target.closest && last.current.target.closest(selector));
+  return { drag, handle, lift, lineAt, tappedIn };
 }
 const DROP_LINE = { height: 3, borderRadius: 2, background: "var(--drop-line, #1a73e8)", margin: "-1px 0" };
 
@@ -19872,9 +19945,9 @@ function KanbanBoard({ view, rows, model, ctx, arrange, onMove, onOpen, emptyTex
   const fields = viewFieldsFor(model, ctx && ctx.views, view.id);
   const cardFields = view.columns.filter(k => k !== "task").map(k => fields.find(f => f.key === k)).filter(Boolean);
   const board = viewBoard(view, rows);
-  const { drag, handle, lift, lineAt } = usePointerSort((key, group, index) => onMove(key, group, index));
+  const { drag, handle, lift, lineAt, tappedIn } = usePointerSort((key, group, index) => onMove(key, group, index));
   return (
-    <div style={{ display: "flex", gap: 12, overflowX: "auto", alignItems: "flex-start", paddingBottom: 8 }}>
+    <div style={{ display: "flex", gap: 12, overflowX: "auto", alignItems: "flex-start", paddingBottom: 24 }}>
       {board.map(col => {
         let slot = 0;
         return (
@@ -19883,7 +19956,7 @@ function KanbanBoard({ view, rows, model, ctx, arrange, onMove, onOpen, emptyTex
               <span style={{ fontWeight: 700, fontSize: 13, color: C.brandDark, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{col.name}</span>
               <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted }}>{col.rows.length}</span>
             </div>
-            <div data-drop-group={col.id} style={{ display: "flex", flexDirection: "column", gap: 8, minHeight: 56 }}>
+            <div data-drop-group={col.id} style={{ display: "flex", flexDirection: "column", gap: 8, minHeight: 56, paddingBottom: 72 }}>
               {col.rows.map(r => {
                 const key = viewTaskKey(r);
                 const dragging = !!drag && drag.key === key;
@@ -19896,13 +19969,14 @@ function KanbanBoard({ view, rows, model, ctx, arrange, onMove, onOpen, emptyTex
                     <div
                       data-drop-item={key}
                       {...(h ? { onPointerDown: h.onPointerDown, onPointerMove: h.onPointerMove, onPointerUp: h.onPointerUp, onPointerCancel: h.onPointerCancel } : {})}
-                      onClick={onOpen && !arrange ? () => onOpen(r) : undefined}
-                      role={onOpen && !arrange ? "button" : undefined}
+                      onClick={onOpen ? (arrange ? () => { if (tappedIn("[data-card-title]")) onOpen(r); } : () => onOpen(r)) : undefined}
                       style={{ background: C.surface, border: `1px solid ${C.border}`, borderLeft: `4px solid ${meta.color}`, borderRadius: 8, padding: "9px 11px", cursor: arrange ? "grab" : (onOpen ? "pointer" : "default"), touchAction: arrange ? "none" : undefined, userSelect: arrange ? "none" : undefined, ...(lift(key) || {}) }}
                     >
                       <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
                         {arrange && <GripVertical size={14} color={C.muted} style={{ flexShrink: 0, marginTop: 2 }} />}
-                        <div style={{ fontSize: 13, fontWeight: 600, color: C.ink, minWidth: 0, wordBreak: "break-word" }}>{r.item.task}</div>
+                        <div data-card-title role={onOpen ? "button" : undefined} tabIndex={onOpen ? 0 : undefined}
+                          onKeyDown={onOpen ? e => { if (e.key === "Enter") onOpen(r); } : undefined}
+                          style={{ fontSize: 13, fontWeight: 600, color: C.ink, minWidth: 0, wordBreak: "break-word", cursor: onOpen ? "pointer" : undefined }}>{r.item.task}</div>
                       </div>
                       <div style={{ fontSize: 12, color: C.muted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.assetName}</div>
                       {cardFields.filter(f => f.key !== "asset").map(f => (
@@ -20118,7 +20192,7 @@ function SettingsViewList({ views, arrange, nameFor, onEdit, onReorder }) {
 function ViewEditor({ initial, allViews, accessUsers, sandbox, rows, model, previewUserName, onSave, onDelete, onCancel }) {
   const [draft, setDraft] = useState(() => initial || {
     id: crypto.randomUUID(), name: "", type: VIEW_TYPE_LIST, userEmails: [], conditions: [],
-    columns: [...VIEW_DEFAULT_COLUMNS], dialogFields: ["schedule", "notes", "owner"], order: [],
+    columns: [...VIEW_DEFAULT_COLUMNS], dialogFields: ["frequency", "lastPerformed", "dueDate", "notes", "owner"], order: [],
     viewersCanOrder: false, defaultBucketName: KANBAN_DEFAULT_NAME, buckets: [], assignments: {},
   });
   const [newBucket, setNewBucket] = useState("");
