@@ -34,7 +34,7 @@ const code = [
   slice('function maintenanceSortKey(row) {'),
   slice('function maintenanceStatusMeta(status) {'),
   block,
-  'return { adoptViews, viewsVisibleTo, viewFieldsFor, viewFieldValue, viewFieldDisplay, viewConditionMatches, viewMatches, describeViewQuery, orderViewRows, moveInViewOrder, addToViewOrder, removeFromViewOrder, viewTaskKey, viewDialogShows, viewVisibleCustomKeys };',
+  'return { adoptViews, viewsVisibleTo, viewFieldsFor, viewFieldValue, viewFieldDisplay, viewConditionMatches, viewMatches, describeViewQuery, orderViewRows, moveInViewOrder, addToViewOrder, removeFromViewOrder, viewTaskKey, viewDialogShows, viewVisibleCustomKeys, viewDragOrder, viewBoard, viewBoardMove, viewBucketIdIn, viewBucketOf, viewBuckets, viewLiveMatches, viewLiveActive, viewCanArrange };',
 ].join(NL);
 const H = new Function(code)();
 
@@ -129,6 +129,64 @@ check('the save validates only the fields the view shows', /viewVisibleCustomKey
 check('a view-only person gets the dialog read-only', /<fieldset disabled=\{viewReadOnly\}/.test(src));
 check('the Edge Function stores and reads the key', ['save.ts', 'inventory.ts'].every(f => /OPTIONAL_CONFIG_KEYS = \["workModel", "views"\]/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api', f), 'utf8'))));
 check('Sandbox carries views', /views: \{ list: \[/.test(src));
+
+// --- Kanban, drag order, live filter, who may arrange (2026-10-17 update)
+const board = (extra = {}) => view([], { id: "kb", name: "Workweek", type: "kanban", defaultBucketName: "Backlog", buckets: [{ id: "b-mon", name: "Monday" }, { id: "b-tue", name: "Tuesday" }], assignments: {}, ...extra });
+const ak = H.adoptViews({ list: [{ id: "k", name: "K", type: "kanban", viewersCanOrder: true, defaultBucketName: " Backlog ", buckets: [{ id: "b1", name: "Mon" }, { id: "", name: "x" }, null], assignments: { "A1::t": "b1", bad: 5 } }, { id: "l", name: "L", type: "weird" }] }).list;
+eq('a Kanban reads its type, buckets, default name and assignments', [ak[0].type, ak[0].viewersCanOrder, ak[0].defaultBucketName, ak[0].buckets, ak[0].assignments], ["kanban", true, "Backlog", [{ id: "b1", name: "Mon" }], { "A1::t": "b1" }]);
+eq('an unknown type reads as a list, and viewers cannot arrange unless ticked', [ak[1].type, ak[1].viewersCanOrder], ["list", false]);
+eq('the default bucket leads, named by the view', H.viewBuckets(board()).map(b => b.name), ["Backlog", "Monday", "Tuesday"]);
+eq('an unassigned task, and one in a removed bucket, sit in the default bucket',
+  [H.viewBucketOf(board(), row("t")).id, H.viewBucketOf(board({ assignments: { "A1::t": "b-gone" } }), row("t")).id], ["__default", "__default"]);
+const wk = board({ assignments: { "A1::t": "b-mon" } });
+const kctx = { userName: "", views: [wk], seen: [] };
+eq('another view can query a Kanban by bucket id', H.viewConditionMatches(cond("kanban:kb", "=", "b-mon"), row("t"), model, kctx), true);
+eq('...and != Monday leaves out only the Monday card', [H.viewConditionMatches(cond("kanban:kb", "!=", "b-mon"), row("t"), model, kctx), H.viewConditionMatches(cond("kanban:kb", "!=", "b-mon"), row("u"), model, kctx)], [false, true]);
+eq('a task the board does not list reads as blank', H.viewBucketIdIn(row("t"), "kb", model, { views: [board({ conditions: [cond("owner", "=", "zz")] })], seen: [] }), "");
+const loop = [board({ id: "p", conditions: [cond("kanban:q", "=", "__default")] }), board({ id: "q", conditions: [cond("kanban:p", "=", "__default")] })];
+eq('two boards that query each other end instead of recursing', typeof H.viewBucketIdIn(row("t"), "p", model, { views: loop, seen: [] }), "string");
+check('a Kanban field is offered for every OTHER board only', H.viewFieldsFor(model, [wk], "kb").every(f => !f.kanban) && H.viewFieldsFor(model, [wk], "other").some(f => f.key === "kanban:kb" && f.label === "Workweek Kanban"));
+eq('a Kanban query reads in words', H.describeViewQuery(view([cond("kanban:kb", "!=", "b-mon")]), model, [wk]), 'Workweek Kanban is not "Monday"');
+
+// dragging in a list: everything down to the dropped task becomes ordered
+eq('dropping the first of the unordered pile on top pins only it', H.viewDragOrder([], ["a", "b", "c"], 0, "a", 0), ["a"]);
+eq('dropping the last at the top pins it first', H.viewDragOrder([], ["a", "b", "c"], 0, "c", 0), ["c"]);
+eq('dropping into the unordered pile pins what is above it', H.viewDragOrder([], ["a", "b", "c"], 0, "a", 2), ["b", "c", "a"]);
+eq('reordering ordered tasks keeps the count', H.viewDragOrder(["a", "b", "c"], ["a", "b", "c"], 3, "c", 0), ["c", "a", "b"]);
+eq('a stored key not on screen keeps its slot', H.viewDragOrder(["a", "hid", "b"], ["a", "b"], 2, "b", 0), ["b", "hid", "a"]);
+eq('an unknown key changes nothing', H.viewDragOrder(["a"], ["a"], 1, "zz", 0), ["a"]);
+
+// the board and moving a card
+const r1 = row("t1", { due: new Date(1000) }), r2 = row("t2", { due: new Date(2000) }), r3 = row("t3", { due: new Date(3000) });
+const bv = board({ assignments: { "A1::t2": "b-mon", "A1::t3": "b-mon" }, order: [] });
+const bd = H.viewBoard(bv, [r1, r2, r3]);
+eq('cards land in their buckets', bd.map(c => c.rows.map(r => r.item.id)), [["t1"], ["t2", "t3"], []]);
+let mv = H.viewBoardMove(bv, bd, "A1::t3", "b-mon", 0);
+eq('dropping on top of a bucket pins it first', mv.order, ["A1::t3"]);
+mv = H.viewBoardMove(bv, bd, "A1::t1", "b-tue", 0);
+eq('moving to another bucket assigns it', [mv.assignments["A1::t1"], mv.order], ["b-tue", ["A1::t1"]]);
+mv = H.viewBoardMove(bv, bd, "A1::t2", "__default", 0);
+eq('moving back to the default stores nothing', ["A1::t2" in mv.assignments, mv.assignments["A1::t3"]], [false, "b-mon"]);
+eq('a drop on a bucket that is gone changes nothing', H.viewBoardMove(bv, bd, "A1::t1", "b-gone", 0).assignments, bv.assignments);
+
+// live filter
+const lf = (text, conds = []) => ({ text, conds });
+check('an empty live filter is inactive and matches all', !H.viewLiveActive(lf("  ")) && H.viewLiveMatches(lf(""), row("t"), view([]), model, ctx));
+check('text matches the task name, ignoring case', H.viewLiveMatches(lf("FILT"), row("t", { task: "Change filter" }), view([]), model, ctx) && !H.viewLiveMatches(lf("zzz"), row("t", { task: "Change filter" }), view([]), model, ctx));
+check('text matches the owner', H.viewLiveMatches(lf("bob"), row("t", { owner: "Bob R" }), view([]), model, ctx));
+check('"has" is contains, and a stored query can never use it', H.viewLiveMatches(lf("", [{ field: "owner", op: "has", value: "ob" }]), row("t", { owner: "Bob" }), view([]), model, ctx) && /op === "has"/.test(src) && !/VIEW_OPS = \[[^\]]*"has"/.test(src));
+check('every live line must hold', !H.viewLiveMatches(lf("", [{ field: "owner", op: "=", value: "Bob" }, { field: "status", op: "=", value: "overdue" }]), row("t", { owner: "Bob" }), view([]), model, ctx));
+eq('editors always arrange; others only when the view allows', [H.viewCanArrange(view([]), true), H.viewCanArrange(view([]), false), H.viewCanArrange(view([], { viewersCanOrder: true }), false)], [true, false, true]);
+
+// wiring
+check('the sidebar lists views with counts and is the first screen on a phone', /<nav aria-label="Views"/.test(src) && /aria-label="Back to views"/.test(src) && /viewPaneOpen/.test(src));
+check('no per-task Set order button remains', !/Set order/.test(src));
+check('tasks and views are ordered from an icon at the top right', /"Order tasks"/.test(src) && /"Order views"/.test(src));
+check('a task from a view opens read-only with a pencil for editors', /editView/.test(src) && /Edit this task/.test(src) && /viewReadOnly = !!dialogView && \(!canEdit \|\| !maintenanceModal\.editView\)/.test(src));
+check('arranging goes through the viewState op on Supabase', /op: "viewState"/.test(src) && /"viewState"/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api/api.ts'), 'utf8')));
+check('the backend checks the permission from stored data', /viewersCanOrder === true/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api/save.ts'), 'utf8')));
+check('the editor offers the checkbox, the type and buckets', /Viewers can change task order/.test(src) && /VIEW_TYPE_KANBAN/.test(src));
+check('Sandbox carries a Kanban and a view that queries it', /type: "kanban"/.test(src) && /field: "kanban:view-week"/.test(src));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
