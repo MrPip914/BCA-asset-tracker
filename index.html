@@ -2434,6 +2434,76 @@ function viewFieldsFor(model, views, selfId) {
 function viewBuckets(view) {
   return [{ id: KANBAN_DEFAULT_BUCKET, name: view.defaultBucketName || KANBAN_DEFAULT_NAME }, ...(view.buckets || [])];
 }
+// What a query line can say, by the kind of value the field holds. Dates get
+// before/after; numbers, choice lists and Kanban boards get less/greater than,
+// where a board's columns count 1, 2, 3... left to right and a choice list's
+// entries count 1, 2, 3... in list order. "has" is the live filter's alone.
+const VIEW_OP_LABELS = { "=": "is", "!=": "is not", before: "is before", after: "is after", "<": "is less than", ">": "is greater than", has: "contains" };
+const VIEW_STORED_OPS = ["=", "!=", "before", "after", "<", ">"];
+function viewFieldEntry(model, views, key) {
+  return viewFieldsFor(model, views, null).find(f => f.key === key) || null;
+}
+function viewKindOf(entry) {
+  if (!entry) return "text";
+  if (entry.kanban) return "board";
+  if (entry.key === "dueDate" || entry.key === "lastDone") return "date";
+  const t = entry.custom && entry.custom.dataType;
+  return t === "date" ? "date" : t === "number" ? "number" : t === "select" ? "choice" : t === "multiselect" ? "multi" : "text";
+}
+function viewOpsFor(entry, allowHas) {
+  const kind = viewKindOf(entry);
+  const ops = kind === "date" ? ["=", "!=", "before", "after"]
+    : kind === "text" ? ["=", "!="] : ["=", "!=", "<", ">"];
+  return allowHas && (kind === "text" || kind === "choice" || kind === "multi") ? ["has", ...ops] : ops;
+}
+// How the value is typed in: a bucket, a date, a number, a pick from the
+// list, or text (where * is a wildcard).
+function viewValueMode(kind, op) {
+  if (kind === "board") return "board";
+  if (kind === "date") return "date";
+  const ordinal = op === "<" || op === ">";
+  if (kind === "number") return ordinal ? "number" : "text";
+  if ((kind === "choice" || kind === "multi") && ordinal) return "option";
+  return "text";
+}
+// A line after the person changes its field and/or comparison: a comparison the
+// new field cannot do falls back to "is", and a value typed for one kind of
+// input is cleared rather than reinterpreted as another.
+function viewCondChanged(cond, patch, prevEntry, nextEntry, allowHas) {
+  const next = { ...cond, ...patch };
+  const ops = viewOpsFor(nextEntry, allowHas);
+  if (!ops.includes(next.op)) next.op = "=";
+  const kind = viewKindOf(nextEntry);
+  const mode = viewValueMode(kind, next.op);
+  const moved = patch.field !== undefined && patch.field !== cond.field;
+  if (mode !== viewValueMode(viewKindOf(prevEntry), cond.op) || (moved && kind === "board")) next.value = "";
+  if (mode !== "text") next.token = "";
+  return next;
+}
+// before / after / less than / greater than for one task. A task with no value
+// for the field (or a value that is not a number, a date or a listed entry)
+// never matches, whichever way round.
+function viewCompare(cond, entry, raw, target) {
+  const kind = viewKindOf(entry);
+  const after = cond.op === "after" || cond.op === ">";
+  const cmp = (a, b) => (after ? a > b : a < b);
+  if (cond.op === "before" || cond.op === "after") {
+    const iso = /^\d{4}-\d{2}-\d{2}$/;
+    return kind === "date" && iso.test(String(raw)) && iso.test(String(target)) && cmp(String(raw), String(target));
+  }
+  if (kind === "number") {
+    const a = parseFloat(raw), b = parseFloat(target);
+    return !isNaN(a) && !isNaN(b) && cmp(a, b);
+  }
+  let rank = null;
+  if (kind === "board") { const ids = viewBuckets(entry.kanban).map(b => b.id); rank = v => ids.indexOf(v) + 1; }
+  else if (kind === "choice" || kind === "multi") { const opts = (entry.custom.options || []).map(viewNorm); rank = v => opts.indexOf(viewNorm(v)) + 1; }
+  if (!rank) return false;
+  const b = rank(target);
+  if (!b) return false;
+  const values = kind === "multi" ? multiValues(raw) : [raw];
+  return values.some(v => { const a = rank(v); return a > 0 && cmp(a, b); });
+}
 function viewDialogFieldsFor(model) {
   const custom = ((model && model.taskFields) || []).map(f => ({ key: VIEW_CUSTOM_PREFIX + f.key, label: f.label }));
   return [...VIEW_DIALOG_FIELDS, ...custom];
@@ -2465,7 +2535,7 @@ function adoptViews(raw) {
       userEmails: strs(v.userEmails).map(e => e.trim().toLowerCase()),
       conditions: (Array.isArray(v.conditions) ? v.conditions : []).filter(c => c && typeof c.field === "string" && c.field).map(c => ({
         field: c.field,
-        op: c.op === "!=" ? "!=" : "=",
+        op: VIEW_STORED_OPS.includes(c.op) ? c.op : "=",
         value: c.value == null ? "" : String(c.value),
         token: VIEW_TOKENS.some(t => t.value === c.token) ? c.token : "",
         join: c.join === "or" ? "or" : "and",
@@ -2577,6 +2647,9 @@ function viewConditionMatches(cond, row, model, ctx) {
   const target = cond.token ? viewTokenValue(cond.token, ctx) : cond.value;
   if (cond.token && !viewNorm(target)) return cond.op === "!=";
   const raw = viewFieldValue(row, cond.field, model, ctx);
+  if (cond.op === "before" || cond.op === "after" || cond.op === "<" || cond.op === ">") {
+    return viewCompare(cond, viewFieldEntry(model, ctx && ctx.views, cond.field), raw, target);
+  }
   const def = cond.field.startsWith(VIEW_CUSTOM_PREFIX) ? ((model && model.taskFields) || []).find(f => f.key === cond.field.slice(VIEW_CUSTOM_PREFIX.length)) : null;
   let values = def && def.dataType === "multiselect" ? multiValues(raw) : [raw];
   if (!values.length) values = [""];
@@ -2610,7 +2683,7 @@ function describeViewQuery(view, model, views) {
       val = c.value === "" ? "not on the board" : `"${b ? b.name : c.value}"`;
     }
     if (!c.token && c.value === "*") val = "any value";
-    return `${f ? f.label : c.field} ${c.op === "!=" ? "is not" : "is"} ${val}`;
+    return `${f ? f.label : c.field} ${VIEW_OP_LABELS[c.op] || "is"} ${val}`;
   };
   const groups = viewConditionGroups(view.conditions);
   if (!groups.length) return "Every task";
@@ -6048,7 +6121,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-18.2";
+const APP_VERSION = "2026-10-19.1";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -19999,6 +20072,34 @@ function KanbanBoard({ view, rows, model, ctx, arrange, onMove, onOpen, emptyTex
   );
 }
 
+// The value box of a query line, by what the field holds: a date picker, a
+// number box, the board's columns, the field's own list, or free text.
+function ViewValueInput({ entry, op, value, onChange, placeholder }) {
+  const mode = viewValueMode(viewKindOf(entry), op);
+  const box = { padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, background: C.surface };
+  if (mode === "board") {
+    const buckets = viewBuckets(entry.kanban);
+    return (
+      <div style={{ width: 190, flexShrink: 0 }}>
+        <PickerField label="Bucket" hideLabel value={value} onChange={onChange}
+          options={op === "<" || op === ">" ? buckets.map(b => b.id) : ["", ...buckets.map(b => b.id)]}
+          labelForOption={id => (id ? ((buckets.find(b => b.id === id)) || {}).name || id : "(not on the board)")} title="Select bucket" />
+      </div>
+    );
+  }
+  if (mode === "option") {
+    return (
+      <div style={{ width: 190, flexShrink: 0 }}>
+        <PickerField label="Entry" hideLabel value={value} onChange={onChange} options={entry.custom.options || []} labelForOption={o => o || "Select…"} title="Select entry" />
+      </div>
+    );
+  }
+  if (mode === "date" || mode === "number") {
+    return <input type={mode} value={value} onChange={e => onChange(e.target.value)} aria-label="Value" style={{ ...box, flex: "0 1 170px", minWidth: 130 }} />;
+  }
+  return <input value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder || "value (* is any)"} aria-label="Value" style={{ ...box, flex: "1 1 120px", minWidth: 100 }} />;
+}
+
 // The live filter's lines: free text, plus "field is / is not / contains value"
 // lines that all have to hold. Reading aid for one person; nothing is saved.
 function ViewLiveFilterPanel({ filter, onChange, fields, kanbanLabel }) {
@@ -20009,24 +20110,17 @@ function ViewLiveFilterPanel({ filter, onChange, fields, kanbanLabel }) {
     <div style={{ border: `1px solid ${C.border}`, background: C.surface, borderRadius: 10, padding: 12, marginBottom: 10 }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {filter.conds.map((c, i) => {
-          const f = fields.find(x => x.key === c.field);
-          const isBoard = !!(f && f.kanban);
+          const f = fields.find(x => x.key === c.field) || null;
+          const change = patch => set({ conds: filter.conds.map((x, j) => (j === i ? viewCondChanged(x, patch, f, patch.field !== undefined ? (fields.find(y => y.key === patch.field) || null) : f, true) : x)) });
           return (
             <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
               <div style={{ width: 160, flexShrink: 0 }}>
-                <PickerField label="Field" hideLabel value={c.field} onChange={v => setCond(i, { field: v, value: "", op: v.startsWith(VIEW_KANBAN_PREFIX) ? "=" : c.op })} options={fields.map(x => x.key)} labelForOption={k => (fields.find(x => x.key === k) || {}).label || k} title="Filter field" />
+                <PickerField label="Field" hideLabel value={c.field} onChange={v => change({ field: v })} options={fields.map(x => x.key)} labelForOption={k => (fields.find(x => x.key === k) || {}).label || k} title="Filter field" />
               </div>
-              <div style={{ width: 120, flexShrink: 0 }}>
-                <PickerField label="Comparison" hideLabel value={c.op} onChange={v => setCond(i, { op: v })} options={isBoard ? ["=", "!="] : ["has", "=", "!="]} labelForOption={v => (v === "has" ? "contains" : v === "=" ? "is" : "is not")} title="Filter comparison" />
+              <div style={{ width: 140, flexShrink: 0 }}>
+                <PickerField label="Comparison" hideLabel value={c.op} onChange={v => change({ op: v })} options={viewOpsFor(f, true)} labelForOption={v => VIEW_OP_LABELS[v] || v} title="Filter comparison" />
               </div>
-              {isBoard ? (
-                <div style={{ width: 180, flexShrink: 0 }}>
-                  <PickerField label="Bucket" hideLabel value={c.value} onChange={v => setCond(i, { value: v })} options={["", ...viewBuckets(f.kanban).map(b => b.id)]} labelForOption={id => (id ? (viewBuckets(f.kanban).find(b => b.id === id) || {}).name : "(not on the board)")} title="Filter bucket" />
-                </div>
-              ) : (
-                <input value={c.value} onChange={e => setCond(i, { value: e.target.value })} placeholder="value (* is any)" aria-label="Filter value"
-                  style={{ flex: "1 1 120px", minWidth: 100, padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }} />
-              )}
+              <ViewValueInput entry={f} op={c.op} value={c.value} onChange={v => change({ value: v })} />
               <button type="button" className="icon-btn" aria-label="Remove this filter" onClick={() => set({ conds: filter.conds.filter((_, j) => j !== i) })} style={iconBtn}><Trash2 size={14} color={C.danger} /></button>
             </div>
           );
@@ -20205,10 +20299,12 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, rows, model, prev
   const setCond = (i, patch) => set({ conditions: draft.conditions.map((c, j) => (j === i ? { ...c, ...patch } : c)) });
   // Changing a line's field to or from a Kanban board changes what a value IS (a
   // bucket, not typed text), so the old value is cleared rather than reinterpreted.
-  const setCondField = (i, key) => {
-    const was = draft.conditions[i].field.startsWith(VIEW_KANBAN_PREFIX);
-    setCond(i, { field: key, ...(was || key.startsWith(VIEW_KANBAN_PREFIX) ? { value: "", token: "" } : {}) });
+  const entryOf = key => fields.find(f => f.key === key) || null;
+  const changeCond = (i, patch) => {
+    const c = draft.conditions[i];
+    set({ conditions: draft.conditions.map((x, j) => (j === i ? viewCondChanged(x, patch, entryOf(c.field), entryOf(patch.field !== undefined ? patch.field : c.field), false) : x)) });
   };
+  const setCondField = (i, key) => changeCond(i, { field: key });
   const toggleIn = (list, v) => (list.includes(v) ? list.filter(x => x !== v) : [...list, v]);
   const lbl = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent };
   const sectionStyle = { marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.border}` };
@@ -20325,27 +20421,19 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, rows, model, prev
                 <div style={{ width: 160, flexShrink: 0 }}>
                   <PickerField label="Field" hideLabel value={c.field} onChange={v => setCondField(i, v)} options={fields.map(f => f.key)} labelForOption={fieldLabel} title="Select field" />
                 </div>
-                <div style={{ width: 96, flexShrink: 0 }}>
-                  <PickerField label="Comparison" hideLabel value={c.op} onChange={v => setCond(i, { op: v })} options={["=", "!="]} labelForOption={v => (v === "=" ? "is" : "is not")} title="Select comparison" />
+                <div style={{ width: 140, flexShrink: 0 }}>
+                  <PickerField label="Comparison" hideLabel value={c.op} onChange={v => changeCond(i, { op: v })} options={viewOpsFor(entryOf(c.field))} labelForOption={v => VIEW_OP_LABELS[v] || v} title="Select comparison" />
                 </div>
-                {c.field.startsWith(VIEW_KANBAN_PREFIX) ? (() => {
-                  const board = (fields.find(f => f.key === c.field) || {}).kanban;
-                  return (
-                    <div style={{ width: 190, flexShrink: 0 }}>
-                      <PickerField label="Bucket" hideLabel value={c.value} onChange={v => setCond(i, { value: v })}
-                        options={["", ...(board ? viewBuckets(board).map(b => b.id) : [])]}
-                        labelForOption={id => (id ? ((board && viewBuckets(board).find(b => b.id === id)) || {}).name || id : "(not on the board)")} title="Select bucket" />
-                    </div>
-                  );
-                })() : c.token ? (
+                {viewValueMode(viewKindOf(entryOf(c.field)), c.op) !== "text" ? (
+                  <ViewValueInput entry={entryOf(c.field)} op={c.op} value={c.value} onChange={v => changeCond(i, { value: v })} />
+                ) : c.token ? (
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "6px 6px 6px 11px", borderRadius: 10, background: C.bg, border: `1.5px solid ${C.border}`, fontSize: 13, fontWeight: 600, color: C.brandDark }}>
                     {(VIEW_TOKENS.find(t => t.value === c.token) || {}).label}
                     <button type="button" className="icon-btn" aria-label="Type a value instead" onClick={() => setCond(i, { token: "" })} style={iconBtn}><X size={13} color={C.muted} /></button>
                   </span>
                 ) : (
                   <>
-                    <input value={c.value} onChange={e => setCond(i, { value: e.target.value })} placeholder="value (* is any)" aria-label="Value"
-                      style={{ flex: "1 1 120px", minWidth: 100, padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }} />
+                    <ViewValueInput entry={entryOf(c.field)} op={c.op} value={c.value} onChange={v => changeCond(i, { value: v })} />
                     {VIEW_TOKENS.map(t => (
                       <button key={t.value} type="button" onClick={() => setCond(i, { token: t.value })}
                         style={{ padding: "6px 9px", fontSize: 12, fontWeight: 600, border: `1px dashed ${C.border}`, borderRadius: 8, background: "none", color: C.brandDark, cursor: "pointer" }}>Use {t.label}</button>

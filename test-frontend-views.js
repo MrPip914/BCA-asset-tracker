@@ -34,13 +34,13 @@ const code = [
   slice('function maintenanceSortKey(row) {'),
   slice('function maintenanceStatusMeta(status) {'),
   block,
-  'return { adoptViews, viewsVisibleTo, viewFieldsFor, viewFieldValue, viewFieldDisplay, viewConditionMatches, viewMatches, describeViewQuery, orderViewRows, moveInViewOrder, addToViewOrder, removeFromViewOrder, viewTaskKey, viewDialogShows, viewVisibleCustomKeys, viewDragOrder, viewBoard, viewBoardMove, viewBucketIdIn, viewBucketOf, viewBuckets, viewLiveMatches, viewLiveActive, viewCanArrange };',
+  'return { adoptViews, viewsVisibleTo, viewFieldsFor, viewFieldValue, viewFieldDisplay, viewConditionMatches, viewMatches, describeViewQuery, orderViewRows, moveInViewOrder, addToViewOrder, removeFromViewOrder, viewTaskKey, viewDialogShows, viewVisibleCustomKeys, viewDragOrder, viewBoard, viewBoardMove, viewBucketIdIn, viewBucketOf, viewBuckets, viewLiveMatches, viewLiveActive, viewCanArrange, viewCondChanged, viewOpsFor, viewFieldEntry, viewKindOf, viewValueMode };',
 ].join(NL);
 const H = new Function(code)();
 
 const model = {
   taskTypes: [{ id: "tt-a", name: "Repair" }], taskTypeSettings: {}, workTypeSettings: {}, workFields: [],
-  taskFields: [{ key: "cf_zone", label: "Zone", dataType: "multiselect", options: ["Roof", "Gym"] }, { key: "cf_psi", label: "PSI", dataType: "number", options: [] }],
+  taskFields: [{ key: "cf_zone", label: "Zone", dataType: "multiselect", options: ["Roof", "Gym"] }, { key: "cf_psi", label: "PSI", dataType: "number", options: [] }, { key: "cf_day", label: "Day", dataType: "select", options: ["Mon", "Tue", "Wed"] }, { key: "cf_when", label: "When", dataType: "date", options: [] }],
 };
 const row = (id, o = {}) => ({
   asset: { id: "A1" }, assetName: "Room 1", status: o.status || "ok", due: o.due || null,
@@ -211,6 +211,45 @@ check('Sandbox carries a Kanban and a view that queries it', /type: "kanban"/.te
   eq('the old schedule tick expands to its pieces', H.adoptViews({ list: [{ id: 'a', dialogFields: ['schedule', 'notes', 'dueDate'] }] }).list[0].dialogFields, ['frequency', 'lastPerformed', 'dueDate', 'notes']);
   check('schedule is no longer a tick of its own', !/key: "schedule"/.test(html));
   check('the read-only task view has no kind toggle or inputs', /viewReadOnly \? \(\s*<div[^>]*>\s*<div[^>]*>\{maintenanceDraft\.task\}/.test(html));
+}
+
+// --- before / after / less than / greater than (2026-10-19)
+{
+  const d = (iso) => ({ toISOString: () => iso + "T00:00:00.000Z" });
+  const dueRow = iso => row("t", { due: iso ? d(iso) : null });
+  const m = (c, r, cx = ctx) => H.viewConditionMatches(c, r, model, cx);
+  eq('a date field offers is / is not / before / after', H.viewOpsFor(H.viewFieldEntry(model, [], "dueDate")), ["=", "!=", "before", "after"]);
+  eq('a custom date field does too', H.viewKindOf(H.viewFieldEntry(model, [], "custom:cf_when")), "date");
+  eq('text offers only is / is not, and the live filter adds contains', [H.viewOpsFor(H.viewFieldEntry(model, [], "owner")), H.viewOpsFor(H.viewFieldEntry(model, [], "owner"), true)], [["=", "!="], ["has", "=", "!="]]);
+  eq('number, choice, multi and board offer less / greater than',
+    ["custom:cf_psi", "custom:cf_day", "custom:cf_zone"].map(k => H.viewOpsFor(H.viewFieldEntry(model, [], k))), [["=", "!=", "<", ">"], ["=", "!=", "<", ">"], ["=", "!=", "<", ">"]]);
+  check('due before a date', m(cond("dueDate", "before", "2026-11-01"), dueRow("2026-10-15")));
+  check('...not on the day itself', !m(cond("dueDate", "before", "2026-10-15"), dueRow("2026-10-15")));
+  check('due after a date', m(cond("dueDate", "after", "2026-10-01"), dueRow("2026-10-15")) && !m(cond("dueDate", "after", "2026-10-15"), dueRow("2026-10-15")));
+  check('a task with no date is neither before nor after', !m(cond("dueDate", "before", "2026-11-01"), dueRow(null)) && !m(cond("dueDate", "after", "2026-01-01"), dueRow(null)));
+  check('no date picked matches nothing', !m(cond("dueDate", "before", ""), dueRow("2026-10-15")));
+  check('a custom date field compares too', m(cond("custom:cf_when", "after", "2026-01-01"), row("t", { custom: { cf_when: "2026-05-05" } })));
+  check('a number custom field: greater and less than', m(cond("custom:cf_psi", ">", "9"), row("t", { custom: { cf_psi: "10" } })) && !m(cond("custom:cf_psi", "<", "9"), row("t", { custom: { cf_psi: "10" } })) && m(cond("custom:cf_psi", "<", "10.5"), row("t", { custom: { cf_psi: "10" } })));
+  check('...numbers compare as numbers, not text', m(cond("custom:cf_psi", ">", "9"), row("t", { custom: { cf_psi: "100" } })));
+  check('...a blank or non-numeric value matches neither', !m(cond("custom:cf_psi", "<", "9"), row("t")) && !m(cond("custom:cf_psi", ">", "9"), row("t", { custom: { cf_psi: "abc" } })));
+  check('a choice list counts its entries 1, 2, 3', m(cond("custom:cf_day", ">", "Mon"), row("t", { custom: { cf_day: "Wed" } })) && m(cond("custom:cf_day", "<", "Wed"), row("t", { custom: { cf_day: "Tue" } })) && !m(cond("custom:cf_day", ">", "Wed"), row("t", { custom: { cf_day: "Wed" } })));
+  check('...a value not in the list matches neither', !m(cond("custom:cf_day", ">", "Mon"), row("t", { custom: { cf_day: "Sat" } })) && !m(cond("custom:cf_day", ">", "Sat"), row("t", { custom: { cf_day: "Wed" } })));
+  check('a multiple choice matches when ANY pick is past the entry', m(cond("custom:cf_zone", ">", "Roof"), row("t", { custom: { cf_zone: "Roof; Gym" } })) && !m(cond("custom:cf_zone", "<", "Roof"), row("t", { custom: { cf_zone: "Roof; Gym" } })));
+  const wk = board({ assignments: { "A1::t": "b-tue" } });
+  const bctx = { userName: "", views: [wk], seen: [] };
+  check('a Kanban counts its columns 1, 2, 3 left to right (default first)', m(cond("kanban:kb", ">", "b-mon"), row("t"), bctx) && !m(cond("kanban:kb", "<", "b-mon"), row("t"), bctx) && m(cond("kanban:kb", ">", "__default"), row("t"), bctx));
+  check('...a task in the default column is column 1', m(cond("kanban:kb", "<", "b-mon"), row("u"), bctx));
+  check('...a task the board does not list matches neither', !m(cond("kanban:kb", ">", "__default"), row("t"), { userName: "", views: [board({ conditions: [cond("owner", "=", "zz")] })], seen: [] }));
+  check('a comparison on a field that cannot do it matches nothing', !m(cond("owner", ">", "a"), row("t", { owner: "b" })) && !m(cond("owner", "before", "2026-01-01"), row("t", { owner: "2025-01-01" })));
+  eq('the new comparisons survive being stored and read back', H.adoptViews({ list: [{ id: "a", conditions: ["before", "after", "<", ">", "has", "x"].map(op => ({ field: "dueDate", op, value: "v" })) }] }).list[0].conditions.map(c => c.op), ["before", "after", "<", ">", "=", "="]);
+  eq('the query reads in words', H.describeViewQuery(view([cond("dueDate", "before", "2026-11-01"), cond("custom:cf_psi", ">", "9")]), model), 'Due date is before "2026-11-01" and PSI is greater than "9"');
+  const E = k => H.viewFieldEntry(model, [], k);
+  eq('changing to a field that cannot do the comparison falls back to is', H.viewCondChanged(cond("dueDate", "before", "2026-11-01"), { field: "owner" }, E("dueDate"), E("owner"), false), { ...cond("owner", "=", ""), });
+  eq('switching between less-than and is clears a typed-in number', H.viewCondChanged(cond("custom:cf_day", "=", "mon*"), { op: ">" }, E("custom:cf_day"), E("custom:cf_day"), false).value, "");
+  eq('switching less-than to greater-than keeps the value', H.viewCondChanged(cond("custom:cf_day", "<", "Tue"), { op: ">" }, E("custom:cf_day"), E("custom:cf_day"), false).value, "Tue");
+  eq('a date line shows a date picker, text keeps wildcards', [H.viewValueMode("date", "="), H.viewValueMode("text", "="), H.viewValueMode("number", "="), H.viewValueMode("number", "<"), H.viewValueMode("choice", ">"), H.viewValueMode("choice", "=")], ["date", "text", "text", "number", "option", "text"]);
+  check('the value box is a date picker for a date field', /mode === "date" \|\| mode === "number"\) \{\s*return <input type=\{mode\}/.test(src));
+  check('both editors use the one value box and the one op list', (src.match(/<ViewValueInput /g) || []).length >= 3 && /viewOpsFor\(f, true\)/.test(src) && /viewOpsFor\(entryOf\(c\.field\)\)/.test(src));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
