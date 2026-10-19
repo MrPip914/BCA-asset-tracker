@@ -34,7 +34,7 @@ const code = [
   slice('function maintenanceSortKey(row) {'),
   slice('function maintenanceStatusMeta(status) {'),
   block,
-  'return { adoptViews, viewsVisibleTo, viewFieldsFor, viewFieldValue, viewFieldDisplay, viewConditionMatches, viewMatches, describeViewQuery, orderViewRows, moveInViewOrder, addToViewOrder, removeFromViewOrder, viewTaskKey, viewDialogShows, viewVisibleCustomKeys, viewDragOrder, viewBoard, viewBoardMove, viewBucketIdIn, viewBucketOf, viewBuckets, viewLiveMatches, viewLiveActive, viewCanArrange, viewCondChanged, viewOpsFor, viewFieldEntry, viewKindOf, viewValueMode };',
+  'return { adoptViews, viewsVisibleTo, viewFieldsFor, viewFieldValue, viewFieldDisplay, viewConditionMatches, viewMatches, describeViewQuery, orderViewRows, moveInViewOrder, addToViewOrder, removeFromViewOrder, viewTaskKey, viewDialogShows, viewVisibleCustomKeys, viewDragOrder, viewBoard, viewBoardMove, viewBucketIdIn, viewBucketOf, viewBuckets, viewLiveMatches, viewLiveActive, viewCanArrange, viewCondChanged, viewOpsFor, viewFieldEntry, viewKindOf, viewValueMode, viewGroups, viewGroupKeyOf, viewGroupMove, viewTokenAllowed };',
 ].join(NL);
 const H = new Function(code)();
 
@@ -249,7 +249,77 @@ check('Sandbox carries a Kanban and a view that queries it', /type: "kanban"/.te
   eq('switching less-than to greater-than keeps the value', H.viewCondChanged(cond("custom:cf_day", "<", "Tue"), { op: ">" }, E("custom:cf_day"), E("custom:cf_day"), false).value, "Tue");
   eq('a date line shows a date picker, text keeps wildcards', [H.viewValueMode("date", "="), H.viewValueMode("text", "="), H.viewValueMode("number", "="), H.viewValueMode("number", "<"), H.viewValueMode("choice", ">"), H.viewValueMode("choice", "=")], ["date", "text", "text", "number", "option", "text"]);
   check('the value box is a date picker for a date field', /mode === "date" \|\| mode === "number"\) \{\s*return <input type=\{mode\}/.test(src));
-  check('both editors use the one value box and the one op list', (src.match(/<ViewValueInput /g) || []).length >= 3 && /viewOpsFor\(f, true\)/.test(src) && /viewOpsFor\(entryOf\(c\.field\)\)/.test(src));
+  check('both editors use the one value box and the one op list', (src.match(/<ViewValueInput /g) || []).length >= 2 && /viewOpsFor\(f, true\)/.test(src) && /viewOpsFor\(entryOf\(c\.field\)\)/.test(src));
+}
+
+// --- grouping, and the [DAY OF WEEK] token (2026-10-20)
+{
+  const g = (extra, rows) => H.viewGroups(view([], extra), rows, model, ctx);
+  const keysOf = (extra, rows) => (g(extra, rows) || []).map(x => x.key);
+  const by = (owner, id) => row(id, { owner });
+  const rs = [by("Cy", "a"), by("Al", "b"), by("", "c"), by("Bo", "d"), by("Al", "e")];
+  eq('an ungrouped view has no groups', g({}, rs), null);
+  eq('a field that no longer exists reads as ungrouped', g({ groupBy: "custom:cf_gone" }, rs), null);
+  eq('groups run ascending, with the blank group last', keysOf({ groupBy: "owner" }, rs), ["Al", "Bo", "Cy", ""]);
+  eq('descending flips them but the blank group stays last', keysOf({ groupBy: "owner", groupDir: "desc" }, rs), ["Cy", "Bo", "Al", ""]);
+  eq('a task joins the group of its value', g({ groupBy: "owner" }, rs)[0].rows.map(r => r.item.id), ["b", "e"]);
+  eq('the blank group is labelled for the field', g({ groupBy: "owner" }, rs)[3].label, "No owner");
+  eq('pinned groups come first, in the pinned order, then the rest by direction',
+    keysOf({ groupBy: "owner", groupOrder: ["Cy", "Bo"] }, rs), ["Cy", "Bo", "Al", ""]);
+  eq('the blank group can be pinned to the front', keysOf({ groupBy: "owner", groupOrder: ["__none"] }, rs), ["", "Al", "Bo", "Cy"]);
+  eq('a pinned group with no tasks is simply absent', keysOf({ groupBy: "owner", groupOrder: ["Zed", "Cy"] }, rs), ["Cy", "Al", "Bo", ""]);
+  const day = (d, id) => row(id, { custom: { cf_day: d } });
+  eq('a choice list groups in the list order, not alphabetically', keysOf({ groupBy: "custom:cf_day" }, [day("Wed", "a"), day("Mon", "b"), day("Tue", "c")]), ["Mon", "Tue", "Wed"]);
+  eq('...and descending reverses that', keysOf({ groupBy: "custom:cf_day", groupDir: "desc" }, [day("Wed", "a"), day("Mon", "b"), day("Tue", "c")]), ["Wed", "Tue", "Mon"]);
+  const num = (n, id) => row(id, { custom: { cf_psi: n } });
+  eq('numbers group numerically', keysOf({ groupBy: "custom:cf_psi" }, [num("100", "a"), num("9", "b"), num("20", "c")]), ["9", "20", "100"]);
+  const dueRow = (iso, id) => row(id, { due: new Date(iso + "T12:00:00Z") });
+  eq('dates group chronologically, labelled as dates', [keysOf({ groupBy: "dueDate" }, [dueRow("2026-11-02", "a"), dueRow("2026-10-05", "b")]), g({ groupBy: "dueDate" }, [dueRow("2026-10-05", "b")])[0].label], [["2026-10-05", "2026-11-02"], "D:2026-10-05"]);
+  eq('a multiple choice groups by its first pick', keysOf({ groupBy: "custom:cf_zone" }, [row("a", { custom: { cf_zone: "Gym; Roof" } }), row("b", { custom: { cf_zone: "Roof" } })]), ["Roof", "Gym"]);
+  const kb = board({ assignments: { "A1::a": "b-tue", "A1::b": "b-mon" } });
+  const gctx = { userName: "", views: [kb], seen: [] };
+  eq('a Kanban field groups in column order, labelled by column name',
+    H.viewGroups(view([], { groupBy: "kanban:kb" }), [row("a"), row("b"), row("c")], model, gctx).map(x => [x.key, x.label]), [["__default", "Backlog"], ["b-mon", "Monday"], ["b-tue", "Tuesday"]]);
+  eq('moving a group down pins everything shown in the new order',
+    H.viewGroupMove(view([], { groupBy: "owner" }), ["Al", "Bo", "Cy", ""], "Al", 1), ["Bo", "Al", "Cy", "__none"]);
+  eq('...and keeps pinned groups that have no tasks behind', H.viewGroupMove(view([], { groupOrder: ["Zed"] }), ["Al", "Bo"], "Bo", -1), ["Bo", "Al", "Zed"]);
+  eq('moving the first group up is a no-op', H.viewGroupMove(view([], { groupOrder: ["x"] }), ["Al", "Bo"], "Al", -1), ["x"]);
+  eq('grouping is stored and read back', (({ groupBy, groupDir, groupOrder }) => ({ groupBy, groupDir, groupOrder }))(H.adoptViews({ list: [{ id: "a", groupBy: " owner ", groupDir: "desc", groupOrder: ["x", 3, ""] }] }).list[0]), { groupBy: "owner", groupDir: "desc", groupOrder: ["x"] });
+  eq('a view with none reads as ungrouped, ascending', (({ groupBy, groupDir, groupOrder }) => ({ groupBy, groupDir, groupOrder }))(H.adoptViews({ list: [{ id: "a", groupDir: "weird", groupBy: 5 }] }).list[0]), { groupBy: "", groupDir: "asc", groupOrder: [] });
+
+  // a grouped Kanban: same group order in every column, each card in its own group
+  const gb = board({ groupBy: "owner", assignments: { "A1::a": "b-mon", "A1::b": "b-mon", "A1::c": "b-mon" } });
+  const gr = [by("Cy", "a"), by("Al", "b"), by("Al", "c"), by("Bo", "d")];
+  const gbd = H.viewBoard(gb, gr, model, ctx);
+  eq('a grouped column reads group by group', gbd.find(c => c.id === "b-mon").groups.map(x => [x.key, x.rows.map(r => r.item.id)]), [["Al", ["b", "c"]], ["Cy", ["a"]]]);
+  eq('a column with none of a group omits it, the others keep their order', gbd.find(c => c.id === "__default").groups.map(x => x.key), ["Bo"]);
+  eq('an ungrouped board has no groups', H.viewBoard(board(), gr, model, ctx)[0].groups, undefined);
+  let mv = H.viewBoardMove(gb, gbd, "A1::c", "b-mon", 0, gbd.find(c => c.id === "b-mon").groups[0].rows);
+  eq('a drop inside its own group orders that group only', mv.order, ["A1::c"]);
+  mv = H.viewBoardMove(gb, gbd, "A1::d", "b-tue", 0, null);
+  eq('a drop outside its own group moves the bucket and orders nothing', [mv.assignments["A1::d"], mv.order], ["b-tue", []]);
+
+  // [DAY OF WEEK]
+  const monday = new Date(2026, 9, 19, 12), friday = new Date(2026, 9, 23, 12);
+  const wkb = board({ assignments: { "A1::t": "b-mon" } });
+  const dctx = now => ({ userName: "", views: [wkb], seen: [], now });
+  const tok = (f, op) => cond(f, op, "", "and", "DAY_OF_WEEK");
+  check('the token is one an editor can pick and a stored view keeps', H.adoptViews({ list: [{ id: "a", conditions: [{ field: "owner", token: "DAY_OF_WEEK" }] }] }).list[0].conditions[0].token === "DAY_OF_WEEK");
+  eq('the token reads as its own name in the query', H.describeViewQuery(view([tok("owner", "=")]), model), "Owner is [DAY OF WEEK]");
+  check('against a text field it is today\'s weekday', H.viewConditionMatches(tok("owner", "="), row("t", { owner: "monday" }), model, dctx(monday)) && !H.viewConditionMatches(tok("owner", "="), row("t", { owner: "monday" }), model, dctx(friday)));
+  check('against a choice list it matches the entry spelled that way', H.viewConditionMatches(tok("custom:cf_day", "="), row("t", { custom: { cf_day: "Friday" } }), model, dctx(friday)));
+  check('against a Kanban it means the column of that name', H.viewConditionMatches(tok("kanban:kb", "="), row("t"), model, dctx(monday)) && !H.viewConditionMatches(tok("kanban:kb", "="), row("t"), model, dctx(friday)));
+  check('...and is not means every card outside it', !H.viewConditionMatches(tok("kanban:kb", "!="), row("t"), model, dctx(monday)) && H.viewConditionMatches(tok("kanban:kb", "!="), row("t"), model, dctx(friday)));
+  check('...a day with no column of that name matches nothing for is', !H.viewConditionMatches(tok("kanban:kb", "="), row("u"), model, dctx(friday)));
+  eq('every weekday has a name', [0, 1, 2, 3, 4, 5, 6].map(i => H.viewConditionMatches(tok("owner", "="), row("t", { owner: ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"][i] }), model, dctx(new Date(2026, 9, 18 + i, 12)))), [true, true, true, true, true, true, true]);
+  eq('a token is offered for text and for a Kanban is / is not, not for dates or less-than', [H.viewTokenAllowed("text", "="), H.viewTokenAllowed("board", "!="), H.viewTokenAllowed("board", "<"), H.viewTokenAllowed("date", "before"), H.viewTokenAllowed("choice", ">")], [true, true, false, false, false]);
+  eq('switching a token line to a comparison that cannot take one drops the token', H.viewCondChanged(tok("kanban:kb", "="), { op: ">" }, H.viewFieldEntry(model, [wkb], "kanban:kb"), H.viewFieldEntry(model, [wkb], "kanban:kb"), false).token, "");
+
+  // wiring
+  check('the list groups into sections with a heading each', /data-group-heading/.test(src) && /viewGroups\(view, rows, model, ctx\)/.test(src));
+  check('the board splits each column and orders inside the card\'s own group', /col\.groups \?/.test(src) && /g\.key === viewGroupKeyOf\(view, row, model, ctx\)/.test(src));
+  check('the editor can pick the field, the direction and move groups', /Group tasks by/.test(src) && /viewGroupMove\(draft/.test(src) && /Move group \$\{g\.label\} up/.test(src));
+  check('Sandbox carries a grouped view and a [DAY OF WEEK] one', /groupBy: "owner"/.test(src) && /token: "DAY_OF_WEEK"/.test(src));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
