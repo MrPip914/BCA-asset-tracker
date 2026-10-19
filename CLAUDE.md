@@ -823,6 +823,26 @@ instead, and still is for anything that takes that path.
   Driven in Chromium against the real function on a local Postgres: two pages saving
   different assets both land; a third, stale on the same asset, gets the not-saved modal.
 
+## Views (2026-10-17, updated same day)
+
+A **Views** main tab shows saved task lists and boards an editor sets up in **Settings > Views**; each person sees only the views assigned to them. Tasks only. Plan: `/mnt/project-files/plans/views.md`. **Frontend plus `asset-api`: a push to dev redeploys the Edge Function; no Apps Script change, no version bump.**
+
+- **Stored in ONE Config key, `views` = `{ list: [view] }`** (an object, because the Edge Function only keeps optional config keys that are objects, as for `workModel`). A view is `{ id, name, type: "list"|"kanban", userEmails, conditions, columns, dialogFields, order, viewersCanOrder, defaultBucketName, buckets: [{id,name}], assignments: {taskKey: bucketId} }`; the task key is `"<assetId>::<taskId>"`. The Apps Script fallback drops it, accepted as for `workModel`. **List order in `views.list` IS the order people see**, set by the order icon in Settings.
+- **Layout: a sidebar of views with task counts** (`ViewsSidebar`); on a phone the sidebar is the first screen and a back arrow returns to it.
+- **Query = lines of `field is / is not value`, joined AND/OR, AND binding tighter.** Token `[CURRENT USERNAME]` is the allowlist name of whoever is signed in, else their email; with no name known it matches nothing for `is`. Compare ignores case and spacing; a multiple-choice custom field matches on any pick.
+- **Assigned by Google email**; Sandbox shows every view. An unassigned editor previews a view "as" an assigned person in Settings.
+- **Kanban**: same query picks the tasks; each lands in a bucket. The **default bucket** (id `__default`, renamable, default "To do") holds every task not assigned elsewhere, and any task whose bucket was removed. Assignments and the order of cards inside a bucket are stored on the view (`assignments`, `order`).
+  - **A Kanban is a query field for OTHER views** (`kanban:<viewId>`, labelled "<name> Kanban"); its value is the bucket **id**, blank when the board's own query leaves the task out, so "Workweek Kanban is not Monday" works. `ctx.seen` stops two boards that query each other recursing. A board does not offer itself.
+- **Ordering is drag and drop, behind an order icon** at the top right of a view (and of the Settings view list). Pointer events (`usePointerSort`), so touch works. A drop pins everything down to the dropped task as ordered; the rest stay below by due date. A key whose task no longer matches keeps its slot.
+- **Who may arrange**: editors always; others only when the view's **"Viewers can change task order"** is ticked AND they are assigned to it. On Supabase arranging goes through its own op, **`op:"viewState"`** (`saveViewState` in `save.ts`), which writes ONLY `order` and `assignments` of that one view and re-checks the permission inside the lock from stored data — a viewer can never touch a view's query or settings, which a normal config save would let them. Sandbox and Apps Script use the ordinary save.
+- **Follow-up (2026-10-18, Eric)**: a Kanban has NO order mode; its cards always drag for whoever may arrange (`arranging = canArrange && (kanban || arrange)`), and only a list keeps the order icon. The filter, order and search controls are icon-only; on a phone search is an icon until tapped (it stays open while it holds text). **A `*` in a query value is a wildcard** (`viewValueEquals`): any run of characters, so `Room 1*` matches a prefix, and a lone `*` is any NON-blank value (so "Owner is *" finds tasks that have an owner; blank is not a value). Case and spacing are still ignored; stored data is unchanged.
+- **Follow-up 2 (2026-10-18, Eric)**: a Kanban card's TITLE opens the task (cards still drag; a press that never moved is a tap, and `usePointerSort` no longer fires a drop for one, since the captured pointer sends the click to the card whatever was tapped). Each column keeps 72px below its last card so a sideways swipe on a phone has somewhere to start that is not a card. **"Schedule and due date" was split into three ticks in `dialogFields`: `frequency` (Repeats), `lastPerformed` (Last performed / Completed) and `dueDate`**; a stored view that still carries `schedule` is expanded to all three on read (`viewDialogFieldsAdopted`), no migration. The dialog's read mode is now plain text rows (only values that exist; a scheduled task's due date reads as "Next due"), with no kind toggle, pickers or empty inputs; Files shows only when there are some. Frontend only.
+- **Live filter**: a search box plus a Filters panel (`field is / is not / contains`), on lists and boards, over the tasks the view already shows. Client state only, never saved. `has` (contains) exists for it alone and is not a stored operator.
+- **A task opened from a view reads first** (`<fieldset disabled>`); editors get a pencil that turns on editing. It shows only the view's `dialogFields`, has no Delete, validates only the visible custom fields, and is read-only for a view-only person.
+- The relationship-query builder was not reused: it follows asset links, and a view is `field = value` over task rows.
+- **The connector does not know views yet** (queued in `/mnt/project-files/connector-queue.md`).
+- Covered by `test-frontend-views.js` (real helpers plus wiring, mutation-checked) and `save_test.ts` (`viewState` permission rule; runs in CI). Driven in Chromium against Sandbox: sidebar and counts, the phone flow, board drag between buckets, list drag and reload, read mode and pencil, the live filter, and the Settings editor and order icon. The viewer path of `viewState` is covered by the Deno test only.
+
 ## Relationships tab (2026-10-10)
 
 Each asset can show a **Relationships** tab listing assets related to it by named
@@ -895,6 +915,28 @@ change, no version bump, no deploy.**
   Sandbox's Room carries a "Breakers feeding this room" query.
 - The rest of the connector's query support is queued in
   `/mnt/project-files/connector-queue.md`.
+
+## Sections drawings (generic window pane layouts, 2026-10-16)
+
+**The Panes tab is now the Sections tab and is a PER-TYPE SETTING**, not a property of the
+built-in Window: `typeSettings[id].sections`, ticked in the type editor ("Has a sections
+drawing"), so a "Paint surfaces" or "Windows (cleaning)" type gets the same drawing, groups
+and task highlighting. `modulesFor` adds the `windowLayout` module when the merged entry has
+`sections`; Window ships `sections: true` in the registry. **Labels only**: the module key
+`windowLayout`, `?tab=windowLayout`, `paneGroupIds`, the `pane_group_*` audit actions and the
+floor-plan fields are unchanged, so existing windows, drawings, groups and tasks need no
+migration. The audit sentences read "section group" at read time. Frontend only. The
+description below still says "panes"; read it as "sections".
+
+**The drawing zooms (2026-10-16).** `WindowLayoutView` takes `zoomable` (and `wheelZoom`): +/-/Reset
+buttons, drag to pan once zoomed, two-finger pinch, and Ctrl/Cmd+wheel (a plain wheel only in the
+full-screen view, so scrolling the page past the drawing still works). The view is a window onto the
+same drawing (`{ z, dx, dy }` -> `zoomViewBox`, clamped inside it, max 8x), so panes stay clickable and
+a drag never counts as a pane click (`onClickCapture`). **`SectionsZoomModal` is the full-screen view**,
+opened by the tab's Enlarge button and by tapping a task's thumbnail in `TaskPaneLayout` (task dialog,
+card and completion form). It is portalled to the body and STOPS every click, or a tap would close the
+dialog it was opened from. Frontend only. Covered in `test-frontend-windows.js` (the zoom maths run for
+real, the wiring read as source); driven in Chromium against Sandbox (buttons, pan, reset, wheel, Escape).
 
 ## Window pane layouts (2026-10-13)
 

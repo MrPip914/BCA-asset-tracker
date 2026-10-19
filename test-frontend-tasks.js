@@ -278,7 +278,7 @@ check('the dialog serves both modes off the same save buttons',
 // there is no done flag to unset. Offering it while ADDING one would invite
 // logging a job as done in the act of creating it.
 check('a one-off being edited can be reopened by clearing its date',
-      /\{editing && \([\s\S]{0,1200}?Clear to reopen/.test(src));
+      /\{editing && vShow\(\"lastPerformed\"\) && \([\s\S]{0,1200}?Clear to reopen/.test(src));
 check('the reopen field is editing-only',
       src.split('Clear to reopen').length - 1 === 1);
 

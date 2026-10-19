@@ -504,6 +504,34 @@ if (!DATABASE_URL) {
     assert(r.readOnly || /view/i.test(r.error || ""), JSON.stringify(r));
   });
 
+  Deno.test("view state: an editor, or a viewer the view allows, can arrange it; nobody else", async () => {
+    await reset();
+    const owner = await signIn();
+    const p = await read(owner);
+    const view = (id: string, extra: Any = {}) => ({ id, name: id, userEmails: ["jane@school.test"], conditions: [], columns: [], dialogFields: [], order: [], ...extra });
+    const views = { list: [view("open", { viewersCanOrder: true }), view("locked"), view("other", { userEmails: [], viewersCanOrder: true })] };
+    assertEquals((await post(bodyFrom(p, owner, { views, _dirty: { assets: false, config: true, breakerTypes: false, photos: false } }))).ok, true);
+
+    const jane = await signIn("jane@school.test");
+    const ok = await post({ op: "viewState", sessionId: jane, viewId: "open", order: ["a::1", "a::2"], assignments: { "a::1": "b2" } });
+    assertEquals(ok.ok, true);
+    const mid = await read(owner);
+    const open = mid.views.list.find((v: Any) => v.id === "open");
+    assertEquals([open.order, open.assignments], [["a::1", "a::2"], { "a::1": "b2" }]);
+    assertEquals(mid.revisions.config, p.revisions.config + 2);
+
+    for (const viewId of ["locked", "other"]) {
+      const no = await post({ op: "viewState", sessionId: jane, viewId, order: ["x"] });
+      assertEquals([no.ok, no.forbidden], [false, true]);
+    }
+    assertEquals((await post({ op: "viewState", sessionId: jane, viewId: "gone", order: [] })).ok, false);
+    assertEquals((await post({ op: "viewState", sessionId: owner, viewId: "locked", order: ["y"] })).ok, true);
+    const after = await read(owner);
+    assertEquals(after.views.list.find((v: Any) => v.id === "locked").order, ["y"]);
+    // Only the order and the placements move; the rest of the view is untouched.
+    assertEquals(after.views.list.find((v: Any) => v.id === "open").name, "open");
+  });
+
   Deno.test({
     name: "close the save test's database",
     sanitizeResources: false,

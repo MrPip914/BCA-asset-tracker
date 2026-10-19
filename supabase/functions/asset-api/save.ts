@@ -44,7 +44,7 @@ const CONFIG_WRITES: [string, () => unknown][] = [
 // Config keys the Sheet backend never had: written only when the save carries one,
 // so an older client's config save cannot erase it, and the stored rows stay what
 // the .gs would hold until the feature is used (the parity tests compare them).
-const OPTIONAL_CONFIG_KEYS = ["workModel"];
+const OPTIONAL_CONFIG_KEYS = ["workModel", "views"];
 
 // Each table a save rewrites: its key, and its columns as jsonb_to_recordset
 // types (the same names as db/load-sql.mjs's TABLE_COLUMNS; api_test.ts checks).
@@ -333,6 +333,55 @@ export async function saveInventory(tx: Tx, body: Body, ctx: SaveContext): Promi
   if (warnings.length) diag.push({ event: "save_adjusted", email: auth.email, detail: warnings.slice(0, 3).join(" | ") + (warnings.length > 3 ? ` (+${warnings.length - 3} more)` : "") });
 
   return assetRevs ? { ok: true, revisions, assetRevs } : { ok: true, revisions };
+}
+
+// op:"viewState": moves ONE view's task order and Kanban placements, nothing
+// else in the Config blob. Separate from a config save for two reasons: a
+// person who was only given the right to arrange a view ("Viewers can change
+// task order") has a view-only role, which a save refuses outright; and
+// arranging must not conflict with an editor who has Settings open. So an
+// editor may always arrange, and anyone else only a view that is assigned to
+// them AND has the setting ticked -- checked here, inside the lock, from the
+// stored view and never from anything the request says about itself.
+export async function saveViewState(tx: Tx, body: Body, ctx: SaveContext): Promise<Row> {
+  const { ownerEmail, now, diag } = ctx;
+  await tx.unsafe(`set local lock_timeout = '${Math.floor(ctx.lockTimeoutMs ?? LOCK_TIMEOUT_MS)}ms'`);
+  await tx`insert into revisions (tenant_id, domain, rev)
+    select current_tenant(), d, 0 from unnest(${REVISION_DOMAINS}::text[]) as d
+    on conflict do nothing`;
+  const stored: Record<string, number> = {};
+  for (const r of await tx`select domain, rev from revisions order by domain for update`) stored[r.domain] = Number(r.rev) > 0 ? Math.floor(r.rev) : 0;
+
+  const users = await readUsers(tx, ownerEmail);
+  const auth: Auth = await authorizeSession(tx, body.sessionId, users, now, diag);
+  if (!auth.ok) return { ok: false, authFailed: true, reason: auth.reason, email: auth.email || "", error: auth.error };
+  ctx.email = auth.email;
+
+  const [{ value: views } = { value: null }] = await tx`select value from config where key = 'views'`;
+  const list: Row[] = views && Array.isArray(views.list) ? views.list : [];
+  const at = list.findIndex((v) => v && v.id === body.viewId);
+  if (at < 0) return { ok: false, error: "That view no longer exists. Reload to see the current views." };
+  const view = list[at];
+  const assigned = Array.isArray(view.userEmails) && view.userEmails.map((e: unknown) => String(e).toLowerCase()).includes(auth.email.toLowerCase());
+  if (auth.role !== ROLE_EDITOR && !(view.viewersCanOrder === true && assigned)) {
+    diag.push({ event: "auth_failed", email: auth.email, reason: "readonly", detail: "view order" });
+    return { ok: false, forbidden: true, error: "You can't change the order of this view." };
+  }
+
+  const next: Row = { ...view };
+  if (Array.isArray(body.order)) next.order = body.order.filter((k: unknown) => typeof k === "string" && k).slice(0, 5000);
+  if (body.assignments && typeof body.assignments === "object" && !Array.isArray(body.assignments)) {
+    const clean: Row = {};
+    for (const [k, v] of Object.entries(body.assignments)) if (typeof v === "string" && v && k) clean[k] = v;
+    next.assignments = clean;
+  }
+  const merged = { ...(views || {}), list: list.map((v, i) => (i === at ? next : v)) };
+  await tx`insert into config (tenant_id, key, value) values (current_tenant(), 'views', ${tx.json(merged)}::jsonb)
+    on conflict (tenant_id, key) do update set value = excluded.value`;
+  await tx`update revisions set rev = rev + 1 where domain = 'config'`;
+  const revisions = Object.fromEntries(REVISION_DOMAINS.map((d) => [d, stored[d] || 0]));
+  revisions.config += 1;
+  return { ok: true, revisions };
 }
 
 // A per-record save's `assetChanges`, cleaned: every entry an object with an

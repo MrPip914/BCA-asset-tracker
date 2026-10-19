@@ -140,7 +140,7 @@ const TYPE_REGISTRY = {
   Window: {
     locked: true, icon: Blinds, categoryIds: ["Facilities"], parentTypes: ["Wall", "Room"],
     excludedFields: ["hostname", "screenSize", "peripherals"],
-    modules: ["windowLayout"],
+    sections: true,
   },
   Other: { parentTypes: ["Room", "Wall"] },
 };
@@ -203,6 +203,18 @@ function typeEntryFor(typeId) {
 
 function isLockedType(typeId) {
   return !!TYPE_REGISTRY[typeId]?.locked;
+}
+
+function modulesFor(type) {
+  const entry = typeEntryFor(type);
+  const mods = entry?.modules || [];
+  // The Sections tab is a per-type SETTING (typeSettings[id].sections), not a
+  // property of one built-in: Window ships with it on, any type can switch it on.
+  return entry?.sections && !mods.includes("windowLayout") ? [...mods, "windowLayout"] : mods;
+}
+
+function hasModule(type, moduleKey) {
+  return modulesFor(type).includes(moduleKey);
 }
 
 function ensureLockedTypes(list) {
@@ -1417,7 +1429,105 @@ function runRelationshipQuery(asset, query, assets, columns, typesList) {
   return { nodes, count: shown.size };
 }
 
+const DEFAULT_WORK_TYPE_ID = "__default";
+
+const DEFAULT_WORK_TYPE_NAME = "Default";
+
+const WORK_BUILTIN_FIELDS = {
+  task: [{ key: "notes", label: "Notes" }, { key: "owner", label: "Owner" }],
+  work: [{ key: "vendor", label: "Vendor" }, { key: "cost", label: "Cost" }, { key: "task", label: "Linked task" }, { key: "note", label: "Details" }],
+};
+
+function defaultWorkTypeId(model, kind) {
+  const m = model || {};
+  const id = kind === "task" ? m.defaultTaskType : m.defaultWorkType;
+  if (!id || id === DEFAULT_WORK_TYPE_ID) return DEFAULT_WORK_TYPE_ID;
+  if (kind === "task" && !(m.taskTypes || []).some(t => t.id === id)) return DEFAULT_WORK_TYPE_ID;
+  return id;
+}
+
+function resolveWorkTypeId(model, kind, typeId) {
+  if (typeId === DEFAULT_WORK_TYPE_ID) return DEFAULT_WORK_TYPE_ID;
+  if (!typeId) return defaultWorkTypeId(model, kind);
+  if (kind === "task" && !((model && model.taskTypes) || []).some(t => t.id === typeId)) return defaultWorkTypeId(model, kind);
+  return typeId;
+}
+
+function workBuiltinShown(model, kind, typeId, key) {
+  const st = workModelParts(model, kind).settings[resolveWorkTypeId(model, kind, typeId)];
+  return !(st && (st.hiddenFields || []).includes(key));
+}
+
+function adoptWorkModel(raw) {
+  const m = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  const list = v => (Array.isArray(v) ? v : []);
+  const obj = v => (v && typeof v === "object" && !Array.isArray(v) ? v : {});
+  const fields = v => list(v).filter(f => f && typeof f.key === "string" && f.key).map(f => ({
+    key: f.key, label: f.label || f.key,
+    dataType: COLUMN_DATA_TYPE_VALUES.has(f.dataType) ? f.dataType : "text",
+    options: list(f.options).map(String),
+    ...(f.format === "dollars" && f.dataType === "number" ? { format: "dollars" } : {}),
+  }));
+  const settings = v => {
+    const out = {};
+    Object.entries(obj(v)).forEach(([id, st]) => {
+      out[id] = { fieldKeys: list(st && st.fieldKeys).map(String), requiredFields: list(st && st.requiredFields).map(String), hiddenFields: list(st && st.hiddenFields).map(String) };
+    });
+    return out;
+  };
+  return {
+    taskTypes: list(m.taskTypes).filter(t => t && t.id).map(t => ({ id: String(t.id), name: String(t.name || t.id) })),
+    taskTypeSettings: settings(m.taskTypeSettings),
+    taskFields: fields(m.taskFields),
+    workTypeSettings: settings(m.workTypeSettings),
+    workFields: fields(m.workFields),
+    defaultTaskType: typeof m.defaultTaskType === "string" ? m.defaultTaskType : "",
+    defaultWorkType: typeof m.defaultWorkType === "string" ? m.defaultWorkType : "",
+  };
+}
+
+function workModelParts(model, kind) {
+  const m = model || adoptWorkModel(null);
+  return kind === "task"
+    ? { fields: m.taskFields || [], settings: m.taskTypeSettings || {} }
+    : { fields: m.workFields || [], settings: m.workTypeSettings || {} };
+}
+
+function customFieldsFor(model, kind, typeId) {
+  const { fields, settings } = workModelParts(model, kind);
+  const st = settings[resolveWorkTypeId(model, kind, typeId)];
+  if (!st) return [];
+  return st.fieldKeys.map(k => fields.find(f => f.key === k)).filter(Boolean);
+}
+
+function requiredCustomFieldsFor(model, kind, typeId) {
+  const have = new Set(customFieldsFor(model, kind, typeId).map(f => f.key));
+  const st = workModelParts(model, kind).settings[resolveWorkTypeId(model, kind, typeId)];
+  return st ? st.requiredFields.filter(k => have.has(k)) : [];
+}
+
+function validateCustomValues(model, kind, typeId, values, visibleKeys) {
+  const v = values && typeof values === "object" ? values : {};
+  // A task opened from a view shows only the fields that view picked; a rule
+  // about one it hides would refuse the save with nothing on screen to fix.
+  const fields = customFieldsFor(model, kind, typeId).filter(f => !visibleKeys || visibleKeys.includes(f.key));
+  const required = new Set(requiredCustomFieldsFor(model, kind, typeId));
+  for (const f of fields) {
+    const raw = v[f.key];
+    const empty = raw === undefined || raw === null || String(raw).trim() === "";
+    if (empty) { if (required.has(f.key)) return `${f.label} is required.`; continue; }
+    const err = validateColumnValue(f, raw);
+    if (err) return err;
+  }
+  return "";
+}
+
+function taskTypeNameOf(model, id) {
+  const t = id ? (model.taskTypes || []).find(x => x.id === id) : null;
+  return t ? t.name : "";
+}
+
 // Each tenant's asset-ID prefix, from clients.js.
 export const TENANT_LABEL_PREFIX = {"3c":"3C","bca":"BCA","dev":"BCA"};
 
-export { TYPE_REGISTRY, DEFAULT_TYPES, applyTypeSettings, adoptLegacyTypesList, ensureLockedTypes, typeNameOf, typeTakesParent, parentTypesFor, isPlaceType, fieldAppliesTo, isPersonType, personMatchKey, nameOf, personLabelsOf, personNamesOf, UNASSIGNED_LABEL, pathOf, fullPathOf, parentNameFor, relate, dateOnly, adoptPersonNames, adoptLegacyNames, isChoiceKind, multiValues, columnDataType, columnOptions, validateColumnValue, DEFAULT_COLUMNS, RENAMED_COLUMN_KEYS, RETIRED_COLUMN_KEYS, IMPORT_KEY_HEADER, importHeadersFor, planAssetImport, PATH_SEPARATOR, assetToImportRow, resolveImportType, isLockedType, nearestAncestorOfType, columnReferenceTypes, referenceColumns, RELATIONSHIP_FOLLOWS, relationshipFollowMeta, relationshipQueriesFor, relationshipQueriesShownFor, runRelationshipQuery };
+export { TYPE_REGISTRY, DEFAULT_TYPES, applyTypeSettings, adoptLegacyTypesList, ensureLockedTypes, typeNameOf, typeTakesParent, parentTypesFor, isPlaceType, fieldAppliesTo, isPersonType, personMatchKey, nameOf, personLabelsOf, personNamesOf, UNASSIGNED_LABEL, pathOf, fullPathOf, parentNameFor, relate, dateOnly, adoptPersonNames, adoptLegacyNames, isChoiceKind, multiValues, columnDataType, columnOptions, validateColumnValue, DEFAULT_COLUMNS, RENAMED_COLUMN_KEYS, RETIRED_COLUMN_KEYS, IMPORT_KEY_HEADER, importHeadersFor, planAssetImport, PATH_SEPARATOR, assetToImportRow, resolveImportType, isLockedType, hasModule, nearestAncestorOfType, columnReferenceTypes, referenceColumns, RELATIONSHIP_FOLLOWS, relationshipFollowMeta, relationshipQueriesFor, relationshipQueriesShownFor, runRelationshipQuery, DEFAULT_WORK_TYPE_ID, DEFAULT_WORK_TYPE_NAME, WORK_BUILTIN_FIELDS, defaultWorkTypeId, resolveWorkTypeId, workBuiltinShown, adoptWorkModel, customFieldsFor, requiredCustomFieldsFor, validateCustomValues, taskTypeNameOf };
