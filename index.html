@@ -2529,6 +2529,28 @@ function viewDialogFieldsAdopted(keys) {
   return out;
 }
 
+// A query is a list of lines, and a line is a condition or a GROUP of lines
+// ({ group: true, join, conditions }), nested up to VIEW_MAX_GROUP_DEPTH deep.
+// A stored flat list is a list with no groups, so it reads exactly as before.
+const VIEW_MAX_GROUP_DEPTH = 3;
+function adoptViewConds(raw, depth) {
+  return (Array.isArray(raw) ? raw : []).map(c => {
+    if (c && c.group === true) {
+      if (depth >= VIEW_MAX_GROUP_DEPTH) return null;
+      const inner = adoptViewConds(c.conditions, depth + 1);
+      return { group: true, join: c.join === "or" ? "or" : "and", conditions: inner };
+    }
+    if (!c || typeof c.field !== "string" || !c.field) return null;
+    return {
+      field: c.field,
+      op: VIEW_STORED_OPS.includes(c.op) ? c.op : "=",
+      value: c.value == null ? "" : String(c.value),
+      token: VIEW_TOKENS.some(t => t.value === c.token) ? c.token : "",
+      join: c.join === "or" ? "or" : "and",
+    };
+  }).filter(Boolean);
+}
+
 function adoptViews(raw) {
   const list = Array.isArray(raw && raw.list) ? raw.list : [];
   const strs = v => (Array.isArray(v) ? v.filter(x => typeof x === "string" && x) : []);
@@ -2544,13 +2566,7 @@ function adoptViews(raw) {
       assignments: Object.fromEntries(Object.entries(v.assignments && typeof v.assignments === "object" && !Array.isArray(v.assignments) ? v.assignments : {})
         .filter(([k, b]) => k && typeof b === "string" && b)),
       userEmails: strs(v.userEmails).map(e => e.trim().toLowerCase()),
-      conditions: (Array.isArray(v.conditions) ? v.conditions : []).filter(c => c && typeof c.field === "string" && c.field).map(c => ({
-        field: c.field,
-        op: VIEW_STORED_OPS.includes(c.op) ? c.op : "=",
-        value: c.value == null ? "" : String(c.value),
-        token: VIEW_TOKENS.some(t => t.value === c.token) ? c.token : "",
-        join: c.join === "or" ? "or" : "and",
-      })),
+      conditions: adoptViewConds(v.conditions, 0),
       columns: Array.isArray(v.columns) ? strs(v.columns) : [...VIEW_DEFAULT_COLUMNS],
       dialogFields: viewDialogFieldsAdopted(strs(v.dialogFields)),
       order: strs(v.order),
@@ -2689,10 +2705,18 @@ function viewConditionGroups(conditions) {
   });
   return groups;
 }
-function viewMatches(view, row, model, ctx) {
-  const groups = viewConditionGroups(view.conditions);
+// A group with no lines in it says nothing, so it is left out rather than
+// matching everything (or nothing).
+function viewItemsLive(items) {
+  return (items || []).filter(c => (c && c.group === true ? viewItemsLive(c.conditions).length > 0 : true));
+}
+function viewItemsMatch(items, row, model, ctx) {
+  const groups = viewConditionGroups(viewItemsLive(items));
   if (!groups.length) return true;
-  return groups.some(g => g.every(c => viewConditionMatches(c, row, model, ctx)));
+  return groups.some(g => g.every(c => (c.group === true ? viewItemsMatch(c.conditions, row, model, ctx) : viewConditionMatches(c, row, model, ctx))));
+}
+function viewMatches(view, row, model, ctx) {
+  return viewItemsMatch(view.conditions, row, model, ctx);
 }
 // The query in words, for the editor and the preview.
 function describeViewQuery(view, model, views) {
@@ -2707,9 +2731,14 @@ function describeViewQuery(view, model, views) {
     if (!c.token && c.value === "*") val = "any value";
     return `${f ? f.label : c.field} ${VIEW_OP_LABELS[c.op] || "is"} ${val}`;
   };
-  const groups = viewConditionGroups(view.conditions);
-  if (!groups.length) return "Every task";
-  return groups.map(g => (groups.length > 1 && g.length > 1 ? "(" + g.map(one).join(" and ") + ")" : g.map(one).join(" and "))).join(" or ");
+  const words = items => {
+    const groups = viewConditionGroups(viewItemsLive(items));
+    return groups.map(g => {
+      const parts = g.map(c => (c.group === true ? "(" + words(c.conditions) + ")" : one(c)));
+      return groups.length > 1 && parts.length > 1 ? "(" + parts.join(" and ") + ")" : parts.join(" and ");
+    }).join(" or ");
+  };
+  return words(view.conditions) || "Every task";
 }
 
 // Ordered tasks first, in the order stored; the rest in the Tasks tab's
@@ -6232,7 +6261,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-20.1";
+const APP_VERSION = "2026-10-20.2";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -20473,15 +20502,78 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, rows, model, prev
   const dialogFields = viewDialogFieldsFor(model);
   const kanban = draft.type === VIEW_TYPE_KANBAN;
   const set = patch => setDraft(d => ({ ...d, ...patch }));
-  const setCond = (i, patch) => set({ conditions: draft.conditions.map((c, j) => (j === i ? { ...c, ...patch } : c)) });
   // Changing a line's field to or from a Kanban board changes what a value IS (a
   // bucket, not typed text), so the old value is cleared rather than reinterpreted.
   const entryOf = key => fields.find(f => f.key === key) || null;
-  const changeCond = (i, patch) => {
-    const c = draft.conditions[i];
-    set({ conditions: draft.conditions.map((x, j) => (j === i ? viewCondChanged(x, patch, entryOf(c.field), entryOf(patch.field !== undefined ? patch.field : c.field), false) : x)) });
+  const newCond = () => ({ field: "owner", op: "=", value: "", token: "", join: "and" });
+  // One recursive renderer serves the top list and every group inside it.
+  const renderConds = (items, setItems, depth) => {
+    const setCond = (i, patch) => setItems(items.map((c, j) => (j === i ? { ...c, ...patch } : c)));
+    const changeCond = (i, patch) => {
+      const c = items[i];
+      setItems(items.map((x, j) => (j === i ? viewCondChanged(x, patch, entryOf(c.field), entryOf(patch.field !== undefined ? patch.field : c.field), false) : x)));
+    };
+    const joinCell = (c, i) => (
+      <div style={{ width: 72, flexShrink: 0 }}>
+        {i === 0
+          ? <span style={{ fontSize: 13, color: C.muted }}>Where</span>
+          : <PickerField label="Join" hideLabel value={c.join} onChange={v => setCond(i, { join: v })} options={["and", "or"]} labelForOption={v => (v === "and" ? "And" : "Or")} title="Join with the line above" />}
+      </div>
+    );
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {items.map((c, i) => c.group === true ? (
+          <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-start", gap: 6 }}>
+            {joinCell(c, i)}
+            <div style={{ flex: 1, minWidth: 240, border: `1.5px solid ${C.border}`, borderRadius: 10, padding: 10, background: C.bg }}>
+              <div style={{ ...lbl, marginBottom: 8, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                Group
+                <button type="button" className="icon-btn" aria-label="Remove this group" onClick={() => setItems(items.filter((_, j) => j !== i))} style={iconBtn}><Trash2 size={14} color={C.danger} /></button>
+              </div>
+              {renderConds(c.conditions, inner => setCond(i, { conditions: inner }), depth + 1)}
+            </div>
+          </div>
+        ) : (
+          <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+            {joinCell(c, i)}
+            <div style={{ width: 160, flexShrink: 0 }}>
+              <PickerField label="Field" hideLabel value={c.field} onChange={v => changeCond(i, { field: v })} options={fields.map(f => f.key)} labelForOption={fieldLabel} title="Select field" />
+            </div>
+            <div style={{ width: 140, flexShrink: 0 }}>
+              <PickerField label="Comparison" hideLabel value={c.op} onChange={v => changeCond(i, { op: v })} options={viewOpsFor(entryOf(c.field))} labelForOption={v => VIEW_OP_LABELS[v] || v} title="Select comparison" />
+            </div>
+            {c.token ? (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "6px 6px 6px 11px", borderRadius: 10, background: C.bg, border: `1.5px solid ${C.border}`, fontSize: 13, fontWeight: 600, color: C.brandDark }}>
+                {(VIEW_TOKENS.find(t => t.value === c.token) || {}).label}
+                <button type="button" className="icon-btn" aria-label="Type a value instead" onClick={() => setCond(i, { token: "" })} style={iconBtn}><X size={13} color={C.muted} /></button>
+              </span>
+            ) : (
+              <>
+                <ViewValueInput entry={entryOf(c.field)} op={c.op} value={c.value} onChange={v => changeCond(i, { value: v })} />
+                {viewTokenAllowed(viewKindOf(entryOf(c.field)), c.op) && VIEW_TOKENS.map(t => (
+                  <button key={t.value} type="button" onClick={() => setCond(i, { token: t.value })}
+                    style={{ padding: "6px 9px", fontSize: 12, fontWeight: 600, border: `1px dashed ${C.border}`, borderRadius: 8, background: "none", color: C.brandDark, cursor: "pointer" }}>Use {t.label}</button>
+                ))}
+              </>
+            )}
+            <button type="button" className="icon-btn" aria-label="Remove this line" onClick={() => setItems(items.filter((_, j) => j !== i))} style={iconBtn}><Trash2 size={14} color={C.danger} /></button>
+          </div>
+        ))}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button type="button" onClick={() => setItems([...items, newCond()])}
+            style={{ display: "flex", alignItems: "center", gap: 4, padding: "6px 11px", borderRadius: 8, fontSize: 13, fontWeight: 600, border: `1.5px dashed ${C.border}`, background: "none", color: C.brandDark }}>
+            <Plus size={13} /> Add a line
+          </button>
+          {depth < VIEW_MAX_GROUP_DEPTH && (
+            <button type="button" onClick={() => setItems([...items, { group: true, join: "and", conditions: [newCond()] }])}
+              style={{ display: "flex", alignItems: "center", gap: 4, padding: "6px 11px", borderRadius: 8, fontSize: 13, fontWeight: 600, border: `1.5px dashed ${C.border}`, background: "none", color: C.brandDark }}>
+              <Plus size={13} /> Add a group
+            </button>
+          )}
+        </div>
+      </div>
+    );
   };
-  const setCondField = (i, key) => changeCond(i, { field: key });
   const toggleIn = (list, v) => (list.includes(v) ? list.filter(x => x !== v) : [...list, v]);
   const lbl = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent };
   const sectionStyle = { marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.border}` };
@@ -20586,44 +20678,9 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, rows, model, prev
         <div style={sectionStyle}>
           <div style={{ ...lbl, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
             Tasks shown
-            <HelpTip label="About the query" text="Leave it empty to show every task. Each line compares one field to a value. And is applied before Or, so 'A and B or C' means (A and B) or C. [CURRENT USERNAME] stands for the name of whoever is signed in, so one view can show each person their own tasks. [DAY OF WEEK] stands for today's weekday (Monday, Tuesday...); against a Kanban it means the column of that name." />
+            <HelpTip label="About the query" text="Leave it empty to show every task. Each line compares one field to a value. And is applied before Or, so 'A and B or C' means (A and B) or C. Add a group to put lines in brackets, e.g. (A or B) and (C or D); groups can sit inside groups. [CURRENT USERNAME] stands for the name of whoever is signed in, so one view can show each person their own tasks. [DAY OF WEEK] stands for today's weekday (Monday, Tuesday...); against a Kanban it means the column of that name." />
           </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {draft.conditions.map((c, i) => (
-              <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
-                <div style={{ width: 72, flexShrink: 0 }}>
-                  {i === 0
-                    ? <span style={{ fontSize: 13, color: C.muted }}>Where</span>
-                    : <PickerField label="Join" hideLabel value={c.join} onChange={v => setCond(i, { join: v })} options={["and", "or"]} labelForOption={v => (v === "and" ? "And" : "Or")} title="Join with the line above" />}
-                </div>
-                <div style={{ width: 160, flexShrink: 0 }}>
-                  <PickerField label="Field" hideLabel value={c.field} onChange={v => setCondField(i, v)} options={fields.map(f => f.key)} labelForOption={fieldLabel} title="Select field" />
-                </div>
-                <div style={{ width: 140, flexShrink: 0 }}>
-                  <PickerField label="Comparison" hideLabel value={c.op} onChange={v => changeCond(i, { op: v })} options={viewOpsFor(entryOf(c.field))} labelForOption={v => VIEW_OP_LABELS[v] || v} title="Select comparison" />
-                </div>
-                {c.token ? (
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "6px 6px 6px 11px", borderRadius: 10, background: C.bg, border: `1.5px solid ${C.border}`, fontSize: 13, fontWeight: 600, color: C.brandDark }}>
-                    {(VIEW_TOKENS.find(t => t.value === c.token) || {}).label}
-                    <button type="button" className="icon-btn" aria-label="Type a value instead" onClick={() => setCond(i, { token: "" })} style={iconBtn}><X size={13} color={C.muted} /></button>
-                  </span>
-                ) : (
-                  <>
-                    <ViewValueInput entry={entryOf(c.field)} op={c.op} value={c.value} onChange={v => changeCond(i, { value: v })} />
-                    {viewTokenAllowed(viewKindOf(entryOf(c.field)), c.op) && VIEW_TOKENS.map(t => (
-                      <button key={t.value} type="button" onClick={() => setCond(i, { token: t.value })}
-                        style={{ padding: "6px 9px", fontSize: 12, fontWeight: 600, border: `1px dashed ${C.border}`, borderRadius: 8, background: "none", color: C.brandDark, cursor: "pointer" }}>Use {t.label}</button>
-                    ))}
-                  </>
-                )}
-                <button type="button" className="icon-btn" aria-label="Remove this line" onClick={() => set({ conditions: draft.conditions.filter((_, j) => j !== i) })} style={iconBtn}><Trash2 size={14} color={C.danger} /></button>
-              </div>
-            ))}
-          </div>
-          <button type="button" onClick={() => set({ conditions: [...draft.conditions, { field: "owner", op: "=", value: "", token: "", join: "and" }] })}
-            style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 4, padding: "6px 11px", borderRadius: 8, fontSize: 13, fontWeight: 600, border: `1.5px dashed ${C.border}`, background: "none", color: C.brandDark }}>
-            <Plus size={13} /> Add a line
-          </button>
+          {renderConds(draft.conditions, conditions => set({ conditions }), 0)}
           <div style={{ fontSize: 12, color: C.muted, marginTop: 8 }}>{describeViewQuery(draft, model, ctxViews)}</div>
         </div>
 
