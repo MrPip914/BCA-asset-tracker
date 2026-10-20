@@ -383,11 +383,11 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   check("a write on a site where this person is a viewer is refused", r.isError && r.writes.length === 0, r.text);
 
   // complete_task
-  r = await w("complete_task", { task: "filter clean", date: "2026-10-05", vendor: "coolco", cost: "$120", note: "dusty" });
+  r = await w("complete_task", { task: "filter clean", date: day(0), vendor: "coolco", cost: "$120", note: "dusty" });
   eq("complete_task by name defaults to Maintenance and spells the vendor as the list does", r.writes[0], { tenant: "dev", op: "complete_task",
-    args: ["m1", "2026-10-05", { changeType: "Maintenance", vendor: "CoolCo", cost: "$120", note: "dusty", custom: {} }] });
+    args: ["m1", day(0), { changeType: "Maintenance", vendor: "CoolCo", cost: "$120", note: "dusty", custom: {} }] });
   eq("complete_task reports the task as done and when it was last done before",
-    [r.data.completed.status, r.data.completed.lastDone, r.data.previouslyDone], ["ok", "2026-10-05", day(-45)]);
+    [r.data.completed.status, r.data.completed.lastDone, r.data.previouslyDone], ["ok", day(0), day(-45)]);
   r = await w("complete_task", { task: "m3" });
   eq("a completion with no date is today, in the site's zone", r.writes[0].args[1], todayIn());
   for (const [label, args] of [

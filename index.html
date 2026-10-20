@@ -10,7 +10,7 @@
 <script src="clients.js"></script>
 <script>document.title = window.ASSET_TRACKER_CLIENT.appName;</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600;700&display=swap" rel="stylesheet">
 <style>
   html, body { margin: 0; padding: 0; }
   #root { min-height: 100vh; }
@@ -2386,7 +2386,12 @@ function maintenanceStatusMeta(status) {
 // `value`. `order` holds task keys ("<assetId>::<taskId>"): ordered tasks come
 // first, in that order, and everything else follows in the normal due order.
 const VIEW_TOKEN_CURRENT_USER = "CURRENT_USERNAME";
-const VIEW_TOKENS = [{ value: VIEW_TOKEN_CURRENT_USER, label: "[CURRENT USERNAME]" }];
+const VIEW_TOKEN_DAY_OF_WEEK = "DAY_OF_WEEK";
+const VIEW_TOKENS = [
+  { value: VIEW_TOKEN_CURRENT_USER, label: "[CURRENT USERNAME]" },
+  { value: VIEW_TOKEN_DAY_OF_WEEK, label: "[DAY OF WEEK]" },
+];
+const VIEW_WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const VIEW_BUILTIN_FIELDS = [
   { key: "task", label: "Task" },
   { key: "asset", label: "Asset" },
@@ -2434,6 +2439,82 @@ function viewFieldsFor(model, views, selfId) {
 function viewBuckets(view) {
   return [{ id: KANBAN_DEFAULT_BUCKET, name: view.defaultBucketName || KANBAN_DEFAULT_NAME }, ...(view.buckets || [])];
 }
+// What a query line can say, by the kind of value the field holds. Dates get
+// before/after; numbers, choice lists and Kanban boards get less/greater than,
+// where a board's columns count 1, 2, 3... left to right and a choice list's
+// entries count 1, 2, 3... in list order. "has" is the live filter's alone.
+const VIEW_OP_LABELS = { "=": "is", "!=": "is not", before: "is before", after: "is after", "<": "is less than", ">": "is greater than", has: "contains" };
+const VIEW_STORED_OPS = ["=", "!=", "before", "after", "<", ">"];
+function viewFieldEntry(model, views, key) {
+  return viewFieldsFor(model, views, null).find(f => f.key === key) || null;
+}
+function viewKindOf(entry) {
+  if (!entry) return "text";
+  if (entry.kanban) return "board";
+  if (entry.key === "dueDate" || entry.key === "lastDone") return "date";
+  const t = entry.custom && entry.custom.dataType;
+  return t === "date" ? "date" : t === "number" ? "number" : t === "select" ? "choice" : t === "multiselect" ? "multi" : "text";
+}
+function viewOpsFor(entry, allowHas) {
+  const kind = viewKindOf(entry);
+  const ops = kind === "date" ? ["=", "!=", "before", "after"]
+    : kind === "text" ? ["=", "!="] : ["=", "!=", "<", ">"];
+  return allowHas && (kind === "text" || kind === "choice" || kind === "multi") ? ["has", ...ops] : ops;
+}
+// How the value is typed in: a bucket, a date, a number, a pick from the
+// list, or text (where * is a wildcard).
+function viewValueMode(kind, op) {
+  if (kind === "board") return "board";
+  if (kind === "date") return "date";
+  const ordinal = op === "<" || op === ">";
+  if (kind === "number") return ordinal ? "number" : "text";
+  if ((kind === "choice" || kind === "multi") && ordinal) return "option";
+  return "text";
+}
+// A prebuilt value ([CURRENT USERNAME], [DAY OF WEEK]) can stand in wherever the
+// value is typed as text, and for a Kanban column's NAME with is / is not.
+function viewTokenAllowed(kind, op) {
+  const mode = viewValueMode(kind, op);
+  return mode === "text" || (mode === "board" && (op === "=" || op === "!="));
+}
+// A line after the person changes its field and/or comparison: a comparison the
+// new field cannot do falls back to "is", and a value typed for one kind of
+// input is cleared rather than reinterpreted as another.
+function viewCondChanged(cond, patch, prevEntry, nextEntry, allowHas) {
+  const next = { ...cond, ...patch };
+  const ops = viewOpsFor(nextEntry, allowHas);
+  if (!ops.includes(next.op)) next.op = "=";
+  const kind = viewKindOf(nextEntry);
+  const mode = viewValueMode(kind, next.op);
+  const moved = patch.field !== undefined && patch.field !== cond.field;
+  if (mode !== viewValueMode(viewKindOf(prevEntry), cond.op) || (moved && kind === "board")) next.value = "";
+  if (!viewTokenAllowed(kind, next.op)) next.token = "";
+  return next;
+}
+// before / after / less than / greater than for one task. A task with no value
+// for the field (or a value that is not a number, a date or a listed entry)
+// never matches, whichever way round.
+function viewCompare(cond, entry, raw, target) {
+  const kind = viewKindOf(entry);
+  const after = cond.op === "after" || cond.op === ">";
+  const cmp = (a, b) => (after ? a > b : a < b);
+  if (cond.op === "before" || cond.op === "after") {
+    const iso = /^\d{4}-\d{2}-\d{2}$/;
+    return kind === "date" && iso.test(String(raw)) && iso.test(String(target)) && cmp(String(raw), String(target));
+  }
+  if (kind === "number") {
+    const a = parseFloat(raw), b = parseFloat(target);
+    return !isNaN(a) && !isNaN(b) && cmp(a, b);
+  }
+  let rank = null;
+  if (kind === "board") { const ids = viewBuckets(entry.kanban).map(b => b.id); rank = v => ids.indexOf(v) + 1; }
+  else if (kind === "choice" || kind === "multi") { const opts = (entry.custom.options || []).map(viewNorm); rank = v => opts.indexOf(viewNorm(v)) + 1; }
+  if (!rank) return false;
+  const b = rank(target);
+  if (!b) return false;
+  const values = kind === "multi" ? multiValues(raw) : [raw];
+  return values.some(v => { const a = rank(v); return a > 0 && cmp(a, b); });
+}
 function viewDialogFieldsFor(model) {
   const custom = ((model && model.taskFields) || []).map(f => ({ key: VIEW_CUSTOM_PREFIX + f.key, label: f.label }));
   return [...VIEW_DIALOG_FIELDS, ...custom];
@@ -2446,6 +2527,28 @@ function viewDialogFieldsAdopted(keys) {
   const out = [];
   keys.forEach(k => (k === "schedule" ? VIEW_SCHEDULE_PIECES : [k]).forEach(x => { if (!out.includes(x)) out.push(x); }));
   return out;
+}
+
+// A query is a list of lines, and a line is a condition or a GROUP of lines
+// ({ group: true, join, conditions }), nested up to VIEW_MAX_GROUP_DEPTH deep.
+// A stored flat list is a list with no groups, so it reads exactly as before.
+const VIEW_MAX_GROUP_DEPTH = 3;
+function adoptViewConds(raw, depth) {
+  return (Array.isArray(raw) ? raw : []).map(c => {
+    if (c && c.group === true) {
+      if (depth >= VIEW_MAX_GROUP_DEPTH) return null;
+      const inner = adoptViewConds(c.conditions, depth + 1);
+      return { group: true, join: c.join === "or" ? "or" : "and", conditions: inner };
+    }
+    if (!c || typeof c.field !== "string" || !c.field) return null;
+    return {
+      field: c.field,
+      op: VIEW_STORED_OPS.includes(c.op) ? c.op : "=",
+      value: c.value == null ? "" : String(c.value),
+      token: VIEW_TOKENS.some(t => t.value === c.token) ? c.token : "",
+      join: c.join === "or" ? "or" : "and",
+    };
+  }).filter(Boolean);
 }
 
 function adoptViews(raw) {
@@ -2463,16 +2566,13 @@ function adoptViews(raw) {
       assignments: Object.fromEntries(Object.entries(v.assignments && typeof v.assignments === "object" && !Array.isArray(v.assignments) ? v.assignments : {})
         .filter(([k, b]) => k && typeof b === "string" && b)),
       userEmails: strs(v.userEmails).map(e => e.trim().toLowerCase()),
-      conditions: (Array.isArray(v.conditions) ? v.conditions : []).filter(c => c && typeof c.field === "string" && c.field).map(c => ({
-        field: c.field,
-        op: c.op === "!=" ? "!=" : "=",
-        value: c.value == null ? "" : String(c.value),
-        token: VIEW_TOKENS.some(t => t.value === c.token) ? c.token : "",
-        join: c.join === "or" ? "or" : "and",
-      })),
+      conditions: adoptViewConds(v.conditions, 0),
       columns: Array.isArray(v.columns) ? strs(v.columns) : [...VIEW_DEFAULT_COLUMNS],
       dialogFields: viewDialogFieldsAdopted(strs(v.dialogFields)),
       order: strs(v.order),
+      groupBy: typeof v.groupBy === "string" ? v.groupBy.trim() : "",
+      groupDir: v.groupDir === "desc" ? "desc" : "asc",
+      groupOrder: strs(v.groupOrder),
     })),
   };
 }
@@ -2555,6 +2655,7 @@ function viewBucketOf(view, row) {
 }
 function viewTokenValue(token, ctx) {
   if (token === VIEW_TOKEN_CURRENT_USER) return String((ctx && ctx.userName) || "").trim();
+  if (token === VIEW_TOKEN_DAY_OF_WEEK) return VIEW_WEEKDAYS[((ctx && ctx.now) || new Date()).getDay()];
   return "";
 }
 function viewNorm(s) { return String(s == null ? "" : s).replace(/\s+/g, " ").trim().toLowerCase(); }
@@ -2574,9 +2675,19 @@ function viewValueEquals(v, target) {
 // A token that resolves to nothing (no name known) matches nothing for "=" --
 // otherwise an unnamed person would be shown every unowned task.
 function viewConditionMatches(cond, row, model, ctx) {
-  const target = cond.token ? viewTokenValue(cond.token, ctx) : cond.value;
+  let target = cond.token ? viewTokenValue(cond.token, ctx) : cond.value;
   if (cond.token && !viewNorm(target)) return cond.op === "!=";
   const raw = viewFieldValue(row, cond.field, model, ctx);
+  if (cond.token && cond.field.startsWith(VIEW_KANBAN_PREFIX)) {
+    // On a board a token names a column by its NAME ("Monday"); no column of
+    // that name matches nothing for "is" and everything on the board for "is not".
+    const kv = ((ctx && ctx.views) || []).find(v => v.id === cond.field.slice(VIEW_KANBAN_PREFIX.length));
+    const b = kv ? viewBuckets(kv).find(x => viewNorm(x.name) === viewNorm(target)) : null;
+    target = b ? b.id : "\u0000no such column";
+  }
+  if (cond.op === "before" || cond.op === "after" || cond.op === "<" || cond.op === ">") {
+    return viewCompare(cond, viewFieldEntry(model, ctx && ctx.views, cond.field), raw, target);
+  }
   const def = cond.field.startsWith(VIEW_CUSTOM_PREFIX) ? ((model && model.taskFields) || []).find(f => f.key === cond.field.slice(VIEW_CUSTOM_PREFIX.length)) : null;
   let values = def && def.dataType === "multiselect" ? multiValues(raw) : [raw];
   if (!values.length) values = [""];
@@ -2594,10 +2705,18 @@ function viewConditionGroups(conditions) {
   });
   return groups;
 }
-function viewMatches(view, row, model, ctx) {
-  const groups = viewConditionGroups(view.conditions);
+// A group with no lines in it says nothing, so it is left out rather than
+// matching everything (or nothing).
+function viewItemsLive(items) {
+  return (items || []).filter(c => (c && c.group === true ? viewItemsLive(c.conditions).length > 0 : true));
+}
+function viewItemsMatch(items, row, model, ctx) {
+  const groups = viewConditionGroups(viewItemsLive(items));
   if (!groups.length) return true;
-  return groups.some(g => g.every(c => viewConditionMatches(c, row, model, ctx)));
+  return groups.some(g => g.every(c => (c.group === true ? viewItemsMatch(c.conditions, row, model, ctx) : viewConditionMatches(c, row, model, ctx))));
+}
+function viewMatches(view, row, model, ctx) {
+  return viewItemsMatch(view.conditions, row, model, ctx);
 }
 // The query in words, for the editor and the preview.
 function describeViewQuery(view, model, views) {
@@ -2610,11 +2729,16 @@ function describeViewQuery(view, model, views) {
       val = c.value === "" ? "not on the board" : `"${b ? b.name : c.value}"`;
     }
     if (!c.token && c.value === "*") val = "any value";
-    return `${f ? f.label : c.field} ${c.op === "!=" ? "is not" : "is"} ${val}`;
+    return `${f ? f.label : c.field} ${VIEW_OP_LABELS[c.op] || "is"} ${val}`;
   };
-  const groups = viewConditionGroups(view.conditions);
-  if (!groups.length) return "Every task";
-  return groups.map(g => (groups.length > 1 && g.length > 1 ? "(" + g.map(one).join(" and ") + ")" : g.map(one).join(" and "))).join(" or ");
+  const words = items => {
+    const groups = viewConditionGroups(viewItemsLive(items));
+    return groups.map(g => {
+      const parts = g.map(c => (c.group === true ? "(" + words(c.conditions) + ")" : one(c)));
+      return groups.length > 1 && parts.length > 1 ? "(" + parts.join(" and ") + ")" : parts.join(" and ");
+    }).join(" or ");
+  };
+  return words(view.conditions) || "Every task";
 }
 
 // Ordered tasks first, in the order stored; the rest in the Tasks tab's
@@ -2660,29 +2784,118 @@ function viewDragOrder(order, displayed, orderedCount, key, index) {
   return out;
 }
 
+// ---- Grouping. A view can split its tasks under headings by any field: in a
+// list each group is a section with its own rows, on a Kanban each column is
+// split the same way. Groups come out in ONE order across the whole view (so a
+// board's columns agree), and the order is the person's: groups listed in
+// `groupOrder` first as listed, the rest by the field's own order (ascending or
+// descending). A blank value is its own "No <field>" group, last unless pinned.
+// A multiple-choice task sits in the group of its FIRST pick.
+const VIEW_GROUP_BLANK = "__none";
+function viewGroupEntry(view, model, ctx) {
+  return view.groupBy ? viewFieldEntry(model, ctx && ctx.views, view.groupBy) : null;
+}
+function viewGroupKeyOf(view, row, model, ctx) {
+  const entry = viewGroupEntry(view, model, ctx);
+  if (!entry) return "";
+  const raw = viewFieldValue(row, view.groupBy, model, ctx);
+  return viewKindOf(entry) === "multi" ? (multiValues(raw)[0] || "") : raw;
+}
+// -> null when the view is not grouped (or its field is gone), else the groups
+// that hold at least one of `rows`: [{ key, label, rows }].
+function viewGroups(view, rows, model, ctx) {
+  const entry = viewGroupEntry(view, model, ctx);
+  if (!entry) return null;
+  const kind = viewKindOf(entry);
+  const found = new Map();
+  rows.forEach(r => {
+    const k = viewGroupKeyOf(view, r, model, ctx);
+    if (!found.has(k)) found.set(k, []);
+    found.get(k).push(r);
+  });
+  const pinned = view.groupOrder || [];
+  const pinAt = k => pinned.indexOf(k === "" ? VIEW_GROUP_BLANK : k);
+  const optionIds = kind === "board" ? viewBuckets(entry.kanban).map(b => b.id)
+    : (kind === "choice" || kind === "multi") ? (entry.custom.options || []).map(viewNorm) : null;
+  const natural = (a, b) => {
+    if (optionIds) {
+      const ia = optionIds.indexOf(kind === "board" ? a : viewNorm(a)), ib = optionIds.indexOf(kind === "board" ? b : viewNorm(b));
+      if (ia !== ib) return (ia < 0 ? Infinity : ia) < (ib < 0 ? Infinity : ib) ? -1 : 1;
+    }
+    if (kind === "number" && !isNaN(parseFloat(a)) && !isNaN(parseFloat(b)) && parseFloat(a) !== parseFloat(b)) return parseFloat(a) - parseFloat(b);
+    if (kind === "date") return a < b ? -1 : a > b ? 1 : 0;
+    return String(a).localeCompare(String(b), undefined, { sensitivity: "base", numeric: true });
+  };
+  const sign = view.groupDir === "desc" ? -1 : 1;
+  const keys = [...found.keys()].sort((a, b) => {
+    const pa = pinAt(a), pb = pinAt(b);
+    if (pa >= 0 || pb >= 0) return pa < 0 ? 1 : pb < 0 ? -1 : pa - pb;
+    if (a === "" || b === "") return a === b ? 0 : a === "" ? 1 : -1;
+    return sign * natural(a, b);
+  });
+  return keys.map(k => {
+    const list = found.get(k);
+    let label;
+    if (k === "") label = "No " + entry.label.toLowerCase();
+    else if (kind === "multi") label = k;
+    else label = viewFieldDisplay(list[0], view.groupBy, model, ctx);
+    return { key: k, label, rows: list };
+  });
+}
+// The groups in the order the editor lists them to be moved around, as the
+// stored keys (a blank group is VIEW_GROUP_BLANK).
+function viewGroupPinKey(key) { return key === "" ? VIEW_GROUP_BLANK : key; }
+// Move group `key` one step (`dir` -1 up, +1 down) among `shown` (the keys on
+// screen, in order). Everything shown becomes pinned in its new order; pinned
+// keys with no task right now keep their place behind.
+function viewGroupMove(view, shown, key, dir) {
+  const i = shown.indexOf(key), j = i + dir;
+  if (i < 0 || j < 0 || j >= shown.length) return view.groupOrder || [];
+  const next = shown.map(viewGroupPinKey);
+  [next[i], next[j]] = [next[j], next[i]];
+  return [...next, ...(view.groupOrder || []).filter(k => !next.includes(k))];
+}
+
 // A Kanban: its buckets, each with its tasks (ordered ones first, then by due).
-function viewBoard(view, rows) {
+// When the view is grouped each bucket also carries `groups`, the same groups in
+// the same order in every bucket, and `rows` reads group by group.
+function viewBoard(view, rows, model, ctx) {
   const cols = viewBuckets(view).map(b => ({ ...b, rows: [] }));
   rows.forEach(r => { const id = viewBucketOf(view, r).id; cols.find(c => c.id === id).rows.push(r); });
-  cols.forEach(c => { const o = orderViewRows(c.rows, view.order); c.rows = [...o.ordered, ...o.rest]; c.orderedCount = o.ordered.length; });
+  const all = viewGroups(view, rows, model, ctx);
+  cols.forEach(c => {
+    if (!all) { const o = orderViewRows(c.rows, view.order); c.rows = [...o.ordered, ...o.rest]; c.orderedCount = o.ordered.length; return; }
+    c.groups = all.map(g => {
+      const mine = c.rows.filter(r => viewGroupKeyOf(view, r, model, ctx) === g.key);
+      const o = orderViewRows(mine, view.order);
+      return { key: g.key, label: g.label, rows: [...o.ordered, ...o.rest], orderedCount: o.ordered.length };
+    }).filter(g => g.rows.length);
+    c.rows = c.groups.flatMap(g => g.rows);
+    c.orderedCount = c.groups.reduce((n, g) => n + g.orderedCount, 0);
+  });
   return cols;
 }
 // A card dropped into a bucket at `index` among that bucket's other cards.
 // Returns the view's new { assignments, order }: the card is placed in the
 // bucket (the default bucket stores nothing), and the bucket's own cards down to
-// it are ordered.
-function viewBoardMove(view, board, key, bucketId, index) {
+// it are ordered. `within` narrows "that bucket's cards" to one group's rows of
+// it (a grouped board orders inside a group), and null means only the bucket
+// changes -- a card dropped somewhere that is not its own group has no place
+// among those cards to take.
+function viewBoardMove(view, board, key, bucketId, index, within) {
   const assignments = { ...(view.assignments || {}) };
   if (bucketId === KANBAN_DEFAULT_BUCKET) delete assignments[key]; else assignments[key] = bucketId;
   const target = board.find(c => c.id === bucketId);
   if (!target) return { assignments: view.assignments || {}, order: view.order };
-  const keys = target.rows.map(viewTaskKey).filter(k => k !== key);
+  if (within === null) return { assignments, order: view.order };
+  const here = within === undefined ? target.rows : within;
+  const keys = here.map(viewTaskKey).filter(k => k !== key);
   const inOrder = new Set(view.order);
   const orderedCount = keys.filter(k => inOrder.has(k)).length;
   const at = Math.max(0, Math.min(index, keys.length));
   keys.splice(at, 0, key);
   const pinned = keys.slice(0, Math.max(orderedCount + 1, at + 1));
-  const drop = new Set([...target.rows.map(viewTaskKey), key]);
+  const drop = new Set([...here.map(viewTaskKey), key]);
   return { assignments, order: [...view.order.filter(k => !drop.has(k)), ...pinned] };
 }
 
@@ -6048,7 +6261,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-18.2";
+const APP_VERSION = "2026-10-20.5";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -7282,7 +7495,13 @@ const MOCK_SNAPSHOT = {
     { id: "view-notmon", name: "Not on Monday", userEmails: [], dialogFields: ["notes", "owner"],
       columns: ["task", "asset", "kanban:view-week", "status"], order: [],
       conditions: [{ field: "kanban:view-week", op: "!=", value: "bk-mon", token: "", join: "and" }, { field: "kanban:view-week", op: "!=", value: "", token: "", join: "and" }] },
+    // Today's column of the Workweek board: [DAY OF WEEK] names a column.
+    { id: "view-today", name: "Today", userEmails: [], dialogFields: ["frequency", "dueDate", "notes", "owner"],
+      columns: ["task", "asset", "dueDate", "status"], order: [],
+      conditions: [{ field: "kanban:view-week", op: "=", value: "", token: "DAY_OF_WEEK", join: "and" }] },
+    // Grouped by owner, people in reverse order, the unowned group first.
     { id: "view-projects", name: "Open projects", userEmails: [], dialogFields: ["dueDate", "notes", "owner"],
+      groupBy: "owner", groupDir: "desc", groupOrder: ["__none"],
       columns: ["task", "asset", "owner", "dueDate"], order: [],
       conditions: [{ field: "kind", op: "=", value: "One-off", token: "", join: "and" }, { field: "status", op: "!=", value: "Done", token: "", join: "and" }] },
   ] },
@@ -8472,7 +8691,21 @@ function AssetTracker() {
   const authSatisfied = sandboxMode || !!auth;
   // View-only users are stopped in persist() and again in the backend. Buttons
   // are also hidden where practical, but that's a courtesy, not the control.
-  const canEdit = sandboxMode || (auth && auth.role !== "viewer");
+  // VIEW AS (owner only): the owner picks a person from the allowlist and the app
+  // renders with THAT person's role and views, to see what they see. Purely a
+  // reading aid in this browser: the session stays the owner's, nothing about
+  // auth or stored data changes, and every write is refused while it is on
+  // (`viewingAs` is checked in persist() and the other write ops). Held in
+  // memory only, so a reload or sign-out ends it. A non-owner can never have a
+  // target, whatever the state says.
+  const [viewAsEmail, setViewAsEmail] = useState(null);
+  const [showViewAsPicker, setShowViewAsPicker] = useState(false);
+  const viewAsIsOwner = !sandboxMode && !!auth && !!auth.ownerEmail
+    && String(auth.email).toLowerCase() === String(auth.ownerEmail).toLowerCase();
+  const viewingAs = (viewAsIsOwner && viewAsEmail)
+    ? (accessUsers.find(u => String(u.email).toLowerCase() === viewAsEmail) || null)
+    : null;
+  const canEdit = sandboxMode || (viewingAs ? viewingAs.role !== "viewer" : (auth && auth.role !== "viewer"));
   const [columnVisibility, setColumnVisibility] = useState({}); // { [columnKey]: boolean } — per-device override, see COLUMN_VISIBILITY_STORAGE_KEY
   // Which icons the type editor offers without opening the browser. Per-device,
   // see ICON_FAVORITES_STORAGE_KEY. Seeded with the shipped row so the first
@@ -8784,6 +9017,7 @@ function AssetTracker() {
     // or not this lands.
     clearSnapshotCache();
     setAuth(null);
+    setViewAsEmail(null);
     setAuthPending(false);
     setCurrentUser(null);
     setAssets(null);
@@ -9615,6 +9849,10 @@ function AssetTracker() {
     // viewer's click doesn't optimistically repaint the screen with a change
     // that the next load will silently undo. Every write in the app funnels
     // through persist(), so nothing gets past this by being missed.
+    if (viewingAs) {
+      setNotice("You're viewing as " + (viewingAs.name || viewingAs.email) + ", which is read-only, so that change wasn't saved. Exit View as to make changes.");
+      return;
+    }
     if (!canEdit) {
       setNotice("Your access is view-only, so that change wasn't saved.");
       return;
@@ -10064,10 +10302,10 @@ function AssetTracker() {
   // ---- Views: the ones this person is assigned (Sandbox has no sign-in, so it
   // shows them all), the open one, and its tasks. [CURRENT USERNAME] is the
   // name the allowlist gives the person, else their email.
-  const viewerEmail = auth ? auth.email : "";
+  const viewerEmail = viewingAs ? viewingAs.email : (auth ? auth.email : "");
   const visibleViews = useMemo(() => viewsVisibleTo(viewsCfg.list, viewerEmail, sandboxMode), [viewsCfg, viewerEmail, sandboxMode]);
   const activeView = visibleViews.find(v => v.id === activeViewId) || visibleViews[0] || null;
-  const viewUserName = sandboxMode ? (currentUser || "") : (auth ? (auth.name || auth.email) : "");
+  const viewUserName = sandboxMode ? (currentUser || "") : (viewingAs ? (viewingAs.name || viewingAs.email) : (auth ? (auth.name || auth.email) : ""));
   // What a query needs besides the task: the signed-in name, and every view (a
   // query can name a Kanban's bucket). `seen` is the boards being worked out.
   const viewCtx = useMemo(() => ({ userName: viewUserName, views: viewsCfg.list, seen: [] }), [viewUserName, viewsCfg]);
@@ -10098,6 +10336,10 @@ function AssetTracker() {
     const next = { list: viewsCfg.list.map(v => (v.id === viewId ? { ...v, ...patch } : v)) };
     if (sandboxMode || !PER_RECORD_SAVES) {
       persist(assets, { views: next });
+      return;
+    }
+    if (viewingAs) {
+      setNotice("You're viewing as " + (viewingAs.name || viewingAs.email) + ", which is read-only, so that change wasn't saved.");
       return;
     }
     setViewsCfg(next);
@@ -11562,6 +11804,7 @@ function AssetTracker() {
   // slow -- see attachPhotos. `count` is bounded server-side, so asking for a
   // hundred signatures does not mint a hundred.
   async function signPhotoUploads(count) {
+    if (viewingAs) throw new Error("Viewing as another person is read-only. Exit View as to upload.");
     const data = await backendPost(SHEET_API_URL, { op: "photoSign", sessionId: sessionId, count: count }).catch(err => ({ ok: false, error: err.message }));
     if (!data || !data.ok) throw new Error((data && data.error) || "Could not get permission to upload.");
     // A v36-or-older backend answers with ONE signature at the top level and no
@@ -11582,6 +11825,7 @@ function AssetTracker() {
   // for Cloudinary's RAW pipeline (see handleFloorPlanSign_), not the N-file
   // array shape a photo batch needs.
   async function signFloorPlanUpload() {
+    if (viewingAs) throw new Error("Viewing as another person is read-only. Exit View as to upload.");
     const data = await backendPost(SHEET_API_URL, { op: "floorPlanSign", sessionId: sessionId }).catch(err => ({ ok: false, error: err.message }));
     if (!data || !data.ok) throw new Error((data && data.error) || "Could not get permission to upload.");
     return data;
@@ -14146,7 +14390,7 @@ function AssetTracker() {
 
   const globalStyle = (
     <style>{`
-      @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+      @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600;700&display=swap');
       * { box-sizing: border-box; }
       input, select, textarea { font-family: 'IBM Plex Sans', sans-serif; }
       ::placeholder { color: ${C.placeholder}; }
@@ -14584,7 +14828,7 @@ function AssetTracker() {
           <div onClick={() => setShowAppMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
           <div
             role="menu"
-            style={{ position: "absolute", right: 0, top: "100%", marginTop: 6, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, width: 270, maxWidth: "calc(100vw - 24px)", maxHeight: "calc(100vh - 80px)", overflowY: "auto", padding: 4 }}
+            style={{ position: isPhone && view === "list" ? "fixed" : "absolute", ...(isPhone && view === "list" ? { right: 12, bottom: PHONE_NAV_PX + 8 } : { right: 0, top: "100%", marginTop: 6 }), background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, width: 270, maxWidth: "calc(100vw - 24px)", maxHeight: isPhone && view === "list" ? `calc(100vh - ${PHONE_NAV_PX + 24}px)` : "calc(100vh - 80px)", overflowY: "auto", padding: 4 }}
           >
             {/* This screen's rows land here, each block under its own heading. */}
             <div ref={setAppMenuSlot} />
@@ -14658,6 +14902,18 @@ function AssetTracker() {
             >
               <Info size={15} /> About
             </button>
+            {viewAsIsOwner && (
+              <div style={{ display: "flex", alignItems: "center", paddingRight: 8 }}>
+                <button
+                  onClick={() => { setShowAppMenu(false); setShowViewAsPicker(true); }}
+                  className="icon-btn"
+                  style={{ ...APP_MENU_ROW, flex: 1, minWidth: 0, width: undefined }}
+                >
+                  <Eye size={15} /> View as…
+                </button>
+                <HelpTip label="About View as" text="Owner only. See the app the way another person sees it, with their access and views. Read-only: nothing can be saved while it is on." />
+              </div>
+            )}
             {!sandboxMode && auth && (
               <button
                 onClick={() => { setShowAppMenu(false); endSession(null, true); }}
@@ -18324,9 +18580,115 @@ function AssetTracker() {
   const hiddenColumns = columns.filter(c => !isColumnVisible(c));
   const addFormColumns = formColumnsFor(draft.type);
 
+  // The main tabs, shared by the desktop tab row and the phone's bottom bar.
+  const mainTabItems = [
+    { key: "assets", label: "Assets" },
+    { key: "maintenance", label: "Tasks", count: allOpenMaintenanceRows.length, urgent: maintenanceOverdueTotal > 0 },
+    // Only for someone who has a view assigned; no count, since a view's
+    // list is whatever its query says.
+    ...(visibleViews.length ? [{ key: "views", label: "Views" }] : []),
+    // No count, deliberately, same reasoning Audit already has below:
+    // it answers "is there a plan here", not "how many", and there's
+    // no natural number to put in parentheses at this scope anyway.
+    { key: "map", label: "Map" },
+    // No count, deliberately. Maintenance's says how much there is to
+    // DO; the audit log only ever grows, so "Audit (11482)" is a number
+    // that answers nothing and gets longer forever.
+    { key: "audit", label: "Audit" },
+  ];
+  const selectMainTab = (key) => {
+    // Leaving the map carries the SELECTED place into the other tab's
+    // navigator; the scope alone is only the plan that was on screen.
+    if (mainTab === "map" && key !== "map" && mapSelectedPlaceId) setScopeId(mapSelectedPlaceId);
+    // Entering the map from a place with no plan of its own moves up to
+    // the nearest place that has one, and selects the original place
+    // on it when that plan draws it (the crumb jump's rule).
+    if (mainTab !== "map" && key === "map" && scopeId) {
+      const here = assets.find(a => a.id === scopeId);
+      const withPlan = here && (here.floorPlanUrl ? here : ancestorsOf(here, assets).find(x => x.floorPlanUrl));
+      if (withPlan && withPlan.id !== here.id) {
+        setScopeId(withPlan.id);
+        setMapQuery("");
+        setMapFocusShapeId(null);
+        const chain = [here, ...ancestorsOf(here, assets)];
+        const cut = chain.findIndex(x => x.id === withPlan.id);
+        for (const place of chain.slice(0, cut)) {
+          const link = (withPlan.floorPlanLinks || []).find(l => l.roomId === place.id);
+          if (link) { setMapSelectShapeId(link.shapeId); break; }
+        }
+      }
+    }
+    setMainTab(key);
+  };
+
+  const headerStatus = (
+    <>
+          {/* THE PILL ONLY EXISTS WHILE SANDBOX IS ON, and getting in is a row
+              in the account menu instead (2026-09-20). It used to be a
+              permanent two-state toggle in the corner — OFF for everyone, all
+              the time, on every screen — which spent the most valuable space in
+              the header on a developer affordance that the overwhelming
+              majority of sessions never touch, and put "start editing fake
+              data" one stray tap from a teacher's thumb.
+
+              Exactly ONE control exists at a time, which is what keeps the
+              two halves from reading as two different features: in production
+              the account menu offers the way IN, and in Sandbox this pill is
+              the way OUT. The pill earns its place precisely because it is
+              conditional — while it is there it is a STATE BANNER first and a
+              control second, answering "why does this inventory look wrong?"
+              before anyone has to go looking. */}
+          {sandboxMode && (
+            <>
+              <button
+                onClick={toggleSandboxMode}
+                title="Sandbox is ON — you're editing local fixture data, nothing is saved to the Google Sheet. Click to switch back to the real Sheet."
+                style={{
+                  display: "flex", alignItems: "center", gap: 5, border: `1.5px solid ${C.accent}`,
+                  background: C.accent, color: "#fff",
+                  borderRadius: 12, padding: "3px 10px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 700,
+                }}
+              >
+                <FlaskConical size={12} />
+                SANDBOX
+              </button>
+              <button
+                onClick={() => { if (confirm("Reset sandbox data back to the starting fixture? Your sandbox edits will be lost.")) resetSandbox(); }}
+                title="Reset sandbox data back to the starting fixture"
+                style={{ display: "flex", alignItems: "center", gap: 4, background: "none", border: "none", padding: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted }}
+              >
+                <RotateCcw size={12} /> Reset
+              </button>
+            </>
+          )}
+          {saveStatusPill}
+          {/* Identity, Settings, About and Sign out are in the one menu (appMenu,
+              defined above) rather than four controls strung across the corner.
+              The View-only badge stays OUTSIDE it on purpose: it explains why the
+              edit controls a viewer expects aren't there, and an explanation that
+              only appears after you open a menu doesn't do that job. */}
+          {!canEdit && (
+            <span
+              title="You can browse the inventory but not change it. Ask an editor if you need to make changes."
+              style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, border: `1px solid ${C.accent}`, borderRadius: 10, padding: "2px 7px" }}
+            >
+              View only
+            </span>
+          )}
+          {backendScriptVersion && backendScriptVersion !== FRONTEND_SCRIPT_VERSION && (
+            <span
+              style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.danger }}
+              title={`Deployed backend: ${backendScriptVersion}\nExpected: ${FRONTEND_SCRIPT_VERSION}\n\nAssetTrackerSync.gs was edited but the live deployment wasn't updated to match — some saves may silently fail to persist. Redeploy: Apps Script > Deploy > Manage deployments > pencil icon > Version: New version > Deploy.`}
+            >
+              Backend outdated
+            </span>
+          )}
+    </>
+  );
+
   return (
     <AppMenuContext.Provider value={appMenuContext}>
-    <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'IBM Plex Sans', 'Helvetica Neue', sans-serif", color: C.ink }}>
+    <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'IBM Plex Sans', 'Helvetica Neue', sans-serif", color: C.ink, paddingBottom: isPhone && view === "list" ? `calc(${PHONE_NAV_PX}px + env(safe-area-inset-bottom))` : undefined }}>
       {globalStyle}
       {conflictModal}
       {nameModal}
@@ -18474,123 +18836,108 @@ function AssetTracker() {
         </div>
       )}
 
-      {/* Slim header */}
-      <div style={{ borderBottom: `2px solid ${C.brand}`, padding: "10px 20px", position: isPhone ? "relative" : "sticky", top: 0, background: C.bg, zIndex: 10, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+      {showViewAsPicker && viewAsIsOwner && (
+        <SelectionModal
+          title="View as"
+          options={accessUsers.filter(u => String(u.email).toLowerCase() !== String(auth.email).toLowerCase()).map(u => String(u.email).toLowerCase())}
+          value={viewAsEmail || ""}
+          labelForOption={e => { const u = accessUsers.find(x => String(x.email).toLowerCase() === e); return u ? `${u.name || u.email} (${u.role === "viewer" ? "view only" : "editor"})` : e; }}
+          emptyLabel="No other people have access yet."
+          searchable
+          onChange={e => { setViewAsEmail(e || null); setShowViewAsPicker(false); }}
+          onClose={() => setShowViewAsPicker(false)}
+        />
+      )}
+      {viewingAs && (
+        <div
+          role="status"
+          style={{
+            position: "fixed", bottom: isPhone && view === "list" ? 12 + PHONE_NAV_PX : 12, left: "50%", transform: "translateX(-50%)", zIndex: 60,
+            background: C.accent, color: "#fff", borderRadius: 999, padding: "8px 8px 8px 14px",
+            display: "flex", alignItems: "center", gap: 10, boxShadow: "0 4px 12px rgba(42,52,57,0.3)",
+            maxWidth: "min(94vw, 460px)", fontSize: 13, fontWeight: 600,
+          }}
+        >
+          <Eye size={15} style={{ flexShrink: 0 }} />
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            Viewing as {viewingAs.name || viewingAs.email} · read-only
+          </span>
+          <button
+            onClick={() => setViewAsEmail(null)}
+            aria-label="Exit View as"
+            title="Exit View as"
+            style={{ display: "flex", alignItems: "center", gap: 4, background: "rgba(255,255,255,0.22)", color: "#fff", border: "none", borderRadius: 999, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}
+          >
+            <X size={13} /> Exit
+          </button>
+        </div>
+      )}
+
+      {/* Slim header (desktop; a phone has the bottom bar instead) */}
+      {!isPhone && <div style={{ borderBottom: `2px solid ${C.brand}`, padding: "10px 20px", position: isPhone ? "relative" : "sticky", top: 0, background: C.bg, zIndex: 10, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
           <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: C.brandDark }}>{APP_NAME}</h1>
           <DevBuildBadge />
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          {/* THE PILL ONLY EXISTS WHILE SANDBOX IS ON, and getting in is a row
-              in the account menu instead (2026-09-20). It used to be a
-              permanent two-state toggle in the corner — OFF for everyone, all
-              the time, on every screen — which spent the most valuable space in
-              the header on a developer affordance that the overwhelming
-              majority of sessions never touch, and put "start editing fake
-              data" one stray tap from a teacher's thumb.
-
-              Exactly ONE control exists at a time, which is what keeps the
-              two halves from reading as two different features: in production
-              the account menu offers the way IN, and in Sandbox this pill is
-              the way OUT. The pill earns its place precisely because it is
-              conditional — while it is there it is a STATE BANNER first and a
-              control second, answering "why does this inventory look wrong?"
-              before anyone has to go looking. */}
-          {sandboxMode && (
-            <>
-              <button
-                onClick={toggleSandboxMode}
-                title="Sandbox is ON — you're editing local fixture data, nothing is saved to the Google Sheet. Click to switch back to the real Sheet."
-                style={{
-                  display: "flex", alignItems: "center", gap: 5, border: `1.5px solid ${C.accent}`,
-                  background: C.accent, color: "#fff",
-                  borderRadius: 12, padding: "3px 10px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 700,
-                }}
-              >
-                <FlaskConical size={12} />
-                SANDBOX
-              </button>
-              <button
-                onClick={() => { if (confirm("Reset sandbox data back to the starting fixture? Your sandbox edits will be lost.")) resetSandbox(); }}
-                title="Reset sandbox data back to the starting fixture"
-                style={{ display: "flex", alignItems: "center", gap: 4, background: "none", border: "none", padding: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted }}
-              >
-                <RotateCcw size={12} /> Reset
-              </button>
-            </>
-          )}
-          {saveStatusPill}
-          {/* Identity, Settings, About and Sign out are in the one menu (appMenu,
-              defined above) rather than four controls strung across the corner.
-              The View-only badge stays OUTSIDE it on purpose: it explains why the
-              edit controls a viewer expects aren't there, and an explanation that
-              only appears after you open a menu doesn't do that job. */}
-          {!canEdit && (
-            <span
-              title="You can browse the inventory but not change it. Ask an editor if you need to make changes."
-              style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, border: `1px solid ${C.accent}`, borderRadius: 10, padding: "2px 7px" }}
-            >
-              View only
-            </span>
-          )}
+          {headerStatus}
           {appMenu}
-          {backendScriptVersion && backendScriptVersion !== FRONTEND_SCRIPT_VERSION && (
-            <span
-              style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.danger }}
-              title={`Deployed backend: ${backendScriptVersion}\nExpected: ${FRONTEND_SCRIPT_VERSION}\n\nAssetTrackerSync.gs was edited but the live deployment wasn't updated to match — some saves may silently fail to persist. Redeploy: Apps Script > Deploy > Manage deployments > pencil icon > Version: New version > Deploy.`}
-            >
-              Backend outdated
-            </span>
-          )}
         </div>
-      </div>
+      </div>}
+
+      {/* PHONE BOTTOM BAR (2026-10-20). The tabs and the one menu, as icons along the
+          bottom edge where a thumb reaches; the title bar is gone on a phone. Each
+          icon has a tooltip and aria-label. Only on the list screens: an open asset
+          has its own header and menu. The menu's card opens upward from here. */}
+      {isPhone && (
+        <nav
+          aria-label="Main"
+          style={{ position: "fixed", left: 0, right: 0, bottom: 0, height: PHONE_NAV_PX, zIndex: 15, background: C.bg, borderTop: `2px solid ${C.brand}`, display: "flex", alignItems: "stretch", paddingBottom: "env(safe-area-inset-bottom)" }}
+        >
+          {mainTabItems.map(tab => {
+            const active = mainTab === tab.key;
+            const TabIcon = PHONE_TAB_ICONS[tab.key] || Package;
+            const tip = tab.count > 0 ? `${tab.label} (${tab.count})` : tab.label;
+            return (
+              <button
+                key={tab.key}
+                onClick={() => selectMainTab(tab.key)}
+                aria-label={tip}
+                aria-current={active ? "page" : undefined}
+                title={tip}
+                style={{ flex: 1, minWidth: 0, background: "none", border: "none", position: "relative", display: "flex", alignItems: "center", justifyContent: "center", color: tab.urgent ? C.danger : active ? C.brandDark : C.muted, boxShadow: active ? `inset 0 3px 0 ${C.brand}` : "none" }}
+              >
+                <TabIcon size={24} strokeWidth={active ? 2.4 : 1.8} />
+                {tab.count > 0 && (
+                  <span style={{ position: "absolute", top: 6, left: "50%", marginLeft: 8, minWidth: 16, height: 16, padding: "0 4px", borderRadius: 8, background: tab.urgent ? C.danger : C.muted, color: "#fff", fontSize: 10, fontWeight: 700, lineHeight: "16px", textAlign: "center" }}>
+                    {tab.count > 99 ? "99+" : tab.count}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+          <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>{appMenu}</div>
+        </nav>
+      )}
 
       {/* Top-level page tabs */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "0 20px", position: "sticky", top: listTabsTop, background: C.bg, zIndex: 9 }}>
+        {isPhone ? (
+          // On a phone the tabs live in the bottom bar (phoneBottomNav) and the
+          // title bar is gone, so the status pills it carried sit here, ahead of
+          // this screen's search.
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", minWidth: 0, minHeight: 36 }}>
+            <DevBuildBadge />
+            {headerStatus}
+          </div>
+        ) : (
         <div style={{ display: "flex", gap: 4, overflowX: "auto", overflowY: "hidden" }}>
-          {[
-            { key: "assets", label: "Assets" },
-            { key: "maintenance", label: "Tasks", count: allOpenMaintenanceRows.length, urgent: maintenanceOverdueTotal > 0 },
-            // Only for someone who has a view assigned; no count, since a view's
-            // list is whatever its query says.
-            ...(visibleViews.length ? [{ key: "views", label: "Views" }] : []),
-            // No count, deliberately, same reasoning Audit already has below:
-            // it answers "is there a plan here", not "how many", and there's
-            // no natural number to put in parentheses at this scope anyway.
-            { key: "map", label: "Map" },
-            // No count, deliberately. Maintenance's says how much there is to
-            // DO; the audit log only ever grows, so "Audit (11482)" is a number
-            // that answers nothing and gets longer forever.
-            { key: "audit", label: "Audit" },
-          ].map(tab => {
+          {mainTabItems.map(tab => {
             const active = mainTab === tab.key;
             return (
               <button
                 key={tab.key}
-                onClick={() => {
-                  // Leaving the map carries the SELECTED place into the other tab's
-                  // navigator; the scope alone is only the plan that was on screen.
-                  if (mainTab === "map" && tab.key !== "map" && mapSelectedPlaceId) setScopeId(mapSelectedPlaceId);
-                  // Entering the map from a place with no plan of its own moves up to
-                  // the nearest place that has one, and selects the original place
-                  // on it when that plan draws it (the crumb jump's rule).
-                  if (mainTab !== "map" && tab.key === "map" && scopeId) {
-                    const here = assets.find(a => a.id === scopeId);
-                    const withPlan = here && (here.floorPlanUrl ? here : ancestorsOf(here, assets).find(x => x.floorPlanUrl));
-                    if (withPlan && withPlan.id !== here.id) {
-                      setScopeId(withPlan.id);
-                      setMapQuery("");
-                      setMapFocusShapeId(null);
-                      const chain = [here, ...ancestorsOf(here, assets)];
-                      const cut = chain.findIndex(x => x.id === withPlan.id);
-                      for (const place of chain.slice(0, cut)) {
-                        const link = (withPlan.floorPlanLinks || []).find(l => l.roomId === place.id);
-                        if (link) { setMapSelectShapeId(link.shapeId); break; }
-                      }
-                    }
-                  }
-                  setMainTab(tab.key);
-                }}
+                onClick={() => selectMainTab(tab.key)}
                 style={{
                   background: "none", border: "none", padding: "10px 12px", whiteSpace: "nowrap",
                   fontSize: 13, fontWeight: active || tab.urgent ? 700 : 500, color: tab.urgent ? C.danger : active ? C.brandDark : C.muted,
@@ -18602,6 +18949,7 @@ function AssetTracker() {
             );
           })}
         </div>
+        )}
 
         {mainTab === "assets" && (
           <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
@@ -19224,15 +19572,17 @@ function AssetTracker() {
           )}
           {(!isPhone || viewPaneOpen) && (
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 12 }}>
-                {isPhone && (
-                  <button type="button" onClick={() => setViewPaneOpen(false)} aria-label="Back to views" className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, alignSelf: "center", display: "flex" }}><ArrowLeft size={18} color={C.ink} /></button>
-                )}
-                <h2 style={{ margin: 0, fontSize: 18, color: C.brandDark }}>{activeView.name}</h2>
-                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: C.muted }}>{activeViewRows.length} {activeViewRows.length === 1 ? "task" : "tasks"}</span>
-              </div>
               <ViewBody
                 key={activeView.id}
+                title={(
+                  <>
+                    {isPhone && (
+                      <button type="button" onClick={() => setViewPaneOpen(false)} aria-label="Back to views" className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, alignSelf: "center", display: "flex" }}><ArrowLeft size={18} color={C.ink} /></button>
+                    )}
+                    <h2 style={{ margin: 0, fontSize: 18, color: C.brandDark }}>{activeView.name}</h2>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: C.muted }}>{activeViewRows.length} {activeViewRows.length === 1 ? "task" : "tasks"}</span>
+                  </>
+                )}
                 view={activeView}
                 rows={activeViewRows}
                 model={workModel}
@@ -19245,6 +19595,53 @@ function AssetTracker() {
             </div>
           )}
         </div>
+        )}
+        {/* The Views tab's floating +: the Map's own button and menu, for the same
+            reason (create something without leaving the page). Seeded with "" so
+            the dialogs open with the Asset picker and nothing assumed. Shares
+            showMapAddMenu: only one tab is mounted at a time. The add-asset form
+            opens as a dialog here, as it does over the map. */}
+        {mainTab === "views" && activeView && showAdd && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20, padding: 16 }}>
+            <div style={{ width: "100%", maxWidth: 760, maxHeight: "90vh", overflowY: "auto", borderRadius: 14 }}>
+              {renderAddForm()}
+            </div>
+          </div>
+        )}
+        {mainTab === "views" && activeView && canEdit && !showAdd && !maintenanceModal && !changeModal && (
+          <>
+            {showMapAddMenu && (
+              <div onClick={() => setShowMapAddMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
+            )}
+            <div style={{ position: "fixed", right: 20, bottom: isPhone ? 20 + PHONE_NAV_PX : 20, zIndex: 41, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 10 }}>
+              {showMapAddMenu && (
+                <div role="menu" style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, boxShadow: "0 4px 14px rgba(42,52,57,0.2)", overflow: "hidden", minWidth: 160 }}>
+                  {[
+                    { label: "Add task", run: () => openMaintenanceAdd("") },
+                    { label: "Add asset", run: () => startAdd() },
+                    { label: "Log work", run: () => openChangeAdd("") },
+                  ].map(item => (
+                    <button
+                      key={item.label}
+                      role="menuitem"
+                      onClick={() => { setShowMapAddMenu(false); item.run(); }}
+                      style={{ display: "block", width: "100%", textAlign: "left", padding: "12px 16px", background: "none", border: "none", borderBottom: `1px solid ${C.border}`, fontSize: 14, fontWeight: 600, color: C.ink }}
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <button
+                aria-label="Add task, asset, or log work"
+                aria-expanded={showMapAddMenu}
+                onClick={() => setShowMapAddMenu(v => !v)}
+                style={{ width: 56, height: 56, borderRadius: "50%", background: C.brand, color: "#fff", border: "none", boxShadow: "0 4px 12px rgba(42,52,57,0.3)", display: "flex", alignItems: "center", justifyContent: "center" }}
+              >
+                <Plus size={26} style={{ transform: showMapAddMenu ? "rotate(45deg)" : "none", transition: "transform 0.15s" }} />
+              </button>
+            </div>
+          </>
         )}
 
         {mainTab === "map" && (() => {
@@ -19383,7 +19780,7 @@ function AssetTracker() {
             {showMapAddMenu && (
               <div onClick={() => setShowMapAddMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
             )}
-            <div style={{ position: "fixed", right: 20, bottom: 20, zIndex: 41, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 10 }}>
+            <div style={{ position: "fixed", right: 20, bottom: isPhone ? 20 + PHONE_NAV_PX : 20, zIndex: 41, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 10 }}>
               {showMapAddMenu && (
                 <div role="menu" style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, boxShadow: "0 4px 14px rgba(42,52,57,0.2)", overflow: "hidden", minWidth: 160 }}>
                   {[
@@ -19879,24 +20276,35 @@ const DROP_LINE = { height: 3, borderRadius: 2, background: "var(--drop-line, #1
 // order. `arrange` turns on a drag handle per row; `onReorder(order)` gets the
 // new stored order. `onOpen` makes a row open its task (left off in the Settings
 // preview, where nothing opens).
+// Group headings read in a serif so they are not mistaken for the table's own
+// (monospace, upper-case) column headers or a Kanban column's name.
+const VIEW_GROUP_FONT = "'IBM Plex Serif', Georgia, serif";
+
 function ViewTaskList({ view, rows, model, ctx, arrange, onReorder, onOpen, emptyText }) {
   const fields = viewFieldsFor(model, ctx && ctx.views, view.id);
   const cols = view.columns.map(k => fields.find(f => f.key === k)).filter(Boolean);
   const shown = cols.length ? cols : [fields[0]];
-  const { ordered, rest } = orderViewRows(rows, view.order);
-  const displayed = [...ordered, ...rest].map(viewTaskKey);
-  const { drag, handle, lift, lineAt } = usePointerSort((key, group, index) => onReorder(viewDragOrder(view.order, displayed, ordered.length, key, index)));
+  // One section when ungrouped; one per group otherwise. Each section orders its
+  // own rows, and a drop only ever reorders inside the section it lands in.
+  const grouped = viewGroups(view, rows, model, ctx);
+  const sections = (grouped || [{ key: "", label: null, rows }]).map(g => {
+    const o = orderViewRows(g.rows, view.order);
+    return { ...g, id: grouped ? "g:" + g.key : "list", ordered: o.ordered, rest: o.rest, displayed: [...o.ordered, ...o.rest].map(viewTaskKey) };
+  });
+  const { drag, handle, lift, lineAt } = usePointerSort((key, group, index) => {
+    const sec = sections.find(x => x.id === group);
+    if (sec && sec.displayed.includes(key)) onReorder(viewDragOrder(view.order, sec.displayed, sec.ordered.length, key, index));
+  });
   const widthOf = f => (f.key === "task" ? 240 : f.key === "notes" ? 260 : f.key === "asset" ? 180 : 140);
   const grid = (arrange ? "40px " : "") + shown.map(f => widthOf(f) + "px").join(" ");
   // Slots count the OTHER rows, so a drop line is placed by position among those.
-  let slot = 0;
-  const renderRow = r => {
+  const renderRow = (r, gid, slotRef) => {
     const key = viewTaskKey(r);
     const dragging = !!drag && drag.key === key;
-    const here = dragging ? -1 : slot++;
+    const here = dragging ? -1 : slotRef.n++;
     return (
       <React.Fragment key={key}>
-        {!dragging && lineAt("list", here) && <div style={DROP_LINE} />}
+        {!dragging && lineAt(gid, here) && <div style={DROP_LINE} />}
         <div
           data-drop-item={key}
           className={onOpen && !arrange ? "row-body" : undefined}
@@ -19926,14 +20334,26 @@ function ViewTaskList({ view, rows, model, ctx, arrange, onReorder, onOpen, empt
         {shown.map(f => <div key={f.key} style={{ padding: "12px 14px" }}>{f.label}</div>)}
       </div>
       {rows.length === 0 && <div style={{ padding: 28, textAlign: "center", color: C.empty, fontSize: 14 }}>{emptyText || "No tasks match."}</div>}
-      <div data-drop-group="list">
-        {ordered.map(renderRow)}
-        {ordered.length > 0 && rest.length > 0 && (
-          <div style={{ padding: "6px 14px", fontSize: 11, color: C.muted, background: C.bg, borderTop: `1px solid ${C.border}`, minWidth: "max-content" }}>Not ordered yet</div>
-        )}
-        {rest.map(renderRow)}
-        {lineAt("list", slot) && <div style={DROP_LINE} />}
-      </div>
+      {sections.map(sec => {
+        const slotRef = { n: 0 };
+        return (
+          <React.Fragment key={sec.id}>
+            {grouped && (
+              <div data-group-heading style={{ display: "flex", alignItems: "baseline", gap: 8, padding: "8px 14px", fontSize: 14, fontWeight: 600, fontFamily: VIEW_GROUP_FONT, color: C.brandDark, background: C.bg, borderTop: `1px solid ${C.border}`, minWidth: "max-content" }}>
+                {sec.label}<span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 400, color: C.muted }}>{sec.rows.length}</span>
+              </div>
+            )}
+            <div data-drop-group={sec.id}>
+              {sec.ordered.map(r => renderRow(r, sec.id, slotRef))}
+              {sec.ordered.length > 0 && sec.rest.length > 0 && (
+                <div style={{ padding: "6px 14px", fontSize: 11, color: C.muted, background: C.bg, borderTop: `1px solid ${C.border}`, minWidth: "max-content" }}>Not ordered yet</div>
+              )}
+              {sec.rest.map(r => renderRow(r, sec.id, slotRef))}
+              {lineAt(sec.id, slotRef.n) && <div style={DROP_LINE} />}
+            </div>
+          </React.Fragment>
+        );
+      })}
     </div>
   );
 }
@@ -19942,61 +20362,118 @@ function ViewTaskList({ view, rows, model, ctx, arrange, onReorder, onOpen, empt
 // card draggable (to another bucket, or to a new place in its own);
 // `onMove(key, bucketId, index)` is called on the drop.
 function KanbanBoard({ view, rows, model, ctx, arrange, onMove, onOpen, emptyText }) {
+  // Drop areas: an ungrouped column is one area named by its bucket id. A grouped
+  // one has an area per group ("<bucket>|k:<group>"), which orders cards, and the
+  // column itself ("<bucket>|*") as the fallback, which only changes the bucket.
   const fields = viewFieldsFor(model, ctx && ctx.views, view.id);
   const cardFields = view.columns.filter(k => k !== "task").map(k => fields.find(f => f.key === k)).filter(Boolean);
-  const board = viewBoard(view, rows);
-  const { drag, handle, lift, lineAt, tappedIn } = usePointerSort((key, group, index) => onMove(key, group, index));
+  const board = viewBoard(view, rows, model, ctx);
+  const { drag, handle, lift, lineAt, tappedIn } = usePointerSort((key, area, index) => {
+    const bar = area.indexOf("|");
+    onMove(key, bar < 0 ? area : area.slice(0, bar), index, bar < 0 ? null : area.slice(bar + 1));
+  });
+  const renderCard = (r, area, slotRef) => {
+    const key = viewTaskKey(r);
+    const dragging = !!drag && drag.key === key;
+    const here = dragging ? -1 : slotRef.n++;
+    const meta = maintenanceStatusMeta(r.status);
+    const h = arrange ? handle(key) : null;
+    return (
+      <React.Fragment key={key}>
+        {!dragging && lineAt(area, here) && <div style={DROP_LINE} />}
+        <div
+          data-drop-item={key}
+          {...(h ? { onPointerDown: h.onPointerDown, onPointerMove: h.onPointerMove, onPointerUp: h.onPointerUp, onPointerCancel: h.onPointerCancel } : {})}
+          onClick={onOpen ? (arrange ? () => { if (tappedIn("[data-card-title]")) onOpen(r); } : () => onOpen(r)) : undefined}
+          style={{ background: C.surface, border: `1px solid ${C.border}`, borderLeft: `4px solid ${meta.color}`, borderRadius: 8, padding: "9px 11px", cursor: arrange ? "grab" : (onOpen ? "pointer" : "default"), touchAction: arrange ? "none" : undefined, userSelect: arrange ? "none" : undefined, ...(lift(key) || {}) }}
+        >
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
+            {arrange && <GripVertical size={14} color={C.muted} style={{ flexShrink: 0, marginTop: 2 }} />}
+            <div data-card-title role={onOpen ? "button" : undefined} tabIndex={onOpen ? 0 : undefined}
+              onKeyDown={onOpen ? e => { if (e.key === "Enter") onOpen(r); } : undefined}
+              style={{ fontSize: 13, fontWeight: 600, color: C.ink, minWidth: 0, wordBreak: "break-word", cursor: onOpen ? "pointer" : undefined }}>{r.item.task}</div>
+          </div>
+          <div style={{ fontSize: 12, color: C.muted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.assetName}</div>
+          {cardFields.filter(f => f.key !== "asset").map(f => (
+            <div key={f.key} style={{ display: "flex", gap: 6, fontSize: 12, marginTop: 3, color: C.muted }}>
+              <span style={{ flexShrink: 0 }}>{f.label}:</span>
+              <span style={{ color: f.key === "status" ? meta.color : C.ink, fontWeight: f.key === "status" ? 700 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{viewFieldDisplay(r, f.key, model, ctx)}</span>
+            </div>
+          ))}
+        </div>
+      </React.Fragment>
+    );
+  };
   return (
-    <div style={{ display: "flex", gap: 12, overflowX: "auto", alignItems: "flex-start", paddingBottom: 24 }}>
+    <div style={{ display: "flex", gap: 12, overflowX: "auto", alignItems: "stretch", paddingBottom: 24 }}>
       {board.map(col => {
-        let slot = 0;
+        const slot = { n: 0 };
         return (
-          <div key={col.id} style={{ flex: "0 0 260px", minWidth: 0, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: 8 }}>
+          <div key={col.id} style={{ flex: "0 0 260px", minWidth: 0, display: "flex", flexDirection: "column", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: 8 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, padding: "2px 4px 8px" }}>
               <span style={{ fontWeight: 700, fontSize: 13, color: C.brandDark, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{col.name}</span>
               <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted }}>{col.rows.length}</span>
             </div>
-            <div data-drop-group={col.id} style={{ display: "flex", flexDirection: "column", gap: 8, minHeight: 56, paddingBottom: 72 }}>
-              {col.rows.map(r => {
-                const key = viewTaskKey(r);
-                const dragging = !!drag && drag.key === key;
-                const here = dragging ? -1 : slot++;
-                const meta = maintenanceStatusMeta(r.status);
-                const h = arrange ? handle(key) : null;
-                return (
-                  <React.Fragment key={key}>
-                    {!dragging && lineAt(col.id, here) && <div style={DROP_LINE} />}
-                    <div
-                      data-drop-item={key}
-                      {...(h ? { onPointerDown: h.onPointerDown, onPointerMove: h.onPointerMove, onPointerUp: h.onPointerUp, onPointerCancel: h.onPointerCancel } : {})}
-                      onClick={onOpen ? (arrange ? () => { if (tappedIn("[data-card-title]")) onOpen(r); } : () => onOpen(r)) : undefined}
-                      style={{ background: C.surface, border: `1px solid ${C.border}`, borderLeft: `4px solid ${meta.color}`, borderRadius: 8, padding: "9px 11px", cursor: arrange ? "grab" : (onOpen ? "pointer" : "default"), touchAction: arrange ? "none" : undefined, userSelect: arrange ? "none" : undefined, ...(lift(key) || {}) }}
-                    >
-                      <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
-                        {arrange && <GripVertical size={14} color={C.muted} style={{ flexShrink: 0, marginTop: 2 }} />}
-                        <div data-card-title role={onOpen ? "button" : undefined} tabIndex={onOpen ? 0 : undefined}
-                          onKeyDown={onOpen ? e => { if (e.key === "Enter") onOpen(r); } : undefined}
-                          style={{ fontSize: 13, fontWeight: 600, color: C.ink, minWidth: 0, wordBreak: "break-word", cursor: onOpen ? "pointer" : undefined }}>{r.item.task}</div>
+            {col.groups ? (
+              <div data-drop-group={col.id + "|*"} style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 56, paddingBottom: 72 }}>
+                {col.groups.map(g => {
+                  const area = col.id + "|k:" + g.key;
+                  const slotRef = { n: 0 };
+                  return (
+                    <div key={g.key} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      <div data-group-heading style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8, padding: "4px 4px 0", fontSize: 13, fontWeight: 600, fontFamily: VIEW_GROUP_FONT, color: C.brandDark }}>
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.label}</span>
+                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 400, color: C.muted }}>{g.rows.length}</span>
                       </div>
-                      <div style={{ fontSize: 12, color: C.muted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.assetName}</div>
-                      {cardFields.filter(f => f.key !== "asset").map(f => (
-                        <div key={f.key} style={{ display: "flex", gap: 6, fontSize: 12, marginTop: 3, color: C.muted }}>
-                          <span style={{ flexShrink: 0 }}>{f.label}:</span>
-                          <span style={{ color: f.key === "status" ? meta.color : C.ink, fontWeight: f.key === "status" ? 700 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{viewFieldDisplay(r, f.key, model, ctx)}</span>
-                        </div>
-                      ))}
+                      <div data-drop-group={area} style={{ display: "flex", flexDirection: "column", gap: 8, minHeight: 12 }}>
+                        {g.rows.map(r => renderCard(r, area, slotRef))}
+                        {lineAt(area, slotRef.n) && <div style={DROP_LINE} />}
+                      </div>
                     </div>
-                  </React.Fragment>
-                );
-              })}
-              {lineAt(col.id, slot) && <div style={DROP_LINE} />}
-              {col.rows.length === 0 && <div style={{ fontSize: 12, color: C.empty, textAlign: "center", padding: "14px 4px", border: `1px dashed ${C.border}`, borderRadius: 8 }}>{emptyText || "No tasks."}</div>}
-            </div>
+                  );
+                })}
+                {col.rows.length === 0 && <div style={{ fontSize: 12, color: C.empty, textAlign: "center", padding: "14px 4px", border: `1px dashed ${C.border}`, borderRadius: 8 }}>{emptyText || "No tasks."}</div>}
+              </div>
+            ) : (
+              <div data-drop-group={col.id} style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 56, paddingBottom: 72 }}>
+                {col.rows.map(r => renderCard(r, col.id, slot))}
+                {lineAt(col.id, slot.n) && <div style={DROP_LINE} />}
+                {col.rows.length === 0 && <div style={{ fontSize: 12, color: C.empty, textAlign: "center", padding: "14px 4px", border: `1px dashed ${C.border}`, borderRadius: 8 }}>{emptyText || "No tasks."}</div>}
+              </div>
+            )}
           </div>
         );
       })}
     </div>
   );
+}
+
+// The value box of a query line, by what the field holds: a date picker, a
+// number box, the board's columns, the field's own list, or free text.
+function ViewValueInput({ entry, op, value, onChange, placeholder }) {
+  const mode = viewValueMode(viewKindOf(entry), op);
+  const box = { padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, background: C.surface };
+  if (mode === "board") {
+    const buckets = viewBuckets(entry.kanban);
+    return (
+      <div style={{ width: 190, flexShrink: 0 }}>
+        <PickerField label="Bucket" hideLabel value={value} onChange={onChange}
+          options={op === "<" || op === ">" ? buckets.map(b => b.id) : ["", ...buckets.map(b => b.id)]}
+          labelForOption={id => (id ? ((buckets.find(b => b.id === id)) || {}).name || id : "(not on the board)")} title="Select bucket" />
+      </div>
+    );
+  }
+  if (mode === "option") {
+    return (
+      <div style={{ width: 190, flexShrink: 0 }}>
+        <PickerField label="Entry" hideLabel value={value} onChange={onChange} options={entry.custom.options || []} labelForOption={o => o || "Select…"} title="Select entry" />
+      </div>
+    );
+  }
+  if (mode === "date" || mode === "number") {
+    return <input type={mode} value={value} onChange={e => onChange(e.target.value)} aria-label="Value" style={{ ...box, flex: "0 1 170px", minWidth: 130 }} />;
+  }
+  return <input value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder || "value (* is any)"} aria-label="Value" style={{ ...box, flex: "1 1 120px", minWidth: 100 }} />;
 }
 
 // The live filter's lines: free text, plus "field is / is not / contains value"
@@ -20009,24 +20486,17 @@ function ViewLiveFilterPanel({ filter, onChange, fields, kanbanLabel }) {
     <div style={{ border: `1px solid ${C.border}`, background: C.surface, borderRadius: 10, padding: 12, marginBottom: 10 }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {filter.conds.map((c, i) => {
-          const f = fields.find(x => x.key === c.field);
-          const isBoard = !!(f && f.kanban);
+          const f = fields.find(x => x.key === c.field) || null;
+          const change = patch => set({ conds: filter.conds.map((x, j) => (j === i ? viewCondChanged(x, patch, f, patch.field !== undefined ? (fields.find(y => y.key === patch.field) || null) : f, true) : x)) });
           return (
             <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
               <div style={{ width: 160, flexShrink: 0 }}>
-                <PickerField label="Field" hideLabel value={c.field} onChange={v => setCond(i, { field: v, value: "", op: v.startsWith(VIEW_KANBAN_PREFIX) ? "=" : c.op })} options={fields.map(x => x.key)} labelForOption={k => (fields.find(x => x.key === k) || {}).label || k} title="Filter field" />
+                <PickerField label="Field" hideLabel value={c.field} onChange={v => change({ field: v })} options={fields.map(x => x.key)} labelForOption={k => (fields.find(x => x.key === k) || {}).label || k} title="Filter field" />
               </div>
-              <div style={{ width: 120, flexShrink: 0 }}>
-                <PickerField label="Comparison" hideLabel value={c.op} onChange={v => setCond(i, { op: v })} options={isBoard ? ["=", "!="] : ["has", "=", "!="]} labelForOption={v => (v === "has" ? "contains" : v === "=" ? "is" : "is not")} title="Filter comparison" />
+              <div style={{ width: 140, flexShrink: 0 }}>
+                <PickerField label="Comparison" hideLabel value={c.op} onChange={v => change({ op: v })} options={viewOpsFor(f, true)} labelForOption={v => VIEW_OP_LABELS[v] || v} title="Filter comparison" />
               </div>
-              {isBoard ? (
-                <div style={{ width: 180, flexShrink: 0 }}>
-                  <PickerField label="Bucket" hideLabel value={c.value} onChange={v => setCond(i, { value: v })} options={["", ...viewBuckets(f.kanban).map(b => b.id)]} labelForOption={id => (id ? (viewBuckets(f.kanban).find(b => b.id === id) || {}).name : "(not on the board)")} title="Filter bucket" />
-                </div>
-              ) : (
-                <input value={c.value} onChange={e => setCond(i, { value: e.target.value })} placeholder="value (* is any)" aria-label="Filter value"
-                  style={{ flex: "1 1 120px", minWidth: 100, padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }} />
-              )}
+              <ViewValueInput entry={f} op={c.op} value={c.value} onChange={v => change({ value: v })} />
               <button type="button" className="icon-btn" aria-label="Remove this filter" onClick={() => set({ conds: filter.conds.filter((_, j) => j !== i) })} style={iconBtn}><Trash2 size={14} color={C.danger} /></button>
             </div>
           );
@@ -20050,7 +20520,7 @@ function ViewLiveFilterPanel({ filter, onChange, fields, kanbanLabel }) {
 // or board. `onState(patch)` receives { order } and/or { assignments } when a
 // person arranges tasks. Keyed by view id by its caller, so the live filter and
 // the arranging mode reset when another view is opened.
-function ViewBody({ view, rows, model, ctx, canArrange, onState, onOpen, emptyText }) {
+function ViewBody({ title, view, rows, model, ctx, canArrange, onState, onOpen, emptyText }) {
   const [arrange, setArrange] = useState(false);
   const [filterOpen, setFilterOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -20077,9 +20547,12 @@ function ViewBody({ view, rows, model, ctx, canArrange, onState, onOpen, emptyTe
   const searchShown = !phone || searchOpen || live.text !== "";
   return (
     <div>
+      {/* The title and the search / filter / order icons share one line; an open
+          search box on a phone drops to its own line beneath. */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10, flex: "1 1 auto", minWidth: 0 }}>{title}</div>
         {searchShown ? (
-          <div style={{ position: "relative", flex: "1 1 180px", minWidth: 140 }}>
+          <div style={{ position: "relative", flex: phone ? "1 1 100%" : "0 1 240px", order: phone ? 5 : 0, minWidth: 140 }}>
             <Search size={14} color={C.muted} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)" }} />
             <input value={live.text} onChange={e => setLive({ ...live, text: e.target.value })} placeholder="Filter this view…" aria-label="Filter this view"
               autoFocus={phone && searchOpen}
@@ -20110,7 +20583,18 @@ function ViewBody({ view, rows, model, ctx, canArrange, onState, onOpen, emptyTe
       )}
       {kanban ? (
         <KanbanBoard view={view} rows={shownRows} model={model} ctx={ctx} arrange={arranging} onOpen={onOpen} emptyText={active ? "None match." : "No tasks."}
-          onMove={(key, bucketId, index) => onState(viewBoardMove(view, viewBoard(view, shownRows), key, bucketId, index))} />
+          onMove={(key, bucketId, index, area) => {
+            const board = viewBoard(view, shownRows, model, ctx);
+            // On a grouped board a drop orders cards only inside the card's OWN group.
+            let within;
+            if (area !== null) {
+              const row = shownRows.find(r => viewTaskKey(r) === key);
+              const col = board.find(c => c.id === bucketId);
+              const g = area.startsWith("k:") && row && col && col.groups ? col.groups.find(x => x.key === area.slice(2)) : null;
+              within = g && g.key === viewGroupKeyOf(view, row, model, ctx) ? g.rows : null;
+            }
+            onState(viewBoardMove(view, board, key, bucketId, index, within));
+          }} />
       ) : (
         <ViewTaskList view={view} rows={shownRows} model={model} ctx={ctx} arrange={arranging} onOpen={onOpen}
           onReorder={order => onState({ order })} emptyText={active ? "No tasks match the filter." : emptyText} />
@@ -20194,6 +20678,7 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, rows, model, prev
     id: crypto.randomUUID(), name: "", type: VIEW_TYPE_LIST, userEmails: [], conditions: [],
     columns: [...VIEW_DEFAULT_COLUMNS], dialogFields: ["frequency", "lastPerformed", "dueDate", "notes", "owner"], order: [],
     viewersCanOrder: false, defaultBucketName: KANBAN_DEFAULT_NAME, buckets: [], assignments: {},
+    groupBy: "", groupDir: "asc", groupOrder: [],
   });
   const [newBucket, setNewBucket] = useState("");
   const [previewAs, setPreviewAs] = useState("");
@@ -20202,12 +20687,77 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, rows, model, prev
   const dialogFields = viewDialogFieldsFor(model);
   const kanban = draft.type === VIEW_TYPE_KANBAN;
   const set = patch => setDraft(d => ({ ...d, ...patch }));
-  const setCond = (i, patch) => set({ conditions: draft.conditions.map((c, j) => (j === i ? { ...c, ...patch } : c)) });
   // Changing a line's field to or from a Kanban board changes what a value IS (a
   // bucket, not typed text), so the old value is cleared rather than reinterpreted.
-  const setCondField = (i, key) => {
-    const was = draft.conditions[i].field.startsWith(VIEW_KANBAN_PREFIX);
-    setCond(i, { field: key, ...(was || key.startsWith(VIEW_KANBAN_PREFIX) ? { value: "", token: "" } : {}) });
+  const entryOf = key => fields.find(f => f.key === key) || null;
+  const newCond = () => ({ field: "owner", op: "=", value: "", token: "", join: "and" });
+  // One recursive renderer serves the top list and every group inside it.
+  const renderConds = (items, setItems, depth) => {
+    const setCond = (i, patch) => setItems(items.map((c, j) => (j === i ? { ...c, ...patch } : c)));
+    const changeCond = (i, patch) => {
+      const c = items[i];
+      setItems(items.map((x, j) => (j === i ? viewCondChanged(x, patch, entryOf(c.field), entryOf(patch.field !== undefined ? patch.field : c.field), false) : x)));
+    };
+    const joinCell = (c, i) => (
+      <div style={{ width: 72, flexShrink: 0 }}>
+        {i === 0
+          ? <span style={{ fontSize: 13, color: C.muted }}>Where</span>
+          : <PickerField label="Join" hideLabel value={c.join} onChange={v => setCond(i, { join: v })} options={["and", "or"]} labelForOption={v => (v === "and" ? "And" : "Or")} title="Join with the line above" />}
+      </div>
+    );
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {items.map((c, i) => c.group === true ? (
+          <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-start", gap: 6 }}>
+            {joinCell(c, i)}
+            <div style={{ flex: 1, minWidth: 240, border: `1.5px solid ${C.border}`, borderRadius: 10, padding: 10, background: C.bg }}>
+              <div style={{ ...lbl, marginBottom: 8, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                Group
+                <button type="button" className="icon-btn" aria-label="Remove this group" onClick={() => setItems(items.filter((_, j) => j !== i))} style={iconBtn}><Trash2 size={14} color={C.danger} /></button>
+              </div>
+              {renderConds(c.conditions, inner => setCond(i, { conditions: inner }), depth + 1)}
+            </div>
+          </div>
+        ) : (
+          <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+            {joinCell(c, i)}
+            <div style={{ width: 160, flexShrink: 0 }}>
+              <PickerField label="Field" hideLabel value={c.field} onChange={v => changeCond(i, { field: v })} options={fields.map(f => f.key)} labelForOption={fieldLabel} title="Select field" />
+            </div>
+            <div style={{ width: 140, flexShrink: 0 }}>
+              <PickerField label="Comparison" hideLabel value={c.op} onChange={v => changeCond(i, { op: v })} options={viewOpsFor(entryOf(c.field))} labelForOption={v => VIEW_OP_LABELS[v] || v} title="Select comparison" />
+            </div>
+            {c.token ? (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "6px 6px 6px 11px", borderRadius: 10, background: C.bg, border: `1.5px solid ${C.border}`, fontSize: 13, fontWeight: 600, color: C.brandDark }}>
+                {(VIEW_TOKENS.find(t => t.value === c.token) || {}).label}
+                <button type="button" className="icon-btn" aria-label="Type a value instead" onClick={() => setCond(i, { token: "" })} style={iconBtn}><X size={13} color={C.muted} /></button>
+              </span>
+            ) : (
+              <>
+                <ViewValueInput entry={entryOf(c.field)} op={c.op} value={c.value} onChange={v => changeCond(i, { value: v })} />
+                {viewTokenAllowed(viewKindOf(entryOf(c.field)), c.op) && VIEW_TOKENS.map(t => (
+                  <button key={t.value} type="button" onClick={() => setCond(i, { token: t.value })}
+                    style={{ padding: "6px 9px", fontSize: 12, fontWeight: 600, border: `1px dashed ${C.border}`, borderRadius: 8, background: "none", color: C.brandDark, cursor: "pointer" }}>Use {t.label}</button>
+                ))}
+              </>
+            )}
+            <button type="button" className="icon-btn" aria-label="Remove this line" onClick={() => setItems(items.filter((_, j) => j !== i))} style={iconBtn}><Trash2 size={14} color={C.danger} /></button>
+          </div>
+        ))}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button type="button" onClick={() => setItems([...items, newCond()])}
+            style={{ display: "flex", alignItems: "center", gap: 4, padding: "6px 11px", borderRadius: 8, fontSize: 13, fontWeight: 600, border: `1.5px dashed ${C.border}`, background: "none", color: C.brandDark }}>
+            <Plus size={13} /> Add a line
+          </button>
+          {depth < VIEW_MAX_GROUP_DEPTH && (
+            <button type="button" onClick={() => setItems([...items, { group: true, join: "and", conditions: [newCond()] }])}
+              style={{ display: "flex", alignItems: "center", gap: 4, padding: "6px 11px", borderRadius: 8, fontSize: 13, fontWeight: 600, border: `1.5px dashed ${C.border}`, background: "none", color: C.brandDark }}>
+              <Plus size={13} /> Add a group
+            </button>
+          )}
+        </div>
+      </div>
+    );
   };
   const toggleIn = (list, v) => (list.includes(v) ? list.filter(x => x !== v) : [...list, v]);
   const lbl = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent };
@@ -20222,6 +20772,7 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, rows, model, prev
   const ctxViews = allViews.some(v => v.id === draft.id) ? allViews.map(v => (v.id === draft.id ? draft : v)) : [...allViews, draft];
   const ctx = { userName, views: ctxViews, seen: [draft.id] };
   const matched = rows.filter(r => viewMatches(draft, r, model, ctx));
+  const groupsNow = viewGroups(draft, matched, model, ctx);
   const fieldLabel = k => (fields.find(f => f.key === k) || {}).label || k;
   const cols = draft.columns.filter(k => fields.some(f => f.key === k));
   const canSave = !!draft.name.trim();
@@ -20312,55 +20863,49 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, rows, model, prev
         <div style={sectionStyle}>
           <div style={{ ...lbl, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
             Tasks shown
-            <HelpTip label="About the query" text="Leave it empty to show every task. Each line compares one field to a value. And is applied before Or, so 'A and B or C' means (A and B) or C. [CURRENT USERNAME] stands for the name of whoever is signed in, so one view can show each person their own tasks." />
+            <HelpTip label="About the query" text="Leave it empty to show every task. Each line compares one field to a value. And is applied before Or, so 'A and B or C' means (A and B) or C. Add a group to put lines in brackets, e.g. (A or B) and (C or D); groups can sit inside groups. [CURRENT USERNAME] stands for the name of whoever is signed in, so one view can show each person their own tasks. [DAY OF WEEK] stands for today's weekday (Monday, Tuesday...); against a Kanban it means the column of that name." />
           </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {draft.conditions.map((c, i) => (
-              <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
-                <div style={{ width: 72, flexShrink: 0 }}>
-                  {i === 0
-                    ? <span style={{ fontSize: 13, color: C.muted }}>Where</span>
-                    : <PickerField label="Join" hideLabel value={c.join} onChange={v => setCond(i, { join: v })} options={["and", "or"]} labelForOption={v => (v === "and" ? "And" : "Or")} title="Join with the line above" />}
-                </div>
-                <div style={{ width: 160, flexShrink: 0 }}>
-                  <PickerField label="Field" hideLabel value={c.field} onChange={v => setCondField(i, v)} options={fields.map(f => f.key)} labelForOption={fieldLabel} title="Select field" />
-                </div>
-                <div style={{ width: 96, flexShrink: 0 }}>
-                  <PickerField label="Comparison" hideLabel value={c.op} onChange={v => setCond(i, { op: v })} options={["=", "!="]} labelForOption={v => (v === "=" ? "is" : "is not")} title="Select comparison" />
-                </div>
-                {c.field.startsWith(VIEW_KANBAN_PREFIX) ? (() => {
-                  const board = (fields.find(f => f.key === c.field) || {}).kanban;
-                  return (
-                    <div style={{ width: 190, flexShrink: 0 }}>
-                      <PickerField label="Bucket" hideLabel value={c.value} onChange={v => setCond(i, { value: v })}
-                        options={["", ...(board ? viewBuckets(board).map(b => b.id) : [])]}
-                        labelForOption={id => (id ? ((board && viewBuckets(board).find(b => b.id === id)) || {}).name || id : "(not on the board)")} title="Select bucket" />
-                    </div>
-                  );
-                })() : c.token ? (
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "6px 6px 6px 11px", borderRadius: 10, background: C.bg, border: `1.5px solid ${C.border}`, fontSize: 13, fontWeight: 600, color: C.brandDark }}>
-                    {(VIEW_TOKENS.find(t => t.value === c.token) || {}).label}
-                    <button type="button" className="icon-btn" aria-label="Type a value instead" onClick={() => setCond(i, { token: "" })} style={iconBtn}><X size={13} color={C.muted} /></button>
-                  </span>
-                ) : (
-                  <>
-                    <input value={c.value} onChange={e => setCond(i, { value: e.target.value })} placeholder="value (* is any)" aria-label="Value"
-                      style={{ flex: "1 1 120px", minWidth: 100, padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }} />
-                    {VIEW_TOKENS.map(t => (
-                      <button key={t.value} type="button" onClick={() => setCond(i, { token: t.value })}
-                        style={{ padding: "6px 9px", fontSize: 12, fontWeight: 600, border: `1px dashed ${C.border}`, borderRadius: 8, background: "none", color: C.brandDark, cursor: "pointer" }}>Use {t.label}</button>
-                    ))}
-                  </>
-                )}
-                <button type="button" className="icon-btn" aria-label="Remove this line" onClick={() => set({ conditions: draft.conditions.filter((_, j) => j !== i) })} style={iconBtn}><Trash2 size={14} color={C.danger} /></button>
-              </div>
-            ))}
-          </div>
-          <button type="button" onClick={() => set({ conditions: [...draft.conditions, { field: "owner", op: "=", value: "", token: "", join: "and" }] })}
-            style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 4, padding: "6px 11px", borderRadius: 8, fontSize: 13, fontWeight: 600, border: `1.5px dashed ${C.border}`, background: "none", color: C.brandDark }}>
-            <Plus size={13} /> Add a line
-          </button>
+          {renderConds(draft.conditions, conditions => set({ conditions }), 0)}
           <div style={{ fontSize: 12, color: C.muted, marginTop: 8 }}>{describeViewQuery(draft, model, ctxViews)}</div>
+        </div>
+
+        <div style={sectionStyle}>
+          <div style={{ ...lbl, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
+            Group tasks by
+            <HelpTip label="About grouping" text={`Splits the tasks under a heading per value of the field you pick${kanban ? ", inside every column" : ""}. Groups come out in the field's own order, ascending or descending, and you can then move any group up or down to put it where you want it. A task with no value sits in its own group at the end. A multiple-choice field groups by its first pick.`} />
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+            <div style={{ width: 200 }}>
+              <PickerField label="Group by" hideLabel value={draft.groupBy || "__nogroup"} onChange={v => set({ groupBy: v === "__nogroup" ? "" : v, groupOrder: [] })}
+                options={["__nogroup", ...fields.map(f => f.key)]} labelForOption={k => (k === "__nogroup" ? "No grouping" : fieldLabel(k))} title="Group tasks by" />
+            </div>
+            {draft.groupBy && (
+              <div style={{ width: 170 }}>
+                <PickerField label="Group order" hideLabel value={draft.groupDir} onChange={v => set({ groupDir: v })}
+                  options={["asc", "desc"]} labelForOption={v => (v === "desc" ? "Descending" : "Ascending")} title="Order of the groups" />
+              </div>
+            )}
+          </div>
+          {draft.groupBy && !entryOf(draft.groupBy) && <div style={{ fontSize: 12, color: C.danger, marginTop: 6 }}>That field no longer exists, so the tasks are not grouped.</div>}
+          {groupsNow && groupsNow.length > 0 && (
+            <div style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 12, color: C.muted, marginBottom: 4 }}>Move a group to change which comes first.</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                {groupsNow.map((g, i) => (
+                  <div key={g.key} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13, color: C.ink }}>
+                    <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.label}</span>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted }}>{g.rows.length}</span>
+                    <button type="button" className="icon-btn" aria-label={`Move group ${g.label} up`} disabled={i === 0} onClick={() => set({ groupOrder: viewGroupMove(draft, groupsNow.map(x => x.key), g.key, -1) })} style={{ ...iconBtn, opacity: i === 0 ? 0.3 : 1 }}><ChevronUp size={14} color={C.muted} /></button>
+                    <button type="button" className="icon-btn" aria-label={`Move group ${g.label} down`} disabled={i === groupsNow.length - 1} onClick={() => set({ groupOrder: viewGroupMove(draft, groupsNow.map(x => x.key), g.key, 1) })} style={{ ...iconBtn, opacity: i === groupsNow.length - 1 ? 0.3 : 1 }}><ChevronDown size={14} color={C.muted} /></button>
+                  </div>
+                ))}
+              </div>
+              {draft.groupOrder.length > 0 && (
+                <button type="button" onClick={() => set({ groupOrder: [] })}
+                  style={{ marginTop: 6, padding: "3px 9px", fontSize: 12, fontWeight: 600, border: `1px solid ${C.border}`, borderRadius: 6, background: "none", color: C.brandDark, cursor: "pointer" }}>Back to the field's order</button>
+              )}
+            </div>
+          )}
         </div>
 
         <div style={sectionStyle}>
@@ -23357,6 +23902,9 @@ const LIST_TABLE_HEADER_TOP = 81;
 // the whole stack moves up on a phone, where the header is not pinned.
 const APP_HEADER_PX = 45;
 const PHONE_MEDIA_QUERY = "(max-width: 640px)";
+// The phone's bottom bar (tabs + menu): its height, and the icon for each main tab.
+const PHONE_NAV_PX = 56;
+const PHONE_TAB_ICONS = { assets: Boxes, maintenance: ClipboardList, views: Layers, map: MapPin, audit: History };
 const DETAIL_TABLE_HEADER_TOP = 90;
 
 // A table whose HEADER stays put while the page scrolls, and whose horizontal
