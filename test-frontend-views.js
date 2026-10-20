@@ -34,7 +34,7 @@ const code = [
   slice('function maintenanceSortKey(row) {'),
   slice('function maintenanceStatusMeta(status) {'),
   block,
-  'return { adoptViews, viewsVisibleTo, viewFieldsFor, viewFieldValue, viewFieldDisplay, viewConditionMatches, viewMatches, describeViewQuery, orderViewRows, moveInViewOrder, addToViewOrder, removeFromViewOrder, viewTaskKey, viewDialogShows, viewVisibleCustomKeys, viewDragOrder, viewBoard, viewBoardMove, viewBucketIdIn, viewBucketOf, viewBuckets, viewLiveMatches, viewLiveActive, viewCanArrange, viewCondChanged, viewOpsFor, viewFieldEntry, viewKindOf, viewValueMode, viewGroups, viewGroupKeyOf, viewGroupMove, viewTokenAllowed };',
+  'return { adoptViews, viewsVisibleTo, viewFieldsFor, viewFieldValue, viewFieldDisplay, viewConditionMatches, viewMatches, describeViewQuery, orderViewRows, moveInViewOrder, addToViewOrder, removeFromViewOrder, viewTaskKey, viewDialogShows, viewVisibleCustomKeys, viewDragOrder, viewBoard, viewBoardMove, viewBucketIdIn, viewBucketOf, viewBuckets, viewLiveMatches, viewLiveActive, viewCanArrange, viewCondChanged, viewOpsFor, viewFieldEntry, viewKindOf, viewValueMode, viewGroups, viewGroupKeyOf, viewGroupMove, viewTokenAllowed, viewItemsMatch, adoptViewConds };',
 ].join(NL);
 const H = new Function(code)();
 
@@ -320,6 +320,30 @@ check('Sandbox carries a Kanban and a view that queries it', /type: "kanban"/.te
   check('the board splits each column and orders inside the card\'s own group', /col\.groups \?/.test(src) && /g\.key === viewGroupKeyOf\(view, row, model, ctx\)/.test(src));
   check('the editor can pick the field, the direction and move groups', /Group tasks by/.test(src) && /viewGroupMove\(draft/.test(src) && /Move group \$\{g\.label\} up/.test(src));
   check('Sandbox carries a grouped view and a [DAY OF WEEK] one', /groupBy: "owner"/.test(src) && /token: "DAY_OF_WEEK"/.test(src));
+}
+
+
+// --- nested groups
+const grp = (conditions, join = "and") => ({ group: true, join, conditions });
+{
+  const g1 = view([grp([cond("owner", "=", "X"), cond("owner", "=", "Y", "or")]), grp([cond("status", "=", "On track")], "and")]);
+  eq('(A or B) and (C) resolves by the groups', rows3.filter(r => H.viewMatches(g1, r, model, ctx)).map(r => r.item.id), ["a"]);
+  const g2 = view([grp([cond("owner", "=", "X"), cond("owner", "=", "Y", "or")]), cond("status", "=", "On track")]);
+  eq('a group beside a plain line', rows3.filter(r => H.viewMatches(g2, r, model, ctx)).map(r => r.item.id), ["a"]);
+  const g3 = view([cond("owner", "=", "Z"), grp([cond("owner", "=", "X"), cond("status", "=", "On track")], "or")]);
+  eq('a group joined with or', rows3.filter(r => H.viewMatches(g3, r, model, ctx)).map(r => r.item.id), ["a", "c"]);
+  const g4 = view([grp([cond("owner", "=", "X"), grp([cond("owner", "=", "Q"), cond("status", "=", "On track", "or")])])]);
+  eq('groups nest', rows3.filter(r => H.viewMatches(g4, r, model, ctx)).map(r => r.item.id), ["a"]);
+  const g5 = view([cond("owner", "=", "X"), grp([])]);
+  eq('an empty group is ignored', rows3.filter(r => H.viewMatches(g5, r, model, ctx)).map(r => r.item.id), ["a"]);
+  eq('only empty groups shows every task', rows3.filter(r => H.viewMatches(view([grp([])]), r, model, ctx)).length, 3);
+  eq('a group reads in brackets', H.describeViewQuery(g1, model), '(Owner is "X" or Owner is "Y") and (Status is "On track")'.replace(/^\(Owner is "X" or Owner is "Y"\) and /, '(Owner is "X" or Owner is "Y") and '));
+  const a = H.adoptViewConds([cond("owner", "=", "X"), { group: true, join: "or", conditions: [{ field: "" }, cond("owner", "=", "Y"), { group: true, conditions: [cond("owner", "=", "Z")] }] }, { group: 1 }], 0);
+  eq('adoption keeps nested groups and drops junk', a, [cond("owner", "=", "X"), { group: true, join: "or", conditions: [cond("owner", "=", "Y"), { group: true, join: "and", conditions: [cond("owner", "=", "Z")] }] }]);
+  const deep = H.adoptViewConds([grp([grp([grp([grp([cond("owner", "=", "X")])])])])], 0);
+  eq('nesting past the limit is dropped', JSON.stringify(deep).split('"group"').length - 1, 3);
+  const src = require("fs").readFileSync("index.html", "utf8");
+  check('the editor offers Add a group', /Add a group/.test(src) && /renderConds\(draft\.conditions/.test(src));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
