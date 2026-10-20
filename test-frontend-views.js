@@ -345,6 +345,14 @@ const grp = (conditions, join = "and") => ({ group: true, join, conditions });
   const src = require("fs").readFileSync("index.html", "utf8");
   check('the editor offers Add a group', /Add a group/.test(src) && /renderConds\(draft\.conditions/.test(src));
 }
+{
+  const src = require("fs").readFileSync("index.html", "utf8");
+  const i = src.indexOf('mainTab === "views" && activeView && canEdit');
+  const blk = i < 0 ? "" : src.slice(i, i + 2600);
+  check('the Views tab has a + for editors', i > 0);
+  check('it offers task, asset and work', /openMaintenanceAdd\(""\)/.test(blk) && /startAdd\(\)/.test(blk) && /openChangeAdd\(""\)/.test(blk));
+  check('the add-asset form opens as a dialog on Views', /mainTab === "views" && activeView && showAdd/.test(src));
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
