@@ -8691,7 +8691,21 @@ function AssetTracker() {
   const authSatisfied = sandboxMode || !!auth;
   // View-only users are stopped in persist() and again in the backend. Buttons
   // are also hidden where practical, but that's a courtesy, not the control.
-  const canEdit = sandboxMode || (auth && auth.role !== "viewer");
+  // VIEW AS (owner only): the owner picks a person from the allowlist and the app
+  // renders with THAT person's role and views, to see what they see. Purely a
+  // reading aid in this browser: the session stays the owner's, nothing about
+  // auth or stored data changes, and every write is refused while it is on
+  // (`viewingAs` is checked in persist() and the other write ops). Held in
+  // memory only, so a reload or sign-out ends it. A non-owner can never have a
+  // target, whatever the state says.
+  const [viewAsEmail, setViewAsEmail] = useState(null);
+  const [showViewAsPicker, setShowViewAsPicker] = useState(false);
+  const viewAsIsOwner = !sandboxMode && !!auth && !!auth.ownerEmail
+    && String(auth.email).toLowerCase() === String(auth.ownerEmail).toLowerCase();
+  const viewingAs = (viewAsIsOwner && viewAsEmail)
+    ? (accessUsers.find(u => String(u.email).toLowerCase() === viewAsEmail) || null)
+    : null;
+  const canEdit = sandboxMode || (viewingAs ? viewingAs.role !== "viewer" : (auth && auth.role !== "viewer"));
   const [columnVisibility, setColumnVisibility] = useState({}); // { [columnKey]: boolean } — per-device override, see COLUMN_VISIBILITY_STORAGE_KEY
   // Which icons the type editor offers without opening the browser. Per-device,
   // see ICON_FAVORITES_STORAGE_KEY. Seeded with the shipped row so the first
@@ -9003,6 +9017,7 @@ function AssetTracker() {
     // or not this lands.
     clearSnapshotCache();
     setAuth(null);
+    setViewAsEmail(null);
     setAuthPending(false);
     setCurrentUser(null);
     setAssets(null);
@@ -9834,6 +9849,10 @@ function AssetTracker() {
     // viewer's click doesn't optimistically repaint the screen with a change
     // that the next load will silently undo. Every write in the app funnels
     // through persist(), so nothing gets past this by being missed.
+    if (viewingAs) {
+      setNotice("You're viewing as " + (viewingAs.name || viewingAs.email) + ", which is read-only, so that change wasn't saved. Exit View as to make changes.");
+      return;
+    }
     if (!canEdit) {
       setNotice("Your access is view-only, so that change wasn't saved.");
       return;
@@ -10283,10 +10302,10 @@ function AssetTracker() {
   // ---- Views: the ones this person is assigned (Sandbox has no sign-in, so it
   // shows them all), the open one, and its tasks. [CURRENT USERNAME] is the
   // name the allowlist gives the person, else their email.
-  const viewerEmail = auth ? auth.email : "";
+  const viewerEmail = viewingAs ? viewingAs.email : (auth ? auth.email : "");
   const visibleViews = useMemo(() => viewsVisibleTo(viewsCfg.list, viewerEmail, sandboxMode), [viewsCfg, viewerEmail, sandboxMode]);
   const activeView = visibleViews.find(v => v.id === activeViewId) || visibleViews[0] || null;
-  const viewUserName = sandboxMode ? (currentUser || "") : (auth ? (auth.name || auth.email) : "");
+  const viewUserName = sandboxMode ? (currentUser || "") : (viewingAs ? (viewingAs.name || viewingAs.email) : (auth ? (auth.name || auth.email) : ""));
   // What a query needs besides the task: the signed-in name, and every view (a
   // query can name a Kanban's bucket). `seen` is the boards being worked out.
   const viewCtx = useMemo(() => ({ userName: viewUserName, views: viewsCfg.list, seen: [] }), [viewUserName, viewsCfg]);
@@ -10317,6 +10336,10 @@ function AssetTracker() {
     const next = { list: viewsCfg.list.map(v => (v.id === viewId ? { ...v, ...patch } : v)) };
     if (sandboxMode || !PER_RECORD_SAVES) {
       persist(assets, { views: next });
+      return;
+    }
+    if (viewingAs) {
+      setNotice("You're viewing as " + (viewingAs.name || viewingAs.email) + ", which is read-only, so that change wasn't saved.");
       return;
     }
     setViewsCfg(next);
@@ -11781,6 +11804,7 @@ function AssetTracker() {
   // slow -- see attachPhotos. `count` is bounded server-side, so asking for a
   // hundred signatures does not mint a hundred.
   async function signPhotoUploads(count) {
+    if (viewingAs) throw new Error("Viewing as another person is read-only. Exit View as to upload.");
     const data = await backendPost(SHEET_API_URL, { op: "photoSign", sessionId: sessionId, count: count }).catch(err => ({ ok: false, error: err.message }));
     if (!data || !data.ok) throw new Error((data && data.error) || "Could not get permission to upload.");
     // A v36-or-older backend answers with ONE signature at the top level and no
@@ -11801,6 +11825,7 @@ function AssetTracker() {
   // for Cloudinary's RAW pipeline (see handleFloorPlanSign_), not the N-file
   // array shape a photo batch needs.
   async function signFloorPlanUpload() {
+    if (viewingAs) throw new Error("Viewing as another person is read-only. Exit View as to upload.");
     const data = await backendPost(SHEET_API_URL, { op: "floorPlanSign", sessionId: sessionId }).catch(err => ({ ok: false, error: err.message }));
     if (!data || !data.ok) throw new Error((data && data.error) || "Could not get permission to upload.");
     return data;
@@ -14877,6 +14902,18 @@ function AssetTracker() {
             >
               <Info size={15} /> About
             </button>
+            {viewAsIsOwner && (
+              <div style={{ display: "flex", alignItems: "center", paddingRight: 8 }}>
+                <button
+                  onClick={() => { setShowAppMenu(false); setShowViewAsPicker(true); }}
+                  className="icon-btn"
+                  style={{ ...APP_MENU_ROW, flex: 1, minWidth: 0, width: undefined }}
+                >
+                  <Eye size={15} /> View as…
+                </button>
+                <HelpTip label="About View as" text="Owner only. See the app the way another person sees it, with their access and views. Read-only: nothing can be saved while it is on." />
+              </div>
+            )}
             {!sandboxMode && auth && (
               <button
                 onClick={() => { setShowAppMenu(false); endSession(null, true); }}
@@ -18689,6 +18726,43 @@ function AssetTracker() {
             style={{ background: "none", border: "none", padding: 0, color: C.muted, fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}
           >
             Dismiss
+          </button>
+        </div>
+      )}
+
+      {showViewAsPicker && viewAsIsOwner && (
+        <SelectionModal
+          title="View as"
+          options={accessUsers.filter(u => String(u.email).toLowerCase() !== String(auth.email).toLowerCase()).map(u => String(u.email).toLowerCase())}
+          value={viewAsEmail || ""}
+          labelForOption={e => { const u = accessUsers.find(x => String(x.email).toLowerCase() === e); return u ? `${u.name || u.email} (${u.role === "viewer" ? "view only" : "editor"})` : e; }}
+          emptyLabel="No other people have access yet."
+          searchable
+          onChange={e => { setViewAsEmail(e || null); setShowViewAsPicker(false); }}
+          onClose={() => setShowViewAsPicker(false)}
+        />
+      )}
+      {viewingAs && (
+        <div
+          role="status"
+          style={{
+            position: "fixed", bottom: 12, left: "50%", transform: "translateX(-50%)", zIndex: 60,
+            background: C.accent, color: "#fff", borderRadius: 999, padding: "8px 8px 8px 14px",
+            display: "flex", alignItems: "center", gap: 10, boxShadow: "0 4px 12px rgba(42,52,57,0.3)",
+            maxWidth: "min(94vw, 460px)", fontSize: 13, fontWeight: 600,
+          }}
+        >
+          <Eye size={15} style={{ flexShrink: 0 }} />
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            Viewing as {viewingAs.name || viewingAs.email} · read-only
+          </span>
+          <button
+            onClick={() => setViewAsEmail(null)}
+            aria-label="Exit View as"
+            title="Exit View as"
+            style={{ display: "flex", alignItems: "center", gap: 4, background: "rgba(255,255,255,0.22)", color: "#fff", border: "none", borderRadius: 999, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}
+          >
+            <X size={13} /> Exit
           </button>
         </div>
       )}
