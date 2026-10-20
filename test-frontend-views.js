@@ -353,6 +353,13 @@ const grp = (conditions, join = "and") => ({ group: true, join, conditions });
   check('it offers task, asset and work', /openMaintenanceAdd\(""\)/.test(blk) && /startAdd\(\)/.test(blk) && /openChangeAdd\(""\)/.test(blk));
   check('the add-asset form opens as a dialog on Views', /mainTab === "views" && activeView && showAdd/.test(src));
 }
+{
+  const src = require("fs").readFileSync("index.html", "utf8");
+  check('Kanban columns stretch to the tallest', /overflowX: "auto", alignItems: "stretch", paddingBottom: 24/.test(src));
+  check('group headings use their own font', (src.match(/fontFamily: VIEW_GROUP_FONT/g) || []).length === 2 && /const VIEW_GROUP_FONT = "'IBM Plex Serif'/.test(src));
+  check('the title shares the toolbar line', /flex: "1 1 auto", minWidth: 0 }}>\{title\}/.test(src) && /title=\{\(/.test(src));
+  check('the + is not hidden on the phone view list', !/!changeModal && \(!isPhone \|\| viewPaneOpen\)/.test(src));
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
