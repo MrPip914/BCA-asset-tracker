@@ -6261,7 +6261,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-20.3";
+const APP_VERSION = "2026-10-20.4";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -14803,7 +14803,7 @@ function AssetTracker() {
           <div onClick={() => setShowAppMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
           <div
             role="menu"
-            style={{ position: "absolute", right: 0, top: "100%", marginTop: 6, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, width: 270, maxWidth: "calc(100vw - 24px)", maxHeight: "calc(100vh - 80px)", overflowY: "auto", padding: 4 }}
+            style={{ position: isPhone && view === "list" ? "fixed" : "absolute", ...(isPhone && view === "list" ? { right: 12, bottom: PHONE_NAV_PX + 8 } : { right: 0, top: "100%", marginTop: 6 }), background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, width: 270, maxWidth: "calc(100vw - 24px)", maxHeight: isPhone && view === "list" ? `calc(100vh - ${PHONE_NAV_PX + 24}px)` : "calc(100vh - 80px)", overflowY: "auto", padding: 4 }}
           >
             {/* This screen's rows land here, each block under its own heading. */}
             <div ref={setAppMenuSlot} />
@@ -18543,9 +18543,115 @@ function AssetTracker() {
   const hiddenColumns = columns.filter(c => !isColumnVisible(c));
   const addFormColumns = formColumnsFor(draft.type);
 
+  // The main tabs, shared by the desktop tab row and the phone's bottom bar.
+  const mainTabItems = [
+    { key: "assets", label: "Assets" },
+    { key: "maintenance", label: "Tasks", count: allOpenMaintenanceRows.length, urgent: maintenanceOverdueTotal > 0 },
+    // Only for someone who has a view assigned; no count, since a view's
+    // list is whatever its query says.
+    ...(visibleViews.length ? [{ key: "views", label: "Views" }] : []),
+    // No count, deliberately, same reasoning Audit already has below:
+    // it answers "is there a plan here", not "how many", and there's
+    // no natural number to put in parentheses at this scope anyway.
+    { key: "map", label: "Map" },
+    // No count, deliberately. Maintenance's says how much there is to
+    // DO; the audit log only ever grows, so "Audit (11482)" is a number
+    // that answers nothing and gets longer forever.
+    { key: "audit", label: "Audit" },
+  ];
+  const selectMainTab = (key) => {
+    // Leaving the map carries the SELECTED place into the other tab's
+    // navigator; the scope alone is only the plan that was on screen.
+    if (mainTab === "map" && key !== "map" && mapSelectedPlaceId) setScopeId(mapSelectedPlaceId);
+    // Entering the map from a place with no plan of its own moves up to
+    // the nearest place that has one, and selects the original place
+    // on it when that plan draws it (the crumb jump's rule).
+    if (mainTab !== "map" && key === "map" && scopeId) {
+      const here = assets.find(a => a.id === scopeId);
+      const withPlan = here && (here.floorPlanUrl ? here : ancestorsOf(here, assets).find(x => x.floorPlanUrl));
+      if (withPlan && withPlan.id !== here.id) {
+        setScopeId(withPlan.id);
+        setMapQuery("");
+        setMapFocusShapeId(null);
+        const chain = [here, ...ancestorsOf(here, assets)];
+        const cut = chain.findIndex(x => x.id === withPlan.id);
+        for (const place of chain.slice(0, cut)) {
+          const link = (withPlan.floorPlanLinks || []).find(l => l.roomId === place.id);
+          if (link) { setMapSelectShapeId(link.shapeId); break; }
+        }
+      }
+    }
+    setMainTab(key);
+  };
+
+  const headerStatus = (
+    <>
+          {/* THE PILL ONLY EXISTS WHILE SANDBOX IS ON, and getting in is a row
+              in the account menu instead (2026-09-20). It used to be a
+              permanent two-state toggle in the corner — OFF for everyone, all
+              the time, on every screen — which spent the most valuable space in
+              the header on a developer affordance that the overwhelming
+              majority of sessions never touch, and put "start editing fake
+              data" one stray tap from a teacher's thumb.
+
+              Exactly ONE control exists at a time, which is what keeps the
+              two halves from reading as two different features: in production
+              the account menu offers the way IN, and in Sandbox this pill is
+              the way OUT. The pill earns its place precisely because it is
+              conditional — while it is there it is a STATE BANNER first and a
+              control second, answering "why does this inventory look wrong?"
+              before anyone has to go looking. */}
+          {sandboxMode && (
+            <>
+              <button
+                onClick={toggleSandboxMode}
+                title="Sandbox is ON — you're editing local fixture data, nothing is saved to the Google Sheet. Click to switch back to the real Sheet."
+                style={{
+                  display: "flex", alignItems: "center", gap: 5, border: `1.5px solid ${C.accent}`,
+                  background: C.accent, color: "#fff",
+                  borderRadius: 12, padding: "3px 10px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 700,
+                }}
+              >
+                <FlaskConical size={12} />
+                SANDBOX
+              </button>
+              <button
+                onClick={() => { if (confirm("Reset sandbox data back to the starting fixture? Your sandbox edits will be lost.")) resetSandbox(); }}
+                title="Reset sandbox data back to the starting fixture"
+                style={{ display: "flex", alignItems: "center", gap: 4, background: "none", border: "none", padding: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted }}
+              >
+                <RotateCcw size={12} /> Reset
+              </button>
+            </>
+          )}
+          {saveStatusPill}
+          {/* Identity, Settings, About and Sign out are in the one menu (appMenu,
+              defined above) rather than four controls strung across the corner.
+              The View-only badge stays OUTSIDE it on purpose: it explains why the
+              edit controls a viewer expects aren't there, and an explanation that
+              only appears after you open a menu doesn't do that job. */}
+          {!canEdit && (
+            <span
+              title="You can browse the inventory but not change it. Ask an editor if you need to make changes."
+              style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, border: `1px solid ${C.accent}`, borderRadius: 10, padding: "2px 7px" }}
+            >
+              View only
+            </span>
+          )}
+          {backendScriptVersion && backendScriptVersion !== FRONTEND_SCRIPT_VERSION && (
+            <span
+              style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.danger }}
+              title={`Deployed backend: ${backendScriptVersion}\nExpected: ${FRONTEND_SCRIPT_VERSION}\n\nAssetTrackerSync.gs was edited but the live deployment wasn't updated to match — some saves may silently fail to persist. Redeploy: Apps Script > Deploy > Manage deployments > pencil icon > Version: New version > Deploy.`}
+            >
+              Backend outdated
+            </span>
+          )}
+    </>
+  );
+
   return (
     <AppMenuContext.Provider value={appMenuContext}>
-    <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'IBM Plex Sans', 'Helvetica Neue', sans-serif", color: C.ink }}>
+    <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'IBM Plex Sans', 'Helvetica Neue', sans-serif", color: C.ink, paddingBottom: isPhone && view === "list" ? `calc(${PHONE_NAV_PX}px + env(safe-area-inset-bottom))` : undefined }}>
       {globalStyle}
       {conflictModal}
       {nameModal}
@@ -18693,123 +18799,71 @@ function AssetTracker() {
         </div>
       )}
 
-      {/* Slim header */}
-      <div style={{ borderBottom: `2px solid ${C.brand}`, padding: "10px 20px", position: isPhone ? "relative" : "sticky", top: 0, background: C.bg, zIndex: 10, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+      {/* Slim header (desktop; a phone has the bottom bar instead) */}
+      {!isPhone && <div style={{ borderBottom: `2px solid ${C.brand}`, padding: "10px 20px", position: isPhone ? "relative" : "sticky", top: 0, background: C.bg, zIndex: 10, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
           <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: C.brandDark }}>{APP_NAME}</h1>
           <DevBuildBadge />
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          {/* THE PILL ONLY EXISTS WHILE SANDBOX IS ON, and getting in is a row
-              in the account menu instead (2026-09-20). It used to be a
-              permanent two-state toggle in the corner — OFF for everyone, all
-              the time, on every screen — which spent the most valuable space in
-              the header on a developer affordance that the overwhelming
-              majority of sessions never touch, and put "start editing fake
-              data" one stray tap from a teacher's thumb.
-
-              Exactly ONE control exists at a time, which is what keeps the
-              two halves from reading as two different features: in production
-              the account menu offers the way IN, and in Sandbox this pill is
-              the way OUT. The pill earns its place precisely because it is
-              conditional — while it is there it is a STATE BANNER first and a
-              control second, answering "why does this inventory look wrong?"
-              before anyone has to go looking. */}
-          {sandboxMode && (
-            <>
-              <button
-                onClick={toggleSandboxMode}
-                title="Sandbox is ON — you're editing local fixture data, nothing is saved to the Google Sheet. Click to switch back to the real Sheet."
-                style={{
-                  display: "flex", alignItems: "center", gap: 5, border: `1.5px solid ${C.accent}`,
-                  background: C.accent, color: "#fff",
-                  borderRadius: 12, padding: "3px 10px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 700,
-                }}
-              >
-                <FlaskConical size={12} />
-                SANDBOX
-              </button>
-              <button
-                onClick={() => { if (confirm("Reset sandbox data back to the starting fixture? Your sandbox edits will be lost.")) resetSandbox(); }}
-                title="Reset sandbox data back to the starting fixture"
-                style={{ display: "flex", alignItems: "center", gap: 4, background: "none", border: "none", padding: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted }}
-              >
-                <RotateCcw size={12} /> Reset
-              </button>
-            </>
-          )}
-          {saveStatusPill}
-          {/* Identity, Settings, About and Sign out are in the one menu (appMenu,
-              defined above) rather than four controls strung across the corner.
-              The View-only badge stays OUTSIDE it on purpose: it explains why the
-              edit controls a viewer expects aren't there, and an explanation that
-              only appears after you open a menu doesn't do that job. */}
-          {!canEdit && (
-            <span
-              title="You can browse the inventory but not change it. Ask an editor if you need to make changes."
-              style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, border: `1px solid ${C.accent}`, borderRadius: 10, padding: "2px 7px" }}
-            >
-              View only
-            </span>
-          )}
+          {headerStatus}
           {appMenu}
-          {backendScriptVersion && backendScriptVersion !== FRONTEND_SCRIPT_VERSION && (
-            <span
-              style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.danger }}
-              title={`Deployed backend: ${backendScriptVersion}\nExpected: ${FRONTEND_SCRIPT_VERSION}\n\nAssetTrackerSync.gs was edited but the live deployment wasn't updated to match — some saves may silently fail to persist. Redeploy: Apps Script > Deploy > Manage deployments > pencil icon > Version: New version > Deploy.`}
-            >
-              Backend outdated
-            </span>
-          )}
         </div>
-      </div>
+      </div>}
+
+      {/* PHONE BOTTOM BAR (2026-10-20). The tabs and the one menu, as icons along the
+          bottom edge where a thumb reaches; the title bar is gone on a phone. Each
+          icon has a tooltip and aria-label. Only on the list screens: an open asset
+          has its own header and menu. The menu's card opens upward from here. */}
+      {isPhone && (
+        <nav
+          aria-label="Main"
+          style={{ position: "fixed", left: 0, right: 0, bottom: 0, height: PHONE_NAV_PX, zIndex: 15, background: C.bg, borderTop: `2px solid ${C.brand}`, display: "flex", alignItems: "stretch", paddingBottom: "env(safe-area-inset-bottom)" }}
+        >
+          {mainTabItems.map(tab => {
+            const active = mainTab === tab.key;
+            const TabIcon = PHONE_TAB_ICONS[tab.key] || Package;
+            const tip = tab.count > 0 ? `${tab.label} (${tab.count})` : tab.label;
+            return (
+              <button
+                key={tab.key}
+                onClick={() => selectMainTab(tab.key)}
+                aria-label={tip}
+                aria-current={active ? "page" : undefined}
+                title={tip}
+                style={{ flex: 1, minWidth: 0, background: "none", border: "none", position: "relative", display: "flex", alignItems: "center", justifyContent: "center", color: tab.urgent ? C.danger : active ? C.brandDark : C.muted, boxShadow: active ? `inset 0 3px 0 ${C.brand}` : "none" }}
+              >
+                <TabIcon size={24} strokeWidth={active ? 2.4 : 1.8} />
+                {tab.count > 0 && (
+                  <span style={{ position: "absolute", top: 6, left: "50%", marginLeft: 8, minWidth: 16, height: 16, padding: "0 4px", borderRadius: 8, background: tab.urgent ? C.danger : C.muted, color: "#fff", fontSize: 10, fontWeight: 700, lineHeight: "16px", textAlign: "center" }}>
+                    {tab.count > 99 ? "99+" : tab.count}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+          <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>{appMenu}</div>
+        </nav>
+      )}
 
       {/* Top-level page tabs */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "0 20px", position: "sticky", top: listTabsTop, background: C.bg, zIndex: 9 }}>
+        {isPhone ? (
+          // On a phone the tabs live in the bottom bar (phoneBottomNav) and the
+          // title bar is gone, so the status pills it carried sit here, ahead of
+          // this screen's search.
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", minWidth: 0, minHeight: 36 }}>
+            <DevBuildBadge />
+            {headerStatus}
+          </div>
+        ) : (
         <div style={{ display: "flex", gap: 4, overflowX: "auto", overflowY: "hidden" }}>
-          {[
-            { key: "assets", label: "Assets" },
-            { key: "maintenance", label: "Tasks", count: allOpenMaintenanceRows.length, urgent: maintenanceOverdueTotal > 0 },
-            // Only for someone who has a view assigned; no count, since a view's
-            // list is whatever its query says.
-            ...(visibleViews.length ? [{ key: "views", label: "Views" }] : []),
-            // No count, deliberately, same reasoning Audit already has below:
-            // it answers "is there a plan here", not "how many", and there's
-            // no natural number to put in parentheses at this scope anyway.
-            { key: "map", label: "Map" },
-            // No count, deliberately. Maintenance's says how much there is to
-            // DO; the audit log only ever grows, so "Audit (11482)" is a number
-            // that answers nothing and gets longer forever.
-            { key: "audit", label: "Audit" },
-          ].map(tab => {
+          {mainTabItems.map(tab => {
             const active = mainTab === tab.key;
             return (
               <button
                 key={tab.key}
-                onClick={() => {
-                  // Leaving the map carries the SELECTED place into the other tab's
-                  // navigator; the scope alone is only the plan that was on screen.
-                  if (mainTab === "map" && tab.key !== "map" && mapSelectedPlaceId) setScopeId(mapSelectedPlaceId);
-                  // Entering the map from a place with no plan of its own moves up to
-                  // the nearest place that has one, and selects the original place
-                  // on it when that plan draws it (the crumb jump's rule).
-                  if (mainTab !== "map" && tab.key === "map" && scopeId) {
-                    const here = assets.find(a => a.id === scopeId);
-                    const withPlan = here && (here.floorPlanUrl ? here : ancestorsOf(here, assets).find(x => x.floorPlanUrl));
-                    if (withPlan && withPlan.id !== here.id) {
-                      setScopeId(withPlan.id);
-                      setMapQuery("");
-                      setMapFocusShapeId(null);
-                      const chain = [here, ...ancestorsOf(here, assets)];
-                      const cut = chain.findIndex(x => x.id === withPlan.id);
-                      for (const place of chain.slice(0, cut)) {
-                        const link = (withPlan.floorPlanLinks || []).find(l => l.roomId === place.id);
-                        if (link) { setMapSelectShapeId(link.shapeId); break; }
-                      }
-                    }
-                  }
-                  setMainTab(tab.key);
-                }}
+                onClick={() => selectMainTab(tab.key)}
                 style={{
                   background: "none", border: "none", padding: "10px 12px", whiteSpace: "nowrap",
                   fontSize: 13, fontWeight: active || tab.urgent ? 700 : 500, color: tab.urgent ? C.danger : active ? C.brandDark : C.muted,
@@ -18821,6 +18875,7 @@ function AssetTracker() {
             );
           })}
         </div>
+        )}
 
         {mainTab === "assets" && (
           <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
@@ -19482,7 +19537,7 @@ function AssetTracker() {
             {showMapAddMenu && (
               <div onClick={() => setShowMapAddMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
             )}
-            <div style={{ position: "fixed", right: 20, bottom: 20, zIndex: 41, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 10 }}>
+            <div style={{ position: "fixed", right: 20, bottom: isPhone ? 20 + PHONE_NAV_PX : 20, zIndex: 41, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 10 }}>
               {showMapAddMenu && (
                 <div role="menu" style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, boxShadow: "0 4px 14px rgba(42,52,57,0.2)", overflow: "hidden", minWidth: 160 }}>
                   {[
@@ -19649,7 +19704,7 @@ function AssetTracker() {
             {showMapAddMenu && (
               <div onClick={() => setShowMapAddMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
             )}
-            <div style={{ position: "fixed", right: 20, bottom: 20, zIndex: 41, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 10 }}>
+            <div style={{ position: "fixed", right: 20, bottom: isPhone ? 20 + PHONE_NAV_PX : 20, zIndex: 41, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 10 }}>
               {showMapAddMenu && (
                 <div role="menu" style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 12, boxShadow: "0 4px 14px rgba(42,52,57,0.2)", overflow: "hidden", minWidth: 160 }}>
                   {[
@@ -23764,6 +23819,9 @@ const LIST_TABLE_HEADER_TOP = 81;
 // the whole stack moves up on a phone, where the header is not pinned.
 const APP_HEADER_PX = 45;
 const PHONE_MEDIA_QUERY = "(max-width: 640px)";
+// The phone's bottom bar (tabs + menu): its height, and the icon for each main tab.
+const PHONE_NAV_PX = 56;
+const PHONE_TAB_ICONS = { assets: Boxes, maintenance: ClipboardList, views: Layers, map: MapPin, audit: History };
 const DETAIL_TABLE_HEADER_TOP = 90;
 
 // A table whose HEADER stays put while the page scrolls, and whose horizontal

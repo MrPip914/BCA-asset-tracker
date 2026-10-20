@@ -847,6 +847,10 @@ A **Views** main tab shows saved task lists and boards an editor sets up in **Se
 - **The connector does not know views yet** (queued in `/mnt/project-files/connector-queue.md`).
 - Covered by `test-frontend-views.js` (real helpers plus wiring, mutation-checked) and `save_test.ts` (`viewState` permission rule; runs in CI). Driven in Chromium against Sandbox: sidebar and counts, the phone flow, board drag between buckets, list drag and reload, read mode and pencil, the live filter, and the Settings editor and order icon. The viewer path of `viewState` is covered by the Deno test only.
 
+## Phone bottom bar (2026-10-20)
+
+At phone width (`PHONE_MEDIA_QUERY`) the list screens drop the title bar and the tabs move to a fixed bottom bar of icons (`PHONE_TAB_ICONS`, each with `title`/`aria-label`, the Tasks badge kept), with the one ☰ menu as its last icon; its card opens upward. The status pills the title bar carried (Sandbox, save state, View only, Backend outdated, Dev) sit in the slim top row beside each tab's search (`headerStatus`). The floating + buttons are lifted above the bar. An open asset keeps its own header and menu. Desktop unchanged. Frontend only.
+
 ## Relationships tab (2026-10-10)
 
 Each asset can show a **Relationships** tab listing assets related to it by named
