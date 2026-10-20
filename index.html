@@ -10,7 +10,7 @@
 <script src="clients.js"></script>
 <script>document.title = window.ASSET_TRACKER_CLIENT.appName;</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600;700&display=swap" rel="stylesheet">
 <style>
   html, body { margin: 0; padding: 0; }
   #root { min-height: 100vh; }
@@ -6261,7 +6261,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-20.4";
+const APP_VERSION = "2026-10-20.5";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -8691,7 +8691,21 @@ function AssetTracker() {
   const authSatisfied = sandboxMode || !!auth;
   // View-only users are stopped in persist() and again in the backend. Buttons
   // are also hidden where practical, but that's a courtesy, not the control.
-  const canEdit = sandboxMode || (auth && auth.role !== "viewer");
+  // VIEW AS (owner only): the owner picks a person from the allowlist and the app
+  // renders with THAT person's role and views, to see what they see. Purely a
+  // reading aid in this browser: the session stays the owner's, nothing about
+  // auth or stored data changes, and every write is refused while it is on
+  // (`viewingAs` is checked in persist() and the other write ops). Held in
+  // memory only, so a reload or sign-out ends it. A non-owner can never have a
+  // target, whatever the state says.
+  const [viewAsEmail, setViewAsEmail] = useState(null);
+  const [showViewAsPicker, setShowViewAsPicker] = useState(false);
+  const viewAsIsOwner = !sandboxMode && !!auth && !!auth.ownerEmail
+    && String(auth.email).toLowerCase() === String(auth.ownerEmail).toLowerCase();
+  const viewingAs = (viewAsIsOwner && viewAsEmail)
+    ? (accessUsers.find(u => String(u.email).toLowerCase() === viewAsEmail) || null)
+    : null;
+  const canEdit = sandboxMode || (viewingAs ? viewingAs.role !== "viewer" : (auth && auth.role !== "viewer"));
   const [columnVisibility, setColumnVisibility] = useState({}); // { [columnKey]: boolean } — per-device override, see COLUMN_VISIBILITY_STORAGE_KEY
   // Which icons the type editor offers without opening the browser. Per-device,
   // see ICON_FAVORITES_STORAGE_KEY. Seeded with the shipped row so the first
@@ -9003,6 +9017,7 @@ function AssetTracker() {
     // or not this lands.
     clearSnapshotCache();
     setAuth(null);
+    setViewAsEmail(null);
     setAuthPending(false);
     setCurrentUser(null);
     setAssets(null);
@@ -9834,6 +9849,10 @@ function AssetTracker() {
     // viewer's click doesn't optimistically repaint the screen with a change
     // that the next load will silently undo. Every write in the app funnels
     // through persist(), so nothing gets past this by being missed.
+    if (viewingAs) {
+      setNotice("You're viewing as " + (viewingAs.name || viewingAs.email) + ", which is read-only, so that change wasn't saved. Exit View as to make changes.");
+      return;
+    }
     if (!canEdit) {
       setNotice("Your access is view-only, so that change wasn't saved.");
       return;
@@ -10283,10 +10302,10 @@ function AssetTracker() {
   // ---- Views: the ones this person is assigned (Sandbox has no sign-in, so it
   // shows them all), the open one, and its tasks. [CURRENT USERNAME] is the
   // name the allowlist gives the person, else their email.
-  const viewerEmail = auth ? auth.email : "";
+  const viewerEmail = viewingAs ? viewingAs.email : (auth ? auth.email : "");
   const visibleViews = useMemo(() => viewsVisibleTo(viewsCfg.list, viewerEmail, sandboxMode), [viewsCfg, viewerEmail, sandboxMode]);
   const activeView = visibleViews.find(v => v.id === activeViewId) || visibleViews[0] || null;
-  const viewUserName = sandboxMode ? (currentUser || "") : (auth ? (auth.name || auth.email) : "");
+  const viewUserName = sandboxMode ? (currentUser || "") : (viewingAs ? (viewingAs.name || viewingAs.email) : (auth ? (auth.name || auth.email) : ""));
   // What a query needs besides the task: the signed-in name, and every view (a
   // query can name a Kanban's bucket). `seen` is the boards being worked out.
   const viewCtx = useMemo(() => ({ userName: viewUserName, views: viewsCfg.list, seen: [] }), [viewUserName, viewsCfg]);
@@ -10317,6 +10336,10 @@ function AssetTracker() {
     const next = { list: viewsCfg.list.map(v => (v.id === viewId ? { ...v, ...patch } : v)) };
     if (sandboxMode || !PER_RECORD_SAVES) {
       persist(assets, { views: next });
+      return;
+    }
+    if (viewingAs) {
+      setNotice("You're viewing as " + (viewingAs.name || viewingAs.email) + ", which is read-only, so that change wasn't saved.");
       return;
     }
     setViewsCfg(next);
@@ -11781,6 +11804,7 @@ function AssetTracker() {
   // slow -- see attachPhotos. `count` is bounded server-side, so asking for a
   // hundred signatures does not mint a hundred.
   async function signPhotoUploads(count) {
+    if (viewingAs) throw new Error("Viewing as another person is read-only. Exit View as to upload.");
     const data = await backendPost(SHEET_API_URL, { op: "photoSign", sessionId: sessionId, count: count }).catch(err => ({ ok: false, error: err.message }));
     if (!data || !data.ok) throw new Error((data && data.error) || "Could not get permission to upload.");
     // A v36-or-older backend answers with ONE signature at the top level and no
@@ -11801,6 +11825,7 @@ function AssetTracker() {
   // for Cloudinary's RAW pipeline (see handleFloorPlanSign_), not the N-file
   // array shape a photo batch needs.
   async function signFloorPlanUpload() {
+    if (viewingAs) throw new Error("Viewing as another person is read-only. Exit View as to upload.");
     const data = await backendPost(SHEET_API_URL, { op: "floorPlanSign", sessionId: sessionId }).catch(err => ({ ok: false, error: err.message }));
     if (!data || !data.ok) throw new Error((data && data.error) || "Could not get permission to upload.");
     return data;
@@ -14365,7 +14390,7 @@ function AssetTracker() {
 
   const globalStyle = (
     <style>{`
-      @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+      @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600;700&display=swap');
       * { box-sizing: border-box; }
       input, select, textarea { font-family: 'IBM Plex Sans', sans-serif; }
       ::placeholder { color: ${C.placeholder}; }
@@ -14877,6 +14902,18 @@ function AssetTracker() {
             >
               <Info size={15} /> About
             </button>
+            {viewAsIsOwner && (
+              <div style={{ display: "flex", alignItems: "center", paddingRight: 8 }}>
+                <button
+                  onClick={() => { setShowAppMenu(false); setShowViewAsPicker(true); }}
+                  className="icon-btn"
+                  style={{ ...APP_MENU_ROW, flex: 1, minWidth: 0, width: undefined }}
+                >
+                  <Eye size={15} /> View as…
+                </button>
+                <HelpTip label="About View as" text="Owner only. See the app the way another person sees it, with their access and views. Read-only: nothing can be saved while it is on." />
+              </div>
+            )}
             {!sandboxMode && auth && (
               <button
                 onClick={() => { setShowAppMenu(false); endSession(null, true); }}
@@ -18799,6 +18836,43 @@ function AssetTracker() {
         </div>
       )}
 
+      {showViewAsPicker && viewAsIsOwner && (
+        <SelectionModal
+          title="View as"
+          options={accessUsers.filter(u => String(u.email).toLowerCase() !== String(auth.email).toLowerCase()).map(u => String(u.email).toLowerCase())}
+          value={viewAsEmail || ""}
+          labelForOption={e => { const u = accessUsers.find(x => String(x.email).toLowerCase() === e); return u ? `${u.name || u.email} (${u.role === "viewer" ? "view only" : "editor"})` : e; }}
+          emptyLabel="No other people have access yet."
+          searchable
+          onChange={e => { setViewAsEmail(e || null); setShowViewAsPicker(false); }}
+          onClose={() => setShowViewAsPicker(false)}
+        />
+      )}
+      {viewingAs && (
+        <div
+          role="status"
+          style={{
+            position: "fixed", bottom: isPhone && view === "list" ? 12 + PHONE_NAV_PX : 12, left: "50%", transform: "translateX(-50%)", zIndex: 60,
+            background: C.accent, color: "#fff", borderRadius: 999, padding: "8px 8px 8px 14px",
+            display: "flex", alignItems: "center", gap: 10, boxShadow: "0 4px 12px rgba(42,52,57,0.3)",
+            maxWidth: "min(94vw, 460px)", fontSize: 13, fontWeight: 600,
+          }}
+        >
+          <Eye size={15} style={{ flexShrink: 0 }} />
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            Viewing as {viewingAs.name || viewingAs.email} · read-only
+          </span>
+          <button
+            onClick={() => setViewAsEmail(null)}
+            aria-label="Exit View as"
+            title="Exit View as"
+            style={{ display: "flex", alignItems: "center", gap: 4, background: "rgba(255,255,255,0.22)", color: "#fff", border: "none", borderRadius: 999, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}
+          >
+            <X size={13} /> Exit
+          </button>
+        </div>
+      )}
+
       {/* Slim header (desktop; a phone has the bottom bar instead) */}
       {!isPhone && <div style={{ borderBottom: `2px solid ${C.brand}`, padding: "10px 20px", position: isPhone ? "relative" : "sticky", top: 0, background: C.bg, zIndex: 10, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
@@ -19498,15 +19572,17 @@ function AssetTracker() {
           )}
           {(!isPhone || viewPaneOpen) && (
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 12 }}>
-                {isPhone && (
-                  <button type="button" onClick={() => setViewPaneOpen(false)} aria-label="Back to views" className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, alignSelf: "center", display: "flex" }}><ArrowLeft size={18} color={C.ink} /></button>
-                )}
-                <h2 style={{ margin: 0, fontSize: 18, color: C.brandDark }}>{activeView.name}</h2>
-                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: C.muted }}>{activeViewRows.length} {activeViewRows.length === 1 ? "task" : "tasks"}</span>
-              </div>
               <ViewBody
                 key={activeView.id}
+                title={(
+                  <>
+                    {isPhone && (
+                      <button type="button" onClick={() => setViewPaneOpen(false)} aria-label="Back to views" className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, alignSelf: "center", display: "flex" }}><ArrowLeft size={18} color={C.ink} /></button>
+                    )}
+                    <h2 style={{ margin: 0, fontSize: 18, color: C.brandDark }}>{activeView.name}</h2>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, color: C.muted }}>{activeViewRows.length} {activeViewRows.length === 1 ? "task" : "tasks"}</span>
+                  </>
+                )}
                 view={activeView}
                 rows={activeViewRows}
                 model={workModel}
@@ -19532,7 +19608,7 @@ function AssetTracker() {
             </div>
           </div>
         )}
-        {mainTab === "views" && activeView && canEdit && !showAdd && !maintenanceModal && !changeModal && (!isPhone || viewPaneOpen) && (
+        {mainTab === "views" && activeView && canEdit && !showAdd && !maintenanceModal && !changeModal && (
           <>
             {showMapAddMenu && (
               <div onClick={() => setShowMapAddMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
@@ -20200,6 +20276,10 @@ const DROP_LINE = { height: 3, borderRadius: 2, background: "var(--drop-line, #1
 // order. `arrange` turns on a drag handle per row; `onReorder(order)` gets the
 // new stored order. `onOpen` makes a row open its task (left off in the Settings
 // preview, where nothing opens).
+// Group headings read in a serif so they are not mistaken for the table's own
+// (monospace, upper-case) column headers or a Kanban column's name.
+const VIEW_GROUP_FONT = "'IBM Plex Serif', Georgia, serif";
+
 function ViewTaskList({ view, rows, model, ctx, arrange, onReorder, onOpen, emptyText }) {
   const fields = viewFieldsFor(model, ctx && ctx.views, view.id);
   const cols = view.columns.map(k => fields.find(f => f.key === k)).filter(Boolean);
@@ -20259,7 +20339,7 @@ function ViewTaskList({ view, rows, model, ctx, arrange, onReorder, onOpen, empt
         return (
           <React.Fragment key={sec.id}>
             {grouped && (
-              <div data-group-heading style={{ display: "flex", alignItems: "baseline", gap: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, color: C.brandDark, background: C.bg, borderTop: `1px solid ${C.border}`, minWidth: "max-content" }}>
+              <div data-group-heading style={{ display: "flex", alignItems: "baseline", gap: 8, padding: "8px 14px", fontSize: 14, fontWeight: 600, fontFamily: VIEW_GROUP_FONT, color: C.brandDark, background: C.bg, borderTop: `1px solid ${C.border}`, minWidth: "max-content" }}>
                 {sec.label}<span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 400, color: C.muted }}>{sec.rows.length}</span>
               </div>
             )}
@@ -20325,23 +20405,23 @@ function KanbanBoard({ view, rows, model, ctx, arrange, onMove, onOpen, emptyTex
     );
   };
   return (
-    <div style={{ display: "flex", gap: 12, overflowX: "auto", alignItems: "flex-start", paddingBottom: 24 }}>
+    <div style={{ display: "flex", gap: 12, overflowX: "auto", alignItems: "stretch", paddingBottom: 24 }}>
       {board.map(col => {
         const slot = { n: 0 };
         return (
-          <div key={col.id} style={{ flex: "0 0 260px", minWidth: 0, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: 8 }}>
+          <div key={col.id} style={{ flex: "0 0 260px", minWidth: 0, display: "flex", flexDirection: "column", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: 8 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, padding: "2px 4px 8px" }}>
               <span style={{ fontWeight: 700, fontSize: 13, color: C.brandDark, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{col.name}</span>
               <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted }}>{col.rows.length}</span>
             </div>
             {col.groups ? (
-              <div data-drop-group={col.id + "|*"} style={{ display: "flex", flexDirection: "column", gap: 8, minHeight: 56, paddingBottom: 72 }}>
+              <div data-drop-group={col.id + "|*"} style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 56, paddingBottom: 72 }}>
                 {col.groups.map(g => {
                   const area = col.id + "|k:" + g.key;
                   const slotRef = { n: 0 };
                   return (
                     <div key={g.key} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                      <div data-group-heading style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8, padding: "4px 4px 0", fontSize: 12, fontWeight: 700, color: C.brandDark }}>
+                      <div data-group-heading style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8, padding: "4px 4px 0", fontSize: 13, fontWeight: 600, fontFamily: VIEW_GROUP_FONT, color: C.brandDark }}>
                         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.label}</span>
                         <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, fontWeight: 400, color: C.muted }}>{g.rows.length}</span>
                       </div>
@@ -20355,7 +20435,7 @@ function KanbanBoard({ view, rows, model, ctx, arrange, onMove, onOpen, emptyTex
                 {col.rows.length === 0 && <div style={{ fontSize: 12, color: C.empty, textAlign: "center", padding: "14px 4px", border: `1px dashed ${C.border}`, borderRadius: 8 }}>{emptyText || "No tasks."}</div>}
               </div>
             ) : (
-              <div data-drop-group={col.id} style={{ display: "flex", flexDirection: "column", gap: 8, minHeight: 56, paddingBottom: 72 }}>
+              <div data-drop-group={col.id} style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 56, paddingBottom: 72 }}>
                 {col.rows.map(r => renderCard(r, col.id, slot))}
                 {lineAt(col.id, slot.n) && <div style={DROP_LINE} />}
                 {col.rows.length === 0 && <div style={{ fontSize: 12, color: C.empty, textAlign: "center", padding: "14px 4px", border: `1px dashed ${C.border}`, borderRadius: 8 }}>{emptyText || "No tasks."}</div>}
@@ -20440,7 +20520,7 @@ function ViewLiveFilterPanel({ filter, onChange, fields, kanbanLabel }) {
 // or board. `onState(patch)` receives { order } and/or { assignments } when a
 // person arranges tasks. Keyed by view id by its caller, so the live filter and
 // the arranging mode reset when another view is opened.
-function ViewBody({ view, rows, model, ctx, canArrange, onState, onOpen, emptyText }) {
+function ViewBody({ title, view, rows, model, ctx, canArrange, onState, onOpen, emptyText }) {
   const [arrange, setArrange] = useState(false);
   const [filterOpen, setFilterOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -20467,9 +20547,12 @@ function ViewBody({ view, rows, model, ctx, canArrange, onState, onOpen, emptyTe
   const searchShown = !phone || searchOpen || live.text !== "";
   return (
     <div>
+      {/* The title and the search / filter / order icons share one line; an open
+          search box on a phone drops to its own line beneath. */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10, flex: "1 1 auto", minWidth: 0 }}>{title}</div>
         {searchShown ? (
-          <div style={{ position: "relative", flex: "1 1 180px", minWidth: 140 }}>
+          <div style={{ position: "relative", flex: phone ? "1 1 100%" : "0 1 240px", order: phone ? 5 : 0, minWidth: 140 }}>
             <Search size={14} color={C.muted} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)" }} />
             <input value={live.text} onChange={e => setLive({ ...live, text: e.target.value })} placeholder="Filter this view…" aria-label="Filter this view"
               autoFocus={phone && searchOpen}
