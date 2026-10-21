@@ -358,6 +358,7 @@ const grp = (conditions, join = "and") => ({ group: true, join, conditions });
   const src = require("fs").readFileSync("index.html", "utf8");
   check('Kanban columns stretch to the tallest', /overflowX: "auto", alignItems: "stretch", paddingBottom: 24/.test(src));
   check('group headings use their own font', (src.match(/fontFamily: VIEW_GROUP_FONT/g) || []).length === 2 && /const VIEW_GROUP_FONT = "'IBM Plex Serif'/.test(src));
+  check('a card leaves out empty fields only when the view asks', /view\.hideEmptyFields && viewFieldDisplay\(r, f\.key, model, ctx\) === "—"/.test(src));
   check('the title shares the toolbar line', /flex: "1 1 auto", minWidth: 0 }}>\{title\}/.test(src) && /title=\{\(/.test(src));
   check('the + is not hidden on the phone view list', !/!changeModal && \(!isPhone \|\| viewPaneOpen\)/.test(src));
 }
@@ -390,6 +391,7 @@ const grp = (conditions, join = "and") => ({ group: true, join, conditions });
 {
   const v2 = H.adoptViews({ list: [{ id: "a", openMode: "edit", newAtTop: true }, { id: "b", openMode: "weird" }] }).list;
   eq('open mode and new-at-top are read, junk reads as the defaults', [v2[0].openMode, v2[0].newAtTop, v2[1].openMode, v2[1].newAtTop], ["edit", true, "view", false]);
+  eq('hide-empty-fields is read, junk reads as off', [H.adoptViews({ list: [{ id: "a", hideEmptyFields: true }, { id: "b", hideEmptyFields: "yes" }] }).list.map(x => x.hideEmptyFields)][0], [true, false]);
 }
 {
   const a = row("a"), b = row("b"), c = row("c");
