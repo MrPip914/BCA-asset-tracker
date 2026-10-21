@@ -367,7 +367,10 @@ const grp = (conditions, join = "and") => ({ group: true, join, conditions });
   const out = board({ id: "kb", conditions: [cond("owner", "=", "zz")], assignments: { [key]: "__default" } });
   const ctx = { views: [out], seen: [] };
   eq('a card shows the column set by hand on a board whose query leaves the task out', H.viewFieldDisplay(r, "kanban:kb", model, ctx), H.viewBuckets(out)[0].name);
-  eq('with no hand placement it is still blank', H.viewFieldDisplay(r, "kanban:kb", model, { views: [board({ id: "kb", conditions: [cond("owner", "=", "zz")] })], seen: [] }), "—");
+  eq('with no hand placement it reads the board\'s default column', H.viewFieldDisplay(r, "kanban:kb", model, { views: [board({ id: "kb", conditions: [cond("owner", "=", "zz")] })], seen: [] }), "Backlog");
+  const ra = board({ id: "A", conditions: [cond("kanban:B", "!=", "x")] }), rb = board({ id: "B", conditions: [cond("kanban:A", "!=", "x")] });
+  eq('two boards naming each other still show the default column', H.viewFieldDisplay(r, "kanban:A", model, { views: [ra, rb], seen: ["B"] }), "Backlog");
+  eq('a board that is not there is still blank', H.viewFieldDisplay(r, "kanban:gone", model, { views: [], seen: [] }), "—");
 }
 
 // --- 2026-10-21 batch
