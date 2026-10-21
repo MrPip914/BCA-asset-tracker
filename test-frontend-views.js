@@ -361,5 +361,13 @@ const grp = (conditions, join = "and") => ({ group: true, join, conditions });
   check('the + is not hidden on the phone view list', !/!changeModal && \(!isPhone \|\| viewPaneOpen\)/.test(src));
 }
 
+{
+  const r = row("t"), key = H.viewTaskKey(r);
+  const out = board({ id: "kb", conditions: [cond("owner", "=", "zz")], assignments: { [key]: "__default" } });
+  const ctx = { views: [out], seen: [] };
+  eq('a card shows the column set by hand on a board whose query leaves the task out', H.viewFieldDisplay(r, "kanban:kb", model, ctx), H.viewBuckets(out)[0].name);
+  eq('with no hand placement it is still blank', H.viewFieldDisplay(r, "kanban:kb", model, { views: [board({ id: "kb", conditions: [cond("owner", "=", "zz")] })], seen: [] }), "—");
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
