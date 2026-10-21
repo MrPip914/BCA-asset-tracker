@@ -15,7 +15,7 @@ for (const m of src.matchAll(/\b(set[A-Z]\w*)\s*[,}]?\s*(?:=|:)/g)) declared.add
 const called = new Set();
 for (const m of src.matchAll(/(?<![\w.])(set[A-Z]\w*)\(/g)) called.add(m[1]);
 
-const missing = [...called].filter(n => !declared.has(n) && n !== 'setTimeout');
+const missing = [...called].filter(n => !declared.has(n) && n !== 'setTimeout' && n !== 'setInterval');
 if (missing.length) {
   console.log('FAIL setters called but never declared: ' + missing.join(', '));
   process.exit(1);

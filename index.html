@@ -100,7 +100,7 @@ import {
   Hammer, Drill, PaintRoller, PaintBucket, Brush, Ruler, PencilRuler,   // Tools & trades
   Boxes, Container, Recycle,   // Storage & waste
   Cog, Flag, Puzzle,   // Other
-  MoreVertical, MapPinOff, Move,   // the Map panel's row action menu (not in the icon catalog)
+  MoreVertical, MapPinOff, Move, Pin, PinOff,   // the Map panel's row action menu (not in the icon catalog)
   GripVertical, ArrowUpDown,   // dragging to arrange (Views)
 } from "lucide-react";
 
@@ -2404,6 +2404,18 @@ const VIEW_BUILTIN_FIELDS = [
   { key: "dueDate", label: "Due date" },
   { key: "lastDone", label: "Last done" },
 ];
+// Places the task's asset sits in, worked out from its parent chain. They read
+// like fields but are never stored: change the asset's place and they follow.
+const VIEW_PLACE_PREFIX = "place:";
+const VIEW_PLACE_FIELDS = [
+  { key: VIEW_PLACE_PREFIX + "room", label: "Room" },
+  { key: VIEW_PLACE_PREFIX + "building", label: "Building" },
+  { key: VIEW_PLACE_PREFIX + "campus", label: "Campus" },
+  { key: VIEW_PLACE_PREFIX + "parent", label: "Inside" },
+  { key: VIEW_PLACE_PREFIX + "path", label: "Full location" },
+];
+const VIEW_GROUP_PLACES = "Places of the task's asset";
+const VIEW_GROUP_BOARDS = "Kanban boards";
 const VIEW_DEFAULT_COLUMNS = ["task", "asset", "dueDate", "status"];
 // What a task shows when opened FROM a view. The task's name is always shown.
 const VIEW_DIALOG_FIELDS = [
@@ -2431,10 +2443,15 @@ const KANBAN_DEFAULT_NAME = "To do";
 // sits in on that board (blank when the board does not list the task).
 function viewFieldsFor(model, views, selfId) {
   const custom = ((model && model.taskFields) || []).map(f => ({ key: VIEW_CUSTOM_PREFIX + f.key, label: f.label, custom: f }));
+  // A board is labelled by its own name; the pickers list the boards together
+  // under one heading (`group`) rather than tagging every name.
   const boards = (views || []).filter(v => v.type === VIEW_TYPE_KANBAN && v.id !== selfId)
-    .map(v => ({ key: VIEW_KANBAN_PREFIX + v.id, label: v.name + " Kanban", kanban: v }));
-  return [...VIEW_BUILTIN_FIELDS, ...custom, ...boards];
+    .map(v => ({ key: VIEW_KANBAN_PREFIX + v.id, label: v.name, kanban: v, group: VIEW_GROUP_BOARDS }));
+  const places = VIEW_PLACE_FIELDS.map(f => ({ ...f, group: VIEW_GROUP_PLACES }));
+  return [...VIEW_BUILTIN_FIELDS, ...custom, ...places, ...boards];
 }
+// The heading a field sits under in a picker (none for the ordinary fields).
+function viewFieldGroup(fields, key) { const f = fields.find(x => x.key === key); return (f && f.group) || null; }
 // A Kanban's buckets in board order: the default one first.
 function viewBuckets(view) {
   return [{ id: KANBAN_DEFAULT_BUCKET, name: view.defaultBucketName || KANBAN_DEFAULT_NAME }, ...(view.buckets || [])];
@@ -2560,6 +2577,8 @@ function adoptViews(raw) {
       name: String(v.name || "Untitled view"),
       type: v.type === VIEW_TYPE_KANBAN ? VIEW_TYPE_KANBAN : VIEW_TYPE_LIST,
       viewersCanOrder: v.viewersCanOrder === true,
+      openMode: v.openMode === "edit" ? "edit" : "view",
+      newAtTop: v.newAtTop === true,
       defaultBucketName: String(v.defaultBucketName || "").trim() || KANBAN_DEFAULT_NAME,
       buckets: (Array.isArray(v.buckets) ? v.buckets : []).filter(b => b && typeof b.id === "string" && b.id && b.id !== KANBAN_DEFAULT_BUCKET)
         .map(b => ({ id: b.id, name: String(b.name || "").trim() || "Bucket" })),
@@ -2596,9 +2615,24 @@ function viewTaskKey(row) { return row.asset.id + "::" + row.item.id; }
 
 // A field's value as comparable text. Dates are ISO (yyyy-mm-dd), which is what
 // someone types into a query; viewFieldDisplay is the reading form.
+// The place a task's asset is in, by walking its parent chain. An asset that IS
+// a room answers with its own name. Blank when the chain has no such place (or
+// the caller supplied no asset list), which is a real answer: a spare in a
+// drawer is in no room.
+function viewPlaceValue(row, which, ctx) {
+  const assets = ctx && ctx.assets;
+  if (!assets || !row.asset) return "";
+  if (which === "room") return roomNameOf(row.asset, assets);
+  if (which === "building") return buildingNameOf(row.asset, assets);
+  if (which === "campus") return campusNameOf(row.asset, assets);
+  if (which === "parent") return parentNameFor(row.asset.parentId, assets);
+  if (which === "path") return pathOf(row.asset, assets);
+  return "";
+}
 function viewFieldValue(row, key, model, ctx) {
   const item = row.item;
   if (key.startsWith(VIEW_KANBAN_PREFIX)) return viewBucketIdIn(row, key.slice(VIEW_KANBAN_PREFIX.length), model, ctx);
+  if (key.startsWith(VIEW_PLACE_PREFIX)) return viewPlaceValue(row, key.slice(VIEW_PLACE_PREFIX.length), ctx);
   switch (key) {
     case "task": return item.task || "";
     case "asset": return row.assetName || "";
@@ -2622,13 +2656,21 @@ function viewFieldValue(row, key, model, ctx) {
   }
 }
 function viewFieldDisplay(row, key, model, ctx) {
-  const v = viewFieldValue(row, key, model, ctx);
-  if (!v) return "—";
+  let v = viewFieldValue(row, key, model, ctx);
   if (key.startsWith(VIEW_KANBAN_PREFIX)) {
     const kv = ((ctx && ctx.views) || []).find(x => x.id === key.slice(VIEW_KANBAN_PREFIX.length));
+    // A card READS the other board's column. When that board's own query leaves
+    // the task out (or cannot be worked out, two boards naming each other), a
+    // column someone put the task in by hand is still where it is.
+    if (!v && kv) {
+      const placed = (kv.assignments || {})[viewTaskKey(row)];
+      if (viewBuckets(kv).some(x => x.id === placed)) v = placed;
+    }
+    if (!v) return "—";
     const b = kv ? viewBuckets(kv).find(x => x.id === v) : null;
     return b ? b.name : v;
   }
+  if (!v) return "—";
   if (key === "dueDate" || key === "lastDone") return formatDateOnly(v) || v;
   if (key.startsWith(VIEW_CUSTOM_PREFIX)) {
     const f = ((model && model.taskFields) || []).find(x => x.key === key.slice(VIEW_CUSTOM_PREFIX.length));
@@ -2743,13 +2785,20 @@ function describeViewQuery(view, model, views) {
 
 // Ordered tasks first, in the order stored; the rest in the Tasks tab's
 // default due order. A key whose task is not in `rows` is simply skipped.
-function orderViewRows(rows, order) {
+// With `newestFirst` the tasks not yet ordered are the newest-added first (and
+// they are laid out ABOVE the ordered ones, see viewRowsFlat).
+function orderViewRows(rows, order, newestFirst) {
   const pos = new Map();
   (order || []).forEach((k, i) => { if (!pos.has(k)) pos.set(k, i); });
   const ordered = rows.filter(r => pos.has(viewTaskKey(r))).sort((a, b) => pos.get(viewTaskKey(a)) - pos.get(viewTaskKey(b)));
-  const rest = rows.filter(r => !pos.has(viewTaskKey(r))).sort((a, b) => maintenanceSortKey(a) - maintenanceSortKey(b));
+  const byDue = (a, b) => maintenanceSortKey(a) - maintenanceSortKey(b);
+  const byNew = (a, b) => String((b.item && b.item.at) || "").localeCompare(String((a.item && a.item.at) || "")) || byDue(a, b);
+  const rest = rows.filter(r => !pos.has(viewTaskKey(r))).sort(newestFirst ? byNew : byDue);
   return { ordered, rest };
 }
+// The two halves in display order: ordered tasks first, or (a view that adds new
+// items to the top) the not-yet-ordered ones first.
+function viewRowsFlat(o, newAtTop) { return newAtTop ? [...o.rest, ...o.ordered] : [...o.ordered, ...o.rest]; }
 // Move one ordered task a step among the ones on screen (`visible` = their keys,
 // in order). Swaps with that neighbour in the FULL order, so slots held by tasks
 // not currently matching are untouched.
@@ -2771,13 +2820,15 @@ function removeFromViewOrder(order, key) { return order.filter(k => k !== key); 
 // result is the NEW stored order: everything down to the dropped task is now
 // ordered (dropping into the unordered pile pins what is above it), and a key
 // the order holds that is not on screen keeps its slot.
-function viewDragOrder(order, displayed, orderedCount, key, index) {
+// With `newAtTop` the not-yet-ordered tasks sit ABOVE the ordered ones, so a
+// drop has no "pile below" to leave alone: everything shown is pinned.
+function viewDragOrder(order, displayed, orderedCount, key, index, newAtTop) {
   const from = displayed.indexOf(key);
   if (from < 0) return order;
   const seq = displayed.filter(k => k !== key);
   const at = Math.max(0, Math.min(index, seq.length));
   seq.splice(at, 0, key);
-  const count = Math.max(from < orderedCount ? orderedCount : orderedCount + 1, at + 1);
+  const count = newAtTop ? seq.length : Math.max(from < orderedCount ? orderedCount : orderedCount + 1, at + 1);
   const out = seq.slice(0, count);
   const shown = new Set(displayed);
   order.forEach((k, i) => { if (!shown.has(k) && !out.includes(k)) out.splice(Math.min(i, out.length), 0, k); });
@@ -2864,11 +2915,11 @@ function viewBoard(view, rows, model, ctx) {
   rows.forEach(r => { const id = viewBucketOf(view, r).id; cols.find(c => c.id === id).rows.push(r); });
   const all = viewGroups(view, rows, model, ctx);
   cols.forEach(c => {
-    if (!all) { const o = orderViewRows(c.rows, view.order); c.rows = [...o.ordered, ...o.rest]; c.orderedCount = o.ordered.length; return; }
+    if (!all) { const o = orderViewRows(c.rows, view.order, view.newAtTop); c.rows = viewRowsFlat(o, view.newAtTop); c.orderedCount = o.ordered.length; return; }
     c.groups = all.map(g => {
       const mine = c.rows.filter(r => viewGroupKeyOf(view, r, model, ctx) === g.key);
-      const o = orderViewRows(mine, view.order);
-      return { key: g.key, label: g.label, rows: [...o.ordered, ...o.rest], orderedCount: o.ordered.length };
+      const o = orderViewRows(mine, view.order, view.newAtTop);
+      return { key: g.key, label: g.label, rows: viewRowsFlat(o, view.newAtTop), orderedCount: o.ordered.length };
     }).filter(g => g.rows.length);
     c.rows = c.groups.flatMap(g => g.rows);
     c.orderedCount = c.groups.reduce((n, g) => n + g.orderedCount, 0);
@@ -2894,7 +2945,7 @@ function viewBoardMove(view, board, key, bucketId, index, within) {
   const orderedCount = keys.filter(k => inOrder.has(k)).length;
   const at = Math.max(0, Math.min(index, keys.length));
   keys.splice(at, 0, key);
-  const pinned = keys.slice(0, Math.max(orderedCount + 1, at + 1));
+  const pinned = view.newAtTop ? keys : keys.slice(0, Math.max(orderedCount + 1, at + 1));
   const drop = new Set([...here.map(viewTaskKey), key]);
   return { assignments, order: [...view.order.filter(k => !drop.has(k)), ...pinned] };
 }
@@ -6261,7 +6312,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-20.5";
+const APP_VERSION = "2026-10-21.2";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -10308,7 +10359,7 @@ function AssetTracker() {
   const viewUserName = sandboxMode ? (currentUser || "") : (viewingAs ? (viewingAs.name || viewingAs.email) : (auth ? (auth.name || auth.email) : ""));
   // What a query needs besides the task: the signed-in name, and every view (a
   // query can name a Kanban's bucket). `seen` is the boards being worked out.
-  const viewCtx = useMemo(() => ({ userName: viewUserName, views: viewsCfg.list, seen: [] }), [viewUserName, viewsCfg]);
+  const viewCtx = useMemo(() => ({ userName: viewUserName, views: viewsCfg.list, assets: assets || [], seen: [] }), [viewUserName, viewsCfg, assets]);
   const activeViewCtx = useMemo(() => ({ ...viewCtx, seen: activeView ? [activeView.id] : [] }), [viewCtx, activeView]);
   const activeViewRows = useMemo(
     () => (activeView ? allMaintenanceRows.filter(r => viewMatches(activeView, r, workModel, activeViewCtx)) : []),
@@ -12518,7 +12569,9 @@ function AssetTracker() {
       paneGroupIds: Array.isArray(item.paneGroupIds) ? [...item.paneGroupIds] : [],
     });
     // `viewId` set means opened from a view: the dialog shows only that view's fields.
-    setMaintenanceModal({ mode: "edit", itemId, ...(viewId ? { viewId } : {}) });
+    // The view decides whether the task opens to read or to edit (an editor only).
+    const openView = viewId ? viewsCfg.list.find(v => v.id === viewId) : null;
+    setMaintenanceModal({ mode: "edit", itemId, ...(viewId ? { viewId } : {}), ...(openView && openView.openMode === "edit" && canEdit ? { editView: true } : {}) });
   }
 
   async function addMaintenanceItem() {
@@ -15724,6 +15777,7 @@ function AssetTracker() {
               allViews={viewsCfg.list}
               accessUsers={accessUsers}
               sandbox={sandboxMode}
+              assets={assets || []}
               rows={allMaintenanceRows}
               model={workModel}
               previewUserName={viewUserName}
@@ -16605,7 +16659,7 @@ function AssetTracker() {
                       button is: there is nothing left to complete, and offering
                       it would read as a way to log a SECOND completion of a job
                       that happens once. */}
-                  {editing && !taskDone && !viewReadOnly && (
+                  {editing && !taskDone && (!viewReadOnly || canEdit) && (
                     <button
                       onClick={() => openMaintenanceComplete(maintenanceModal.itemId, workDialogAssetId)}
                       style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brand}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.brand }}
@@ -20218,9 +20272,44 @@ function CustomValuesLine({ model, kind, typeId, values }) {
 // being dragged is moved with a transform while the pointer is captured on its
 // handle. `onDrop(key, group, index)` gets the group released over and the slot
 // among that group's OTHER items.
+//
+// Dragging near the edge of the screen (or of a board or table that scrolls)
+// scrolls it, so a card can be carried to a column or row that is off screen. The
+// scrolled distance is added to the drag offset: the item moves with the content
+// it sits in, and would otherwise slide away from the pointer.
+const DRAG_EDGE_PX = 64;
+const DRAG_SCROLL_MAX = 18;
+function dragScrollStep(el, x, y) {
+  let dx = 0, dy = 0;
+  const speed = d => Math.ceil(DRAG_SCROLL_MAX * Math.min(1, (DRAG_EDGE_PX - d) / DRAG_EDGE_PX));
+  const nudge = (box, r) => {
+    const ox = box === window ? window.scrollX : box.scrollLeft, oy = box === window ? window.scrollY : box.scrollTop;
+    let mx = 0, my = 0;
+    if (x - r.left < DRAG_EDGE_PX) mx = -speed(Math.max(0, x - r.left));
+    else if (r.right - x < DRAG_EDGE_PX) mx = speed(Math.max(0, r.right - x));
+    if (y - r.top < DRAG_EDGE_PX) my = -speed(Math.max(0, y - r.top));
+    else if (r.bottom - y < DRAG_EDGE_PX) my = speed(Math.max(0, r.bottom - y));
+    if (!mx && !my) return;
+    if (box === window) window.scrollBy(mx, my); else box.scrollBy(mx, my);
+    dx += (box === window ? window.scrollX : box.scrollLeft) - ox;
+    dy += (box === window ? window.scrollY : box.scrollTop) - oy;
+  };
+  for (let n = el && el.parentElement; n && n !== document.body && n !== document.documentElement; n = n.parentElement) {
+    const cs = window.getComputedStyle(n);
+    const sx = /(auto|scroll)/.test(cs.overflowX) && n.scrollWidth > n.clientWidth;
+    const sy = /(auto|scroll)/.test(cs.overflowY) && n.scrollHeight > n.clientHeight;
+    if (sx || sy) nudge(n, n.getBoundingClientRect());
+  }
+  nudge(window, { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight });
+  return { dx, dy };
+}
+
 function usePointerSort(onDrop) {
   const [drag, setDrag] = useState(null); // { key, dx, dy, group, index }
   const st = useRef(null);
+  const timer = useRef(null);
+  const stopScroll = () => { if (timer.current) { clearInterval(timer.current); timer.current = null; } };
+  useEffect(() => stopScroll, []);
   // What the last press was, for a click that follows it: a drag captures the
   // pointer on the item, so the click lands on the item whatever was tapped.
   const last = useRef({ moved: false, target: null });
@@ -20238,25 +20327,38 @@ function usePointerSort(onDrop) {
       if (e.button !== undefined && e.button !== 0) return;
       e.preventDefault();
       try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) { /* a synthetic event has no pointer to capture */ }
-      st.current = { key, x: e.clientX, y: e.clientY, moved: false };
+      st.current = { key, x: e.clientX, y: e.clientY, px: e.clientX, py: e.clientY, sx: 0, sy: 0, el: e.currentTarget, moved: false };
       last.current = { moved: false, target: e.target };
       setDrag({ key, dx: 0, dy: 0, ...find(e.clientX, e.clientY, key) });
+      stopScroll();
+      // The pointer can sit still at an edge while the content scrolls under it,
+      // so this runs on a clock rather than on pointer moves.
+      timer.current = setInterval(() => {
+        const s = st.current;
+        if (!s || !s.moved) return;
+        const d = dragScrollStep(s.el, s.px, s.py);
+        if (!d.dx && !d.dy) return;
+        s.sx += d.dx; s.sy += d.dy;
+        setDrag({ key: s.key, dx: s.px - s.x + s.sx, dy: s.py - s.y + s.sy, ...find(s.px, s.py, s.key) });
+      }, 30);
     },
     onPointerMove: e => {
       const s = st.current;
       if (!s) return;
       if (Math.abs(e.clientX - s.x) + Math.abs(e.clientY - s.y) > 6) { s.moved = true; last.current.moved = true; }
-      setDrag({ key: s.key, dx: e.clientX - s.x, dy: e.clientY - s.y, ...find(e.clientX, e.clientY, s.key) });
+      s.px = e.clientX; s.py = e.clientY;
+      setDrag({ key: s.key, dx: e.clientX - s.x + s.sx, dy: e.clientY - s.y + s.sy, ...find(e.clientX, e.clientY, s.key) });
     },
     onPointerUp: e => {
       const s = st.current;
       if (!s) return;
       st.current = null;
+      stopScroll();
       const t = find(e.clientX, e.clientY, s.key);
       setDrag(null);
       if (s.moved && t.group !== null) onDrop(s.key, t.group, t.index);
     },
-    onPointerCancel: () => { st.current = null; setDrag(null); },
+    onPointerCancel: () => { st.current = null; stopScroll(); setDrag(null); },
     style: { touchAction: "none", cursor: "grab" },
   });
   // The style a dragged item wears.
@@ -20288,12 +20390,12 @@ function ViewTaskList({ view, rows, model, ctx, arrange, onReorder, onOpen, empt
   // own rows, and a drop only ever reorders inside the section it lands in.
   const grouped = viewGroups(view, rows, model, ctx);
   const sections = (grouped || [{ key: "", label: null, rows }]).map(g => {
-    const o = orderViewRows(g.rows, view.order);
-    return { ...g, id: grouped ? "g:" + g.key : "list", ordered: o.ordered, rest: o.rest, displayed: [...o.ordered, ...o.rest].map(viewTaskKey) };
+    const o = orderViewRows(g.rows, view.order, view.newAtTop);
+    return { ...g, id: grouped ? "g:" + g.key : "list", ordered: o.ordered, rest: o.rest, displayed: viewRowsFlat(o, view.newAtTop).map(viewTaskKey) };
   });
   const { drag, handle, lift, lineAt } = usePointerSort((key, group, index) => {
     const sec = sections.find(x => x.id === group);
-    if (sec && sec.displayed.includes(key)) onReorder(viewDragOrder(view.order, sec.displayed, sec.ordered.length, key, index));
+    if (sec && sec.displayed.includes(key)) onReorder(viewDragOrder(view.order, sec.displayed, sec.ordered.length, key, index, view.newAtTop));
   });
   const widthOf = f => (f.key === "task" ? 240 : f.key === "notes" ? 260 : f.key === "asset" ? 180 : 140);
   const grid = (arrange ? "40px " : "") + shown.map(f => widthOf(f) + "px").join(" ");
@@ -20344,11 +20446,23 @@ function ViewTaskList({ view, rows, model, ctx, arrange, onReorder, onOpen, empt
               </div>
             )}
             <div data-drop-group={sec.id}>
-              {sec.ordered.map(r => renderRow(r, sec.id, slotRef))}
-              {sec.ordered.length > 0 && sec.rest.length > 0 && (
-                <div style={{ padding: "6px 14px", fontSize: 11, color: C.muted, background: C.bg, borderTop: `1px solid ${C.border}`, minWidth: "max-content" }}>Not ordered yet</div>
+              {view.newAtTop ? (
+                <>
+                  {sec.rest.map(r => renderRow(r, sec.id, slotRef))}
+                  {sec.ordered.length > 0 && sec.rest.length > 0 && (
+                    <div style={{ padding: "6px 14px", fontSize: 11, color: C.muted, background: C.bg, borderTop: `1px solid ${C.border}`, minWidth: "max-content" }}>Ordered</div>
+                  )}
+                  {sec.ordered.map(r => renderRow(r, sec.id, slotRef))}
+                </>
+              ) : (
+                <>
+                  {sec.ordered.map(r => renderRow(r, sec.id, slotRef))}
+                  {sec.ordered.length > 0 && sec.rest.length > 0 && (
+                    <div style={{ padding: "6px 14px", fontSize: 11, color: C.muted, background: C.bg, borderTop: `1px solid ${C.border}`, minWidth: "max-content" }}>Not ordered yet</div>
+                  )}
+                  {sec.rest.map(r => renderRow(r, sec.id, slotRef))}
+                </>
               )}
-              {sec.rest.map(r => renderRow(r, sec.id, slotRef))}
               {lineAt(sec.id, slotRef.n) && <div style={DROP_LINE} />}
             </div>
           </React.Fragment>
@@ -20361,7 +20475,7 @@ function ViewTaskList({ view, rows, model, ctx, arrange, onReorder, onOpen, empt
 // A Kanban view: one column per bucket, a card per task. `arrange` makes every
 // card draggable (to another bucket, or to a new place in its own);
 // `onMove(key, bucketId, index)` is called on the drop.
-function KanbanBoard({ view, rows, model, ctx, arrange, onMove, onOpen, emptyText }) {
+function KanbanBoard({ view, rows, model, ctx, arrange, onMove, onOpen, emptyText, freezeFirst }) {
   // Drop areas: an ungrouped column is one area named by its bucket id. A grouped
   // one has an area per group ("<bucket>|k:<group>"), which orders cards, and the
   // column itself ("<bucket>|*") as the fallback, which only changes the bucket.
@@ -20406,10 +20520,12 @@ function KanbanBoard({ view, rows, model, ctx, arrange, onMove, onOpen, emptyTex
   };
   return (
     <div style={{ display: "flex", gap: 12, overflowX: "auto", alignItems: "stretch", paddingBottom: 24 }}>
-      {board.map(col => {
+      {board.map((col, colIndex) => {
         const slot = { n: 0 };
+        // A frozen first column stays at the left edge while the others scroll past.
+        const frozen = freezeFirst && colIndex === 0;
         return (
-          <div key={col.id} style={{ flex: "0 0 260px", minWidth: 0, display: "flex", flexDirection: "column", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: 8 }}>
+          <div key={col.id} data-frozen={frozen ? "true" : undefined} style={{ flex: "0 0 260px", minWidth: 0, display: "flex", flexDirection: "column", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, padding: 8, ...(frozen ? { position: "sticky", left: 0, zIndex: 2, boxShadow: "6px 0 8px -4px rgba(42,52,57,0.22)" } : {}) }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, padding: "2px 4px 8px" }}>
               <span style={{ fontWeight: 700, fontSize: 13, color: C.brandDark, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{col.name}</span>
               <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted }}>{col.rows.length}</span>
@@ -20491,7 +20607,7 @@ function ViewLiveFilterPanel({ filter, onChange, fields, kanbanLabel }) {
           return (
             <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
               <div style={{ width: 160, flexShrink: 0 }}>
-                <PickerField label="Field" hideLabel value={c.field} onChange={v => change({ field: v })} options={fields.map(x => x.key)} labelForOption={k => (fields.find(x => x.key === k) || {}).label || k} title="Filter field" />
+                <PickerField label="Field" hideLabel value={c.field} onChange={v => change({ field: v })} options={fields.map(x => x.key)} labelForOption={k => (fields.find(x => x.key === k) || {}).label || k} headingFor={k => viewFieldGroup(fields, k)} title="Filter field" />
               </div>
               <div style={{ width: 140, flexShrink: 0 }}>
                 <PickerField label="Comparison" hideLabel value={c.op} onChange={v => change({ op: v })} options={viewOpsFor(f, true)} labelForOption={v => VIEW_OP_LABELS[v] || v} title="Filter comparison" />
@@ -20532,6 +20648,11 @@ function ViewBody({ title, view, rows, model, ctx, canArrange, onState, onOpen, 
     mq.addEventListener("change", on);
     return () => mq.removeEventListener("change", on);
   }, []);
+  // Desktop only, per device: keep the board's first column in place while the
+  // others scroll. A phone has no room for a column that does not move.
+  const freezeKey = CLIENT.storageKey("asset-tracker-view-freeze:" + view.id);
+  const [freeze, setFreeze] = useState(() => { try { return localStorage.getItem(freezeKey) === "1"; } catch (e) { return false; } });
+  const toggleFreeze = () => setFreeze(f => { const n = !f; try { localStorage.setItem(freezeKey, n ? "1" : "0"); } catch (e) { /* storage blocked: the choice lasts this visit */ } return n; });
   const [live, setLive] = useState(EMPTY_LIVE_FILTER);
   const shownRows = useMemo(() => rows.filter(r => viewLiveMatches(live, r, view, model, ctx)), [rows, live, view, model, ctx]);
   const fields = viewFieldsFor(model, ctx && ctx.views, view.id);
@@ -20564,6 +20685,11 @@ function ViewBody({ title, view, rows, model, ctx, canArrange, onState, onOpen, 
         <button type="button" aria-label="More filters" title="Filters" aria-pressed={filterOpen} onClick={() => setFilterOpen(o => !o)} style={barBtn(filterOpen || filterCount > 0)}>
           <Filter size={16} />{filterCount > 0 && <span style={{ fontSize: 12 }}>{filterCount}</span>}
         </button>
+        {kanban && !phone && (
+          <button type="button" aria-label={freeze ? "Unfreeze the first column" : "Freeze the first column"} title={freeze ? "Unfreeze the first column" : "Freeze the first column"} aria-pressed={freeze} onClick={toggleFreeze} style={barBtn(freeze)}>
+            {freeze ? <PinOff size={16} /> : <Pin size={16} />}
+          </button>
+        )}
         {canArrange && !kanban && (
           <button type="button" aria-label={arranging ? "Done ordering" : "Order tasks"} title={arranging ? "Done ordering" : "Order tasks"} aria-pressed={arranging} onClick={() => setArrange(a => !a)} style={barBtn(arranging)}>
             {arranging ? <Check size={16} /> : <ArrowUpDown size={16} />}
@@ -20582,7 +20708,7 @@ function ViewBody({ title, view, rows, model, ctx, canArrange, onState, onOpen, 
         </div>
       )}
       {kanban ? (
-        <KanbanBoard view={view} rows={shownRows} model={model} ctx={ctx} arrange={arranging} onOpen={onOpen} emptyText={active ? "None match." : "No tasks."}
+        <KanbanBoard view={view} rows={shownRows} model={model} ctx={ctx} arrange={arranging} onOpen={onOpen} freezeFirst={freeze && !phone} emptyText={active ? "None match." : "No tasks."}
           onMove={(key, bucketId, index, area) => {
             const board = viewBoard(view, shownRows, model, ctx);
             // On a grouped board a drop orders cards only inside the card's OWN group.
@@ -20673,11 +20799,11 @@ function SettingsViewList({ views, arrange, nameFor, onEdit, onReorder }) {
 // columns, the fields shown when a task opens from it, and the task order (with
 // a preview as one of the assigned people, since [CURRENT USERNAME] reads
 // differently for each). A draft, saved once.
-function ViewEditor({ initial, allViews, accessUsers, sandbox, rows, model, previewUserName, onSave, onDelete, onCancel }) {
+function ViewEditor({ initial, allViews, accessUsers, sandbox, assets, rows, model, previewUserName, onSave, onDelete, onCancel }) {
   const [draft, setDraft] = useState(() => initial || {
     id: crypto.randomUUID(), name: "", type: VIEW_TYPE_LIST, userEmails: [], conditions: [],
     columns: [...VIEW_DEFAULT_COLUMNS], dialogFields: ["frequency", "lastPerformed", "dueDate", "notes", "owner"], order: [],
-    viewersCanOrder: false, defaultBucketName: KANBAN_DEFAULT_NAME, buckets: [], assignments: {},
+    viewersCanOrder: false, openMode: "view", newAtTop: false, defaultBucketName: KANBAN_DEFAULT_NAME, buckets: [], assignments: {},
     groupBy: "", groupDir: "asc", groupOrder: [],
   });
   const [newBucket, setNewBucket] = useState("");
@@ -20722,25 +20848,29 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, rows, model, prev
           <div key={i} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
             {joinCell(c, i)}
             <div style={{ width: 160, flexShrink: 0 }}>
-              <PickerField label="Field" hideLabel value={c.field} onChange={v => changeCond(i, { field: v })} options={fields.map(f => f.key)} labelForOption={fieldLabel} title="Select field" />
+              <PickerField label="Field" hideLabel value={c.field} onChange={v => changeCond(i, { field: v })} options={fields.map(f => f.key)} labelForOption={fieldLabel} headingFor={k => viewFieldGroup(fields, k)} title="Select field" />
             </div>
             <div style={{ width: 140, flexShrink: 0 }}>
               <PickerField label="Comparison" hideLabel value={c.op} onChange={v => changeCond(i, { op: v })} options={viewOpsFor(entryOf(c.field))} labelForOption={v => VIEW_OP_LABELS[v] || v} title="Select comparison" />
             </div>
-            {c.token ? (
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "6px 6px 6px 11px", borderRadius: 10, background: C.bg, border: `1.5px solid ${C.border}`, fontSize: 13, fontWeight: 600, color: C.brandDark }}>
-                {(VIEW_TOKENS.find(t => t.value === c.token) || {}).label}
-                <button type="button" className="icon-btn" aria-label="Type a value instead" onClick={() => setCond(i, { token: "" })} style={iconBtn}><X size={13} color={C.muted} /></button>
-              </span>
-            ) : (
-              <>
-                <ViewValueInput entry={entryOf(c.field)} op={c.op} value={c.value} onChange={v => changeCond(i, { value: v })} />
-                {viewTokenAllowed(viewKindOf(entryOf(c.field)), c.op) && VIEW_TOKENS.map(t => (
-                  <button key={t.value} type="button" onClick={() => setCond(i, { token: t.value })}
-                    style={{ padding: "6px 9px", fontSize: 12, fontWeight: 600, border: `1px dashed ${C.border}`, borderRadius: 8, background: "none", color: C.brandDark, cursor: "pointer" }}>Use {t.label}</button>
-                ))}
-              </>
-            )}
+            {(() => {
+              const kind = viewKindOf(entryOf(c.field));
+              const presets = [...(viewTokenAllowed(kind, c.op) ? VIEW_TOKENS.map(t => t.value) : []), ...(viewValueMode(kind, c.op) === "text" ? ["*"] : [])];
+              const preset = c.token || (c.value === "*" && presets.includes("*") ? "*" : "");
+              return (
+                <>
+                  {!c.token && <ViewValueInput entry={entryOf(c.field)} op={c.op} value={c.value} onChange={v => changeCond(i, { value: v })} />}
+                  {presets.length > 0 && (
+                    <div style={{ width: c.token ? 200 : 150, flexShrink: 0 }}>
+                      <PickerField label="Preset value" hideLabel value={preset} placeholder="Preset…" title="Preset values"
+                        onChange={v => setCond(i, v === "" ? { token: "", value: c.token ? "" : c.value } : v === "*" ? { token: "", value: "*" } : { token: v })}
+                        options={["", ...presets]}
+                        labelForOption={v => (v === "" ? "Type a value" : v === "*" ? "* (any value)" : (VIEW_TOKENS.find(t => t.value === v) || {}).label || v)} />
+                    </div>
+                  )}
+                </>
+              );
+            })()}
             <button type="button" className="icon-btn" aria-label="Remove this line" onClick={() => setItems(items.filter((_, j) => j !== i))} style={iconBtn}><Trash2 size={14} color={C.danger} /></button>
           </div>
         ))}
@@ -20770,7 +20900,7 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, rows, model, prev
   const previewEmail = draft.userEmails.includes(previewAs) ? previewAs : "";
   const userName = previewEmail ? nameOfEmail(previewEmail) : previewUserName;
   const ctxViews = allViews.some(v => v.id === draft.id) ? allViews.map(v => (v.id === draft.id ? draft : v)) : [...allViews, draft];
-  const ctx = { userName, views: ctxViews, seen: [draft.id] };
+  const ctx = { userName, views: ctxViews, assets, seen: [draft.id] };
   const matched = rows.filter(r => viewMatches(draft, r, model, ctx));
   const groupsNow = viewGroups(draft, matched, model, ctx);
   const fieldLabel = k => (fields.find(f => f.key === k) || {}).label || k;
@@ -20805,6 +20935,17 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, rows, model, prev
             Viewers can change task order
           </label>
           <div style={{ fontSize: 12, color: C.muted, marginTop: 4 }}>Unticked, only editors can {kanban ? "arrange the cards" : "change the order"}.</div>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12, fontSize: 14, color: C.ink, cursor: "pointer" }}>
+            <input type="checkbox" checked={!!draft.newAtTop} onChange={e => set({ newAtTop: e.target.checked })} />
+            Show new tasks at the top
+          </label>
+          <div style={{ fontSize: 12, color: C.muted, marginTop: 4 }}>Tasks nobody has placed yet, newest first, sit above the ones that have been put in order{kanban ? ", in each column" : ""}. Unticked, they follow below.</div>
+          <div style={{ marginTop: 12, maxWidth: 260, display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={{ fontSize: 14, color: C.ink }}>When a task is opened</span>
+            <PickerField label="When a task is opened" hideLabel value={draft.openMode === "edit" ? "edit" : "view"} onChange={v => set({ openMode: v })}
+              options={["view", "edit"]} labelForOption={v => (v === "edit" ? "In edit mode" : "In view mode")} title="When a task is opened" />
+          </div>
+          <div style={{ fontSize: 12, color: C.muted, marginTop: 4 }}>Only editors can edit; everyone else always reads.</div>
         </div>
 
         {kanban && (
@@ -20877,7 +21018,7 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, rows, model, prev
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
             <div style={{ width: 200 }}>
               <PickerField label="Group by" hideLabel value={draft.groupBy || "__nogroup"} onChange={v => set({ groupBy: v === "__nogroup" ? "" : v, groupOrder: [] })}
-                options={["__nogroup", ...fields.map(f => f.key)]} labelForOption={k => (k === "__nogroup" ? "No grouping" : fieldLabel(k))} title="Group tasks by" />
+                options={["__nogroup", ...fields.map(f => f.key)]} labelForOption={k => (k === "__nogroup" ? "No grouping" : fieldLabel(k))} headingFor={k => viewFieldGroup(fields, k)} title="Group tasks by" />
             </div>
             {draft.groupBy && (
               <div style={{ width: 170 }}>
@@ -20920,13 +21061,9 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, rows, model, prev
               </div>
             ))}
           </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {fields.filter(f => !cols.includes(f.key)).map(f => (
-              <button key={f.key} type="button" onClick={() => set({ columns: [...cols, f.key] })} style={{ ...chip(false), padding: "4px 10px", fontSize: 12 }}>
-                <Plus size={11} /> {f.label}
-              </button>
-            ))}
-          </div>
+          <PickerField label={kanban ? "Fields on each card" : "Columns in the list"} hideLabel multi value={cols}
+            onChange={v => set({ columns: [...cols.filter(k => v.includes(k)), ...v.filter(k => !cols.includes(k))] })}
+            options={fields.map(f => f.key)} labelForOption={fieldLabel} headingFor={k => viewFieldGroup(fields, k)} placeholder="Choose fields…" title={kanban ? "Fields on each card" : "Columns in the list"} />
         </div>
 
         <div style={sectionStyle}>
@@ -20934,16 +21071,9 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, rows, model, prev
             Fields shown when a task is opened
             <HelpTip label="About task fields" text="Opening a task from this view shows only the fields ticked here, to keep the person on what they need. The task's name is always shown. There is no Delete button on a task opened from a view." />
           </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {dialogFields.map(f => {
-              const on = draft.dialogFields.includes(f.key);
-              return (
-                <button key={f.key} type="button" aria-pressed={on} onClick={() => set({ dialogFields: toggleIn(draft.dialogFields, f.key) })} style={chip(on)}>
-                  {f.label}{on && <Check size={13} />}
-                </button>
-              );
-            })}
-          </div>
+          <PickerField label="Fields shown when a task is opened" hideLabel multi value={draft.dialogFields.filter(k => dialogFields.some(f => f.key === k))}
+            onChange={v => set({ dialogFields: v })}
+            options={dialogFields.map(f => f.key)} labelForOption={k => (dialogFields.find(f => f.key === k) || {}).label || k} placeholder="Choose fields…" title="Fields shown when a task is opened" />
         </div>
 
         <div style={sectionStyle}>
@@ -20960,7 +21090,8 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, rows, model, prev
           <ViewBody key={draft.type} view={draft} rows={matched} model={model} ctx={ctx} canArrange onState={set} emptyText="No tasks match this view." />
         </div>
 
-        <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "flex-end", marginTop: 20, flexWrap: "wrap" }}>
+        {/* Stays at the bottom of the screen while the long form scrolls under it. */}
+        <div style={{ position: "sticky", bottom: -22, zIndex: 3, display: "flex", gap: 10, alignItems: "center", justifyContent: "flex-end", margin: "20px -22px -22px", padding: "12px 22px", background: C.surface, borderTop: `1px solid ${C.border}`, borderRadius: "0 0 14px 14px", flexWrap: "wrap" }}>
           {initial && !confirmDelete && (
             <button onClick={() => setConfirmDelete(true)} style={{ marginRight: "auto", padding: "8px 12px", background: "transparent", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.danger, cursor: "pointer" }}>Delete view</button>
           )}
@@ -22059,7 +22190,7 @@ function ParentField({ value, onChange, childType, childId, assets, error, note 
 // so every single-select field in the app looks and behaves the same way. To allow
 // clearing back to unselected, the caller prepends "" to `options` itself (see
 // BulkTypeField below) and maps it to a placeholder like "Select…" via labelForOption.
-function PickerField({ label, value, onChange, options, placeholder = "Select…", labelForOption, onManage, manageLabel, title, emptyLabel, wide, hideLabel, required, error, multi, searchable }) {
+function PickerField({ label, value, onChange, options, placeholder = "Select…", labelForOption, onManage, manageLabel, title, emptyLabel, wide, hideLabel, required, error, multi, searchable, headingFor }) {
   const [open, setOpen] = useState(false);
   const getLabel = labelForOption || (o => o);
   // `multi`: value is an array, the modal stays open and toggles, Done closes.
@@ -22093,6 +22224,7 @@ function PickerField({ label, value, onChange, options, placeholder = "Select…
           manageLabel={manageLabel}
           multi={multi}
           searchable={searchable}
+          headingFor={headingFor}
         />
       )}
     </Wrapper>
@@ -23714,7 +23846,7 @@ function LabelGroupHeader({ name, count, open, onToggle, unlabeled, leading }) {
 // OPTIONAL `multi`: `value` is an array, a tap toggles an option and the modal
 // stays open, and Done closes it. The same list, rows and search as a single
 // pick, so a multi-select dropdown is not a second picker look-alike.
-function SelectionModal({ title, options, value, onChange, onClose, labelForOption, emptyLabel, onManage, manageLabel, labelOptions, labelsForOption, searchable, multi }) {
+function SelectionModal({ title, options, value, onChange, onClose, labelForOption, emptyLabel, onManage, manageLabel, labelOptions, labelsForOption, searchable, multi, headingFor }) {
   const getLabel = labelForOption || (o => o);
   const [searchQuery, setSearchQuery] = useState("");
   // OPTIONAL label GROUPS, absent for every caller but the Type picker: one
@@ -23797,7 +23929,18 @@ function SelectionModal({ title, options, value, onChange, onClose, labelForOpti
           <div style={{ fontSize: 13, color: C.empty, padding: "4px 2px 8px" }}>{emptyLabel}</div>
         )}
         <div style={{ display: "flex", flexDirection: "column", gap: 2, overflowY: "auto", minHeight: 0, flex: 1 }}>
-          {flatOptions.map(opt => renderRow(opt, opt || "__none__", false))}
+          {flatOptions.map((opt, i) => {
+            // OPTIONAL plain headings (a field picker's Kanban boards): shown where
+            // the group changes, so the options must already be listed together.
+            const h = headingFor ? headingFor(opt) : null;
+            const prev = headingFor && i > 0 ? headingFor(flatOptions[i - 1]) : null;
+            return (
+              <React.Fragment key={opt || "__none__"}>
+                {h && h !== prev && <div style={{ padding: "8px 10px 2px", fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: 0.5, textTransform: "uppercase", color: C.muted, flexShrink: 0 }}>{h}</div>}
+                {renderRow(opt, opt || "__none__", false)}
+              </React.Fragment>
+            );
+          })}
           {!flat && groups.map(g => {
             const open = !!searchNorm || openGroups.includes(g.id);
             return (

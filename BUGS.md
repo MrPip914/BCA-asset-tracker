@@ -811,3 +811,6 @@ returns whatever the sheet holds, so a column that gets written comes back on it
 **Verified** by `test-backend-fields.js` in the repo root, not in a browser — Sandbox
 never contacts Apps Script and the live backend needs a sign-in, so the write path this
 bug lived on is exactly what the usual check can't reach.
+
+## test-frontend-setters.js fails on `setItems` (2026-10-21)
+The test flags `setItems` in the Views editor's `renderConds(items, setItems, depth)` as a state setter that is never declared; it is a parameter name, so this is a false positive. Present on dev before this session, and the test is not in CI, so nothing has caught it. Fix by excluding parameter names or renaming the parameter. No deploy needed.
