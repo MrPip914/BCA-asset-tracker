@@ -25,6 +25,7 @@ const code = [
   'const dateOnly = s => String(s || "").slice(0, 10);',
   'const localDateString = d => d.toISOString().slice(0, 10);',
   'const formatDateOnly = s => "D:" + s;',
+  'const roomNameOf = (a) => a.room || ""; const buildingNameOf = (a) => a.building || ""; const campusNameOf = (a) => a.campus || ""; const parentNameFor = (id) => id ? "P:" + id : ""; const pathOf = (a) => a.path || "";',
   'const isOneOffTask = item => item.kind === "oneoff";',
   'const dataTypeDisplay = (f, v) => String(v);',
   slice('function multiValues(value) {'),
@@ -34,7 +35,7 @@ const code = [
   slice('function maintenanceSortKey(row) {'),
   slice('function maintenanceStatusMeta(status) {'),
   block,
-  'return { adoptViews, viewsVisibleTo, viewFieldsFor, viewFieldValue, viewFieldDisplay, viewConditionMatches, viewMatches, describeViewQuery, orderViewRows, moveInViewOrder, addToViewOrder, removeFromViewOrder, viewTaskKey, viewDialogShows, viewVisibleCustomKeys, viewDragOrder, viewBoard, viewBoardMove, viewBucketIdIn, viewBucketOf, viewBuckets, viewLiveMatches, viewLiveActive, viewCanArrange, viewCondChanged, viewOpsFor, viewFieldEntry, viewKindOf, viewValueMode, viewGroups, viewGroupKeyOf, viewGroupMove, viewTokenAllowed, viewItemsMatch, adoptViewConds };',
+  'return { adoptViews, viewsVisibleTo, viewFieldsFor, viewFieldValue, viewFieldDisplay, viewConditionMatches, viewMatches, describeViewQuery, orderViewRows, moveInViewOrder, addToViewOrder, removeFromViewOrder, viewTaskKey, viewDialogShows, viewVisibleCustomKeys, viewDragOrder, viewBoard, viewBoardMove, viewBucketIdIn, viewBucketOf, viewBuckets, viewLiveMatches, viewLiveActive, viewCanArrange, viewCondChanged, viewOpsFor, viewFieldEntry, viewKindOf, viewValueMode, viewGroups, viewGroupKeyOf, viewGroupMove, viewTokenAllowed, viewItemsMatch, adoptViewConds, viewRowsFlat, viewFieldGroup, viewPlaceValue };',
 ].join(NL);
 const H = new Function(code)();
 
@@ -145,8 +146,8 @@ eq('...and != Monday leaves out only the Monday card', [H.viewConditionMatches(c
 eq('a task the board does not list reads as blank', H.viewBucketIdIn(row("t"), "kb", model, { views: [board({ conditions: [cond("owner", "=", "zz")] })], seen: [] }), "");
 const loop = [board({ id: "p", conditions: [cond("kanban:q", "=", "__default")] }), board({ id: "q", conditions: [cond("kanban:p", "=", "__default")] })];
 eq('two boards that query each other end instead of recursing', typeof H.viewBucketIdIn(row("t"), "p", model, { views: loop, seen: [] }), "string");
-check('a Kanban field is offered for every OTHER board only', H.viewFieldsFor(model, [wk], "kb").every(f => !f.kanban) && H.viewFieldsFor(model, [wk], "other").some(f => f.key === "kanban:kb" && f.label === "Workweek Kanban"));
-eq('a Kanban query reads in words', H.describeViewQuery(view([cond("kanban:kb", "!=", "b-mon")]), model, [wk]), 'Workweek Kanban is not "Monday"');
+check('a Kanban field is offered for every OTHER board only', H.viewFieldsFor(model, [wk], "kb").every(f => !f.kanban) && H.viewFieldsFor(model, [wk], "other").some(f => f.key === "kanban:kb" && f.label === "Workweek" && f.group === "Kanban boards"));
+eq('a Kanban query reads in words', H.describeViewQuery(view([cond("kanban:kb", "!=", "b-mon")]), model, [wk]), 'Workweek is not "Monday"');
 
 // dragging in a list: everything down to the dropped task becomes ordered
 eq('dropping the first of the unordered pile on top pins only it', H.viewDragOrder([], ["a", "b", "c"], 0, "a", 0), ["a"]);
@@ -367,6 +368,48 @@ const grp = (conditions, join = "and") => ({ group: true, join, conditions });
   const ctx = { views: [out], seen: [] };
   eq('a card shows the column set by hand on a board whose query leaves the task out', H.viewFieldDisplay(r, "kanban:kb", model, ctx), H.viewBuckets(out)[0].name);
   eq('with no hand placement it is still blank', H.viewFieldDisplay(r, "kanban:kb", model, { views: [board({ id: "kb", conditions: [cond("owner", "=", "zz")] })], seen: [] }), "—");
+}
+
+// --- 2026-10-21 batch
+{
+  const f = H.viewFieldsFor(model, [board({ id: "kb" })], "x");
+  eq('a board is labelled by its name alone', f.find(x => x.key === "kanban:kb").label, "Workweek");
+  check('boards sit together after every other field', f.map(x => !!x.kanban).join("").replace(/0*(1*)$/, "$1") === f.map(x => !!x.kanban).join("").replace(/^0*/, ""));
+  eq('the picker heading comes from the field', [H.viewFieldGroup(f, "kanban:kb"), H.viewFieldGroup(f, "owner"), H.viewFieldGroup(f, "place:room")], ["Kanban boards", null, "Places of the task's asset"]);
+  const r = row("t"); r.asset = { id: "A1", room: "Room 101", building: "Bldg 100", campus: "Main", parentId: "R1", path: "Main › Bldg 100 › Room 101" };
+  const pctx = { assets: [r.asset] };
+  eq('place fields read off the asset chain', ["room", "building", "campus", "parent", "path"].map(k => H.viewFieldValue(r, "place:" + k, model, pctx)), ["Room 101", "Bldg 100", "Main", "P:R1", "Main › Bldg 100 › Room 101"]);
+  eq('place fields are blank without an asset list', H.viewFieldValue(r, "place:room", model, {}), "");
+  check('a query can use a place', H.viewConditionMatches(cond("place:building", "=", "bldg 100"), r, model, pctx));
+}
+{
+  const v2 = H.adoptViews({ list: [{ id: "a", openMode: "edit", newAtTop: true }, { id: "b", openMode: "weird" }] }).list;
+  eq('open mode and new-at-top are read, junk reads as the defaults', [v2[0].openMode, v2[0].newAtTop, v2[1].openMode, v2[1].newAtTop], ["edit", true, "view", false]);
+}
+{
+  const a = row("a"), b = row("b"), c = row("c");
+  a.item.at = "2026-01-01"; b.item.at = "2026-03-01"; c.item.at = "2026-02-01";
+  const o = H.orderViewRows([a, b, c], [H.viewTaskKey(a)], true);
+  eq('not-yet-ordered tasks come newest first', o.rest.map(r => r.item.id), ["b", "c"]);
+  eq('new at the top puts them above the ordered ones', H.viewRowsFlat(o, true).map(r => r.item.id), ["b", "c", "a"]);
+  eq('otherwise ordered ones lead', H.viewRowsFlat(o, false).map(r => r.item.id), ["a", "b", "c"]);
+  eq('a drop in a new-at-top list pins everything shown', H.viewDragOrder([], ["b", "c", "a"], 1, "a", 0, true), ["a", "b", "c"]);
+  const bv = board({ id: "kb", newAtTop: true, order: [H.viewTaskKey(a)] });
+  const brd = H.viewBoard(bv, [a, b, c], model, { views: [bv], seen: [] });
+  eq('a board column lists new tasks first', brd[0].rows.map(r => r.item.id), ["b", "c", "a"]);
+  const mv = H.viewBoardMove(bv, brd, H.viewTaskKey(a), "__default", 1, undefined);
+  eq('a drop on a new-at-top board pins the whole column', mv.order, [H.viewTaskKey(b), H.viewTaskKey(a), H.viewTaskKey(c)]);
+}
+{
+  const src = require("fs").readFileSync("index.html", "utf8");
+  check('the editor save bar is sticky', /position: "sticky", bottom: -22/.test(src));
+  check('card fields and dialog fields are multi-select dropdowns', (src.match(/hideLabel multi value=\{(cols|draft\.dialogFields)/g) || []).length === 2);
+  check('field pickers group boards under a heading', (src.match(/headingFor=\{k => viewFieldGroup\(fields, k\)\}/g) || []).length >= 4);
+  check('a preset dropdown offers the tokens and *', /Preset values/.test(src) && /\* \(any value\)/.test(src) && !/Use \{t\.label\}/.test(src));
+  check('a view can open tasks in edit mode', /openView\.openMode === "edit" && canEdit/.test(src) && /When a task is opened/.test(src));
+  check('mark complete shows in read mode for editors', /editing && !taskDone && \(!viewReadOnly \|\| canEdit\)/.test(src));
+  check('dragging scrolls at the edge and carries the offset', /dragScrollStep\(s\.el, s\.px, s\.py\)/.test(src) && /s\.sx \+= d\.dx/.test(src));
+  check('the first Kanban column can freeze on desktop', /freezeFirst=\{freeze && !phone\}/.test(src) && /position: "sticky", left: 0, zIndex: 2/.test(src));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
