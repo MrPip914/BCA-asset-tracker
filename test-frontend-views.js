@@ -35,7 +35,7 @@ const code = [
   slice('function maintenanceSortKey(row) {'),
   slice('function maintenanceStatusMeta(status) {'),
   block,
-  'return { adoptViews, viewsVisibleTo, viewFieldsFor, viewFieldValue, viewFieldDisplay, viewConditionMatches, viewMatches, describeViewQuery, orderViewRows, moveInViewOrder, addToViewOrder, removeFromViewOrder, viewTaskKey, viewDialogShows, viewVisibleCustomKeys, viewDragOrder, viewBoard, viewBoardMove, viewBucketIdIn, viewBucketOf, viewBuckets, viewLiveMatches, viewLiveActive, viewCanArrange, viewCondChanged, viewOpsFor, viewFieldEntry, viewKindOf, viewValueMode, viewGroups, viewGroupKeyOf, viewGroupMove, viewTokenAllowed, viewItemsMatch, adoptViewConds, viewRowsFlat, viewFieldGroup, viewPlaceValue };',
+  'return { viewBackingField, viewResolveField, viewsResolved, adoptViews, viewsVisibleTo, viewFieldsFor, viewFieldValue, viewFieldDisplay, viewConditionMatches, viewMatches, describeViewQuery, orderViewRows, moveInViewOrder, addToViewOrder, removeFromViewOrder, viewTaskKey, viewDialogShows, viewVisibleCustomKeys, viewDragOrder, viewBoard, viewBoardMove, viewBucketIdIn, viewBucketOf, viewBuckets, viewLiveMatches, viewLiveActive, viewCanArrange, viewCondChanged, viewOpsFor, viewFieldEntry, viewKindOf, viewValueMode, viewGroups, viewGroupKeyOf, viewGroupMove, viewTokenAllowed, viewItemsMatch, adoptViewConds, viewRowsFlat, viewFieldGroup, viewPlaceValue };',
 ].join(NL);
 const H = new Function(code)();
 
@@ -192,7 +192,7 @@ check('a value without * still has to match whole', !wc("jane"));
 check('the sidebar lists views with counts and is the first screen on a phone', /<nav aria-label="Views"/.test(src) && /aria-label="Back to views"/.test(src) && /viewPaneOpen/.test(src));
 check('no per-task Set order button remains', !/Set order/.test(src));
 check('tasks and views are ordered from an icon at the top right', /"Order tasks"/.test(src) && /"Order views"/.test(src));
-check('a Kanban has no order button and its cards always drag', /canArrange && !kanban && \(/.test(src) && /const arranging = canArrange && \(kanban \|\| arrange\)/.test(src));
+check('a Kanban has no order button and its cards always drag', /canArrange && !kanban && \(/.test(src) && /const arranging = canArrange && \(!view\.fieldBacked \|\| !!onField\) && \(kanban \|\| arrange\)/.test(src));
 check('search is an icon on a phone until opened', /aria-label="Search this view"/.test(src) && /searchShown = !phone \|\| searchOpen/.test(src));
 check('filter and order buttons carry no text label', !/ Filters\{filterCount/.test(src) && !/\{arranging \? "Done" : "Order"\}/.test(src));
 check('a task from a view opens read-only with a pencil for editors', /editView/.test(src) && /Edit this task/.test(src) && /viewReadOnly = !!dialogView && \(!canEdit \|\| !maintenanceModal\.editView\)/.test(src));
@@ -418,6 +418,26 @@ const grp = (conditions, join = "and") => ({ group: true, join, conditions });
   check('mark complete shows in read mode for editors', /editing && !taskDone && \(!viewReadOnly \|\| canEdit\)/.test(src));
   check('dragging scrolls at the edge and carries the offset', /dragScrollStep\(s\.el, s\.px, s\.py\)/.test(src) && /s\.sx \+= d\.dx/.test(src));
   check('the first Kanban column can freeze on desktop', /freezeFirst=\{freeze && !phone\}/.test(src) && /position: "sticky", left: 0, zIndex: 2/.test(src));
+}
+
+// --- a Kanban backed by a choice-list task field
+{
+  const asset = { id: "A1", maintenanceItems: [
+    { id: "t1", custom: { cf_day: "Tue" } }, { id: "t2", custom: {} }, { id: "t3", custom: { cf_day: "Gone" } }, { id: "t4" },
+  ] };
+  const kb = (extra = {}) => view([], { type: "kanban", defaultBucketName: "To do", buckets: [{ id: "own", name: "Own" }], assignments: { "A1::t2": "own" }, fieldKey: "cf_day", ...extra });
+  const rv = H.viewResolveField(kb(), model, [asset]);
+  eq('columns are the field choices, default first', H.viewBuckets(rv).map(b => b.name), ["To do", "Mon", "Tue", "Wed"]);
+  eq('a task sits in the column of its own value; blank and unknown values are unplaced', rv.assignments, { "A1::t1": "Tue" });
+  eq('the board reads the value as the task column', H.viewBucketOf(rv, row("t1")).id, "Tue");
+  eq('the view own buckets and placements are untouched underneath', [kb().buckets.length, Object.keys(kb().assignments)], [1, ["A1::t2"]]);
+  eq('a removed field resolves to the plain board', H.viewResolveField(kb({ fieldKey: "nope" }), model, [asset]).fieldBacked, undefined);
+  eq('a field that is not a choice list resolves to the plain board', H.viewResolveField(kb({ fieldKey: "cf_psi" }), model, [asset]).fieldBacked, undefined);
+  eq('a list view ignores a stray fieldKey', H.viewResolveField(view([], { type: "list", fieldKey: "cf_day" }), model, [asset]).fieldBacked, undefined);
+  eq('fieldKey survives reading stored data, on a board only', H.adoptViews({ list: [{ id: "a", type: "kanban", fieldKey: "cf_day" }, { id: "b", type: "list", fieldKey: "cf_day" }] }).list.map(x => x.fieldKey), ["cf_day", ""]);
+  check('a drop writes the field, refuses a type without it, and never in the editor preview',
+    /async function setTaskBoardValue/.test(src) && /doesn't have the \$\{field\.label\} field/.test(src) && /onField=\{canEdit && activeView\.fieldBacked/.test(src) && !/<ViewBody key=\{draft\.type\}[^>]*onField/.test(src));
+  check('every reader is given the resolved views', /views: resolvedViews/.test(src) && /viewsVisibleTo\(resolvedViews/.test(src));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
