@@ -350,7 +350,7 @@ const grp = (conditions, join = "and") => ({ group: true, join, conditions });
   const src = require("fs").readFileSync("index.html", "utf8");
   const i = src.indexOf('ONE floating + for every main tab');
   const blk = i < 0 ? "" : src.slice(i, i + 4200);
-  check('one shared + for editors on every main tab', i > 0 && /canEdit && !mapPlacing/.test(blk) && (src.match(/aria-label="Add asset, task, or log work"/g) || []).length === 1);
+  check('the + for editors on every main tab and the asset page', i > 0 && /canEdit && !mapPlacing/.test(blk) && (src.match(/aria-label="Add asset, task, or log work"/g) || []).length === 2 && /canEdit && !detailEditing && !showAdd/.test(src));
   check('it offers task, asset and work', /openMaintenanceAdd\(seed/.test(blk) && /startAdd\(/.test(blk) && /openChangeAdd\(seed/.test(blk));
   check('the add-asset form opens as a dialog off the Assets tab', /mainTab !== "assets" && showAdd/.test(blk));
   check('the task asset chooser is searchable', /excluded=\{archived\}\s+searchable/.test(src));
