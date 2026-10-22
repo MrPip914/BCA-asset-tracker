@@ -817,3 +817,6 @@ The test flags `setItems` in the Views editor's `renderConds(items, setItems, de
 
 ## test-frontend-setters.js fails on dev: `setItems` called but never declared (found 2026-10-22)
 Pre-existing on `dev` (fails with and without the install-app change). Found while adding the PWA install row; not investigated. No backend deploy needed to fix.
+## test-frontend-setters.js fails on dev (found 2026-10-22)
+
+Reports "setters called but never declared: setItems". Fails without the asset-page + change too. Not investigated; does not block anything known.
