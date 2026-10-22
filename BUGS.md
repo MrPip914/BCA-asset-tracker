@@ -814,3 +814,6 @@ bug lived on is exactly what the usual check can't reach.
 
 ## test-frontend-setters.js fails on `setItems` (2026-10-21)
 The test flags `setItems` in the Views editor's `renderConds(items, setItems, depth)` as a state setter that is never declared; it is a parameter name, so this is a false positive. Present on dev before this session, and the test is not in CI, so nothing has caught it. Fix by excluding parameter names or renaming the parameter. No deploy needed.
+
+## test-frontend-setters.js fails on dev: `setItems` called but never declared (found 2026-10-22)
+Pre-existing on `dev` (fails with and without the install-app change). Found while adding the PWA install row; not investigated. No backend deploy needed to fix.
