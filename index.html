@@ -2479,7 +2479,8 @@ function viewFieldsFor(model, views, selfId) {
 function viewFieldGroup(fields, key) { const f = fields.find(x => x.key === key); return (f && f.group) || null; }
 // A Kanban's buckets in board order: the default one first.
 function viewBuckets(view) {
-  return [{ id: KANBAN_DEFAULT_BUCKET, name: view.defaultBucketName || KANBAN_DEFAULT_NAME }, ...(view.buckets || [])];
+  const rest = view.buckets || [];
+  return view.noDefaultBucket ? [...rest] : [{ id: KANBAN_DEFAULT_BUCKET, name: view.defaultBucketName || KANBAN_DEFAULT_NAME }, ...rest];
 }
 // A Kanban can take its columns from a choice-list task field (`fieldKey`):
 // each choice is a column, the blank value is the default column, and a task's
@@ -2490,20 +2491,65 @@ function viewBuckets(view) {
 // needed to learn about fields. The view's own buckets/assignments are left
 // alone underneath, so unlinking the field brings the old board back. A field
 // that was removed, or is no longer a choice list, resolves to the plain board.
+// The fields a board can take its columns from besides a choice-list custom
+// field: built-in task fields with a fixed set of values. Stored in `fieldKey`
+// as "builtin:<key>"; a plain custom key is stored as it always was. Only Type
+// can be changed by dragging a card (Kind and Status are worked out from the
+// task, so those boards only show where each task is).
+const VIEW_BUILTIN_BOARD_PREFIX = "builtin:";
+const VIEW_BUILTIN_BOARD_FIELDS = [
+  { key: "type", label: "Task type", writable: true },
+  { key: "kind", label: "Kind", writable: false },
+  { key: "status", label: "Status", writable: false },
+];
+function viewBuiltinBoardSource(view, model) {
+  const def = VIEW_BUILTIN_BOARD_FIELDS.find(f => VIEW_BUILTIN_BOARD_PREFIX + f.key === view.fieldKey);
+  if (!def) return null;
+  let options;
+  let valueOf;
+  if (def.key === "type") {
+    options = [{ id: DEFAULT_WORK_TYPE_ID, name: DEFAULT_WORK_TYPE_NAME }, ...((model && model.taskTypes) || []).map(t => ({ id: t.id, name: t.name }))];
+    valueOf = item => resolveWorkTypeId(model, "task", item.taskType);
+  } else if (def.key === "kind") {
+    options = [{ id: "scheduled", name: "Scheduled" }, { id: "oneoff", name: "One-off" }];
+    valueOf = item => (isOneOffTask(item) ? "oneoff" : "scheduled");
+  } else {
+    options = ["overdue", "due-soon", "ok", "never", "undated", "done"].map(id => ({ id, name: maintenanceStatusMeta(id).label }));
+    valueOf = item => maintenanceStatusOf(item);
+  }
+  return { key: view.fieldKey, label: def.label, builtin: def.key, writable: def.writable, options, valueOf };
+}
 function viewBackingField(view, model) {
   if (!view || view.type !== VIEW_TYPE_KANBAN || !view.fieldKey) return null;
+  const builtin = viewBuiltinBoardSource(view, model);
+  if (builtin) return builtin;
   const f = ((model && model.taskFields) || []).find(x => x.key === view.fieldKey);
-  return f && f.dataType === "select" && Array.isArray(f.options) && f.options.length ? f : null;
+  if (!(f && f.dataType === "select" && Array.isArray(f.options) && f.options.length)) return null;
+  return { key: f.key, label: f.label, writable: true, options: f.options.map(o => ({ id: o, name: o })), valueOf: item => { const v = item && item.custom && item.custom[f.key]; return typeof v === "string" ? v : ""; } };
+}
+// `fieldChoices` limits which of the field's options become columns (none ticked
+// = all of them). A task whose value is an option that was NOT picked is left
+// out of the board altogether (`fieldOmits`); a task with no value stays in the
+// default column. A built-in field gives every task a value, so it has no
+// default column (`noDefaultBucket`).
+function viewFieldChoicesOf(view, src) {
+  const picked = Array.isArray(view.fieldChoices) ? view.fieldChoices.filter(id => src.options.some(o => o.id === id)) : [];
+  return picked.length ? picked : null;
 }
 function viewResolveField(view, model, assets) {
   const f = viewBackingField(view, model);
   if (!f) return view;
+  const chosen = viewFieldChoicesOf(view, f);
+  const known = new Set(f.options.map(o => o.id));
+  const options = chosen ? f.options.filter(o => chosen.includes(o.id)) : f.options;
+  const shownIds = new Set(options.map(o => o.id));
   const assignments = {};
   (assets || []).forEach(a => (a.maintenanceItems || []).forEach(it => {
-    const v = it && it.custom && it.custom[f.key];
-    if (typeof v === "string" && f.options.includes(v)) assignments[a.id + "::" + it.id] = v;
+    const v = it && f.valueOf(it);
+    if (v && shownIds.has(v)) assignments[a.id + "::" + it.id] = v;
   }));
-  return { ...view, buckets: f.options.map(o => ({ id: o, name: o })), assignments, fieldBacked: true };
+  const fieldOmits = chosen ? (row => { const v = f.valueOf(row.item); return !!v && known.has(v) && !shownIds.has(v); }) : null;
+  return { ...view, buckets: options.map(o => ({ id: o.id, name: o.name })), assignments, fieldBacked: true, fieldWritable: f.writable, noDefaultBucket: !!f.builtin, fieldOmits };
 }
 function viewsResolved(list, model, assets) { return (list || []).map(v => viewResolveField(v, model, assets)); }
 
@@ -2632,6 +2678,7 @@ function adoptViews(raw) {
       newAtTop: v.newAtTop === true,
       hideEmptyFields: v.hideEmptyFields === true,
       fieldKey: v.type === VIEW_TYPE_KANBAN && typeof v.fieldKey === "string" ? v.fieldKey : "",
+      fieldChoices: v.type === VIEW_TYPE_KANBAN ? strs(v.fieldChoices) : [],
       defaultBucketName: String(v.defaultBucketName || "").trim() || KANBAN_DEFAULT_NAME,
       buckets: (Array.isArray(v.buckets) ? v.buckets : []).filter(b => b && typeof b.id === "string" && b.id && b.id !== KANBAN_DEFAULT_BUCKET)
         .map(b => ({ id: b.id, name: String(b.name || "").trim() || "Bucket" })),
@@ -2815,6 +2862,7 @@ function viewItemsMatch(items, row, model, ctx) {
   return groups.some(g => g.every(c => (c.group === true ? viewItemsMatch(c.conditions, row, model, ctx) : viewConditionMatches(c, row, model, ctx))));
 }
 function viewMatches(view, row, model, ctx) {
+  if (view.fieldOmits && view.fieldOmits(row)) return false;
   return viewItemsMatch(view.conditions, row, model, ctx);
 }
 // The query in words, for the editor and the preview.
@@ -6369,7 +6417,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-23.1";
+const APP_VERSION = "2026-10-23.2";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -10483,18 +10531,30 @@ function AssetTracker() {
     const asset = assets.find(a => a.id === assetId);
     const item = asset && (asset.maintenanceItems || []).find(m => m && m.id === itemId);
     if (!item) return;
-    if (!customFieldsFor(workModel, "task", item.taskType).some(f => f.key === field.key)) {
+    if (!field.writable) {
+      setNotice(`${field.label} is worked out from the task, so a card can't be dragged to change it.`);
+      return;
+    }
+    const builtinType = field.builtin === "type";
+    if (!builtinType && !customFieldsFor(workModel, "task", item.taskType).some(f => f.key === field.key)) {
       setNotice(`"${item.task}" is a type of task that doesn't have the ${field.label} field, so it can't be moved on this board.`);
       return;
     }
-    const before = String((item.custom || {})[field.key] ?? "");
+    const before = builtinType ? field.valueOf(item) : String((item.custom || {})[field.key] ?? "");
     if (before === value) return;
-    const custom = { ...(item.custom || {}) };
-    if (value) custom[field.key] = value; else delete custom[field.key];
-    const next = assets.map(a => (a.id === assetId ? { ...a, maintenanceItems: a.maintenanceItems.map(m => (m.id === itemId ? { ...m, custom } : m)) } : a));
+    let change;
+    if (builtinType) {
+      change = { taskType: value };
+    } else {
+      const custom = { ...(item.custom || {}) };
+      if (value) custom[field.key] = value; else delete custom[field.key];
+      change = { custom };
+    }
+    const nameOf_ = id => (field.options.find(o => o.id === id) || {}).name || id;
+    const next = assets.map(a => (a.id === assetId ? { ...a, maintenanceItems: a.maintenanceItems.map(m => (m.id === itemId ? { ...m, ...change } : m)) } : a));
     await persist(next, { auditLog: logAudit([{
       at: new Date().toISOString(), by: currentUser || "", assetLabel: assetId, assetType: asset.type,
-      action: "maintenance_edited", field: `${item.task} — ${field.label}`, from: before || "—", to: value || "—",
+      action: "maintenance_edited", field: `${item.task} — ${field.label}`, from: (builtinType ? nameOf_(before) : before) || "—", to: (builtinType ? nameOf_(value) : value) || "—",
     }]) });
   }
   function saveViewDraft(view) {
@@ -19830,7 +19890,7 @@ function AssetTracker() {
                 ctx={activeViewCtx}
                 canArrange={viewCanArrange(activeView, canEdit)}
                 onState={patch => saveViewState(activeView.id, patch)}
-                onField={canEdit && activeView.fieldBacked ? (key, value) => setTaskBoardValue(activeView, key, value) : undefined}
+                onField={canEdit && activeView.fieldBacked && activeView.fieldWritable ? (key, value) => setTaskBoardValue(activeView, key, value) : undefined}
                 onOpen={r => openMaintenanceEdit(r.item.id, r.asset.id, activeView.id)}
                 emptyText="No tasks match this view."
               />
@@ -20957,7 +21017,7 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, assets, rows, mod
   const [draft, setDraft] = useState(() => initial || {
     id: crypto.randomUUID(), name: "", type: VIEW_TYPE_LIST, userEmails: [], conditions: [],
     columns: [...VIEW_DEFAULT_COLUMNS], dialogFields: ["frequency", "lastPerformed", "dueDate", "notes", "owner"], order: [],
-    viewersCanOrder: false, openMode: "view", newAtTop: false, hideEmptyFields: false, fieldKey: "", defaultBucketName: KANBAN_DEFAULT_NAME, buckets: [], assignments: {},
+    viewersCanOrder: false, openMode: "view", newAtTop: false, hideEmptyFields: false, fieldKey: "", fieldChoices: [], defaultBucketName: KANBAN_DEFAULT_NAME, buckets: [], assignments: {},
     groupBy: "", groupDir: "asc", groupOrder: [],
   });
   const [newBucket, setNewBucket] = useState("");
@@ -21057,8 +21117,8 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, assets, rows, mod
   const backing = viewBackingField(draft, model);
   const ctxViews = allViews.some(v => v.id === draft.id) ? allViews.map(v => (v.id === draft.id ? shown : v)) : [...allViews, shown];
   const ctx = { userName, views: ctxViews, assets, seen: [draft.id] };
-  const matched = rows.filter(r => viewMatches(draft, r, model, ctx));
-  const groupsNow = viewGroups(draft, matched, model, ctx);
+  const matched = rows.filter(r => viewMatches(shown, r, model, ctx));
+  const groupsNow = viewGroups(shown, matched, model, ctx);
   const fieldLabel = k => (fields.find(f => f.key === k) || {}).label || k;
   const cols = draft.columns.filter(k => fields.some(f => f.key === k));
   const canSave = !!draft.name.trim();
@@ -21122,13 +21182,26 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, assets, rows, mod
             Columns come from
             <HelpTip label="About field-backed boards" text="Pick a choice-list task field and each of its choices becomes a column, with tasks that have no value in the default column. Dragging a card then changes the task's value of that field, and changing the field moves the card. Only editors can drag, and only tasks whose type has the field. The choices are managed in Settings > Task types; the board's own buckets are kept and come back if you pick 'Its own buckets'." />
           </div>
-          <PickerField label="Columns come from" hideLabel value={backing ? backing.key : ""} onChange={v => set({ fieldKey: v })}
-            options={["", ...((model && model.taskFields) || []).filter(f => f.dataType === "select" && (f.options || []).length).map(f => f.key)]}
-            labelForOption={k => (k ? (((model && model.taskFields) || []).find(f => f.key === k) || {}).label || k : "Its own buckets")} title="Columns come from" />
+          <PickerField label="Columns come from" hideLabel value={backing ? backing.key : ""} onChange={v => set({ fieldKey: v, fieldChoices: [] })}
+            options={["", ...VIEW_BUILTIN_BOARD_FIELDS.map(f => VIEW_BUILTIN_BOARD_PREFIX + f.key), ...((model && model.taskFields) || []).filter(f => f.dataType === "select" && (f.options || []).length).map(f => f.key)]}
+            labelForOption={k => (k ? ((VIEW_BUILTIN_BOARD_FIELDS.find(f => VIEW_BUILTIN_BOARD_PREFIX + f.key === k) || {}).label || (((model && model.taskFields) || []).find(f => f.key === k) || {}).label || k) : "Its own buckets")}
+            headingFor={k => (k.startsWith(VIEW_BUILTIN_BOARD_PREFIX) ? "Built-in fields" : k ? "Custom fields" : null)} title="Columns come from" />
+          {backing && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ fontSize: 14, color: C.ink, display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                Columns shown
+                <HelpTip label="About columns shown" text="Pick which of the field's choices get a column. Tasks whose value is a choice you leave out are left off this board. Leave it empty to show every choice. Tasks with no value stay in the default column." />
+              </div>
+              <PickerField label="Columns shown" hideLabel multi value={viewFieldChoicesOf(draft, backing) || []}
+                onChange={v => set({ fieldChoices: backing.options.map(o => o.id).filter(id => v.includes(id)) })}
+                options={backing.options.map(o => o.id)} labelForOption={id => (backing.options.find(o => o.id === id) || {}).name || id}
+                placeholder="All choices" title="Columns shown" />
+            </div>
+          )}
         </div>
         )}
 
-        {kanban && (
+        {kanban && !(backing && backing.builtin) && (
         <div style={sectionStyle}>
           <div style={{ ...lbl, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
             {backing ? "Default column" : "Buckets"}

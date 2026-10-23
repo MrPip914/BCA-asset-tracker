@@ -35,7 +35,7 @@ const code = [
   slice('function maintenanceSortKey(row) {'),
   slice('function maintenanceStatusMeta(status) {'),
   block,
-  'return { viewBackingField, viewResolveField, viewsResolved, adoptViews, viewsVisibleTo, viewFieldsFor, viewFieldValue, viewFieldDisplay, viewConditionMatches, viewMatches, describeViewQuery, orderViewRows, moveInViewOrder, addToViewOrder, removeFromViewOrder, viewTaskKey, viewDialogShows, viewVisibleCustomKeys, viewDragOrder, viewBoard, viewBoardMove, viewBucketIdIn, viewBucketOf, viewBuckets, viewLiveMatches, viewLiveActive, viewCanArrange, viewCondChanged, viewOpsFor, viewFieldEntry, viewKindOf, viewValueMode, viewGroups, viewGroupKeyOf, viewGroupMove, viewTokenAllowed, viewItemsMatch, adoptViewConds, viewRowsFlat, viewFieldGroup, viewPlaceValue };',
+  'return { viewBackingField, viewResolveField, viewsResolved, adoptViews, viewsVisibleTo, viewFieldsFor, viewFieldValue, viewFieldDisplay, viewConditionMatches, viewMatches, describeViewQuery, orderViewRows, moveInViewOrder, addToViewOrder, removeFromViewOrder, viewTaskKey, viewDialogShows, viewVisibleCustomKeys, viewDragOrder, viewBoard, viewBoardMove, viewBucketIdIn, viewBucketOf, viewBuckets, viewLiveMatches, viewLiveActive, viewCanArrange, viewCondChanged, viewOpsFor, viewFieldEntry, viewKindOf, viewValueMode, viewGroups, viewGroupKeyOf, viewGroupMove, viewTokenAllowed, viewItemsMatch, adoptViewConds, viewRowsFlat, viewFieldGroup, viewPlaceValue, viewBuiltinBoardSource, viewFieldChoicesOf };',
 ].join(NL);
 const H = new Function(code)();
 
@@ -438,6 +438,24 @@ const grp = (conditions, join = "and") => ({ group: true, join, conditions });
   check('a drop writes the field, refuses a type without it, and never in the editor preview',
     /async function setTaskBoardValue/.test(src) && /doesn't have the \$\{field\.label\} field/.test(src) && /onField=\{canEdit && activeView\.fieldBacked/.test(src) && !/<ViewBody key=\{draft\.type\}[^>]*onField/.test(src));
   check('every reader is given the resolved views', /views: resolvedViews/.test(src) && /viewsVisibleTo\(resolvedViews/.test(src));
+  // built-in fields and limited columns
+  const tmodel = { ...model, taskTypes: [{ id: "tt1", name: "Repair" }, { id: "tt2", name: "Inspect" }, { id: "tt3", name: "Clean" }] };
+  const titems = [{ id: "x1", taskType: "tt1" }, { id: "x2", taskType: "tt2" }, { id: "x3", taskType: "tt3" }, { id: "x4" }, { id: "x5", taskType: "gone" }];
+  const tasset = { id: "A1", maintenanceItems: titems };
+  const trow = id => ({ asset: tasset, item: titems.find(t => t.id === id) });
+  const tb = (extra = {}) => view([], { type: "kanban", defaultBucketName: "To do", fieldKey: "builtin:type", ...extra });
+  const tv = H.viewResolveField(tb(), tmodel, [tasset]);
+  eq('a built-in field gives columns for each choice, and no default column', H.viewBuckets(tv).map(b => b.name), ["Default", "Repair", "Inspect", "Clean"]);
+  eq('a task sits in its type column; blank and removed types fall to the default type', tv.assignments, { "A1::x1": "tt1", "A1::x2": "tt2", "A1::x3": "tt3", "A1::x4": "__default", "A1::x5": "__default" });
+  eq('only Type can be dragged', [H.viewBuiltinBoardSource(tb(), tmodel).writable, H.viewBuiltinBoardSource(tb({ fieldKey: "builtin:kind" }), tmodel).writable], [true, false]);
+  const lim = H.viewResolveField(tb({ fieldChoices: ["tt1", "tt3"] }), tmodel, [tasset]);
+  eq('limiting the choices keeps only those columns', H.viewBuckets(lim).map(b => b.name), ["Repair", "Clean"]);
+  eq('tasks of an unpicked choice (the default type included) are left off the board', ["x1", "x2", "x3", "x4"].map(id => H.viewMatches(lim, trow(id), tmodel, { views: [lim], seen: [] })), [true, false, true, false]);
+  const limc = H.viewResolveField(kb({ fieldChoices: ["Tue"] }), model, [asset]);
+  eq('a custom field limit omits other values but keeps blanks in the default column', [H.viewBuckets(limc).map(b => b.name), ["t1", "t2", "t3", "t4"].map(id => H.viewMatches(limc, row(id), model, { views: [limc], seen: [] }))], [["To do", "Tue"], [true, true, true, true]]);
+  eq('an unlimited board omits nothing', H.viewResolveField(tb({ fieldChoices: ["nope"] }), tmodel, [tasset]).fieldOmits, null);
+  eq('fieldChoices survives reading, on a board only', H.adoptViews({ list: [{ id: "a", type: "kanban", fieldChoices: ["x"] }, { id: "b", type: "list", fieldChoices: ["x"] }] }).list.map(x => x.fieldChoices), [["x"], []]);
+  check('the editor offers built-in fields and a columns-shown picker; non-writable boards do not drag', /Columns shown/.test(src) && /VIEW_BUILTIN_BOARD_FIELDS\.map/.test(src) && /activeView\.fieldWritable/.test(src));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
