@@ -6417,7 +6417,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-23.2";
+const APP_VERSION = "2026-10-23.3";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -15024,7 +15024,7 @@ function AssetTracker() {
           <div onClick={() => setShowAppMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
           <div
             role="menu"
-            style={{ position: isPhone && view === "list" ? "fixed" : "absolute", ...(isPhone && view === "list" ? { right: 12, bottom: PHONE_NAV_PX + 8 } : { right: 0, top: "100%", marginTop: 6 }), background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, width: 270, maxWidth: "calc(100vw - 24px)", maxHeight: isPhone && view === "list" ? `calc(100vh - ${PHONE_NAV_PX + 24}px)` : "calc(100vh - 80px)", overflowY: "auto", padding: 4 }}
+            style={{ position: isPhone ? "fixed" : "absolute", ...(isPhone ? { right: 12, bottom: PHONE_NAV_PX + 8 } : { right: 0, top: "100%", marginTop: 6 }), background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21, width: 270, maxWidth: "calc(100vw - 24px)", maxHeight: isPhone ? `calc(100vh - ${PHONE_NAV_PX + 24}px)` : "calc(100vh - 80px)", overflowY: "auto", padding: 4 }}
           >
             {/* This screen's rows land here, each block under its own heading. */}
             <div ref={setAppMenuSlot} />
@@ -17142,6 +17142,87 @@ function AssetTracker() {
     );
   }
   // ---------- DETAIL VIEW ----------
+  // The main tabs, shared by the desktop tab row and the phone's bottom bar.
+  const mainTabItems = [
+    { key: "assets", label: "Assets" },
+    { key: "maintenance", label: "Tasks", count: allOpenMaintenanceRows.length, urgent: maintenanceOverdueTotal > 0 },
+    // Only for someone who has a view assigned; no count, since a view's
+    // list is whatever its query says.
+    ...(visibleViews.length ? [{ key: "views", label: "Views" }] : []),
+    // No count, deliberately, same reasoning Audit already has below:
+    // it answers "is there a plan here", not "how many", and there's
+    // no natural number to put in parentheses at this scope anyway.
+    { key: "map", label: "Map" },
+    // No count, deliberately. Maintenance's says how much there is to
+    // DO; the audit log only ever grows, so "Audit (11482)" is a number
+    // that answers nothing and gets longer forever.
+    { key: "audit", label: "Audit" },
+  ];
+  const selectMainTab = (key) => {
+    // Leaving the map carries the SELECTED place into the other tab's
+    // navigator; the scope alone is only the plan that was on screen.
+    if (mainTab === "map" && key !== "map" && mapSelectedPlaceId) setScopeId(mapSelectedPlaceId);
+    // Entering the map from a place with no plan of its own moves up to
+    // the nearest place that has one, and selects the original place
+    // on it when that plan draws it (the crumb jump's rule).
+    if (mainTab !== "map" && key === "map" && scopeId) {
+      const here = assets.find(a => a.id === scopeId);
+      const withPlan = here && (here.floorPlanUrl ? here : ancestorsOf(here, assets).find(x => x.floorPlanUrl));
+      if (withPlan && withPlan.id !== here.id) {
+        setScopeId(withPlan.id);
+        setMapQuery("");
+        setMapFocusShapeId(null);
+        const chain = [here, ...ancestorsOf(here, assets)];
+        const cut = chain.findIndex(x => x.id === withPlan.id);
+        for (const place of chain.slice(0, cut)) {
+          const link = (withPlan.floorPlanLinks || []).find(l => l.roomId === place.id);
+          if (link) { setMapSelectShapeId(link.shapeId); break; }
+        }
+      }
+    }
+    setMainTab(key);
+    // From an open asset the bar also leaves it, in one history move like Home.
+    if (view === "detail") goHome();
+  };
+
+  // PHONE BOTTOM BAR (2026-10-20, on every screen since 2026-10-23). The tabs and
+  // the one menu, as icons along the bottom edge where a thumb reaches; the title
+  // bar is gone on a phone. Each icon has a tooltip and aria-label. An open asset
+  // shows it too (no tab lit), and a tab there also leaves the asset. The menu's
+  // card opens upward from here. Hidden under the Settings overlay, which has its own back.
+  const phoneBottomNav = (
+    isPhone && (
+        <nav
+          aria-label="Main"
+          style={{ position: "fixed", left: 0, right: 0, bottom: 0, height: PHONE_NAV_PX, zIndex: 15, background: C.bg, borderTop: `2px solid ${C.brand}`, display: "flex", alignItems: "stretch", paddingBottom: "env(safe-area-inset-bottom)" }}
+        >
+          {mainTabItems.map(tab => {
+            const active = view === "list" && mainTab === tab.key;
+            const TabIcon = PHONE_TAB_ICONS[tab.key] || Package;
+            const tip = tab.count > 0 ? `${tab.label} (${tab.count})` : tab.label;
+            return (
+              <button
+                key={tab.key}
+                onClick={() => selectMainTab(tab.key)}
+                aria-label={tip}
+                aria-current={active ? "page" : undefined}
+                title={tip}
+                style={{ flex: 1, minWidth: 0, background: "none", border: "none", position: "relative", display: "flex", alignItems: "center", justifyContent: "center", color: tab.urgent ? C.danger : active ? C.brandDark : C.muted, boxShadow: active ? `inset 0 3px 0 ${C.brand}` : "none" }}
+              >
+                <TabIcon size={24} strokeWidth={active ? 2.4 : 1.8} />
+                {tab.count > 0 && (
+                  <span style={{ position: "absolute", top: 6, left: "50%", marginLeft: 8, minWidth: 16, height: 16, padding: "0 4px", borderRadius: 8, background: tab.urgent ? C.danger : C.muted, color: "#fff", fontSize: 10, fontWeight: 700, lineHeight: "16px", textAlign: "center" }}>
+                    {tab.count > 99 ? "99+" : tab.count}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+          <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>{appMenu}</div>
+        </nav>
+    )
+  );
+
   if (view === "detail" && selectedAsset) {
     const Icon = iconFor(selectedAsset.type);
     const comments = [...(selectedAsset.comments || [])].reverse();
@@ -17243,8 +17324,9 @@ function AssetTracker() {
 
     return (
       <AppMenuContext.Provider value={appMenuContext}>
-      <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'IBM Plex Sans', sans-serif", color: C.ink }}>
+      <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'IBM Plex Sans', sans-serif", color: C.ink, paddingBottom: isPhone ? `calc(${PHONE_NAV_PX}px + env(safe-area-inset-bottom))` : undefined }}>
         {globalStyle}
+        {phoneBottomNav}
         {conflictModal}
         {nameModal}
         {nameOrderModal}
@@ -17303,7 +17385,7 @@ function AssetTracker() {
           <div style={{ fontSize: 15, fontWeight: 600, color: C.brandDark, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{titleText}</div>
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
             {saveStatusPill}
-            {appMenu}
+            {!isPhone && appMenu}
           </div>
         </div>
 
@@ -18881,47 +18963,6 @@ function AssetTracker() {
   // ---------- LIST VIEW ----------
   const hiddenColumns = columns.filter(c => !isColumnVisible(c));
 
-  // The main tabs, shared by the desktop tab row and the phone's bottom bar.
-  const mainTabItems = [
-    { key: "assets", label: "Assets" },
-    { key: "maintenance", label: "Tasks", count: allOpenMaintenanceRows.length, urgent: maintenanceOverdueTotal > 0 },
-    // Only for someone who has a view assigned; no count, since a view's
-    // list is whatever its query says.
-    ...(visibleViews.length ? [{ key: "views", label: "Views" }] : []),
-    // No count, deliberately, same reasoning Audit already has below:
-    // it answers "is there a plan here", not "how many", and there's
-    // no natural number to put in parentheses at this scope anyway.
-    { key: "map", label: "Map" },
-    // No count, deliberately. Maintenance's says how much there is to
-    // DO; the audit log only ever grows, so "Audit (11482)" is a number
-    // that answers nothing and gets longer forever.
-    { key: "audit", label: "Audit" },
-  ];
-  const selectMainTab = (key) => {
-    // Leaving the map carries the SELECTED place into the other tab's
-    // navigator; the scope alone is only the plan that was on screen.
-    if (mainTab === "map" && key !== "map" && mapSelectedPlaceId) setScopeId(mapSelectedPlaceId);
-    // Entering the map from a place with no plan of its own moves up to
-    // the nearest place that has one, and selects the original place
-    // on it when that plan draws it (the crumb jump's rule).
-    if (mainTab !== "map" && key === "map" && scopeId) {
-      const here = assets.find(a => a.id === scopeId);
-      const withPlan = here && (here.floorPlanUrl ? here : ancestorsOf(here, assets).find(x => x.floorPlanUrl));
-      if (withPlan && withPlan.id !== here.id) {
-        setScopeId(withPlan.id);
-        setMapQuery("");
-        setMapFocusShapeId(null);
-        const chain = [here, ...ancestorsOf(here, assets)];
-        const cut = chain.findIndex(x => x.id === withPlan.id);
-        for (const place of chain.slice(0, cut)) {
-          const link = (withPlan.floorPlanLinks || []).find(l => l.roomId === place.id);
-          if (link) { setMapSelectShapeId(link.shapeId); break; }
-        }
-      }
-    }
-    setMainTab(key);
-  };
-
   const headerStatus = (
     <>
           {/* THE PILL ONLY EXISTS WHILE SANDBOX IS ON, and getting in is a row
@@ -18989,7 +19030,7 @@ function AssetTracker() {
 
   return (
     <AppMenuContext.Provider value={appMenuContext}>
-    <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'IBM Plex Sans', 'Helvetica Neue', sans-serif", color: C.ink, paddingBottom: isPhone && view === "list" ? `calc(${PHONE_NAV_PX}px + env(safe-area-inset-bottom))` : undefined }}>
+    <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'IBM Plex Sans', 'Helvetica Neue', sans-serif", color: C.ink, paddingBottom: isPhone ? `calc(${PHONE_NAV_PX}px + env(safe-area-inset-bottom))` : undefined }}>
       {globalStyle}
       {conflictModal}
       {nameModal}
@@ -19153,7 +19194,7 @@ function AssetTracker() {
         <div
           role="status"
           style={{
-            position: "fixed", bottom: isPhone && view === "list" ? 12 + PHONE_NAV_PX : 12, left: "50%", transform: "translateX(-50%)", zIndex: 60,
+            position: "fixed", bottom: isPhone ? 12 + PHONE_NAV_PX : 12, left: "50%", transform: "translateX(-50%)", zIndex: 60,
             background: C.accent, color: "#fff", borderRadius: 999, padding: "8px 8px 8px 14px",
             display: "flex", alignItems: "center", gap: 10, boxShadow: "0 4px 12px rgba(42,52,57,0.3)",
             maxWidth: "min(94vw, 460px)", fontSize: 13, fontWeight: 600,
@@ -19186,40 +19227,7 @@ function AssetTracker() {
         </div>
       </div>}
 
-      {/* PHONE BOTTOM BAR (2026-10-20). The tabs and the one menu, as icons along the
-          bottom edge where a thumb reaches; the title bar is gone on a phone. Each
-          icon has a tooltip and aria-label. Only on the list screens: an open asset
-          has its own header and menu. The menu's card opens upward from here. */}
-      {isPhone && (
-        <nav
-          aria-label="Main"
-          style={{ position: "fixed", left: 0, right: 0, bottom: 0, height: PHONE_NAV_PX, zIndex: 15, background: C.bg, borderTop: `2px solid ${C.brand}`, display: "flex", alignItems: "stretch", paddingBottom: "env(safe-area-inset-bottom)" }}
-        >
-          {mainTabItems.map(tab => {
-            const active = mainTab === tab.key;
-            const TabIcon = PHONE_TAB_ICONS[tab.key] || Package;
-            const tip = tab.count > 0 ? `${tab.label} (${tab.count})` : tab.label;
-            return (
-              <button
-                key={tab.key}
-                onClick={() => selectMainTab(tab.key)}
-                aria-label={tip}
-                aria-current={active ? "page" : undefined}
-                title={tip}
-                style={{ flex: 1, minWidth: 0, background: "none", border: "none", position: "relative", display: "flex", alignItems: "center", justifyContent: "center", color: tab.urgent ? C.danger : active ? C.brandDark : C.muted, boxShadow: active ? `inset 0 3px 0 ${C.brand}` : "none" }}
-              >
-                <TabIcon size={24} strokeWidth={active ? 2.4 : 1.8} />
-                {tab.count > 0 && (
-                  <span style={{ position: "absolute", top: 6, left: "50%", marginLeft: 8, minWidth: 16, height: 16, padding: "0 4px", borderRadius: 8, background: tab.urgent ? C.danger : C.muted, color: "#fff", fontSize: 10, fontWeight: 700, lineHeight: "16px", textAlign: "center" }}>
-                    {tab.count > 99 ? "99+" : tab.count}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-          <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>{appMenu}</div>
-        </nav>
-      )}
+      {phoneBottomNav}
 
       {/* Top-level page tabs */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "0 20px", position: "sticky", top: listTabsTop, background: C.bg, zIndex: 9 }}>
