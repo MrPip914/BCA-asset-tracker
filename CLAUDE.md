@@ -845,6 +845,20 @@ asset per site (`GENERAL_ASSET_ID` = `"__general"`, type `General`, name "No ass
 - Covered by `test-frontend-general-asset.js`; driven in Chromium against Sandbox (add a task
   with "No asset" from the Tasks tab; it shows in the table and not in the Assets list).
 
+## Parent / child tasks (2026-10-28)
+
+Phase 4 of `/mnt/project-files/plans/task-relationships-scheduling.md`. A task can be a **subtask** of another: `parentTaskId` on the child, and nothing on the parent. **A parent's children are derived** by scanning every asset's tasks (`taskChildrenOf`), the "reference on one side" rule, so a child may sit on a different asset from its parent. A parent id matching no task reads as top level.
+
+- **Supabase keeps the key through `TASK_EXTRA_KEYS`** in `save-shape.ts`, the one backend change: it goes out with the next `asset-api` deploy (the Database migrations workflow on a push to dev). The Apps Script fallback drops it. No migration.
+- **A child is always a one-off** (add and edit both force it; the kind toggle is hidden on a subtask). **Depth is capped at 3** (`TASK_MAX_DEPTH`; `canAddSubtaskTo`), and every walk up carries a visited set so bad data cannot loop. A parent can only be chosen at creation (Add subtask in the parent's dialog), so the form cannot create a loop.
+- **The parent's dialog lists its subtasks** with "N of M done", a + to add one (opens on the parent's asset, the Asset picker lets it sit elsewhere), and a checkbox on subtasks whose type completes in one tap (`completeTaskQuick(..., keepOpen)`). A subtask's dialog links back to its parent.
+- **Parents never complete themselves and never block.** Completing one with open subtasks asks "Complete anyway?" (`guardParentComplete`, on the dialog and card buttons).
+- **Completing a REPEATING parent reopens its finished subtasks** (`resetSubtasks`, in the same save, each audited as a cleared "Completed" edit), so a recurring checklist starts over. A one-off parent does not reset anything.
+- **Deleting a task deletes everything below it, on any asset**; the confirmation counts them, and each gets its own `maintenance_removed` row.
+- **View field `Parent task`** (the parent's name, blank for top level, so "Parent task is not *" is top-level only). Needs `ctx.assets`.
+- Not built yet: a progress chip on the Tasks table and cards (the dialog shows it), a "top-level only" view setting, date warnings between parent and child, and a Parent picker for an existing task.
+- Covered by `test-frontend-subtasks.js` and a case in `save_test.ts`; driven in Chromium against Sandbox (Add subtask, progress, back-link).
+
 ## Task completion modes (2026-10-28)
 
 Phase 2 of `/mnt/project-files/plans/task-relationships-scheduling.md`. **Frontend only: no backend change, no migration, no deploy.** A task TYPE chooses how completing works, stored as `completion` on `taskTypeSettings[typeId]` (a property on an existing blob, so no release): `required` (today's completion form and a work entry; absent reads this, so every existing type is unchanged), `optional` (a "Done" checkbox completes in one tap, and "Log work…" stays as a separate button) and `simple` (the checkbox only; never a work entry).
