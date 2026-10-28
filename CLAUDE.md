@@ -959,6 +959,26 @@ A **Views** main tab shows saved task lists and boards an editor sets up in **Se
 - **The connector does not know views yet** (queued in `/mnt/project-files/connector-queue.md`).
 - Covered by `test-frontend-views.js` (real helpers plus wiring, mutation-checked) and `save_test.ts` (`viewState` permission rule; runs in CI). Driven in Chromium against Sandbox: sidebar and counts, the phone flow, board drag between buckets, list drag and reload, read mode and pencil, the live filter, and the Settings editor and order icon. The viewer path of `viewState` is covered by the Deno test only.
 
+## Dark mode (2026-10-28)
+
+**Settings > Personal > Appearance**: Light, Dark or Follow system (the default), remembered per DEVICE
+in `localStorage` (`asset-tracker-theme-mode`, not tenant-namespaced). Frontend only: no backend change.
+
+- **`clients.js` resolves it before anything paints**: `DARK_THEME` replaces EVERY palette key for every
+  tenant (a school's light colours carry no contrast guarantee on dark), and `applyTheme` also sets
+  `color-scheme` on the root. `CLIENT.dark` / `CLIENT.themeMode` tell the app. The public panel pages
+  pick it up for free, since they read the same CSS variables.
+- **Changing it RELOADS the page**: `C` is plain values read at render and at module load, so there is
+  no re-render path. "Follow system" is read at load only.
+- **`brandBar` is `brandDark` as a SURFACE** (table headers, bars); `brandDark` stays the ink/link colour.
+  They are equal in light mode (a tenant naming only `brandDark` gets it as `brandBar` too) and part in dark,
+  where the ink goes light and the bar stays dark. **Use `C.brandBar` for any new background.**
+- **Never write `#fff`/`white` as a background**; use `C.surface`. White TEXT on brand/danger/success
+  buttons is fine, which is why those three stay mid-dark in the dark palette.
+- **Floor plans and section drawings sit on `PLAN_PAPER`**, a light sheet in dark mode, because an uploaded
+  plan is drawn in dark ink. The print door card is already light.
+- A tenant has no way to set its own dark palette yet.
+
 ## Phone bottom bar (2026-10-20)
 
 At phone width (`PHONE_MEDIA_QUERY`) the list screens drop the title bar and the tabs move to a fixed bottom bar of icons (`PHONE_TAB_ICONS`, each with `title`/`aria-label`, the Tasks badge kept), with the one ☰ menu as its last icon; its card opens upward. The status pills the title bar carried (Sandbox, save state, View only, Backend outdated, Dev) sit in the slim top row beside each tab's search (`headerStatus`). The floating + buttons are lifted above the bar. An open asset keeps its own header and menu. Desktop unchanged. Frontend only.

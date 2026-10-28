@@ -153,5 +153,35 @@ check('clients.js resolves a theme with no DOM present', !!THEME && Object.keys(
         `CLIENT at ${iClient}, C at ${iC}`);
 }
 
+// Dark mode (Appearance setting). The mode is read from per-device storage, and
+// "system" follows the media query; the dark palette must name only real keys.
+{
+  const run = (mode, prefersDark) => {
+    const ctx = {
+      window: {
+        location: { search: '', pathname: '/' },
+        console: { warn() {} },
+        localStorage: { getItem: () => mode },
+        matchMedia: () => ({ matches: prefersDark }),
+      },
+      URLSearchParams,
+    };
+    vm.createContext(ctx);
+    new vm.Script(CLIENTS_SRC, { filename: 'clients.js' }).runInContext(ctx);
+    return ctx.window.ASSET_TRACKER_CLIENT;
+  };
+  check('no stored mode follows the system: light system stays light', run(null, false).dark === false);
+  check('no stored mode follows the system: dark system goes dark', run(null, true).dark === true);
+  check('stored "light" beats a dark system', run('light', true).dark === false);
+  check('stored "dark" beats a light system', run('dark', false).dark === true);
+  check('an unreadable stored mode is treated as system', run('banana', false).themeMode === 'system');
+  const d = run('dark', false);
+  check('dark mode changes the surface and the ink', d.theme.bg !== THEME.bg && d.theme.ink !== THEME.ink);
+  check('dark mode carries exactly the same keys as light',
+        Object.keys(d.theme).sort().join() === Object.keys(THEME).sort().join());
+  check('brandBar equals brandDark in light mode, and parts from it in dark',
+        THEME.brandBar === THEME.brandDark && d.theme.brandBar !== d.theme.brandDark);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

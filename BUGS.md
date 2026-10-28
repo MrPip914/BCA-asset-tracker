@@ -16,6 +16,13 @@ version that fixed them.
 
 ## Open
 
+### A person's name in the Assets list reads in the border colour (nearly invisible)
+**Found:** 2026-10-28, while adding dark mode.
+**Needs a deploy:** no; frontend only.
+**Confirmed:** in the Assets table a User row's Name cell takes `applies ? C.muted : C.border` and
+`name` is excluded for a person type, so `applies` is false and the name is drawn in the faint
+border colour (about 1.3:1 on the surface, in light mode as well as dark). It should read like any other name.
+
 ### test-frontend-setters.js fails on the Views editor's `renderConds`
 **Found:** 2026-10-28, while building tasks with no asset (fails on `dev` without that change).
 **Needs a deploy:** no; test or one rename only.

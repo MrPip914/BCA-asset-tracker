@@ -58,6 +58,11 @@
     ink: "#2A3439",
     brand: "#546F75",
     brandDark: "#3E5054",
+    // brandDark as a SURFACE (table headers, bars) rather than as ink. The two
+    // are one colour in light mode and must part in dark, where ink goes light
+    // and the bar stays dark. A tenant that names no brandBar gets its own
+    // brandDark (see resolveTheme), so the school's light palette is unchanged.
+    brandBar: "#3E5054",
     accent: "#A9764B",
     border: "#DCD4C2",
     hover: "#EAE3D3",
@@ -80,6 +85,48 @@
     onBrandActive: "#E8C9A0",
     dangerSurface: "#FBF0EE",
   };
+
+  // The dark palette. It replaces EVERY key, whichever tenant is loaded: a
+  // school's own light colours (a pale background, a mid-tone brand) have no
+  // guaranteed contrast on a dark surface, so letting them through would make
+  // dark mode readable for one school and not another. Keys are DEFAULT_THEME's.
+  // `brand`, `danger` and `success` also sit behind white button text, so they
+  // stay mid-dark rather than lightening like the text colours do.
+  var DARK_THEME = {
+    bg: "#161B1D",
+    surface: "#20282B",
+    ink: "#E6E9E8",
+    brand: "#5B7A81",
+    brandDark: "#9CC0C8",
+    brandBar: "#2F4348",
+    accent: "#C99266",
+    border: "#38454A",
+    hover: "#2B363A",
+    danger: "#CF5A45",
+    success: "#4F8A55",
+    muted: "#A7B4B6",
+    placeholder: "#75868A",
+    empty: "#8A999C",
+    scrollThumb: "#4A5A5F",
+    onBrand: "#E6E9E8",
+    onBrandActive: "#E8C9A0",
+    dangerSurface: "#3A2420",
+  };
+
+  // light | dark | system, remembered per DEVICE (not per tenant: one phone
+  // reads the same in every school). Anything unreadable is "system".
+  var THEME_MODE_KEY = "asset-tracker-theme-mode";
+  function readThemeMode() {
+    try {
+      var v = window.localStorage && window.localStorage.getItem(THEME_MODE_KEY);
+      if (v === "light" || v === "dark") return v;
+    } catch (e) {}
+    return "system";
+  }
+  var themeMode = readThemeMode();
+  var dark = themeMode === "dark" || (themeMode === "system"
+    && typeof window.matchMedia === "function"
+    && !!window.matchMedia("(prefers-color-scheme: dark)").matches);
 
   var CLIENTS = {
     bca: {
@@ -278,6 +325,8 @@
       if (!Object.prototype.hasOwnProperty.call(DEFAULT_THEME, key)) { unknown.push(key); return; }
       theme[key] = overrides[key];
     });
+    // A tenant that sets brandDark but not brandBar keeps the two equal.
+    if (!overrides.brandBar) theme.brandBar = theme.brandDark;
     if (unknown.length && window.console && window.console.warn) {
       window.console.warn(
         "clients.js: tenant \"" + id + "\" names theme key(s) that do not exist and were ignored: "
@@ -312,6 +361,10 @@
     if (typeof document === "undefined" || !document.documentElement) return;
     var style = document.documentElement.style;
     Object.keys(theme).forEach(function (key) { style.setProperty(cssVarName(key), theme[key]); });
+    // Native controls (scrollbars, date pickers, autofill) and the strip behind
+    // an overscroll follow the theme too.
+    style.colorScheme = dark ? "dark" : "light";
+    style.backgroundColor = theme.bg;
   }
 
   // ?backend=sheet runs a tenant that has moved to Supabase against its old
@@ -328,10 +381,15 @@
   var backend = usePreview || (config.sheetApiUrl && !useSheet) ? "supabase" : "sheet";
 
   var theme = resolveTheme(config.theme);
+  if (dark) Object.keys(DARK_THEME).forEach(function (key) { theme[key] = DARK_THEME[key]; });
   applyTheme(theme);
 
   window.ASSET_TRACKER_CLIENT = {
     id: id,
+    // The device's choice ("light" | "dark" | "system") and what it resolved to.
+    themeMode: themeMode,
+    themeModeKey: THEME_MODE_KEY,
+    dark: dark,
     appName: config.appName,
     orgName: config.orgName,
     labelPrefix: config.labelPrefix,
