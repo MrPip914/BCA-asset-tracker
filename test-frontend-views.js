@@ -211,7 +211,7 @@ check('Sandbox carries a Kanban and a view that queries it', /type: "kanban"/.te
   check('the sort hook drops only a real drag, not a tap', /s\.moved && t\.group !== null/.test(html));
   eq('the old schedule tick expands to its pieces', H.adoptViews({ list: [{ id: 'a', dialogFields: ['schedule', 'notes', 'dueDate'] }] }).list[0].dialogFields, ['frequency', 'lastPerformed', 'dueDate', 'notes']);
   check('schedule is no longer a tick of its own', !/key: "schedule"/.test(html));
-  check('the read-only task view has no kind toggle or inputs', /viewReadOnly \? \(\s*<div[^>]*>\s*<div[^>]*>\{maintenanceDraft\.task\}/.test(html));
+  check('the read-only task view has no kind toggle or inputs', /viewReadOnly \? \(\s*<div[^>]*>\s*<div[^>]*>\s*\{doneCircle\}\s*<span>\{maintenanceDraft\.task\}<\/span>/.test(html));
 }
 
 // --- before / after / less than / greater than (2026-10-19)

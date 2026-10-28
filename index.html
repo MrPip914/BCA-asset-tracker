@@ -2643,8 +2643,17 @@ const VIEW_PLACE_FIELDS = [
 const VIEW_GROUP_PLACES = "Places of the task's asset";
 const VIEW_GROUP_BOARDS = "Kanban boards";
 const VIEW_DEFAULT_COLUMNS = ["task", "asset", "dueDate", "status"];
+// An optional column that is a CONTROL, not a field: a circle that gains a
+// check when the task is done, shown right before the task's title on a card or
+// list row. It is offered beside the fields in the column pickers and is never
+// a query field, so it is not part of viewFieldsFor.
+const VIEW_DONE_COLUMN = "done";
+const VIEW_DONE_FIELD = { key: VIEW_DONE_COLUMN, label: "Done circle" };
+function viewColumnFields(fields) { return [VIEW_DONE_FIELD, ...fields]; }
 // What a task shows when opened FROM a view. The task's name is always shown.
 const VIEW_DIALOG_FIELDS = [
+  { key: "done", label: "Done circle" },
+  { key: "status", label: "Status" },
   { key: "frequency", label: "Repeats" },
   { key: "lastPerformed", label: "Last performed / completed" },
   { key: "startDate", label: "Start date" },
@@ -6858,7 +6867,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-28.9";
+const APP_VERSION = "2026-10-28.10";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -8087,16 +8096,16 @@ const MOCK_SNAPSHOT = {
   // Two saved task lists. Sandbox shows every view (it has no sign-in), and
   // [CURRENT USERNAME] reads the sandbox name tag, so "Eric" sees his own tasks.
   views: { list: [
-    { id: "view-mine", name: "My tasks", userEmails: [], dialogFields: ["frequency", "lastPerformed", "dueDate", "notes", "asset"],
-      columns: ["task", "asset", "dueDate", "status"], order: ["BCA0086::mnt-0086-drain"],
+    { id: "view-mine", name: "My tasks", userEmails: [], dialogFields: ["done", "status", "frequency", "lastPerformed", "dueDate", "notes", "asset"],
+      columns: ["done", "task", "asset", "dueDate", "status"], order: ["BCA0086::mnt-0086-drain"],
       conditions: [{ field: "owner", op: "=", value: "", token: "CURRENT_USERNAME", join: "and" }, { field: "status", op: "!=", value: "Done", token: "", join: "and" }] },
     // A Kanban: open tasks start in "To do" and are moved into a weekday. The
     // third view asks which bucket a task is in, so Sandbox shows a query naming
     // another view's board.
-    { id: "view-week", name: "Workweek", type: "kanban", userEmails: [], dialogFields: ["frequency", "lastPerformed", "dueDate", "notes", "owner"],
+    { id: "view-week", name: "Workweek", type: "kanban", userEmails: [], dialogFields: ["done", "frequency", "lastPerformed", "dueDate", "notes", "owner"],
       defaultBucketName: "To do", buckets: [{ id: "bk-mon", name: "Monday" }, { id: "bk-tue", name: "Tuesday" }, { id: "bk-wed", name: "Wednesday" }],
       assignments: { "BCA0086::mnt-0086-filter": "bk-mon", "BCA0086::mnt-0086-drain": "bk-tue" },
-      columns: ["task", "asset", "dueDate", "status"], order: [], viewersCanOrder: true,
+      columns: ["done", "task", "asset", "dueDate", "status"], order: [], viewersCanOrder: true,
       conditions: [{ field: "status", op: "!=", value: "Done", token: "", join: "and" }, { field: "frequency", op: "!=", value: "", token: "", join: "and" }] },
     { id: "view-notmon", name: "Not on Monday", userEmails: [], dialogFields: ["notes", "owner"],
       columns: ["task", "asset", "kanban:view-week", "status"], order: [],
@@ -8106,10 +8115,10 @@ const MOCK_SNAPSHOT = {
       columns: ["task", "asset", "dueDate", "status"], order: [],
       conditions: [{ field: "kanban:view-week", op: "=", value: "", token: "DAY_OF_WEEK", join: "and" }] },
     // Grouped by owner, people in reverse order, the unowned group first.
-    { id: "view-projects", name: "Open projects", userEmails: [], dialogFields: ["dueDate", "notes", "owner"],
+    { id: "view-projects", name: "Projects", userEmails: [], dialogFields: ["done", "status", "dueDate", "notes", "owner"],
       groupBy: "owner", groupDir: "desc", groupOrder: ["__none"],
-      columns: ["task", "asset", "owner", "dueDate"], order: [],
-      conditions: [{ field: "kind", op: "=", value: "One-off", token: "", join: "and" }, { field: "status", op: "!=", value: "Done", token: "", join: "and" }] },
+      columns: ["done", "task", "asset", "owner", "dueDate", "status"], order: [],
+      conditions: [{ field: "kind", op: "=", value: "One-off", token: "", join: "and" }] },
     // Every task on a month: a dated day, a start-to-due span, and the undated.
     { id: "view-calendar", name: "Calendar", type: "calendar", userEmails: [], dialogFields: ["frequency", "dueDate", "doOn", "notes", "owner"],
       columns: ["task", "asset", "dueDate", "status"], order: [], conditions: [] },
@@ -13552,6 +13561,34 @@ function AssetTracker() {
     if (!keepOpen) setMaintenanceModal(null);
   }
 
+  // Reopen a finished one-off: clear its completed date, audited as the edit
+  // it is (the same row resetSubtasks writes). `assetId` follows the usual rule.
+  async function reopenTask(itemId, assetId, keepOpen) {
+    if (savingRef.current) return; // double-submit guard, see savingRef
+    const tid = assetId || selectedId;
+    const target = assets ? assets.find(a => a.id === tid) : null;
+    const item = target ? (target.maintenanceItems || []).find(m => m && m.id === itemId) : null;
+    if (!item || !item.lastPerformed) return;
+    const entry = { at: new Date().toISOString(), by: currentUser || "", assetLabel: tid, assetType: target.type, action: "maintenance_edited", field: `${item.task} — Completed`, from: formatDateOnly(item.lastPerformed), to: "—" };
+    const next = assets.map(a => (a.id === tid ? { ...a, maintenanceItems: a.maintenanceItems.map(m => (m && m.id === itemId ? { ...m, lastPerformed: "" } : m)) } : a));
+    await persist(next, { auditLog: logAudit([entry]) });
+    if (!keepOpen) setMaintenanceModal(null);
+  }
+
+  // The done circle. A finished one-off is reopened. Anything else is
+  // completed the way its type says: the Log work form where one is required,
+  // a one-tap completion otherwise. The same guard as the buttons asks first
+  // about open subtasks and blockers. The task dialog, if open, stays open.
+  function toggleTaskDone(row) {
+    const item = row.item;
+    const assetId = row.asset.id;
+    if (isOneOffTask(item) && taskIsDone(item)) { reopenTask(item.id, assetId, true); return; }
+    guardComplete(item.id, () => {
+      if (taskCompletionMode(workModel, item.taskType) === "required") openMaintenanceComplete(item.id, assetId);
+      else completeTaskQuick(item.id, assetId, true);
+    });
+  }
+
   async function deleteMaintenanceItem(itemId) {
     if (savingRef.current) return; // double-submit guard, see savingRef
     if (!workTarget) return;
@@ -17192,6 +17229,11 @@ function AssetTracker() {
             const maintenanceFrequencyOk = maintenanceDraft.kind === TASK_KIND_ONEOFF || !!frequencyFromDraft(maintenanceDraft);
             const taskCustomError = validateCustomValues(workModel, "task", maintenanceDraft.taskType, maintenanceDraft.custom, viewVisibleCustomKeys(dialogView));
             const taskStatusMeta = taskItem ? maintenanceStatusMeta(maintenanceStatusOf(taskItem)) : null;
+            // The done circle lives in the dialog only when the view asked for it
+            // (it replaces the Mark done / Log work buttons then). Dialogs opened
+            // anywhere else keep their buttons.
+            const doneRow = dialogView && vShow("done") && taskItem && workTarget ? { item: taskItem, asset: workTarget } : null;
+            const doneCircle = doneRow ? <TaskDoneCircle row={doneRow} onToggle={canEdit ? toggleTaskDone : undefined} size={20} /> : null;
             // Only ever shown for a dialog opened somewhere OTHER than the
             // asset's own page -- workDialogAssetId is null exactly when the
             // asset is already open, where a link to it would lead nowhere.
@@ -17213,7 +17255,10 @@ function AssetTracker() {
               const isoOf = d => (d ? d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0") : "");
               const addRow = (label, value) => { if (value) readRows.push({ label, value }); };
               if (!oneOff && vShow("frequency")) addRow("Repeats", (taskItem && taskItem.frequencyLabel) || maintenanceDraft.frequency);
-              if (vShow("lastPerformed")) addRow(oneOff ? "Completed" : "Last performed", dayText(dateOnly(maintenanceDraft.lastPerformed)));
+              // Read from the stored task, not the draft: the done circle can change it
+              // while this view stays open, and a read view has no unsaved edits.
+              if (vShow("status") && taskStatusMeta) addRow("Status", taskStatusMeta.label);
+              if (vShow("lastPerformed")) addRow(oneOff ? "Completed" : "Last performed", dayText(dateOnly(taskItem ? taskItem.lastPerformed : maintenanceDraft.lastPerformed)));
               if (oneOff && vShow("startDate")) addRow("Start", dayText(dateOnly(maintenanceDraft.startDate)));
               if (oneOff && vShow("doOn")) addRow("Scheduled for", dayText(dateOnly(maintenanceDraft.doOn)));
               if (vShow("dueDate")) {
@@ -17247,22 +17292,20 @@ function AssetTracker() {
             <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20, padding: 16 }}>
               <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 520, maxHeight: "90vh", overflowY: "auto" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, marginBottom: 16 }}>
-                  <div style={{ fontWeight: 700, color: C.brandDark }}>
-                    {editing
-                      ? (maintenanceDraft.parentTaskId ? "Subtask" : maintenanceDraft.kind === TASK_KIND_ONEOFF ? "One-off task" : "Scheduled task")
-                      : (maintenanceDraft.parentTaskId ? "Add subtask" : maintenanceDraft.kind === TASK_KIND_ONEOFF ? "Add one-off task" : "Add scheduled task")}
+                  {/* One-off or repeating is not a title: a repeating task shows an icon
+                      after its name, a one-off shows nothing. */}
+                  <div style={{ fontWeight: 700, color: C.brandDark, display: "flex", alignItems: "center" }}>
+                    {!viewReadOnly && doneCircle}
+                    {viewReadOnly ? null : editing
+                      ? (maintenanceDraft.parentTaskId ? "Subtask" : "Task")
+                      : (maintenanceDraft.parentTaskId ? "Add subtask" : "Add task")}
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
                     {isBlocked && (
                       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: C.danger, flexShrink: 0 }}>Blocked</span>
                     )}
-                    {taskStatusMeta && (
-                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: taskStatusMeta.color, flexShrink: 0 }}>
-                        {taskStatusMeta.label}
-                      </span>
-                    )}
                     {dialogView && canEdit && !maintenanceModal.editView && (
-                      <button onClick={() => setMaintenanceModal({ ...maintenanceModal, editView: true })} aria-label="Edit this task" className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4 }}><Pencil size={16} color={C.muted} /></button>
+                      <button onClick={() => { openMaintenanceEdit(maintenanceModal.itemId, workDialogAssetId, maintenanceModal.viewId); setMaintenanceModal(m => ({ ...m, editView: true })); }} aria-label="Edit this task" className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4 }}><Pencil size={16} color={C.muted} /></button>
                     )}
                     <button onClick={() => setMaintenanceModal(null)} aria-label="Close" className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
                   </div>
@@ -17300,7 +17343,11 @@ function AssetTracker() {
                     would let someone fill in a pair the app then ignores. */}
                 {viewReadOnly ? (
                   <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                    <div style={{ fontSize: 17, fontWeight: 700, color: C.ink, wordBreak: "break-word" }}>{maintenanceDraft.task}</div>
+                    <div style={{ fontSize: 17, fontWeight: 700, color: C.ink, wordBreak: "break-word", display: "flex", alignItems: "center", gap: 8 }}>
+                      {doneCircle}
+                      <span>{maintenanceDraft.task}</span>
+                      {maintenanceDraft.kind !== TASK_KIND_ONEOFF && <Repeat size={15} color={C.muted} aria-label="Repeating task" role="img" style={{ flexShrink: 0 }} />}
+                    </div>
                     {readRows.map(r => (
                       <div key={r.label}>
                         <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>{r.label}</div>
@@ -17330,6 +17377,14 @@ function AssetTracker() {
                 />
                 )}
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
+                  {/* Status is worked out from the task's dates, so it is shown, not edited:
+                      one more field in the list, when the view (or no view) asks for it. */}
+                  {editing && taskStatusMeta && vShow("status") && (
+                    <div style={{ gridColumn: "1 / -1" }}>
+                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Status</div>
+                      <div style={{ fontSize: 14, color: C.ink, marginTop: 2 }}>{taskStatusMeta.label}</div>
+                    </div>
+                  )}
                   <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
                     <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Task</span>
                     <input
@@ -17607,7 +17662,7 @@ function AssetTracker() {
                       button is: there is nothing left to complete, and offering
                       it would read as a way to log a SECOND completion of a job
                       that happens once. */}
-                  {editing && !taskDone && (!viewReadOnly || canEdit) && (() => {
+                  {editing && !taskDone && (!viewReadOnly || canEdit) && !doneRow && (() => {
                     const mode = taskCompletionMode(workModel, maintenanceDraft.taskType);
                     const btn = { padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brand}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.brand };
                     return (
@@ -20707,6 +20762,7 @@ function AssetTracker() {
                 onField={canEdit && activeView.fieldBacked && activeView.fieldWritable ? (key, value) => setTaskBoardValue(activeView, key, value) : undefined}
                 onSchedule={canEdit ? (key, day) => setTaskDoOn(key, day) : undefined}
                 onOpen={r => openMaintenanceEdit(r.item.id, r.asset.id, activeView.id)}
+                onToggleDone={canEdit ? toggleTaskDone : undefined}
                 emptyText="No tasks match this view."
               />
             </div>
@@ -21404,6 +21460,27 @@ function usePointerSort(onDrop) {
 }
 const DROP_LINE = { height: 3, borderRadius: 2, background: "var(--drop-line, #1a73e8)", margin: "-1px 0" };
 
+// The done circle: an empty ring that gains a check when the task is done.
+// Pressing it completes the task (or opens the Log work form, for a type that
+// asks for one); pressing a checked one reopens it. `onToggle` is left off for a
+// view-only person, who sees the state and cannot change it. It stops its own
+// pointer and click events so it never opens the task or starts a drag. A
+// repeating task is never done, so its ring is always empty: pressing it logs
+// a completion and the task simply comes round again.
+function TaskDoneCircle({ row, onToggle, size = 18 }) {
+  const done = isOneOffTask(row.item) && taskIsDone(row.item);
+  const stop = e => e.stopPropagation();
+  return (
+    <button type="button" data-done-circle={done ? "done" : "open"} disabled={!onToggle}
+      aria-label={done ? `Mark ${row.item.task} not done` : `Mark ${row.item.task} done`} aria-pressed={done}
+      onPointerDown={stop} onPointerUp={stop} onKeyDown={stop}
+      onClick={e => { e.stopPropagation(); if (onToggle) onToggle(row); }}
+      style={{ flexShrink: 0, width: size, height: size, padding: 0, marginRight: 8, marginTop: size > 16 ? 0 : 1, verticalAlign: "middle", display: "inline-flex", alignItems: "center", justifyContent: "center", borderRadius: "50%", border: `1.5px solid ${done ? C.success : C.muted}`, background: done ? C.success : "transparent", cursor: onToggle ? "pointer" : "default" }}>
+      {done && <Check size={size - 6} color="#fff" strokeWidth={3} />}
+    </button>
+  );
+}
+
 // A view's task list. `rows` are the tasks that already matched the query. Ordered
 // tasks sit on top in their stored order, the rest below in the Tasks tab's due
 // order. `arrange` turns on a drag handle per row; `onReorder(order)` gets the
@@ -21413,10 +21490,11 @@ const DROP_LINE = { height: 3, borderRadius: 2, background: "var(--drop-line, #1
 // (monospace, upper-case) column headers or a Kanban column's name.
 const VIEW_GROUP_FONT = "'IBM Plex Serif', Georgia, serif";
 
-function ViewTaskList({ view, rows, model, ctx, arrange, onReorder, onOpen, emptyText }) {
+function ViewTaskList({ view, rows, model, ctx, arrange, onReorder, onOpen, onToggleDone, emptyText }) {
   const fields = viewFieldsFor(model, ctx && ctx.views, view.id);
-  const cols = view.columns.map(k => fields.find(f => f.key === k)).filter(Boolean);
+  const cols = view.columns.filter(k => k !== VIEW_DONE_COLUMN).map(k => fields.find(f => f.key === k)).filter(Boolean);
   const shown = cols.length ? cols : [fields[0]];
+  const showDone = view.columns.includes(VIEW_DONE_COLUMN);
   // One section when ungrouped; one per group otherwise. Each section orders its
   // own rows, and a drop only ever reorders inside the section it lands in.
   const grouped = viewGroups(view, rows, model, ctx);
@@ -21451,6 +21529,7 @@ function ViewTaskList({ view, rows, model, ctx, arrange, onReorder, onOpen, empt
           )}
           {shown.map(f => (
             <div key={f.key} style={{ padding: "12px 14px", fontSize: 13, color: f.key === "task" ? C.ink : C.muted, fontWeight: f.key === "task" ? 600 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {f.key === "task" && showDone && <TaskDoneCircle row={r} onToggle={onToggleDone} />}
               {f.key === "status"
                 ? <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: maintenanceStatusMeta(r.status).color }}>{viewFieldDisplay(r, f.key, model, ctx)}</span>
                 : viewFieldDisplay(r, f.key, model, ctx)}
@@ -21506,12 +21585,13 @@ function ViewTaskList({ view, rows, model, ctx, arrange, onReorder, onOpen, empt
 // A Kanban view: one column per bucket, a card per task. `arrange` makes every
 // card draggable (to another bucket, or to a new place in its own);
 // `onMove(key, bucketId, index)` is called on the drop.
-function KanbanBoard({ view, rows, model, ctx, arrange, onMove, onOpen, emptyText, freezeFirst }) {
+function KanbanBoard({ view, rows, model, ctx, arrange, onMove, onOpen, onToggleDone, emptyText, freezeFirst }) {
   // Drop areas: an ungrouped column is one area named by its bucket id. A grouped
   // one has an area per group ("<bucket>|k:<group>"), which orders cards, and the
   // column itself ("<bucket>|*") as the fallback, which only changes the bucket.
   const fields = viewFieldsFor(model, ctx && ctx.views, view.id);
-  const cardFields = view.columns.filter(k => k !== "task").map(k => fields.find(f => f.key === k)).filter(Boolean);
+  const showDone = view.columns.includes(VIEW_DONE_COLUMN);
+  const cardFields = view.columns.filter(k => k !== "task" && k !== VIEW_DONE_COLUMN).map(k => fields.find(f => f.key === k)).filter(Boolean);
   const board = viewBoard(view, rows, model, ctx);
   const { drag, handle, lift, lineAt, tappedIn } = usePointerSort((key, area, index) => {
     const bar = area.indexOf("|");
@@ -21534,6 +21614,7 @@ function KanbanBoard({ view, rows, model, ctx, arrange, onMove, onOpen, emptyTex
         >
           <div style={{ display: "flex", alignItems: "flex-start", gap: 6 }}>
             {arrange && <GripVertical size={14} color={C.muted} style={{ flexShrink: 0, marginTop: 2 }} />}
+            {showDone && <TaskDoneCircle row={r} onToggle={onToggleDone} />}
             <div data-card-title role={onOpen ? "button" : undefined} tabIndex={onOpen ? 0 : undefined}
               onKeyDown={onOpen ? e => { if (e.key === "Enter") onOpen(r); } : undefined}
               style={{ fontSize: 13, fontWeight: 600, color: C.ink, minWidth: 0, wordBreak: "break-word", cursor: onOpen ? "pointer" : undefined }}>{r.item.task}</div>
@@ -21775,7 +21856,7 @@ function CalendarView({ view, rows, onOpen, onSchedule, emptyText }) {
 // or board. `onState(patch)` receives { order } and/or { assignments } when a
 // person arranges tasks. Keyed by view id by its caller, so the live filter and
 // the arranging mode reset when another view is opened.
-function ViewBody({ title, view, rows, model, ctx, canArrange, onState, onField, onSchedule, onOpen, emptyText }) {
+function ViewBody({ title, view, rows, model, ctx, canArrange, onState, onField, onSchedule, onOpen, onToggleDone, emptyText }) {
   const [arrange, setArrange] = useState(false);
   const [filterOpen, setFilterOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -21852,7 +21933,7 @@ function ViewBody({ title, view, rows, model, ctx, canArrange, onState, onField,
       {calendar ? (
         <CalendarView view={view} rows={shownRows} onOpen={onOpen} onSchedule={onSchedule} emptyText={active ? "No tasks match the filter." : emptyText} />
       ) : kanban ? (
-        <KanbanBoard view={view} rows={shownRows} model={model} ctx={ctx} arrange={arranging} onOpen={onOpen} freezeFirst={freeze && !phone} emptyText={active ? "None match." : "No tasks."}
+        <KanbanBoard view={view} rows={shownRows} model={model} ctx={ctx} arrange={arranging} onOpen={onOpen} onToggleDone={onToggleDone} freezeFirst={freeze && !phone} emptyText={active ? "None match." : "No tasks."}
           onMove={(key, bucketId, index, area) => {
             const board = viewBoard(view, shownRows, model, ctx);
             // On a grouped board a drop orders cards only inside the card's OWN group.
@@ -21872,7 +21953,7 @@ function ViewBody({ title, view, rows, model, ctx, canArrange, onState, onField,
             }
           }} />
       ) : (
-        <ViewTaskList view={view} rows={shownRows} model={model} ctx={ctx} arrange={arranging} onOpen={onOpen}
+        <ViewTaskList view={view} rows={shownRows} model={model} ctx={ctx} arrange={arranging} onOpen={onOpen} onToggleDone={onToggleDone}
           onReorder={order => onState({ order })} emptyText={active ? "No tasks match the filter." : emptyText} />
       )}
     </div>
@@ -22170,7 +22251,7 @@ function ScheduleTemplateDialog({ templates, assets, dialog, onChange, onRun, on
 function ViewEditor({ initial, allViews, accessUsers, sandbox, assets, rows, model, previewUserName, onSave, onDelete, onCancel }) {
   const [draft, setDraft] = useState(() => initial || {
     id: crypto.randomUUID(), name: "", type: VIEW_TYPE_LIST, userEmails: [], conditions: [],
-    columns: [...VIEW_DEFAULT_COLUMNS], dialogFields: ["frequency", "lastPerformed", "dueDate", "notes", "owner"], order: [],
+    columns: [...VIEW_DEFAULT_COLUMNS], dialogFields: ["done", "status", "frequency", "lastPerformed", "dueDate", "notes", "owner"], order: [],
     viewersCanOrder: false, openMode: "view", newAtTop: false, hideEmptyFields: false, fieldKey: "", fieldChoices: [], defaultBucketName: KANBAN_DEFAULT_NAME, buckets: [], assignments: {},
     groupBy: "", groupDir: "asc", groupOrder: [],
   });
@@ -22274,8 +22355,9 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, assets, rows, mod
   const ctx = { userName, views: ctxViews, assets, seen: [draft.id] };
   const matched = rows.filter(r => viewMatches(shown, r, model, ctx));
   const groupsNow = viewGroups(shown, matched, model, ctx);
-  const fieldLabel = k => (fields.find(f => f.key === k) || {}).label || k;
-  const cols = draft.columns.filter(k => fields.some(f => f.key === k));
+  const columnFields = viewColumnFields(fields);
+  const fieldLabel = k => (columnFields.find(f => f.key === k) || {}).label || k;
+  const cols = draft.columns.filter(k => columnFields.some(f => f.key === k));
   const canSave = !!draft.name.trim();
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
@@ -22476,7 +22558,7 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, assets, rows, mod
           </div>
           <PickerField label={kanban ? "Fields on each card" : "Columns in the list"} hideLabel multi value={cols}
             onChange={v => set({ columns: [...cols.filter(k => v.includes(k)), ...v.filter(k => !cols.includes(k))] })}
-            options={fields.map(f => f.key)} labelForOption={fieldLabel} headingFor={k => viewFieldGroup(fields, k)} placeholder="Choose fields…" title={kanban ? "Fields on each card" : "Columns in the list"} />
+            options={columnFields.map(f => f.key)} labelForOption={fieldLabel} headingFor={k => viewFieldGroup(fields, k)} placeholder="Choose fields…" title={kanban ? "Fields on each card" : "Columns in the list"} />
         </div>
 
         </>}
