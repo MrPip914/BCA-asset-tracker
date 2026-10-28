@@ -845,6 +845,15 @@ asset per site (`GENERAL_ASSET_ID` = `"__general"`, type `General`, name "No ass
 - Covered by `test-frontend-general-asset.js`; driven in Chromium against Sandbox (add a task
   with "No asset" from the Tasks tab; it shows in the table and not in the Assets list).
 
+## Task completion modes (2026-10-28)
+
+Phase 2 of `/mnt/project-files/plans/task-relationships-scheduling.md`. **Frontend only: no backend change, no migration, no deploy.** A task TYPE chooses how completing works, stored as `completion` on `taskTypeSettings[typeId]` (a property on an existing blob, so no release): `required` (today's completion form and a work entry; absent reads this, so every existing type is unchanged), `optional` (a "Done" checkbox completes in one tap, and "Log work…" stays as a separate button) and `simple` (the checkbox only; never a work entry).
+
+- **A quick completion (`completeTaskQuick`) stamps `lastPerformed` and writes the same `maintenance_completed` audit row as the form, and nothing else.** Same single `persist()`, and it closes the task dialog behind it for the reason the form does.
+- Switched per type under Settings > Task types ("Completing", with a ? tip). The built-in Default type can be switched too, so untyped tasks follow it. `setTaskCompletionMode` stores nothing for `required`.
+- Shown in the task dialog (Mark done button) and on the asset's task cards (checkbox). The Tasks table row still opens the dialog. Applies to scheduled tasks as well as one-offs: the checkbox just stamps today.
+- Covered by `test-frontend-completion-modes.js`.
+
 ## Task date roles (2026-10-28)
 
 Phase 3 of `/mnt/project-files/plans/task-relationships-scheduling.md`. A ONE-OFF task carries up
