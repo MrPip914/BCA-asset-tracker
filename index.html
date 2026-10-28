@@ -1160,6 +1160,30 @@ function readStoredNameOrder() {
   }
 }
 
+// ---------- TASKS WITH NO ASSET (2026-10-28) ----------
+// Every task hangs off an asset (tasks are rows of their asset's
+// maintenanceItems), so a task that belongs to nothing physical lives on ONE
+// hidden catch-all asset per site. To everything else it is still an ordinary
+// asset -- work entries, files, audit rows, views, Kanban and the save path all
+// keep working -- and the only places that know about it are the ones that LIST
+// assets, which leave it out (isGeneralAsset), and the Asset picker, which
+// offers it as "No asset". Its name is the text people see in an Asset column.
+// It is created in memory at load and reaches the database only with the first
+// task saved onto it, so a site that never uses it never stores it.
+const GENERAL_ASSET_ID = "__general";
+const GENERAL_ASSET_TYPE = "General";
+const GENERAL_ASSET_NAME = "No asset";
+function isGeneralAsset(a) { return !!a && a.id === GENERAL_ASSET_ID; }
+function makeGeneralAsset() {
+  return {
+    id: GENERAL_ASSET_ID, label: GENERAL_ASSET_ID, tag: "", name: GENERAL_ASSET_NAME,
+    type: GENERAL_ASSET_TYPE, status: "Active", parentId: "", personIds: [],
+    maintenanceItems: [], changes: [], comments: [], allocations: [], breakers: [], unassignedCircuits: [],
+  };
+}
+function ensureGeneralAsset(list) {
+  return (list || []).some(isGeneralAsset) ? list : [...(list || []), makeGeneralAsset()];
+}
 function nameOf(asset, typesList) {
   // A person is called by their parts, composed in whichever order the app is
   // currently reading in. Checked FIRST and never falling back to a stored
@@ -6417,7 +6441,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-23.3";
+const APP_VERSION = "2026-10-28.1";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -9354,7 +9378,7 @@ function AssetTracker() {
     // so a person whose parts are adopted here is already excluded from the
     // "fill in a blank name" pass, and there is no window in which a person
     // could pick up a generated "User BCA0090".
-    const loadedAssets = adoptLegacyNames(adoptPersonNames(parented), loadedTypes);
+    const loadedAssets = ensureGeneralAsset(adoptLegacyNames(adoptPersonNames(parented), loadedTypes));
     assetRevsRef.current = readRevs;
     setAssets(loadedAssets);
     // No scriptVersion at all means an old backend that predates this check entirely —
@@ -10262,7 +10286,7 @@ function AssetTracker() {
   // Type filter options are type IDS, sorted by the name they currently show.
   const types = useMemo(() => {
     if (!assets) return [];
-    const present = new Set(assets.map(a => a.type || "Other"));
+    const present = new Set(assets.filter(a => !isGeneralAsset(a)).map(a => a.type || "Other"));
     // ONE order, A→Z by the name people read. It used to be category order with
     // names sorted inside each run, which existed only to feed the headings the
     // filter drew; labels are a filter now, not headings, so there is no run to
@@ -10323,6 +10347,7 @@ function AssetTracker() {
     if (!assets) return [];
     const q = query.trim().toLowerCase();
     const list = assets.filter(a => {
+      if (isGeneralAsset(a)) return false; // the hidden home of tasks with no asset
       // Scope: the chosen place itself, plus everything BENEATH it at any depth
       // — drilling to a building shows the building's own row and the
       // equipment in all its rooms, not just what sits directly on it. See
@@ -10883,6 +10908,7 @@ function AssetTracker() {
   // Neither set (the normal click) PUSHES, which is what gives the browser's
   // own Back button — and a phone's back gesture — the trail to walk.
   function openDetail(asset, initialTab, opts = {}) {
+    if (isGeneralAsset(asset)) return; // no page: it only holds tasks with no asset
     setSelectedId(asset.id);
     setView("detail");
     setDetailEditing(false);
@@ -14282,7 +14308,7 @@ function AssetTracker() {
       row.Building = buildingNameOf(a, assets);
       row.Room = roomNameOf(a, assets);
     };
-    const assetRows = assets.map(a => {
+    const assetRows = assets.filter(a => !isGeneralAsset(a)).map(a => {
       const row = {};
       columns.forEach(c => {
         // Handled before the fieldAppliesTo check, and the place columns written
@@ -16530,7 +16556,7 @@ function AssetTracker() {
             // Only ever shown for a dialog opened somewhere OTHER than the
             // asset's own page -- workDialogAssetId is null exactly when the
             // asset is already open, where a link to it would lead nowhere.
-            const linkAsset = editing && workDialogAssetId !== null && vShow("asset") ? workTarget : null;
+            const linkAsset = editing && workDialogAssetId !== null && vShow("asset") && !isGeneralAsset(workTarget) ? workTarget : null;
             const LinkAssetIcon = linkAsset ? iconFor(linkAsset.type) : null;
             // This item's own service history, newest first. Read off the
             // target asset rather than changesByMaintenance, which is built
@@ -16606,6 +16632,7 @@ function AssetTracker() {
                       value={workDialogAssetId}
                       onChange={id => setWorkDialogAssetId(id)}
                       hint="Which asset is this task for?"
+                      allowNone
                   />
                   </div>
                   )}
@@ -21905,7 +21932,7 @@ function SpaceRoomPickerField({ shapeId, value, onChange, assets, floorPlanLinks
 // Archived assets are excluded. They are out of service, so scheduling
 // maintenance on one is almost certainly a mis-click, and the site-wide lists
 // already exclude them.
-function AssetPickerField({ label, assets, value, onChange, hint }) {
+function AssetPickerField({ label, assets, value, onChange, hint, allowNone }) {
   const [open, setOpen] = useState(false);
   const all = assets || [];
   const chosen = all.find(a => a.id === value);
@@ -21913,7 +21940,9 @@ function AssetPickerField({ label, assets, value, onChange, hint }) {
   // share a name and the breadcrumb is gone once the modal closes.
   const triggerText = chosen ? nameOf(chosen) : "";
   const triggerPath = chosen ? pathOf(chosen, all) : "";
-  const archived = new Set(all.filter(a => (a.status || "Active") === "Archived").map(a => a.id));
+  // The catch-all asset is never browsable; it is offered as the "No asset" row
+  // when the caller allows it (tasks), and otherwise not at all.
+  const archived = new Set(all.filter(a => (a.status || "Active") === "Archived" || isGeneralAsset(a)).map(a => a.id));
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>{label}</span>
@@ -21926,8 +21955,9 @@ function AssetPickerField({ label, assets, value, onChange, hint }) {
           isSelectable={a => !archived.has(a.id)}
           excluded={archived}
           searchable
-          value={value || ""}
-          onChange={onChange}
+          value={value === GENERAL_ASSET_ID ? "" : (value || "")}
+          onChange={allowNone ? (id => onChange(id || GENERAL_ASSET_ID)) : onChange}
+          noneLabel={allowNone ? "No asset (not tied to anything)" : undefined}
           onClose={() => setOpen(false)}
         />
       )}
