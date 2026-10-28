@@ -42,7 +42,7 @@ check('a subtask is stored with its parent id, a child is always a one-off',
   /\|\| !!maintenanceDraft\.parentTaskId;/.test(src) && /\|\| !!original\.parentTaskId;/.test(src) && /\.\.\.\(maintenanceDraft\.parentTaskId \? \{ parentTaskId/.test(src));
 check('delete cascades through descendants on every asset', /taskDescendantsOf\(assets, itemId\)/.test(src) && /This also deletes its/.test(src));
 check('both completion paths reset a repeating parent', (src.match(/resetSubtasks\(next, itemId, currentUser\)/g) || []).length === 2);
-check('completing asks when subtasks are open', /guardParentComplete\(maintenanceModal\.itemId/.test(src) && /guardParentComplete\(item\.id/.test(src) && /Complete anyway/.test(src));
+check('completing asks when subtasks are open', /guardComplete\(maintenanceModal\.itemId/.test(src) && /guardComplete\(item\.id/.test(src) && /Complete anyway/.test(src));
 check('Parent task is a view field', /key: "parent", label: "Parent task"/.test(src) && /case "parent":/.test(src));
 check('the Supabase save keeps parentTaskId', /"parentTaskId"/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api/save-shape.ts'), 'utf8')));
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -845,6 +845,18 @@ asset per site (`GENERAL_ASSET_ID` = `"__general"`, type `General`, name "No ass
 - Covered by `test-frontend-general-asset.js`; driven in Chromium against Sandbox (add a task
   with "No asset" from the Tasks tab; it shows in the table and not in the Assets list).
 
+## Task dependencies (2026-10-28)
+
+Phase 5 of `/mnt/project-files/plans/task-relationships-scheduling.md`. A one-off task can be **blocked by** other tasks: `blockedBy`, an array of task ids on the blocked task only. **Blocked is derived, never stored** (`taskOpenBlockers`, `taskIsBlocked`): a task is blocked while any listed task still exists and is not done, so a finished or deleted blocker just stops counting.
+
+- **It warns and never refuses.** Completing a blocked task (the dialog and card buttons, through `guardComplete`, the same prompt as open subtasks) says "Blocked by X" and offers Complete anyway.
+- **One-offs only**: a repeating task is never done, so it is neither blocked nor a blocker (saving a task as scheduled drops the list, as it drops the dates). Loops are refused at the picker (`blockedByWouldLoop`), which also leaves out the task itself and finished tasks; a blocker already chosen stays listed.
+- Set with a multi-select "Blocked by" in the task dialog (any task, any asset); the dialog header shows a red Blocked label; the change is audited as "Blocked by".
+- **View fields `Blocked` (Yes/No) and `Blocked by`** (names of the open blockers), both needing `ctx.assets`. `maintenanceStatusOf` was left alone (it sees one task, not the list), so Blocked is a field and not a status; a Blocked Kanban column is "Blocked is Yes" as a query.
+- **Supabase keeps it through `TASK_EXTRA_KEYS`** (an `asset-api` redeploy on push to dev); the Apps Script fallback drops it. No migration.
+- Not built: a Blocked chip on the Tasks table and cards, and "blocks" (the reverse list) in a blocker's dialog.
+- Covered by `test-frontend-dependencies.js` and a `save_test.ts` case; driven in Chromium against Sandbox (pick a blocker, Blocked label, completion warning).
+
 ## Parent / child tasks (2026-10-28)
 
 Phase 4 of `/mnt/project-files/plans/task-relationships-scheduling.md`. A task can be a **subtask** of another: `parentTaskId` on the child, and nothing on the parent. **A parent's children are derived** by scanning every asset's tasks (`taskChildrenOf`), the "reference on one side" rule, so a child may sit on a different asset from its parent. A parent id matching no task reads as top level.
