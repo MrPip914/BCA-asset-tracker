@@ -67,6 +67,18 @@ Deno.test("a one-off task keeps its start and scheduled dates, and a blank one i
   assert(!("doOn" in a.maintenanceItems[1]));
 });
 
+Deno.test("a subtask keeps its parentTaskId, and a top-level task stores none", () => {
+  const [a] = shapeAssets([{
+    id: "a1", label: "a1", type: "Room",
+    maintenanceItems: [
+      { id: "m1", task: "Event", kind: "oneoff" },
+      { id: "m2", task: "Set up", kind: "oneoff", parentTaskId: "m1" },
+    ],
+  }], []);
+  assertEquals(a.maintenanceItems[1].parentTaskId, "m1");
+  assert(!("parentTaskId" in a.maintenanceItems[0]));
+});
+
 const OWNER = "mrpip914@gmail.com";
 const verifyIdToken = (token: unknown) => {
   const [kind, email] = String(token).split(":");

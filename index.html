@@ -2413,6 +2413,72 @@ function taskNotStarted(item) {
   const start = dateOnly(item && item.startDate);
   return !!start && isOneOffTask(item) && start > localDateString(new Date());
 }
+// Parent / child (2026-10-28). A subtask names its parent in `parentTaskId` and
+// nothing else records the relationship: a parent's children are DERIVED by
+// scanning every asset's tasks, the app's "reference on one side" rule. A parent
+// id that matches no task reads as top level. A child may sit on a different
+// asset from its parent. Depth is capped (event > task > checklist item), and a
+// child is always a one-off.
+const TASK_MAX_DEPTH = 3;
+function taskIndexOf(assets) {
+  const index = new Map();
+  (assets || []).forEach(a => (a.maintenanceItems || []).forEach(m => { if (m && m.id) index.set(m.id, { item: m, asset: a }); }));
+  return index;
+}
+function taskChildrenOf(assets, parentId) {
+  const out = [];
+  if (!parentId) return out;
+  (assets || []).forEach(a => (a.maintenanceItems || []).forEach(m => { if (m && m.parentTaskId === parentId) out.push({ item: m, asset: a }); }));
+  return out;
+}
+// 1 for a top-level task. Walks up with a visited set, so bad data cannot loop.
+function taskDepthOf(index, item) {
+  let depth = 1;
+  const seen = new Set([item && item.id]);
+  let cur = item;
+  while (cur && cur.parentTaskId && index.has(cur.parentTaskId) && !seen.has(cur.parentTaskId) && depth < 50) {
+    seen.add(cur.parentTaskId);
+    cur = index.get(cur.parentTaskId).item;
+    depth += 1;
+  }
+  return depth;
+}
+function canAddSubtaskTo(index, parentItem) { return taskDepthOf(index, parentItem) < TASK_MAX_DEPTH; }
+// Every task below `id`, at any depth.
+function taskDescendantsOf(assets, id) {
+  const out = [];
+  const seen = new Set([id]);
+  let frontier = [id];
+  while (frontier.length) {
+    const next = [];
+    frontier.forEach(pid => taskChildrenOf(assets, pid).forEach(c => {
+      if (!seen.has(c.item.id)) { seen.add(c.item.id); out.push(c); next.push(c.item.id); }
+    }));
+    frontier = next;
+  }
+  return out;
+}
+function taskProgressOf(assets, id) {
+  const kids = taskChildrenOf(assets, id);
+  return { done: kids.filter(c => taskIsDone(c.item)).length, total: kids.length };
+}
+// Completing a REPEATING parent starts its checklist over: every finished
+// subtask below it is reopened (its completion date cleared), each audited as the
+// edit it is. Returns the new assets and the audit rows.
+function resetSubtasks(assets, parentId, by) {
+  const reopen = new Set(taskDescendantsOf(assets, parentId).filter(c => taskIsDone(c.item)).map(c => c.item.id));
+  if (!reopen.size) return { assets, entries: [] };
+  const entries = [];
+  const next = assets.map(a => {
+    if (!(a.maintenanceItems || []).some(m => m && reopen.has(m.id))) return a;
+    return { ...a, maintenanceItems: a.maintenanceItems.map(m => {
+      if (!m || !reopen.has(m.id)) return m;
+      entries.push({ at: new Date().toISOString(), by: by || "", assetLabel: a.id, assetType: a.type, action: "maintenance_edited", field: `${m.task} — Completed`, from: formatDateOnly(m.lastPerformed), to: "—" });
+      return { ...m, lastPerformed: "" };
+    }) };
+  });
+  return { assets: next, entries };
+}
 // "overdue", "due-soon" (within 14 days) and "ok" mean the same thing for both
 // kinds. The two that do not are the point of this function:
 //
@@ -2505,6 +2571,7 @@ const VIEW_BUILTIN_FIELDS = [
   { key: "kind", label: "Kind" },
   { key: "status", label: "Status" },
   { key: "type", label: "Type" },
+  { key: "parent", label: "Parent task" },
   { key: "owner", label: "Owner" },
   { key: "notes", label: "Notes" },
   { key: "frequency", label: "Frequency" },
@@ -2827,6 +2894,14 @@ function viewFieldValue(row, key, model, ctx) {
     case "type": {
       const id = resolveWorkTypeId(model, "task", item.taskType);
       return id === DEFAULT_WORK_TYPE_ID ? DEFAULT_WORK_TYPE_NAME : (taskTypeNameOf(model, id) || "");
+    }
+    case "parent": {
+      // The name of the task this is a subtask of; blank for a top-level one, so
+      // "Parent task is not *" is "top-level tasks only". Needs ctx.assets.
+      if (!item.parentTaskId || !ctx || !ctx.assets) return "";
+      const index = ctx.taskIndex || (ctx.taskIndex = taskIndexOf(ctx.assets));
+      const ref = index.get(item.parentTaskId);
+      return ref ? (ref.item.task || "") : "";
     }
     case "owner": return item.owner || "";
     case "notes": return item.notes || "";
@@ -6531,7 +6606,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-28.3";
+const APP_VERSION = "2026-10-28.4";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -8807,7 +8882,7 @@ function AssetTracker() {
   // The draft behind the task dialog, filled by BOTH modes -- `id` is the item
   // the dialog acts on, minted on open in add mode so a photo can name the task
   // while the form is still being filled in.
-  const [maintenanceDraft, setMaintenanceDraft] = useState({ id: "", kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [] });
+  const [maintenanceDraft, setMaintenanceDraft] = useState({ id: "", kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [], parentTaskId: "" });
   // null when closed; { mode: "add" } or { mode: "edit", itemId }. ONE dialog
   // for both, the shape changeModal already uses and for the same reason: a
   // separate edit form is a second copy of the same fields to keep in step, and
@@ -8816,6 +8891,7 @@ function AssetTracker() {
   // the site-wide list had nowhere to be edited at all.
   const [maintenanceModal, setMaintenanceModal] = useState(null);
   const [confirmMaintenanceDelete, setConfirmMaintenanceDelete] = useState(null);
+  const [parentCompleteAsk, setParentCompleteAsk] = useState(null);
   // v34: null when closed; otherwise the completion form for ONE maintenance
   // item -- { itemId, date, changeType, vendor, cost, note, error }. One object
   // rather than seven parallel useStates, for the reason breakerModal is one:
@@ -11075,7 +11151,7 @@ function AssetTracker() {
     setConfirmArchive(null);
     setAllocationDraft({ roomId: "", quantity: "", error: "" });
     setConfirmAllocationRemove(null);
-    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [] });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [], parentTaskId: "" });
     setConfirmMaintenanceDelete(null);
     setMaintenanceCompleteModal(null);
     setOpenMaintenanceHistory(null);
@@ -12794,7 +12870,7 @@ function AssetTracker() {
     setWorkDialogAssetId(assetId === undefined ? null : assetId);
     // Minted on OPEN so a photo can name this schedule while the form is still
     // being filled in -- the same rule openChangeAdd follows.
-    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [] });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [], parentTaskId: "" });
     setMaintenanceModal({ mode: "add" });
   }
 
@@ -12829,6 +12905,7 @@ function AssetTracker() {
       taskType: item.taskType || "",
       custom: item.custom && typeof item.custom === "object" ? { ...item.custom } : {},
       paneGroupIds: Array.isArray(item.paneGroupIds) ? [...item.paneGroupIds] : [],
+      parentTaskId: item.parentTaskId || "",
     });
     // `viewId` set means opened from a view: the dialog shows only that view's fields.
     // The view decides whether the task opens to read or to edit (an editor only).
@@ -12836,10 +12913,27 @@ function AssetTracker() {
     setMaintenanceModal({ mode: "edit", itemId, ...(viewId ? { viewId } : {}), ...(openView && openView.openMode === "edit" && canEdit ? { editView: true } : {}) });
   }
 
+  // Add a subtask: the add dialog with the parent already named. It opens on the
+  // parent's asset (the Asset picker lets the child sit elsewhere) and as a
+  // one-off, since a child never repeats.
+  function openSubtaskAdd(parentItem, parentAssetId) {
+    setWorkDialogAssetId(parentAssetId);
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [], parentTaskId: parentItem.id });
+    setMaintenanceModal({ mode: "add" });
+  }
+
+  // Parents never complete themselves and never block: finishing one with open
+  // subtasks asks first, and "Complete anyway" carries on.
+  function guardParentComplete(itemId, proceed) {
+    const open = taskChildrenOf(assets, itemId).filter(c => !taskIsDone(c.item)).length;
+    if (open === 0) { proceed(); return; }
+    setParentCompleteAsk({ count: open, proceed });
+  }
+
   async function addMaintenanceItem() {
     if (savingRef.current) return; // double-submit guard, see savingRef
     if (!maintenanceDraft.task.trim() || !workTarget) return;
-    const oneOff = maintenanceDraft.kind === TASK_KIND_ONEOFF;
+    const oneOff = maintenanceDraft.kind === TASK_KIND_ONEOFF || !!maintenanceDraft.parentTaskId;
     const freq = frequencyFromDraft(maintenanceDraft);
     if (!oneOff && !freq) return; // a Custom choice that isn't a rule yet; Save is disabled on it
     const item = {
@@ -12866,13 +12960,14 @@ function AssetTracker() {
       taskType: maintenanceDraft.taskType || "",
       custom: { ...(maintenanceDraft.custom || {}) },
       ...(livePaneGroupIds(workTarget, maintenanceDraft.paneGroupIds).length ? { paneGroupIds: livePaneGroupIds(workTarget, maintenanceDraft.paneGroupIds) } : {}),
+      ...(maintenanceDraft.parentTaskId ? { parentTaskId: maintenanceDraft.parentTaskId } : {}),
       at: new Date().toISOString(),
       by: currentUser || "",
     };
     if (validateCustomValues(workModel, "task", item.taskType, item.custom)) return; // Save is disabled on it, with the reason on screen
     const next = assets.map(a => (a.id === workTargetId ? { ...a, maintenanceItems: [...(a.maintenanceItems || []), item] } : a));
     await persist(next, { columns });
-    setMaintenanceDraft({ id: crypto.randomUUID(), kind: maintenanceDraft.kind, task: "", notes: "", frequency: maintenanceDraft.frequency, recurrence: maintenanceDraft.recurrence, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [] });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: maintenanceDraft.kind, task: "", notes: "", frequency: maintenanceDraft.frequency, recurrence: maintenanceDraft.recurrence, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [], parentTaskId: "" });
     setMaintenanceModal(null);
   }
 
@@ -12887,7 +12982,7 @@ function AssetTracker() {
     const items = workTarget.maintenanceItems || [];
     const original = items.find(m => m && m.id === maintenanceModal.itemId);
     if (!original) { setMaintenanceModal(null); return; }
-    const oneOff = maintenanceDraft.kind === TASK_KIND_ONEOFF;
+    const oneOff = maintenanceDraft.kind === TASK_KIND_ONEOFF || !!original.parentTaskId;
     const freq = frequencyFromDraft(maintenanceDraft);
     if (!oneOff && !freq) return; // a Custom choice that isn't a rule yet; Save is disabled on it
     const updated = {
@@ -13061,7 +13156,9 @@ function AssetTracker() {
     // The change entry itself is NOT separately audited -- it carries its own
     // at/by and its presence in the Change Log is the record, same as an ordinary
     // change or a comment. An audit row on top would say the same thing twice.
-    await persist(next, { auditLog: logAudit([entry]) });
+    // A repeating parent starting over reopens its checklist, in the same save.
+    const reset = isOneOffTask(item) ? { assets: next, entries: [] } : resetSubtasks(next, itemId, currentUser);
+    await persist(reset.assets, { auditLog: logAudit([entry, ...reset.entries]) });
     setMaintenanceCompleteModal(null);
     // And the task dialog with it, when the completion was logged from inside
     // one. Leaving it open would leave a draft holding the PREVIOUS
@@ -13073,7 +13170,7 @@ function AssetTracker() {
   // One-tap completion for a type whose mode is "optional" or "simple": stamps
   // lastPerformed and writes the same maintenance_completed audit row as the
   // form, but no work entry. `assetId` follows openMaintenanceComplete's rule.
-  async function completeTaskQuick(itemId, assetId) {
+  async function completeTaskQuick(itemId, assetId, keepOpen) {
     if (savingRef.current) return; // double-submit guard, see savingRef
     const tid = assetId || selectedId;
     const target = assets ? assets.find(a => a.id === tid) : null;
@@ -13089,8 +13186,9 @@ function AssetTracker() {
       from: item.lastPerformed ? formatDateOnly(item.lastPerformed) : "never", to: formatDateOnly(date),
     };
     const next = assets.map(a => (a.id === tid ? { ...a, maintenanceItems: nextItems } : a));
-    await persist(next, { auditLog: logAudit([entry]) });
-    setMaintenanceModal(null);
+    const reset = isOneOffTask(item) ? { assets: next, entries: [] } : resetSubtasks(next, itemId, currentUser);
+    await persist(reset.assets, { auditLog: logAudit([entry, ...reset.entries]) });
+    if (!keepOpen) setMaintenanceModal(null);
   }
 
   async function deleteMaintenanceItem(itemId) {
@@ -13099,13 +13197,20 @@ function AssetTracker() {
     const items = workTarget.maintenanceItems || [];
     const item = items.find(m => m && m.id === itemId);
     if (!item) { setConfirmMaintenanceDelete(null); return; }
-    const nextItems = items.filter(m => !m || m.id !== itemId);
-    const next = assets.map(a => (a.id === workTargetId ? { ...a, maintenanceItems: nextItems } : a));
-    const entry = {
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: workTargetId,
-      assetType: workTarget.type, action: "maintenance_removed", field: item.task,
-    };
-    await persist(next, { auditLog: logAudit([entry]) });
+    // Deleting a task deletes everything below it, on any asset; the
+    // confirmation has already said how many.
+    const gone = new Map([[itemId, workTarget]]);
+    taskDescendantsOf(assets, itemId).forEach(c => gone.set(c.item.id, c.asset));
+    const next = assets.map(a => (
+      (a.maintenanceItems || []).some(m => m && gone.has(m.id))
+        ? { ...a, maintenanceItems: a.maintenanceItems.filter(m => !m || !gone.has(m.id)) } : a
+    ));
+    const removedRows = [{ item, asset: workTarget }, ...taskDescendantsOf(assets, itemId)];
+    const entries = removedRows.map(r => ({
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: r.asset.id,
+      assetType: r.asset.type, action: "maintenance_removed", field: r.item.task,
+    }));
+    await persist(next, { auditLog: logAudit(entries) });
     setConfirmMaintenanceDelete(null);
     // Deleting from inside the task dialog leaves it open over a record that no
     // longer exists, which renders as an empty form.
@@ -16715,6 +16820,10 @@ function AssetTracker() {
               });
               if (workBuiltinShown(workModel, "task", maintenanceDraft.taskType, "notes") && vShow("notes") && maintenanceDraft.notes) addRow("Notes", <span style={{ whiteSpace: "pre-wrap" }}>{maintenanceDraft.notes}</span>);
             }
+            const tIndex = taskIndexOf(assets);
+            const kids = editing ? taskChildrenOf(assets, maintenanceModal.itemId) : [];
+            const parentRef = maintenanceDraft.parentTaskId ? tIndex.get(maintenanceDraft.parentTaskId) : null;
+            const canSub = editing && canEdit && !dialogView && canAddSubtaskTo(tIndex, { id: maintenanceModal.itemId, parentTaskId: maintenanceDraft.parentTaskId });
             const readGroups = viewReadOnly && workTarget && vShow("sections") && isWindowLayoutType(workTarget.type)
               ? windowGroupsOf(workTarget).filter(g => (maintenanceDraft.paneGroupIds || []).includes(g.id)) : [];
             return (
@@ -16723,8 +16832,8 @@ function AssetTracker() {
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, marginBottom: 16 }}>
                   <div style={{ fontWeight: 700, color: C.brandDark }}>
                     {editing
-                      ? (maintenanceDraft.kind === TASK_KIND_ONEOFF ? "One-off task" : "Scheduled task")
-                      : (maintenanceDraft.kind === TASK_KIND_ONEOFF ? "Add one-off task" : "Add scheduled task")}
+                      ? (maintenanceDraft.parentTaskId ? "Subtask" : maintenanceDraft.kind === TASK_KIND_ONEOFF ? "One-off task" : "Scheduled task")
+                      : (maintenanceDraft.parentTaskId ? "Add subtask" : maintenanceDraft.kind === TASK_KIND_ONEOFF ? "Add one-off task" : "Add scheduled task")}
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
                     {taskStatusMeta && (
@@ -16794,7 +16903,7 @@ function AssetTracker() {
                   </div>
                 ) : (
                 <fieldset disabled={viewReadOnly} style={{ border: "none", padding: 0, margin: 0, minWidth: 0 }}>
-                {(vShow("frequency") || vShow("lastPerformed") || vShow("dueDate") || vShow("startDate") || vShow("doOn")) && (
+                {(vShow("frequency") || vShow("lastPerformed") || vShow("dueDate") || vShow("startDate") || vShow("doOn")) && !maintenanceDraft.parentTaskId && (
                 <TaskKindToggle
                   value={maintenanceDraft.kind}
                   onChange={k => setMaintenanceDraft({ ...maintenanceDraft, kind: k })}
@@ -17022,6 +17131,40 @@ function AssetTracker() {
                     </div>
                   </div>
                 )}
+                {parentRef && (
+                  <button
+                    onClick={() => openMaintenanceEdit(parentRef.item.id, parentRef.asset.id)}
+                    style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", marginTop: 14, padding: "8px 10px", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 13, color: C.brandDark, cursor: "pointer", textAlign: "left" }}
+                  >
+                    <span style={{ color: C.muted }}>Subtask of</span>
+                    <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{parentRef.item.task}</span>
+                    <ChevronRight size={14} style={{ marginLeft: "auto", flexShrink: 0, color: C.muted }} />
+                  </button>
+                )}
+                {(kids.length > 0 || canSub) && (
+                  <div style={{ marginTop: 14 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Subtasks</span>
+                      {kids.length > 0 && <span style={{ fontSize: 12, color: C.muted }}>{kids.filter(k => taskIsDone(k.item)).length} of {kids.length} done</span>}
+                      {canSub && (
+                        <button onClick={() => openSubtaskAdd({ id: maintenanceModal.itemId }, workTargetId)} aria-label="Add subtask" title="Add subtask" className="icon-btn" style={{ marginLeft: "auto", background: "none", border: "none", padding: 4, borderRadius: 4 }}><Plus size={16} color={C.brand} /></button>
+                      )}
+                    </div>
+                    {kids.map(k => {
+                      const done = taskIsDone(k.item);
+                      const kMode = taskCompletionMode(workModel, k.item.taskType);
+                      return (
+                        <div key={k.item.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0", fontSize: 14 }}>
+                          {kMode !== "required" && canEdit && !done
+                            ? <input type="checkbox" checked={false} onChange={() => guardParentComplete(k.item.id, () => completeTaskQuick(k.item.id, k.asset.id, true))} aria-label={`Mark ${k.item.task} done`} />
+                            : <input type="checkbox" checked={done} disabled aria-label={done ? "Done" : "Not done"} />}
+                          <button onClick={() => openMaintenanceEdit(k.item.id, k.asset.id)} style={{ background: "none", border: "none", padding: 0, textAlign: "left", fontSize: 14, color: C.ink, cursor: "pointer", textDecoration: done ? "line-through" : "none", opacity: done ? 0.6 : 1, overflow: "hidden", textOverflow: "ellipsis" }}>{k.item.task}</button>
+                          {k.asset.id !== workTargetId && <span style={{ fontSize: 12, color: C.muted, flexShrink: 0 }}>{nameOf(k.asset)}</span>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
                 <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "flex-end", marginTop: 16, flexWrap: "wrap" }}>
                   {/* Delete sits at the far left, away from Save, and still goes
                       through its own confirmation. */}
@@ -17043,10 +17186,10 @@ function AssetTracker() {
                     return (
                       <>
                         {mode !== "required" && (
-                          <button onClick={() => completeTaskQuick(maintenanceModal.itemId, workDialogAssetId)} style={btn}>Mark done</button>
+                          <button onClick={() => guardParentComplete(maintenanceModal.itemId, () => completeTaskQuick(maintenanceModal.itemId, workDialogAssetId))} style={btn}>Mark done</button>
                         )}
                         {mode !== "simple" && (
-                          <button onClick={() => openMaintenanceComplete(maintenanceModal.itemId, workDialogAssetId)} style={btn}>
+                          <button onClick={() => guardParentComplete(maintenanceModal.itemId, () => openMaintenanceComplete(maintenanceModal.itemId, workDialogAssetId))} style={btn}>
                             {mode === "optional" ? "Log work…" : maintenanceDraft.kind === TASK_KIND_ONEOFF ? "Mark complete…" : "Log completion…"}
                           </button>
                         )}
@@ -17078,7 +17221,9 @@ function AssetTracker() {
             <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20 }}>
               <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 340 }}>
                 <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Delete this task?</div>
-                <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>This can't be undone.</div>
+                <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>
+                  {(() => { const n = taskDescendantsOf(assets, confirmMaintenanceDelete).length; return n > 0 ? `This also deletes its ${n} subtask${n === 1 ? "" : "s"}. This can't be undone.` : "This can't be undone."; })()}
+                </div>
                 <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
                   <button onClick={() => setConfirmMaintenanceDelete(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                   <button
@@ -17087,6 +17232,19 @@ function AssetTracker() {
                   >
                     {"Delete"}
                   </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {parentCompleteAsk && (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 21, padding: 16 }}>
+              <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 340 }}>
+                <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Subtasks still open</div>
+                <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>{parentCompleteAsk.count} subtask{parentCompleteAsk.count === 1 ? " is" : "s are"} not done yet. Complete this one anyway?</div>
+                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                  <button onClick={() => setParentCompleteAsk(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                  <button onClick={() => { const go = parentCompleteAsk.proceed; setParentCompleteAsk(null); go(); }} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Complete anyway</button>
                 </div>
               </div>
             </div>
@@ -18288,12 +18446,12 @@ function AssetTracker() {
                                     <>
                                       {mode !== "required" && (
                                         <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, color: C.ink, cursor: "pointer" }}>
-                                          <input type="checkbox" checked={false} onChange={() => completeTaskQuick(item.id)} aria-label={`Mark ${item.task} done`} />
+                                          <input type="checkbox" checked={false} onChange={() => guardParentComplete(item.id, () => completeTaskQuick(item.id))} aria-label={`Mark ${item.task} done`} />
                                           Done
                                         </label>
                                       )}
                                       {mode !== "simple" && (
-                                        <button onClick={() => openMaintenanceComplete(item.id)} style={btn}>
+                                        <button onClick={() => guardParentComplete(item.id, () => openMaintenanceComplete(item.id))} style={btn}>
                                           {mode === "optional" ? "Log work…" : oneOff ? "Mark complete…" : "Log completion…"}
                                         </button>
                                       )}

@@ -117,7 +117,7 @@ check('the group save returns false when refused, so the tab keeps the selection
 check('the tab is wired: Sections tab renders WindowLayoutTabContent only for a window',
   /detailTab === "windowLayout" && hasModule\(selectedAsset\.type, "windowLayout"\)/.test(src));
 check('all four task drafts carry paneGroupIds, and opening a task seeds them',
-  (src.match(/taskType: "", custom: \{\}, paneGroupIds: \[\] \}/g) || []).length === 4
+  (src.match(/taskType: "", custom: \{\}, paneGroupIds: \[\], parentTaskId: "" \}/g) || []).length === 4
   && /paneGroupIds: Array\.isArray\(item\.paneGroupIds\) \? \[\.\.\.item\.paneGroupIds\] : \[\]/.test(src));
 check('add and edit both save only live groups',
   (src.match(/livePaneGroupIds\(workTarget, maintenanceDraft\.paneGroupIds\)/g) || []).length >= 4);
