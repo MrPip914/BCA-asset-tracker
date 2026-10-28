@@ -2184,6 +2184,7 @@ const MAINTENANCE_STATUS_FILTER_OPTIONS = [
   { value: "ok", label: "On track" },
   { value: "never", label: "Never done" },
   { value: "undated", label: "No date" },
+  { value: "upcoming", label: "Upcoming" },
   { value: "done", label: "Done" },
 ];
 // The Kind filter, which is what separates the two kinds of task inside ONE
@@ -2370,6 +2371,28 @@ function taskDueDate(item) {
   if (rule) return nextRecurrenceDate(rule, last);
   return new Date(last.getTime() + item.frequencyDays * 86400000);
 }
+// A one-off carries up to three dates, each a different promise (2026-10-28):
+//   startDate -- do not start before this ("Start date"); until then the task
+//                is "upcoming" and neither overdue nor due soon.
+//   doOn      -- the day it is meant to be done ("Scheduled for").
+//   dueDate   -- the latest it may be finished ("Due date").
+// All three are optional and independent. A SCHEDULED task has none of them: its
+// due date stays derived, and both save paths write these blank for a schedule
+// so flipping a kind cannot resurrect a stale date.
+function taskDateOf(item, key) {
+  if (!item || !isOneOffTask(item)) return null;
+  const d = dateOnly(item[key]);
+  if (!d) return null;
+  const when = new Date(d + "T00:00:00");
+  return isNaN(when.getTime()) ? null : when;
+}
+function taskStartDate(item) { return taskDateOf(item, "startDate"); }
+function taskDoOnDate(item) { return taskDateOf(item, "doOn"); }
+// True while the start date is still ahead (today counts as started).
+function taskNotStarted(item) {
+  const start = dateOnly(item && item.startDate);
+  return !!start && isOneOffTask(item) && start > localDateString(new Date());
+}
 // "overdue", "due-soon" (within 14 days) and "ok" mean the same thing for both
 // kinds. The two that do not are the point of this function:
 //
@@ -2378,11 +2401,13 @@ function taskDueDate(item) {
 //   "undated" — a ONE-OFF with no dueDate. Says nothing about urgency; it is a
 //               someday item, and treating it as "never" would pin every
 //               undated project to the top of the overdue list.
+//   "upcoming" — a ONE-OFF whose start date has not come yet.
 //   "done"    — a completed one-off. A schedule never reaches this; being
 //               performed only starts its next interval.
 function maintenanceStatusOf(item) {
   const oneOff = isOneOffTask(item);
   if (oneOff && taskIsDone(item)) return "done";
+  if (oneOff && taskNotStarted(item)) return "upcoming";
   const due = taskDueDate(item);
   if (!due) return oneOff ? "undated" : "never";
   const daysUntil = Math.floor((due.getTime() - Date.now()) / 86400000);
@@ -2414,6 +2439,7 @@ function maintenanceStatusMeta(status) {
     ok: { label: "On track", color: C.success },
     never: { label: "Not yet done", color: C.muted },
     undated: { label: "No date", color: C.muted },
+    upcoming: { label: "Upcoming", color: C.muted },
     done: { label: "Done", color: C.success },
   }[status] || { label: status || "", color: C.muted };
 }
@@ -2436,10 +2462,22 @@ function maintenanceStatusMeta(status) {
 // first, in that order, and everything else follows in the normal due order.
 const VIEW_TOKEN_CURRENT_USER = "CURRENT_USERNAME";
 const VIEW_TOKEN_DAY_OF_WEEK = "DAY_OF_WEEK";
+// Date tokens (2026-10-28), offered for date fields only. TODAY is a date and
+// works with every comparison; THIS_WEEK is a Sunday-to-Saturday range, so
+// "is" means inside it, "is not" outside, before / after either side of it.
+const VIEW_TOKEN_TODAY = "TODAY";
+const VIEW_TOKEN_THIS_WEEK = "THIS_WEEK";
+const VIEW_DATE_TOKENS = [
+  { value: VIEW_TOKEN_TODAY, label: "[TODAY]" },
+  { value: VIEW_TOKEN_THIS_WEEK, label: "[THIS WEEK]" },
+];
 const VIEW_TOKENS = [
   { value: VIEW_TOKEN_CURRENT_USER, label: "[CURRENT USERNAME]" },
   { value: VIEW_TOKEN_DAY_OF_WEEK, label: "[DAY OF WEEK]" },
+  ...VIEW_DATE_TOKENS,
 ];
+// Built-in fields that hold a date (YYYY-MM-DD, or blank).
+const VIEW_DATE_FIELD_KEYS = ["startDate", "doOn", "dueDate", "lastDone"];
 const VIEW_WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const VIEW_BUILTIN_FIELDS = [
   { key: "task", label: "Task" },
@@ -2450,6 +2488,8 @@ const VIEW_BUILTIN_FIELDS = [
   { key: "owner", label: "Owner" },
   { key: "notes", label: "Notes" },
   { key: "frequency", label: "Frequency" },
+  { key: "startDate", label: "Start date" },
+  { key: "doOn", label: "Scheduled for" },
   { key: "dueDate", label: "Due date" },
   { key: "lastDone", label: "Last done" },
 ];
@@ -2470,6 +2510,8 @@ const VIEW_DEFAULT_COLUMNS = ["task", "asset", "dueDate", "status"];
 const VIEW_DIALOG_FIELDS = [
   { key: "frequency", label: "Repeats" },
   { key: "lastPerformed", label: "Last performed / completed" },
+  { key: "startDate", label: "Start date" },
+  { key: "doOn", label: "Scheduled for" },
   { key: "dueDate", label: "Due date" },
   { key: "notes", label: "Notes" },
   { key: "owner", label: "Owner" },
@@ -2538,7 +2580,7 @@ function viewBuiltinBoardSource(view, model) {
     options = [{ id: "scheduled", name: "Scheduled" }, { id: "oneoff", name: "One-off" }];
     valueOf = item => (isOneOffTask(item) ? "oneoff" : "scheduled");
   } else {
-    options = ["overdue", "due-soon", "ok", "never", "undated", "done"].map(id => ({ id, name: maintenanceStatusMeta(id).label }));
+    options = ["overdue", "due-soon", "ok", "never", "undated", "upcoming", "done"].map(id => ({ id, name: maintenanceStatusMeta(id).label }));
     valueOf = item => maintenanceStatusOf(item);
   }
   return { key: view.fieldKey, label: def.label, builtin: def.key, writable: def.writable, options, valueOf };
@@ -2589,7 +2631,7 @@ function viewFieldEntry(model, views, key) {
 function viewKindOf(entry) {
   if (!entry) return "text";
   if (entry.kanban) return "board";
-  if (entry.key === "dueDate" || entry.key === "lastDone") return "date";
+  if (VIEW_DATE_FIELD_KEYS.includes(entry.key)) return "date";
   const t = entry.custom && entry.custom.dataType;
   return t === "date" ? "date" : t === "number" ? "number" : t === "select" ? "choice" : t === "multiselect" ? "multi" : "text";
 }
@@ -2626,7 +2668,7 @@ function viewCondChanged(cond, patch, prevEntry, nextEntry, allowHas) {
   const mode = viewValueMode(kind, next.op);
   const moved = patch.field !== undefined && patch.field !== cond.field;
   if (mode !== viewValueMode(viewKindOf(prevEntry), cond.op) || (moved && kind === "board")) next.value = "";
-  if (!viewTokenAllowed(kind, next.op)) next.token = "";
+  if (next.token && !viewTokensFor(kind, next.op).includes(next.token)) next.token = "";
   return next;
 }
 // before / after / less than / greater than for one task. A task with no value
@@ -2769,6 +2811,8 @@ function viewFieldValue(row, key, model, ctx) {
     case "owner": return item.owner || "";
     case "notes": return item.notes || "";
     case "frequency": return isOneOffTask(item) ? "" : (item.frequencyLabel || "");
+    case "startDate": return isOneOffTask(item) ? (dateOnly(item.startDate) || "") : "";
+    case "doOn": return isOneOffTask(item) ? (dateOnly(item.doOn) || "") : "";
     case "dueDate": return row.due ? localDateString(row.due) : "";
     case "lastDone": return dateOnly(item.lastPerformed) || "";
     default:
@@ -2799,7 +2843,7 @@ function viewFieldDisplay(row, key, model, ctx) {
     return b ? b.name : v;
   }
   if (!v) return "—";
-  if (key === "dueDate" || key === "lastDone") return formatDateOnly(v) || v;
+  if (VIEW_DATE_FIELD_KEYS.includes(key)) return formatDateOnly(v) || v;
   if (key.startsWith(VIEW_CUSTOM_PREFIX)) {
     const f = ((model && model.taskFields) || []).find(x => x.key === key.slice(VIEW_CUSTOM_PREFIX.length));
     return f ? dataTypeDisplay(f, v) : v;
@@ -2823,7 +2867,23 @@ function viewBucketOf(view, row) {
   const id = (view.assignments || {})[viewTaskKey(row)];
   return buckets.find(b => b.id === id) || buckets[0];
 }
+// The Sunday-to-Saturday week holding `now`, as two ISO dates.
+function viewWeekRange(now) {
+  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const start = new Date(d.getFullYear(), d.getMonth(), d.getDate() - d.getDay());
+  const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 6);
+  return { start: localDateString(start), end: localDateString(end) };
+}
+// Which tokens a line may use: the text ones where the value is typed as text
+// or names a board column, the date ones for a date field with any comparison.
+function viewTokensFor(kind, op) {
+  const out = [];
+  if (viewTokenAllowed(kind, op)) out.push(VIEW_TOKEN_CURRENT_USER, VIEW_TOKEN_DAY_OF_WEEK);
+  if (kind === "date") out.push(VIEW_TOKEN_TODAY, VIEW_TOKEN_THIS_WEEK);
+  return out;
+}
 function viewTokenValue(token, ctx) {
+  if (token === VIEW_TOKEN_TODAY) return localDateString((ctx && ctx.now) || new Date());
   if (token === VIEW_TOKEN_CURRENT_USER) return String((ctx && ctx.userName) || "").trim();
   if (token === VIEW_TOKEN_DAY_OF_WEEK) return VIEW_WEEKDAYS[((ctx && ctx.now) || new Date()).getDay()];
   return "";
@@ -2845,6 +2905,16 @@ function viewValueEquals(v, target) {
 // A token that resolves to nothing (no name known) matches nothing for "=" --
 // otherwise an unnamed person would be shown every unowned task.
 function viewConditionMatches(cond, row, model, ctx) {
+  if (cond.token === VIEW_TOKEN_THIS_WEEK) {
+    const week = viewWeekRange((ctx && ctx.now) || new Date());
+    const v = String(viewFieldValue(row, cond.field, model, ctx));
+    const iso = /^\d{4}-\d{2}-\d{2}$/.test(v);
+    const inside = iso && v >= week.start && v <= week.end;
+    if (cond.op === "!=") return !inside;
+    if (cond.op === "before") return iso && v < week.start;
+    if (cond.op === "after") return iso && v > week.end;
+    return inside;
+  }
   let target = cond.token ? viewTokenValue(cond.token, ctx) : cond.value;
   if (cond.token && !viewNorm(target)) return cond.op === "!=";
   const raw = viewFieldValue(row, cond.field, model, ctx);
@@ -4610,7 +4680,7 @@ function workMatchesSearch(r, typesList, q, model) {
 // only effect is to show everything or nothing is a dead control (the rule
 // useLabelFilter already follows). Values OR within a group, AND across groups.
 // View state only, never saved.
-const MAP_TASK_STATUS_ORDER = ["overdue", "due-soon", "never", "ok", "undated", "done"];
+const MAP_TASK_STATUS_ORDER = ["overdue", "due-soon", "never", "ok", "upcoming", "undated", "done"];
 const MAP_HISTORY_PERIODS = AUDIT_PERIOD_OPTIONS.filter(o => o.value !== AUDIT_ALL_TIME && o.value !== "today");
 const MAP_NO_WORK_TYPE = "No work type";
 const MAP_UNASSIGNED_USER = "__unassigned";
@@ -6441,7 +6511,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-28.1";
+const APP_VERSION = "2026-10-28.2";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -7839,7 +7909,8 @@ const MOCK_SNAPSHOT = {
     // the case that makes site-wide work expressible without an asset-less task.
     { label: "BCB0002", type: "Building", name: "Building 200", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active",
       maintenanceItems: [
-        { id: "mnt-b200-repaint", kind: "oneoff", task: "Repaint the south exterior wall", notes: "Two quotes in. Waiting on the district to confirm the colour before scheduling.", frequencyLabel: "", frequencyDays: "", dueDate: "2026-10-15", lastPerformed: "", owner: "Eric", at: "", by: "" },
+        { id: "mnt-b200-repaint", kind: "oneoff", task: "Repaint the south exterior wall", notes: "Two quotes in. Waiting on the district to confirm the colour before scheduling.", frequencyLabel: "", frequencyDays: "", startDate: "2026-09-01", doOn: "2026-10-12", dueDate: "2026-10-15", lastPerformed: "", owner: "Eric", at: "", by: "" },
+        { id: "mnt-b200-paint-samples", kind: "oneoff", task: "Order paint samples for the spring repaint", notes: "", frequencyLabel: "", frequencyDays: "", startDate: "2027-03-01", doOn: "2027-03-08", dueDate: "2027-03-15", lastPerformed: "", owner: "", at: "", by: "" },
       ] },
     { label: "BCB0003", type: "Building", name: "Building 300", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
     { label: "BCB0004", type: "Building", name: "Building 400", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
@@ -8716,7 +8787,7 @@ function AssetTracker() {
   // The draft behind the task dialog, filled by BOTH modes -- `id` is the item
   // the dialog acts on, minted on open in add mode so a photo can name the task
   // while the form is still being filled in.
-  const [maintenanceDraft, setMaintenanceDraft] = useState({ id: "", kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [] });
+  const [maintenanceDraft, setMaintenanceDraft] = useState({ id: "", kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [] });
   // null when closed; { mode: "add" } or { mode: "edit", itemId }. ONE dialog
   // for both, the shape changeModal already uses and for the same reason: a
   // separate edit form is a second copy of the same fields to keep in step, and
@@ -10984,7 +11055,7 @@ function AssetTracker() {
     setConfirmArchive(null);
     setAllocationDraft({ roomId: "", quantity: "", error: "" });
     setConfirmAllocationRemove(null);
-    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [] });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [] });
     setConfirmMaintenanceDelete(null);
     setMaintenanceCompleteModal(null);
     setOpenMaintenanceHistory(null);
@@ -12703,7 +12774,7 @@ function AssetTracker() {
     setWorkDialogAssetId(assetId === undefined ? null : assetId);
     // Minted on OPEN so a photo can name this schedule while the form is still
     // being filled in -- the same rule openChangeAdd follows.
-    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [] });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [] });
     setMaintenanceModal({ mode: "add" });
   }
 
@@ -12730,6 +12801,8 @@ function AssetTracker() {
       // seeded; everything else opens on its preset as before.
       frequency: parseRecurrence(item.recurrence) ? MAINTENANCE_FREQUENCY_CUSTOM : (item.frequencyLabel || MAINTENANCE_FREQUENCIES[1].label),
       recurrence: recurrenceToDraft(parseRecurrence(item.recurrence)),
+      startDate: dateOnly(item.startDate),
+      doOn: dateOnly(item.doOn),
       dueDate: dateOnly(item.dueDate),
       lastPerformed: dateOnly(item.lastPerformed),
       owner: item.owner || "",
@@ -12765,6 +12838,8 @@ function AssetTracker() {
       frequencyLabel: oneOff ? "" : freq.label,
       frequencyDays: oneOff ? "" : freq.days,
       recurrence: oneOff ? "" : freq.recurrence,
+      startDate: oneOff ? (maintenanceDraft.startDate || "") : "",
+      doOn: oneOff ? (maintenanceDraft.doOn || "") : "",
       dueDate: oneOff ? (maintenanceDraft.dueDate || "") : "",
       lastPerformed: oneOff ? "" : (maintenanceDraft.lastPerformed || ""),
       owner: maintenanceDraft.owner.trim(),
@@ -12777,7 +12852,7 @@ function AssetTracker() {
     if (validateCustomValues(workModel, "task", item.taskType, item.custom)) return; // Save is disabled on it, with the reason on screen
     const next = assets.map(a => (a.id === workTargetId ? { ...a, maintenanceItems: [...(a.maintenanceItems || []), item] } : a));
     await persist(next, { columns });
-    setMaintenanceDraft({ id: crypto.randomUUID(), kind: maintenanceDraft.kind, task: "", notes: "", frequency: maintenanceDraft.frequency, recurrence: maintenanceDraft.recurrence, dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [] });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: maintenanceDraft.kind, task: "", notes: "", frequency: maintenanceDraft.frequency, recurrence: maintenanceDraft.recurrence, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [] });
     setMaintenanceModal(null);
   }
 
@@ -12807,6 +12882,8 @@ function AssetTracker() {
       frequencyLabel: oneOff ? "" : freq.label,
       frequencyDays: oneOff ? "" : freq.days,
       recurrence: oneOff ? "" : freq.recurrence,
+      startDate: oneOff ? (maintenanceDraft.startDate || "") : "",
+      doOn: oneOff ? (maintenanceDraft.doOn || "") : "",
       dueDate: oneOff ? (maintenanceDraft.dueDate || "") : "",
       // Clearing this on a one-off is how a finished job is REOPENED -- there
       // is no separate done flag to unset, and the change is audited below
@@ -12829,6 +12906,12 @@ function AssetTracker() {
     if (original.task !== updated.task) entries.push(mkEntry("Task", original.task, updated.task));
     if ((original.notes || "") !== (updated.notes || "")) entries.push(mkEntry("Notes", original.notes || "—", updated.notes || "—"));
     if ((original.frequencyLabel || "") !== (updated.frequencyLabel || "")) entries.push(mkEntry("Frequency", original.frequencyLabel || "—", updated.frequencyLabel || "—"));
+    if ((original.startDate || "") !== (updated.startDate || "")) {
+      entries.push(mkEntry("Start date", formatDateOnly(original.startDate) || "—", formatDateOnly(updated.startDate) || "—"));
+    }
+    if ((original.doOn || "") !== (updated.doOn || "")) {
+      entries.push(mkEntry("Scheduled for", formatDateOnly(original.doOn) || "—", formatDateOnly(updated.doOn) || "—"));
+    }
     if ((original.dueDate || "") !== (updated.dueDate || "")) {
       entries.push(mkEntry("Due date", formatDateOnly(original.dueDate) || "—", formatDateOnly(updated.dueDate) || "—"));
     }
@@ -16575,6 +16658,8 @@ function AssetTracker() {
               const addRow = (label, value) => { if (value) readRows.push({ label, value }); };
               if (!oneOff && vShow("frequency")) addRow("Repeats", (taskItem && taskItem.frequencyLabel) || maintenanceDraft.frequency);
               if (vShow("lastPerformed")) addRow(oneOff ? "Completed" : "Last performed", dayText(dateOnly(maintenanceDraft.lastPerformed)));
+              if (oneOff && vShow("startDate")) addRow("Start", dayText(dateOnly(maintenanceDraft.startDate)));
+              if (oneOff && vShow("doOn")) addRow("Scheduled for", dayText(dateOnly(maintenanceDraft.doOn)));
               if (vShow("dueDate")) {
                 addRow(oneOff ? "Due" : "Next due", dayText(oneOff ? dateOnly(maintenanceDraft.dueDate) : isoOf(taskItem ? taskDueDate(taskItem) : null)));
               }
@@ -16666,7 +16751,7 @@ function AssetTracker() {
                   </div>
                 ) : (
                 <fieldset disabled={viewReadOnly} style={{ border: "none", padding: 0, margin: 0, minWidth: 0 }}>
-                {(vShow("frequency") || vShow("lastPerformed") || vShow("dueDate")) && (
+                {(vShow("frequency") || vShow("lastPerformed") || vShow("dueDate") || vShow("startDate") || vShow("doOn")) && (
                 <TaskKindToggle
                   value={maintenanceDraft.kind}
                   onChange={k => setMaintenanceDraft({ ...maintenanceDraft, kind: k })}
@@ -16698,6 +16783,28 @@ function AssetTracker() {
 )}
                   {(maintenanceDraft.kind === TASK_KIND_ONEOFF ? (
                     <>
+                    {vShow("startDate") && (
+                    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, display: "flex", alignItems: "center", gap: 4 }}>Start date<HelpTip label="About Start date" text="Don't start before this day. Until then the task shows as Upcoming, not overdue." size={12} /></span>
+                      <input
+                        type="date"
+                        value={maintenanceDraft.startDate}
+                        onChange={e => setMaintenanceDraft({ ...maintenanceDraft, startDate: e.target.value })}
+                        style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                      />
+                    </label>
+                    )}
+                    {vShow("doOn") && (
+                    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, display: "flex", alignItems: "center", gap: 4 }}>Scheduled for<HelpTip label="About Scheduled for" text="The day this is meant to be done. Optional." size={12} /></span>
+                      <input
+                        type="date"
+                        value={maintenanceDraft.doOn}
+                        onChange={e => setMaintenanceDraft({ ...maintenanceDraft, doOn: e.target.value })}
+                        style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                      />
+                    </label>
+                    )}
                     {vShow("dueDate") && (
                     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Due date</span>
@@ -21104,7 +21211,7 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, assets, rows, mod
             </div>
             {(() => {
               const kind = viewKindOf(entryOf(c.field));
-              const presets = [...(viewTokenAllowed(kind, c.op) ? VIEW_TOKENS.map(t => t.value) : []), ...(viewValueMode(kind, c.op) === "text" ? ["*"] : [])];
+              const presets = [...viewTokensFor(kind, c.op), ...(viewValueMode(kind, c.op) === "text" ? ["*"] : [])];
               const preset = c.token || (c.value === "*" && presets.includes("*") ? "*" : "");
               return (
                 <>

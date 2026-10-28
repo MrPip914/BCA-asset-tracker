@@ -845,6 +845,30 @@ asset per site (`GENERAL_ASSET_ID` = `"__general"`, type `General`, name "No ass
 - Covered by `test-frontend-general-asset.js`; driven in Chromium against Sandbox (add a task
   with "No asset" from the Tasks tab; it shows in the table and not in the Assets list).
 
+## Task date roles (2026-10-28)
+
+Phase 3 of `/mnt/project-files/plans/task-relationships-scheduling.md`. A ONE-OFF task carries up
+to three optional dates, each a different promise: **Start date** (`startDate`, do not start
+before), **Scheduled for** (`doOn`, the day it is meant to be done) and **Due date** (`dueDate`,
+the latest). A scheduled task has none of them (its due date stays derived), and both save paths
+write them blank for a schedule so flipping the kind cannot resurrect a stale date.
+
+- **New status `upcoming`**: a one-off, not done, whose start date is still ahead (`taskNotStarted`;
+  today counts as started). It wins over overdue, since it cannot be late before it starts, and it is
+  not counted by the Tasks badge. It is in the Status filter, the Map list's status order and the view
+  Status field.
+- **Views**: `startDate` and `doOn` are query fields (date kind), columns and dialog fields. Date fields
+  gained tokens: `[TODAY]` (any comparison) and `[THIS WEEK]` (Sunday to Saturday: is = inside,
+  is not = outside, before / after = either side). `viewTokensFor(kind, op)` decides which tokens a line
+  offers; changing a line's field drops a token the new field cannot take.
+- **Supabase keeps both through `TASK_EXTRA_KEYS`** in `save-shape.ts`, the one backend change: it goes
+  out with the next `asset-api` deploy (the Database migrations workflow). The Apps Script fallback drops
+  them, as it drops `taskType`/`custom`. No migration.
+- `from-app.js` carries `taskNotStarted` and `localDateString` so the connector's status matches; it
+  does not yet read or write the new dates (queued).
+- Covered by `test-frontend-tasks.js` and `test-frontend-views.js`; driven in Chromium against Sandbox
+  (the new fixture task shows Upcoming and its three dates in the dialog).
+
 ## Views (2026-10-17, updated same day)
 
 A **Views** main tab shows saved task lists and boards an editor sets up in **Settings > Views**; each person sees only the views assigned to them. Tasks only. Plan: `/mnt/project-files/plans/views.md`. **Frontend plus `asset-api`: a push to dev redeploys the Edge Function; no Apps Script change, no version bump.**

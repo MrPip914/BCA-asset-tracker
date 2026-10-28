@@ -35,7 +35,7 @@ const code = [
   slice('function maintenanceSortKey(row) {'),
   slice('function maintenanceStatusMeta(status) {'),
   block,
-  'return { viewBackingField, viewResolveField, viewsResolved, adoptViews, viewsVisibleTo, viewFieldsFor, viewFieldValue, viewFieldDisplay, viewConditionMatches, viewMatches, describeViewQuery, orderViewRows, moveInViewOrder, addToViewOrder, removeFromViewOrder, viewTaskKey, viewDialogShows, viewVisibleCustomKeys, viewDragOrder, viewBoard, viewBoardMove, viewBucketIdIn, viewBucketOf, viewBuckets, viewLiveMatches, viewLiveActive, viewCanArrange, viewCondChanged, viewOpsFor, viewFieldEntry, viewKindOf, viewValueMode, viewGroups, viewGroupKeyOf, viewGroupMove, viewTokenAllowed, viewItemsMatch, adoptViewConds, viewRowsFlat, viewFieldGroup, viewPlaceValue, viewBuiltinBoardSource, viewFieldChoicesOf };',
+  'return { viewBackingField, viewResolveField, viewsResolved, adoptViews, viewsVisibleTo, viewFieldsFor, viewFieldValue, viewFieldDisplay, viewConditionMatches, viewMatches, describeViewQuery, orderViewRows, moveInViewOrder, addToViewOrder, removeFromViewOrder, viewTaskKey, viewDialogShows, viewVisibleCustomKeys, viewDragOrder, viewBoard, viewBoardMove, viewBucketIdIn, viewBucketOf, viewBuckets, viewLiveMatches, viewLiveActive, viewCanArrange, viewCondChanged, viewOpsFor, viewFieldEntry, viewKindOf, viewValueMode, viewGroups, viewGroupKeyOf, viewGroupMove, viewTokenAllowed, viewItemsMatch, adoptViewConds, viewRowsFlat, viewFieldGroup, viewPlaceValue, viewBuiltinBoardSource, viewFieldChoicesOf, viewTokensFor, viewWeekRange, viewTokenValue };',
 ].join(NL);
 const H = new Function(code)();
 
@@ -456,6 +456,33 @@ const grp = (conditions, join = "and") => ({ group: true, join, conditions });
   eq('an unlimited board omits nothing', H.viewResolveField(tb({ fieldChoices: ["nope"] }), tmodel, [tasset]).fieldOmits, null);
   eq('fieldChoices survives reading, on a board only', H.adoptViews({ list: [{ id: "a", type: "kanban", fieldChoices: ["x"] }, { id: "b", type: "list", fieldChoices: ["x"] }] }).list.map(x => x.fieldChoices), [["x"], []]);
   check('the editor offers built-in fields and a columns-shown picker; non-writable boards do not drag', /Columns shown/.test(src) && /VIEW_BUILTIN_BOARD_FIELDS\.map/.test(src) && /activeView\.fieldWritable/.test(src));
+}
+
+// --- date roles and date tokens (2026-10-28)
+{
+  const now = new Date("2026-10-28T12:00:00Z"); // a Wednesday
+  const drow = (id, o) => { const r = row(id, { kind: "oneoff" }); Object.assign(r.item, o); return r; };
+  const m = (c, r) => H.viewConditionMatches(c, r, model, { now });
+  eq('start date and scheduled for are readable one-off fields', [H.viewFieldValue(drow("a", { startDate: "2026-11-01", doOn: "2026-11-02" }), "startDate", model, {}), H.viewFieldValue(drow("a", { startDate: "2026-11-01", doOn: "2026-11-02" }), "doOn", model, {})], ["2026-11-01", "2026-11-02"]);
+  eq('a scheduled task has neither', [H.viewFieldValue(row("s", { kind: "scheduled" }), "startDate", model, {}), H.viewFieldValue(Object.assign(row("s"), {}), "doOn", model, {})], ["", ""]);
+  eq('the new fields are dates', [H.viewKindOf({ key: "startDate" }), H.viewKindOf({ key: "doOn" })], ["date", "date"]);
+  eq('[TODAY] is the clock date', H.viewTokenValue("TODAY", { now }), "2026-10-28");
+  eq('the week is Sunday to Saturday', H.viewWeekRange(now), { start: "2026-10-25", end: "2026-10-31" });
+  eq('date tokens only offered on date fields', [H.viewTokensFor("date", "=").sort(), H.viewTokensFor("text", "=").sort(), H.viewTokensFor("number", "<")], [["THIS_WEEK", "TODAY"], ["CURRENT_USERNAME", "DAY_OF_WEEK"], []]);
+  eq('[TODAY] works with is and before / after', [
+    m({ field: "doOn", op: "=", value: "", token: "TODAY" }, drow("a", { doOn: "2026-10-28" })),
+    m({ field: "doOn", op: "before", value: "", token: "TODAY" }, drow("a", { doOn: "2026-10-27" })),
+    m({ field: "doOn", op: "after", value: "", token: "TODAY" }, drow("a", { doOn: "2026-10-27" })),
+  ], [true, true, false]);
+  const wk = op => ({ field: "doOn", op, value: "", token: "THIS_WEEK" });
+  eq('[THIS WEEK] is inside the range, is not outside, before / after either side', [
+    m(wk("="), drow("a", { doOn: "2026-10-25" })), m(wk("="), drow("a", { doOn: "2026-10-31" })), m(wk("="), drow("a", { doOn: "2026-11-01" })),
+    m(wk("!="), drow("a", { doOn: "2026-11-01" })), m(wk("!="), drow("a", { doOn: "" })),
+    m(wk("before"), drow("a", { doOn: "2026-10-24" })), m(wk("after"), drow("a", { doOn: "2026-11-01" })), m(wk("after"), drow("a", { doOn: "2026-10-30" })),
+  ], [true, true, false, true, true, true, true, false]);
+  eq('a task with no date is never inside the week', m(wk("="), drow("a", {})), false);
+  eq('changing a line to a field that cannot take the token clears it', H.viewCondChanged({ field: "doOn", op: "=", value: "", token: "TODAY" }, { field: "owner" }, { key: "doOn" }, { key: "owner" }).token, "");
+  eq('an unknown token still reads as none, a date token is kept', H.adoptViewConds([{ field: "doOn", op: "=", value: "", token: "THIS_WEEK" }, { field: "doOn", op: "=", value: "", token: "NOPE" }]).map(c => c.token), ["THIS_WEEK", ""]);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

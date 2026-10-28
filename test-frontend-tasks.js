@@ -37,12 +37,17 @@ const ctx = new Function(
     sliceFn('isOneOffTask'),
     sliceFn('taskIsDone'),
     sliceFn('taskDueDate'),
+    'const localDateString = d => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");',
+    sliceFn('taskDateOf'),
+    sliceFn('taskStartDate'),
+    sliceFn('taskDoOnDate'),
+    sliceFn('taskNotStarted'),
     sliceFn('maintenanceStatusOf'),
     sliceFn('maintenanceSortKey'),
-    'return { taskKindOf, isOneOffTask, taskIsDone, taskDueDate, maintenanceStatusOf, maintenanceSortKey };',
+    'return { taskKindOf, isOneOffTask, taskIsDone, taskDueDate, maintenanceStatusOf, maintenanceSortKey, taskStartDate, taskDoOnDate, taskNotStarted };',
   ].join('\n')
 )();
-const { taskKindOf, isOneOffTask, taskIsDone, taskDueDate, maintenanceStatusOf, maintenanceSortKey } = ctx;
+const { taskKindOf, isOneOffTask, taskIsDone, taskDueDate, maintenanceStatusOf, maintenanceSortKey, taskStartDate, taskDoOnDate, taskNotStarted } = ctx;
 
 let pass = 0, fail = 0;
 const check = (name, ok, detail) => {
@@ -307,6 +312,34 @@ check('the backend declares no completion column beside lastPerformed',
 check('SCRIPT_VERSION and FRONTEND_SCRIPT_VERSION agree',
       (gs.match(/const SCRIPT_VERSION = "(v\d+)"/) || [])[1]
         === (src.match(/const FRONTEND_SCRIPT_VERSION = "(v\d+)"/) || [])[1]);
+
+// ---------- date roles (2026-10-28): start date, scheduled for, due ----------
+const oneOff = o => ({ kind: 'oneoff', task: 't', ...o });
+check('a one-off whose start date is ahead is upcoming',
+      maintenanceStatusOf(oneOff({ startDate: inDays(5), dueDate: inDays(-3) })) === 'upcoming',
+      'upcoming wins over overdue: it has not started, so it cannot be late');
+check('a one-off whose start date is today has started',
+      maintenanceStatusOf(oneOff({ startDate: inDays(0), dueDate: inDays(30) })) === 'ok');
+check('a one-off with a past start date reads by its due date',
+      maintenanceStatusOf(oneOff({ startDate: inDays(-5), dueDate: inDays(-1) })) === 'overdue');
+check('a done one-off is done even with a future start date',
+      maintenanceStatusOf(oneOff({ startDate: inDays(5), lastPerformed: inDays(-1) })) === 'done');
+check('a scheduled task ignores any stored start date',
+      maintenanceStatusOf({ kind: 'scheduled', startDate: inDays(5), frequencyDays: 30, lastPerformed: inDays(-40) }) === 'overdue');
+check('taskNotStarted is false for a blank or scheduled task',
+      !taskNotStarted(oneOff({})) && !taskNotStarted({ startDate: inDays(5) }));
+check('taskStartDate / taskDoOnDate read one-offs only',
+      !!taskStartDate(oneOff({ startDate: '2026-11-01' })) && taskStartDate({ startDate: '2026-11-01' }) === null
+        && !!taskDoOnDate(oneOff({ doOn: '2026-11-01' })) && taskDoOnDate({ doOn: '2026-11-01' }) === null);
+check('both save paths write the new dates blank for a schedule',
+      (src.match(/startDate: oneOff \? \(maintenanceDraft\.startDate \|\| ""\) : ""/g) || []).length === 2
+        && (src.match(/doOn: oneOff \? \(maintenanceDraft\.doOn \|\| ""\) : ""/g) || []).length === 2);
+check('all three dialog openers seed the dates',
+      (src.match(/startDate: "", doOn: "", dueDate: ""/g) || []).length >= 3 && /startDate: dateOnly\(item\.startDate\)/.test(src));
+check('the edge function keeps both dates',
+      /TASK_EXTRA_KEYS = \[[^\]]*"startDate"[^\]]*"doOn"/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api/save-shape.ts'), 'utf8')));
+check('editing either date is audited',
+      /mkEntry\("Start date"/.test(src) && /mkEntry\("Scheduled for"/.test(src));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

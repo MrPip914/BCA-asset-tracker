@@ -53,6 +53,20 @@ Deno.test("a task keeps the window pane groups it names, and an empty list is no
   assert(!("paneGroupIds" in a.maintenanceItems[1]));
 });
 
+Deno.test("a one-off task keeps its start and scheduled dates, and a blank one is not stored", () => {
+  const [a] = shapeAssets([{
+    id: "a1", label: "a1", type: "Room",
+    maintenanceItems: [
+      { id: "m1", task: "Repaint", kind: "oneoff", startDate: "2026-11-01", doOn: "2026-11-05", dueDate: "2026-11-10" },
+      { id: "m2", task: "Old task", kind: "scheduled", startDate: "", doOn: "" },
+    ],
+  }], []);
+  assertEquals(a.maintenanceItems[0].startDate, "2026-11-01");
+  assertEquals(a.maintenanceItems[0].doOn, "2026-11-05");
+  assert(!("startDate" in a.maintenanceItems[1]));
+  assert(!("doOn" in a.maintenanceItems[1]));
+});
+
 const OWNER = "mrpip914@gmail.com";
 const verifyIdToken = (token: unknown) => {
   const [kind, email] = String(token).split(":");

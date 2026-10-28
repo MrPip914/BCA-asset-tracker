@@ -122,7 +122,7 @@ check('both saves validate custom values', (src.match(/validateCustomValues\(wor
 check('the draft is seeded with taskType/custom when editing', /taskType: item\.taskType \|\| "",/.test(src));
 check('Save is disabled while a custom value is invalid', /\|\| !!taskCustomError\}/.test(src));
 check('the Task types settings section exists', /key: "tasktypes"/.test(src) && /key === "tasktypes"/.test(src));
-check('the edge function keeps taskType/custom on save', /TASK_EXTRA_KEYS = \["taskType", "custom", "paneGroupIds"\]/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api/save-shape.ts'), 'utf8')));
+check('the edge function keeps taskType/custom on save', /TASK_EXTRA_KEYS = \["taskType", "custom", "paneGroupIds"/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api/save-shape.ts'), 'utf8')));
 
 // ---- work dialog wiring (source)
 check('add and edit work saves write custom', (src.match(/custom: \{ \.\.\.\(changeDraft\.custom \|\| \{\}\) \}/g) || []).length === 2);

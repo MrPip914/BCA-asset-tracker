@@ -39,7 +39,7 @@ const eq = (name, got, want) => check(name, JSON.stringify(got) === JSON.stringi
     ...["RECURRENCE_UNITS", "RECURRENCE_ORDINALS", "MAINTENANCE_FREQUENCIES"].map(arr),
     line("WEEKDAY_NAMES"),
     ...["recurrenceCount", "parseRecurrence", "addCalendarMonths", "nthWeekdayOfMonth", "nextRecurrenceDate",
-      "dateOnly", "taskKindOf", "isOneOffTask", "taskIsDone", "taskDueDate", "maintenanceStatusOf", "cellsLabel_",
+      "dateOnly", "taskKindOf", "isOneOffTask", "taskIsDone", "taskDueDate", "localDateString", "taskNotStarted", "maintenanceStatusOf", "cellsLabel_",
       "formatRecurrence", "describeRecurrence", "recurrenceApproxDays",
       "floorPlanPathToPoints", "floorPlanRemapShapeIds", "floorPlanRemapLinksAndGroups", "floorPlanSegmentId", "floorPlanSegmentParts",
       // The outside-wall rule, and the geometry it runs on: set_plan_walls must
