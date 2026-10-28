@@ -1471,7 +1471,7 @@ function adoptWorkModel(raw) {
   const settings = v => {
     const out = {};
     Object.entries(obj(v)).forEach(([id, st]) => {
-      out[id] = { fieldKeys: list(st && st.fieldKeys).map(String), requiredFields: list(st && st.requiredFields).map(String), hiddenFields: list(st && st.hiddenFields).map(String) };
+      out[id] = { fieldKeys: list(st && st.fieldKeys).map(String), requiredFields: list(st && st.requiredFields).map(String), hiddenFields: list(st && st.hiddenFields).map(String), ...(st && (st.completion === "optional" || st.completion === "simple") ? { completion: st.completion } : {}) };
     });
     return out;
   };
