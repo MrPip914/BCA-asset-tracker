@@ -87,8 +87,8 @@ check('a workModel change marks config dirty', /nextWorkModel !== workModel/.tes
 check('per-record saves send workModel', /CONFIG_PAYLOAD_KEYS = \[[^\]]*"workModel"/.test(src));
 check('load adopts it', /setWorkModel\(adoptWorkModel\(data\.workModel\)\)/.test(src));
 const root = __dirname;
-check('the backend writes the key', /OPTIONAL_CONFIG_KEYS = \["workModel", "views"\]/.test(fs.readFileSync(path.join(root, 'supabase/functions/asset-api/save.ts'), 'utf8')));
-check('the backend reads the key', /OPTIONAL_CONFIG_KEYS = \["workModel", "views"\]/.test(fs.readFileSync(path.join(root, 'supabase/functions/asset-api/inventory.ts'), 'utf8')));
+check('the backend writes the key', /OPTIONAL_CONFIG_KEYS = \["workModel", "views".test(fs.readFileSync(path.join(root, 'supabase/functions/asset-api/save.ts'), 'utf8')));
+check('the backend reads the key', /OPTIONAL_CONFIG_KEYS = \["workModel", "views".test(fs.readFileSync(path.join(root, 'supabase/functions/asset-api/inventory.ts'), 'utf8')));
 
 // ---- editing
 let em = H.adoptWorkModel(null);

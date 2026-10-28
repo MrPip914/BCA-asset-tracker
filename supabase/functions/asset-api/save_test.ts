@@ -91,6 +91,18 @@ Deno.test("a task keeps its blockedBy list, and an empty one is not stored", () 
   assert(!("blockedBy" in a.maintenanceItems[1]));
 });
 
+Deno.test("a task stamped from a template keeps its origin, and a task without one stores none", () => {
+  const [a] = shapeAssets([{
+    id: "a1", label: "a1", type: "Room",
+    maintenanceItems: [
+      { id: "m1", task: "Set up", kind: "oneoff", origin: { templateId: "t1", itemId: "i1", runDate: "2026-11-01" } },
+      { id: "m2", task: "Paint", kind: "oneoff" },
+    ],
+  }], []);
+  assertEquals(a.maintenanceItems[0].origin, { templateId: "t1", itemId: "i1", runDate: "2026-11-01" });
+  assert(!("origin" in a.maintenanceItems[1]));
+});
+
 const OWNER = "mrpip914@gmail.com";
 const verifyIdToken = (token: unknown) => {
   const [kind, email] = String(token).split(":");
