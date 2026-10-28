@@ -977,6 +977,7 @@ in `localStorage` (`asset-tracker-theme-mode`, not tenant-namespaced). Frontend 
   buttons is fine, which is why those three stay mid-dark in the dark palette.
 - **Floor plans and section drawings sit on `PLAN_PAPER`**, a light sheet in dark mode, because an uploaded
   plan is drawn in dark ink. The print door card is already light.
+- **`index.html` loads `clients.js?v=<build>`; bump that `v` whenever index.html starts depending on something new in clients.js.** A browser that kept the old clients.js beside the new page (Pages caches both) made the Appearance buttons reload without changing anything.
 - A tenant has no way to set its own dark palette yet.
 
 ## Phone bottom bar (2026-10-20)
