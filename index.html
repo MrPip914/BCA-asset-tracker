@@ -91,7 +91,7 @@ import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useContex
 // import() instead. See the comment there before moving it back up.
 import {
   Search, Plus, X, Pencil, Trash2, Save, ChevronRight, ChevronDown, ChevronUp, ArrowLeft, MessageSquare,
-  Monitor, Phone, Tv, Camera, HardDrive, HelpCircle, Columns3, Lock, Filter, Check, DoorOpen, Download,
+  Monitor, Phone, Tv, Camera, HardDrive, HelpCircle, Columns3, CalendarDays, ChevronLeft, Lock, Filter, Check, DoorOpen, Download,
   Wrench, UserCircle, Settings, History, Archive, ArchiveRestore, Building2, Package, Copy, Zap, Repeat, ArrowLeftRight, Menu,
   FlaskConical, Layers, RotateCcw, RotateCw, AlertTriangle, Loader2, Printer, MapPin, QrCode, Info, LogOut, Users, Maximize,
   ImagePlus, Eye, EyeOff, Home, Paperclip, FileText, ExternalLink, Upload,
@@ -2645,6 +2645,7 @@ const VIEW_DIALOG_FIELDS = [
 const VIEW_CUSTOM_PREFIX = "custom:";
 const VIEW_TYPE_LIST = "list";
 const VIEW_TYPE_KANBAN = "kanban";
+const VIEW_TYPE_CALENDAR = "calendar";
 const VIEW_KANBAN_PREFIX = "kanban:";
 const KANBAN_DEFAULT_BUCKET = "__default";
 const KANBAN_DEFAULT_NAME = "To do";
@@ -2859,7 +2860,7 @@ function adoptViews(raw) {
     list: list.filter(v => v && typeof v.id === "string" && v.id).map(v => ({
       id: v.id,
       name: String(v.name || "Untitled view"),
-      type: v.type === VIEW_TYPE_KANBAN ? VIEW_TYPE_KANBAN : VIEW_TYPE_LIST,
+      type: v.type === VIEW_TYPE_KANBAN ? VIEW_TYPE_KANBAN : v.type === VIEW_TYPE_CALENDAR ? VIEW_TYPE_CALENDAR : VIEW_TYPE_LIST,
       viewersCanOrder: v.viewersCanOrder === true,
       openMode: v.openMode === "edit" ? "edit" : "view",
       newAtTop: v.newAtTop === true,
@@ -2899,6 +2900,88 @@ function viewVisibleCustomKeys(view) {
 }
 
 function viewTaskKey(row) { return row.asset.id + "::" + row.item.id; }
+
+// ---------- CALENDAR VIEW (2026-10-28) ----------
+// A calendar lays the view's tasks on a month or a week. Where a task sits:
+//   - a one-off with "Scheduled for" (doOn): that day;
+//   - a one-off with a start date AND a due date and no doOn: a SPAN across its
+//     window ("anytime this week"), drawn as a strip, not in a day cell;
+//   - otherwise its due date (a one-off's own, a schedule's derived next due);
+//   - a task with no date at all is listed under "No date" and is not lost.
+// Dates are yyyy-mm-dd strings throughout, so comparing them as text orders them.
+const CALENDAR_MODES = ["month", "week"];
+function calendarDayAdd(day, n) {
+  const d = new Date(day + "T00:00:00");
+  d.setDate(d.getDate() + n);
+  return localDateString(d);
+}
+// The days a calendar shows, Sunday first. A month fills whole weeks.
+function calendarRange(mode, anchor) {
+  const a = new Date((anchor || localDateString(new Date())) + "T00:00:00");
+  let first, last;
+  if (mode === "week") {
+    first = new Date(a); first.setDate(a.getDate() - a.getDay());
+    last = new Date(first); last.setDate(first.getDate() + 6);
+  } else {
+    const m1 = new Date(a.getFullYear(), a.getMonth(), 1);
+    const m2 = new Date(a.getFullYear(), a.getMonth() + 1, 0);
+    first = new Date(m1); first.setDate(m1.getDate() - m1.getDay());
+    last = new Date(m2); last.setDate(m2.getDate() + (6 - m2.getDay()));
+  }
+  const days = [];
+  for (let d = new Date(first); d <= last; d.setDate(d.getDate() + 1)) days.push(localDateString(d));
+  const weeks = [];
+  for (let i = 0; i < days.length; i += 7) weeks.push(days.slice(i, i + 7));
+  return { mode, from: days[0], to: days[days.length - 1], days, weeks, month: a.getMonth() };
+}
+// Previous / next window: a month moves by month, a week by seven days.
+function calendarShift(mode, anchor, dir) {
+  const a = new Date((anchor || localDateString(new Date())) + "T00:00:00");
+  if (mode === "week") { a.setDate(a.getDate() + 7 * dir); return localDateString(a); }
+  return localDateString(new Date(a.getFullYear(), a.getMonth() + dir, 1));
+}
+function calendarTitle(range, anchor) {
+  if (range.mode === "week") {
+    const f = new Date(range.from + "T00:00:00"), t = new Date(range.to + "T00:00:00");
+    const m = d => d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    return m(f) + " – " + m(t) + ", " + t.getFullYear();
+  }
+  return new Date(anchor + "T00:00:00").toLocaleDateString(undefined, { month: "long", year: "numeric" });
+}
+// Where one row sits: { kind: "day", date, via } | { kind: "span", from, to } | null.
+function calendarPlacement(row) {
+  const item = row && row.item;
+  if (!item) return null;
+  if (isOneOffTask(item)) {
+    const doOn = dateOnly(item.doOn), start = dateOnly(item.startDate), due = dateOnly(item.dueDate);
+    if (doOn) return { kind: "day", date: doOn, via: "doOn" };
+    if (start && due && start < due) return { kind: "span", from: start, to: due };
+    if (due) return { kind: "day", date: due, via: "due" };
+    if (start) return { kind: "day", date: start, via: "start" };
+    return null;
+  }
+  const due = row.due instanceof Date && !isNaN(row.due.getTime()) ? localDateString(row.due) : "";
+  return due ? { kind: "day", date: due, via: "due" } : null;
+}
+// Everything the grid needs: tasks per day, spans touching the window, the undated.
+function calendarLayout(rows, range) {
+  const byDay = {};
+  range.days.forEach(d => { byDay[d] = []; });
+  const spans = [];
+  const undated = [];
+  (rows || []).forEach(r => {
+    const p = calendarPlacement(r);
+    if (!p) { undated.push(r); return; }
+    if (p.kind === "day") { if (byDay[p.date]) byDay[p.date].push({ row: r, via: p.via }); return; }
+    if (p.to >= range.from && p.from <= range.to) spans.push({ row: r, from: p.from, to: p.to });
+  });
+  return { byDay, spans, undated };
+}
+// A task can be dragged to a day only when that sets its "Scheduled for": a
+// one-off that is not finished. A schedule's due date is derived, so it cannot.
+function calendarCanSchedule(row) {
+  return !!row && !!row.item && isOneOffTask(row.item) && !taskIsDone(row.item);
+}
 
 // A field's value as comparable text. Dates are ISO (yyyy-mm-dd), which is what
 // someone types into a query; viewFieldDisplay is the reading form.
@@ -6651,7 +6734,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-28.5";
+const APP_VERSION = "2026-10-28.6";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -7894,6 +7977,9 @@ const MOCK_SNAPSHOT = {
       groupBy: "owner", groupDir: "desc", groupOrder: ["__none"],
       columns: ["task", "asset", "owner", "dueDate"], order: [],
       conditions: [{ field: "kind", op: "=", value: "One-off", token: "", join: "and" }, { field: "status", op: "!=", value: "Done", token: "", join: "and" }] },
+    // Every task on a month: a dated day, a start-to-due span, and the undated.
+    { id: "view-calendar", name: "Calendar", type: "calendar", userEmails: [], dialogFields: ["frequency", "dueDate", "doOn", "notes", "owner"],
+      columns: ["task", "asset", "dueDate", "status"], order: [], conditions: [] },
   ] },
   // A STORED label list that is deliberately INCOMPLETE and RE-ORDERED: it omits
   // "People" (a shipped label) and puts Facilities before Equipment. So the
@@ -8051,6 +8137,7 @@ const MOCK_SNAPSHOT = {
       maintenanceItems: [
         { id: "mnt-b200-repaint", kind: "oneoff", task: "Repaint the south exterior wall", notes: "Two quotes in. Waiting on the district to confirm the colour before scheduling.", frequencyLabel: "", frequencyDays: "", startDate: "2026-09-01", doOn: "2026-10-12", dueDate: "2026-10-15", lastPerformed: "", owner: "Eric", at: "", by: "" },
         { id: "mnt-b200-paint-samples", kind: "oneoff", task: "Order paint samples for the spring repaint", notes: "", frequencyLabel: "", frequencyDays: "", startDate: "2027-03-01", doOn: "2027-03-08", dueDate: "2027-03-15", lastPerformed: "", owner: "", at: "", by: "" },
+        { id: "mnt-b200-gutters", kind: "oneoff", task: "Clear the gutters before the rains", notes: "Any day in the window works.", frequencyLabel: "", frequencyDays: "", startDate: "2026-10-26", doOn: "", dueDate: "2026-11-03", lastPerformed: "", owner: "", at: "", by: "" },
       ] },
     { label: "BCB0003", type: "Building", name: "Building 300", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
     { label: "BCB0004", type: "Building", name: "Building 400", parentId: "BCC0001", brand: "", model: "", serial: "", person: "", peripherals: "", notes: "", totalQuantity: "", purchaseDate: "", warrantyUntil: "", status: "Active" },
@@ -10792,6 +10879,27 @@ function AssetTracker() {
     await persist(next, { auditLog: logAudit([{
       at: new Date().toISOString(), by: currentUser || "", assetLabel: assetId, assetType: asset.type,
       action: "maintenance_edited", field: `${item.task} — ${field.label}`, from: (builtinType ? nameOf_(before) : before) || "—", to: (builtinType ? nameOf_(value) : value) || "—",
+    }]) });
+  }
+  // Dragging a task to another day on a Calendar view sets its "Scheduled for",
+  // audited like the same edit in the task dialog. Only a one-off that is not
+  // finished has one; a schedule's due date is worked out and cannot be dragged.
+  async function setTaskDoOn(taskKey, day) {
+    if (!canEdit || !assets) return;
+    const [assetId, itemId] = taskKey.split("::");
+    const asset = assets.find(a => a.id === assetId);
+    const item = asset && (asset.maintenanceItems || []).find(m => m && m.id === itemId);
+    if (!item) return;
+    if (!isOneOffTask(item) || taskIsDone(item)) {
+      setNotice(`"${item.task}" ${taskIsDone(item) ? "is finished" : "repeats on a schedule"}, so it can't be moved to another day.`);
+      return;
+    }
+    const before = dateOnly(item.doOn);
+    if (before === day) return;
+    const next = assets.map(a => (a.id === assetId ? { ...a, maintenanceItems: a.maintenanceItems.map(m => (m.id === itemId ? { ...m, doOn: day } : m)) } : a));
+    await persist(next, { auditLog: logAudit([{
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: assetId, assetType: asset.type,
+      action: "maintenance_edited", field: `${item.task} — Scheduled for`, from: formatDateOnly(before) || "—", to: formatDateOnly(day) || "—",
     }]) });
   }
   function saveViewDraft(view) {
@@ -20337,6 +20445,7 @@ function AssetTracker() {
                 canArrange={viewCanArrange(activeView, canEdit)}
                 onState={patch => saveViewState(activeView.id, patch)}
                 onField={canEdit && activeView.fieldBacked && activeView.fieldWritable ? (key, value) => setTaskBoardValue(activeView, key, value) : undefined}
+                onSchedule={canEdit ? (key, day) => setTaskDoOn(key, day) : undefined}
                 onOpen={r => openMaintenanceEdit(r.item.id, r.asset.id, activeView.id)}
                 emptyText="No tasks match this view."
               />
@@ -21293,11 +21402,119 @@ function ViewLiveFilterPanel({ filter, onChange, fields, kanbanLabel }) {
   );
 }
 
+// A Calendar view: the tasks the query finds, on a month or a week. Tapping a
+// task opens it. Whoever may schedule (an editor) can drag a one-off to another
+// day, which sets its "Scheduled for"; `onSchedule(key, date)` does the write.
+// Dragging is the browser's own drag and drop, so on a phone the way to move a
+// task is the "Scheduled for" field in its dialog.
+function CalendarView({ view, rows, onOpen, onSchedule, emptyText }) {
+  const today = localDateString(new Date());
+  const [mode, setMode] = useState("month");
+  const [anchor, setAnchor] = useState(today);
+  const [over, setOver] = useState("");
+  const range = useMemo(() => calendarRange(mode, anchor), [mode, anchor]);
+  const layout = useMemo(() => calendarLayout(rows, range), [rows, range]);
+  const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const navBtn = { display: "flex", alignItems: "center", padding: "6px 8px", borderRadius: 8, border: `1.5px solid ${C.border}`, background: C.surface, color: C.ink, cursor: "pointer", fontSize: 13, fontWeight: 600 };
+  const chipFor = (r, extra) => {
+    const meta = maintenanceStatusMeta(r.status);
+    const key = viewTaskKey(r);
+    const drag = !!onSchedule && calendarCanSchedule(r);
+    return (
+      <div key={key + (extra || "")} data-cal-task={key} draggable={drag}
+        onDragStart={drag ? e => { e.dataTransfer.setData("text/plain", key); e.dataTransfer.effectAllowed = "move"; } : undefined}
+        onClick={onOpen ? () => onOpen(r) : undefined}
+        role={onOpen ? "button" : undefined} tabIndex={onOpen ? 0 : undefined}
+        onKeyDown={onOpen ? e => { if (e.key === "Enter") onOpen(r); } : undefined}
+        title={r.item.task + " — " + r.assetName}
+        style={{ borderLeft: `3px solid ${meta.color}`, background: C.surface, border: `1px solid ${C.border}`, borderLeftWidth: 3, borderLeftColor: meta.color, borderRadius: 5, padding: "2px 6px", fontSize: 12, color: r.status === "done" ? C.muted : C.ink, textDecoration: r.status === "done" ? "line-through" : "none", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: drag ? "grab" : (onOpen ? "pointer" : "default") }}>
+        {r.item.task}
+      </div>
+    );
+  };
+  const drop = day => e => {
+    e.preventDefault();
+    setOver("");
+    const key = e.dataTransfer.getData("text/plain");
+    if (key && onSchedule) onSchedule(key, day);
+  };
+  const spansForWeek = week => layout.spans.filter(s => s.to >= week[0] && s.from <= week[6]);
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+        <button type="button" aria-label={mode === "week" ? "Previous week" : "Previous month"} title="Previous" onClick={() => setAnchor(calendarShift(mode, anchor, -1))} style={navBtn}><ChevronLeft size={16} /></button>
+        <button type="button" aria-label={mode === "week" ? "Next week" : "Next month"} title="Next" onClick={() => setAnchor(calendarShift(mode, anchor, 1))} style={navBtn}><ChevronRight size={16} /></button>
+        <button type="button" onClick={() => setAnchor(today)} style={navBtn}>Today</button>
+        <div data-cal-title style={{ fontWeight: 700, fontSize: 15, color: C.brandDark, flex: 1, minWidth: 120 }}>{calendarTitle(range, anchor)}</div>
+        <div style={{ display: "flex", gap: 4 }}>
+          {CALENDAR_MODES.map(m => (
+            <button key={m} type="button" aria-pressed={mode === m} onClick={() => setMode(m)}
+              style={{ ...navBtn, borderColor: mode === m ? C.brand : C.border, background: mode === m ? C.bg : C.surface }}>{m === "month" ? "Month" : "Week"}</button>
+          ))}
+        </div>
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <div style={{ minWidth: mode === "week" ? 560 : 640, border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden", background: C.surface }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", background: C.brandDark, color: C.onBrand }}>
+            {dayNames.map(n => <div key={n} style={{ padding: "6px 8px", fontSize: 11, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase" }}>{n}</div>)}
+          </div>
+          {range.weeks.map((week, wi) => {
+            const spans = spansForWeek(week);
+            return (
+              <div key={wi} style={{ borderTop: `1px solid ${C.border}` }}>
+                {spans.length > 0 && (
+                  <div data-cal-spans style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 2, padding: "4px 2px 0", background: C.bg }}>
+                    {spans.map(s => {
+                      const c0 = Math.max(0, week.indexOf(s.from < week[0] ? week[0] : s.from));
+                      const endDay = s.to > week[6] ? week[6] : s.to;
+                      const c1 = week.indexOf(endDay);
+                      const meta = maintenanceStatusMeta(s.row.status);
+                      return (
+                        <div key={viewTaskKey(s.row)} data-cal-span={viewTaskKey(s.row)} onClick={onOpen ? () => onOpen(s.row) : undefined} title={s.row.item.task + " — anytime " + s.from + " to " + s.to}
+                          style={{ gridColumn: `${c0 + 1} / ${c1 + 2}`, background: C.surface, border: `1px dashed ${meta.color}`, borderRadius: 5, padding: "1px 6px", fontSize: 12, color: C.ink, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: onOpen ? "pointer" : "default" }}>
+                          {s.from < week[0] ? "◂ " : ""}{s.row.item.task}{s.to > week[6] ? " ▸" : ""}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))" }}>
+                  {week.map((day, di) => {
+                    const items = layout.byDay[day] || [];
+                    const dim = mode === "month" && new Date(day + "T00:00:00").getMonth() !== range.month;
+                    return (
+                      <div key={day} data-cal-day={day}
+                        onDragOver={onSchedule ? e => { e.preventDefault(); setOver(day); } : undefined}
+                        onDragLeave={onSchedule ? () => setOver(o => (o === day ? "" : o)) : undefined}
+                        onDrop={onSchedule ? drop(day) : undefined}
+                        style={{ minHeight: mode === "week" ? 160 : 92, padding: 4, borderLeft: di === 0 ? "none" : `1px solid ${C.border}`, background: over === day ? C.bg : (dim ? "rgba(0,0,0,0.025)" : "transparent"), outline: day === today ? `2px solid ${C.brand}` : "none", outlineOffset: -2, display: "flex", flexDirection: "column", gap: 3, minWidth: 0 }}>
+                        <div style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: dim ? C.empty : C.muted, fontWeight: day === today ? 700 : 400 }}>{Number(day.slice(8))}</div>
+                        {items.map(it => chipFor(it.row, it.via))}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      {layout.undated.length > 0 && (
+        <div data-cal-undated style={{ marginTop: 14 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: C.muted, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 6 }}>No date ({layout.undated.length})</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>{layout.undated.map(r => chipFor(r))}</div>
+        </div>
+      )}
+      {!rows.length && <div style={{ fontSize: 13, color: C.empty, marginTop: 12 }}>{emptyText}</div>}
+    </div>
+  );
+}
+
 // Everything under a view's title: the live filter, the order icon, and the list
 // or board. `onState(patch)` receives { order } and/or { assignments } when a
 // person arranges tasks. Keyed by view id by its caller, so the live filter and
 // the arranging mode reset when another view is opened.
-function ViewBody({ title, view, rows, model, ctx, canArrange, onState, onField, onOpen, emptyText }) {
+function ViewBody({ title, view, rows, model, ctx, canArrange, onState, onField, onSchedule, onOpen, emptyText }) {
   const [arrange, setArrange] = useState(false);
   const [filterOpen, setFilterOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -21318,6 +21535,7 @@ function ViewBody({ title, view, rows, model, ctx, canArrange, onState, onField,
   const shownRows = useMemo(() => rows.filter(r => viewLiveMatches(live, r, view, model, ctx)), [rows, live, view, model, ctx]);
   const fields = viewFieldsFor(model, ctx && ctx.views, view.id);
   const kanban = view.type === VIEW_TYPE_KANBAN;
+  const calendar = view.type === VIEW_TYPE_CALENDAR;
   const active = viewLiveActive(live);
   const filterCount = live.conds.filter(c => c.field).length;
   const barBtn = on => ({ display: "flex", alignItems: "center", gap: 4, padding: "7px 9px", borderRadius: 8, fontSize: 13, fontWeight: 600, border: `1.5px solid ${on ? C.brand : C.border}`, background: on ? C.bg : C.surface, color: C.ink, cursor: "pointer" });
@@ -21353,7 +21571,7 @@ function ViewBody({ title, view, rows, model, ctx, canArrange, onState, onField,
             {freeze ? <PinOff size={16} /> : <Pin size={16} />}
           </button>
         )}
-        {canArrange && !kanban && (
+        {canArrange && !kanban && !calendar && (
           <button type="button" aria-label={arranging ? "Done ordering" : "Order tasks"} title={arranging ? "Done ordering" : "Order tasks"} aria-pressed={arranging} onClick={() => setArrange(a => !a)} style={barBtn(arranging)}>
             {arranging ? <Check size={16} /> : <ArrowUpDown size={16} />}
           </button>
@@ -21361,7 +21579,7 @@ function ViewBody({ title, view, rows, model, ctx, canArrange, onState, onField,
       </div>
       {filterOpen && <ViewLiveFilterPanel filter={live} onChange={setLive} fields={fields} />}
       {active && <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>Showing {shownRows.length} of {rows.length}</div>}
-      {arranging && !kanban && (
+      {arranging && !kanban && !calendar && (
         <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12, color: C.muted, marginBottom: 8, flexWrap: "wrap" }}>
           <span>Drag a task by its handle. Ordered tasks sit at the top; the rest follow below.</span>
           {anyOrdered && (
@@ -21370,7 +21588,9 @@ function ViewBody({ title, view, rows, model, ctx, canArrange, onState, onField,
           )}
         </div>
       )}
-      {kanban ? (
+      {calendar ? (
+        <CalendarView view={view} rows={shownRows} onOpen={onOpen} onSchedule={onSchedule} emptyText={active ? "No tasks match the filter." : emptyText} />
+      ) : kanban ? (
         <KanbanBoard view={view} rows={shownRows} model={model} ctx={ctx} arrange={arranging} onOpen={onOpen} freezeFirst={freeze && !phone} emptyText={active ? "None match." : "No tasks."}
           onMove={(key, bucketId, index, area) => {
             const board = viewBoard(view, shownRows, model, ctx);
@@ -21408,7 +21628,7 @@ function ViewsSidebar({ views, counts, activeId, onPick, full }) {
         return (
           <button key={v.id} type="button" onClick={() => onPick(v.id)} aria-current={on ? "true" : undefined}
             style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left", padding: full ? "14px 14px" : "9px 12px", borderRadius: 10, border: `1px solid ${on ? C.brand : (full ? C.border : "transparent")}`, background: on ? C.bg : (full ? C.surface : "transparent"), color: C.ink, fontSize: 14, fontWeight: on ? 700 : 500, cursor: "pointer" }}>
-            {v.type === VIEW_TYPE_KANBAN ? <Columns3 size={15} color={C.muted} style={{ flexShrink: 0 }} /> : <ClipboardList size={15} color={C.muted} style={{ flexShrink: 0 }} />}
+            {v.type === VIEW_TYPE_KANBAN ? <Columns3 size={15} color={C.muted} style={{ flexShrink: 0 }} /> : v.type === VIEW_TYPE_CALENDAR ? <CalendarDays size={15} color={C.muted} style={{ flexShrink: 0 }} /> : <ClipboardList size={15} color={C.muted} style={{ flexShrink: 0 }} />}
             <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v.name}</span>
             <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted, flexShrink: 0 }}>{counts[v.id] || 0}</span>
             {full && <ChevronRight size={16} color={C.muted} style={{ flexShrink: 0 }} />}
@@ -21444,7 +21664,7 @@ function SettingsViewList({ views, arrange, nameFor, onEdit, onReorder }) {
               )}
               <button type="button" onClick={arrange ? undefined : () => onEdit(v.id)} style={{ flex: 1, minWidth: 0, textAlign: "left", background: "none", border: "none", padding: 0, cursor: arrange ? "default" : "pointer" }}>
                 <div style={{ fontSize: 14, color: C.ink, display: "flex", alignItems: "center", gap: 6 }}>
-                  {v.type === VIEW_TYPE_KANBAN ? <Columns3 size={14} color={C.muted} /> : <ClipboardList size={14} color={C.muted} />}{v.name}
+                  {v.type === VIEW_TYPE_KANBAN ? <Columns3 size={14} color={C.muted} /> : v.type === VIEW_TYPE_CALENDAR ? <CalendarDays size={14} color={C.muted} /> : <ClipboardList size={14} color={C.muted} />}{v.name}
                 </div>
                 <div style={{ fontSize: 12, color: C.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {v.userEmails.length ? "Shown to: " + v.userEmails.map(nameFor).join(", ") : "Not assigned to anyone"}
@@ -21481,6 +21701,7 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, assets, rows, mod
   const fields = viewFieldsFor(model, allViews, draft.id);
   const dialogFields = viewDialogFieldsFor(model);
   const kanban = draft.type === VIEW_TYPE_KANBAN;
+  const calendar = draft.type === VIEW_TYPE_CALENDAR;
   const set = patch => setDraft(d => ({ ...d, ...patch }));
   // Changing a line's field to or from a Kanban board changes what a value IS (a
   // bucket, not typed text), so the old value is cleared rather than reinterpreted.
@@ -21594,13 +21815,14 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, assets, rows, mod
         <div style={sectionStyle}>
           <div style={{ ...lbl, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
             Type
-            <HelpTip label="About view types" text="A list shows the tasks in a table. A Kanban shows them as cards in buckets: the tasks the query finds start in the default bucket, and are moved into the others. Another view's query can then ask which bucket a task is in." />
+            <HelpTip label="About view types" text="A list shows the tasks in a table. A Kanban shows them as cards in buckets: the tasks the query finds start in the default bucket, and are moved into the others. Another view's query can then ask which bucket a task is in. A calendar lays the tasks on a month or a week by their Scheduled for date, else their due date; editors can drag a one-off to another day." />
           </div>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-            {[[VIEW_TYPE_LIST, "List"], [VIEW_TYPE_KANBAN, "Kanban"]].map(([k, label]) => (
+            {[[VIEW_TYPE_LIST, "List"], [VIEW_TYPE_KANBAN, "Kanban"], [VIEW_TYPE_CALENDAR, "Calendar"]].map(([k, label]) => (
               <button key={k} type="button" aria-pressed={draft.type === k} onClick={() => set({ type: k })} style={chip(draft.type === k)}>{label}{draft.type === k && <Check size={13} />}</button>
             ))}
           </div>
+          {!calendar && <>
           <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 12 }}>
             <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, color: C.ink, cursor: "pointer" }}>
               <input type="checkbox" checked={!!draft.viewersCanOrder} onChange={e => set({ viewersCanOrder: e.target.checked })} />
@@ -21615,6 +21837,7 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, assets, rows, mod
             </label>
             <HelpTip label="About showing new tasks at the top" text={`Tasks nobody has placed yet, newest first, sit above the ones that have been put in order${kanban ? ", in each column" : ""}. Unticked, they follow below.`} />
           </div>
+          </>}
           {kanban && (
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 12 }}>
               <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, color: C.ink, cursor: "pointer" }}>
@@ -21720,6 +21943,7 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, assets, rows, mod
           <div style={{ fontSize: 12, color: C.muted, marginTop: 8 }}>{describeViewQuery(draft, model, ctxViews)}</div>
         </div>
 
+        {!calendar && <>
         <div style={sectionStyle}>
           <div style={{ ...lbl, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
             Group tasks by
@@ -21775,6 +21999,8 @@ function ViewEditor({ initial, allViews, accessUsers, sandbox, assets, rows, mod
             onChange={v => set({ columns: [...cols.filter(k => v.includes(k)), ...v.filter(k => !cols.includes(k))] })}
             options={fields.map(f => f.key)} labelForOption={fieldLabel} headingFor={k => viewFieldGroup(fields, k)} placeholder="Choose fields…" title={kanban ? "Fields on each card" : "Columns in the list"} />
         </div>
+
+        </>}
 
         <div style={sectionStyle}>
           <div style={{ ...lbl, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
