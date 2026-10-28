@@ -128,7 +128,7 @@ check('opening from a view passes the view id', /openMaintenanceEdit\(r\.item\.i
 check('no Delete on a task opened from a view', /\{editing && !dialogView && \(\s*<button\s+onClick=\{\(\) => setConfirmMaintenanceDelete/.test(src));
 check('the save validates only the fields the view shows', /viewVisibleCustomKeys\(viewsCfg\.list\.find\(v => v\.id === maintenanceModal\.viewId\)\)/.test(src));
 check('a view-only person gets the dialog read-only', /<fieldset disabled=\{viewReadOnly\}/.test(src));
-check('the Edge Function stores and reads the key', ['save.ts', 'inventory.ts'].every(f => /OPTIONAL_CONFIG_KEYS = \["workModel", "views"\]/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api', f), 'utf8'))));
+check('the Edge Function stores and reads the key', ['save.ts', 'inventory.ts'].every(f => /OPTIONAL_CONFIG_KEYS = \["workModel", "views"/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api', f), 'utf8'))));
 check('Sandbox carries views', /views: \{ list: \[/.test(src));
 
 // --- Kanban, drag order, live filter, who may arrange (2026-10-17 update)

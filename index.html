@@ -2983,6 +2983,114 @@ function calendarCanSchedule(row) {
   return !!row && !!row.item && isOneOffTask(row.item) && !taskIsDone(row.item);
 }
 
+// ---------- TASK TEMPLATES AND EVENTS (2026-10-28) ----------
+// A template is a SNAPSHOT RECIPE: a parent task (the "event") and child tasks
+// whose dates are rules measured from the event's date. Scheduling one on a date
+// stamps ordinary tasks (`parentTaskId` set, `origin` recorded) in one save;
+// editing the template later never touches events already stamped.
+// Stored in the Config key `taskTemplates` = { list: [template] } (an object, as
+// for `views`, because the Edge Function keeps only optional keys that are).
+//   template = { id, name, taskType, parent: { task, notes, assetId },
+//                items: [{ id, parentItemId, task, notes, taskType, owner, asset, start, doOn, due }] }
+//   asset: "event" (the event's own asset) or an asset id.
+//   rule (start / doOn / due) = null
+//        | { kind: "days", n, dir: "before" | "after" }
+//        | { kind: "weekday", weekday: 0-6, which: "preceding" | "following" }
+const TEMPLATE_RULE_MODES = ["none", "before", "after", "preceding", "following"];
+const TEMPLATE_ITEM_MAX_DEPTH = 2; // items sit under the event: event > item > item = task depth 3
+function adoptTemplateRule(r) {
+  if (!r || typeof r !== "object") return null;
+  if (r.kind === "days") {
+    const n = Math.floor(Number(r.n));
+    return Number.isFinite(n) && n >= 0 && n <= 3650 && (r.dir === "before" || r.dir === "after") ? { kind: "days", n, dir: r.dir } : null;
+  }
+  if (r.kind === "weekday") {
+    const w = Math.floor(Number(r.weekday));
+    return w >= 0 && w <= 6 && (r.which === "preceding" || r.which === "following") ? { kind: "weekday", weekday: w, which: r.which } : null;
+  }
+  return null;
+}
+function adoptTaskTemplates(raw) {
+  const list = Array.isArray(raw && raw.list) ? raw.list : [];
+  const str = v => (typeof v === "string" ? v : "");
+  return {
+    list: list.filter(t => t && typeof t.id === "string" && t.id).map(t => {
+      const items = (Array.isArray(t.items) ? t.items : []).filter(i => i && typeof i.id === "string" && i.id).map(i => ({
+        id: i.id, parentItemId: str(i.parentItemId), task: str(i.task), notes: str(i.notes), taskType: str(i.taskType), owner: str(i.owner),
+        asset: str(i.asset) || "event", start: adoptTemplateRule(i.start), doOn: adoptTemplateRule(i.doOn), due: adoptTemplateRule(i.due),
+      }));
+      // A parent item must exist, not be the item itself, and not itself sit under another.
+      const byId = new Map(items.map(i => [i.id, i]));
+      items.forEach(i => {
+        const p = byId.get(i.parentItemId);
+        if (!p || p.id === i.id || p.parentItemId) i.parentItemId = "";
+      });
+      const par = t.parent && typeof t.parent === "object" ? t.parent : {};
+      return { id: t.id, name: String(t.name || "Untitled template"), taskType: str(t.taskType), parent: { task: str(par.task), notes: str(par.notes), assetId: str(par.assetId) }, items };
+    }),
+  };
+}
+function templateRuleMode(rule) { return !rule ? "none" : rule.kind === "days" ? rule.dir : rule.which; }
+function templateRuleFrom(mode, n, weekday) {
+  if (mode === "before" || mode === "after") return { kind: "days", n: Math.max(0, Math.floor(Number(n) || 0)), dir: mode };
+  if (mode === "preceding" || mode === "following") return { kind: "weekday", weekday: Math.max(0, Math.min(6, Math.floor(Number(weekday) || 0))), which: mode };
+  return null;
+}
+function describeTemplateRule(rule) {
+  if (!rule) return "";
+  if (rule.kind === "days") return rule.n === 0 ? "On the day" : `${rule.n} day${rule.n === 1 ? "" : "s"} ${rule.dir}`;
+  return `The ${WEEKDAY_NAMES[rule.weekday]} ${rule.which === "preceding" ? "before" : "after"}`;
+}
+// A rule's date, measured from the event's day. A weekday rule is the nearest
+// such weekday STRICTLY before or after the event, so "the Monday before a
+// Monday event" is a week earlier, never the event's own day.
+function resolveTemplateRule(rule, eventDay) {
+  const r = adoptTemplateRule(rule);
+  if (!r || !eventDay) return "";
+  if (r.kind === "days") return calendarDayAdd(eventDay, r.dir === "before" ? -r.n : r.n);
+  const dow = new Date(eventDay + "T00:00:00").getDay();
+  return r.which === "preceding"
+    ? calendarDayAdd(eventDay, -(((dow - r.weekday + 7) % 7) || 7))
+    : calendarDayAdd(eventDay, ((r.weekday - dow + 7) % 7) || 7);
+}
+// The tasks a template makes for one event: [{ assetId, item }], parent first,
+// each item after the item it sits under. An item whose asset is not (or no
+// longer) among `assetIds` falls back to the event's asset.
+function stampTemplate(template, eventDay, eventAssetId, assetIds, stamp) {
+  const out = [];
+  const t = adoptTaskTemplates({ list: [template] }).list[0];
+  if (!t || !eventDay || !eventAssetId) return out;
+  const base = (id, extra) => ({
+    id, kind: "oneoff", task: "", notes: "", frequencyLabel: "", frequencyDays: "", recurrence: "", startDate: "", doOn: "", dueDate: "",
+    lastPerformed: "", owner: "", taskType: "", custom: {}, at: (stamp && stamp.at) || "", by: (stamp && stamp.by) || "", ...extra,
+  });
+  const newId = (stamp && stamp.newId) || (() => crypto.randomUUID());
+  const parentId = newId();
+  out.push({ assetId: eventAssetId, item: base(parentId, {
+    task: t.parent.task.trim() || t.name, notes: t.parent.notes, taskType: t.taskType, doOn: eventDay,
+    origin: { templateId: t.id, itemId: "", runDate: eventDay },
+  }) });
+  const ids = new Map(t.items.map(i => [i.id, newId()]));
+  // Parents before children, so a reader never meets a child ahead of its parent.
+  const ordered = [...t.items.filter(i => !i.parentItemId), ...t.items.filter(i => i.parentItemId)];
+  ordered.forEach(i => {
+    out.push({ assetId: i.asset !== "event" && assetIds.has(i.asset) ? i.asset : eventAssetId, item: base(ids.get(i.id), {
+      task: i.task.trim() || "Untitled task", notes: i.notes, taskType: i.taskType, owner: i.owner,
+      startDate: resolveTemplateRule(i.start, eventDay), doOn: resolveTemplateRule(i.doOn, eventDay), dueDate: resolveTemplateRule(i.due, eventDay),
+      parentTaskId: i.parentItemId ? ids.get(i.parentItemId) : parentId,
+      origin: { templateId: t.id, itemId: i.id, runDate: eventDay },
+    }) });
+  });
+  return out;
+}
+function daysBetween(a, b) { return Math.round((new Date(b + "T00:00:00") - new Date(a + "T00:00:00")) / 86400000); }
+// What shifting a task by `days` changes: each of its three dates that is set.
+function shiftTaskDates(item, days) {
+  const patch = {};
+  ["startDate", "doOn", "dueDate"].forEach(k => { const d = dateOnly(item && item[k]); if (d) patch[k] = calendarDayAdd(d, days); });
+  return patch;
+}
+
 // A field's value as comparable text. Dates are ISO (yyyy-mm-dd), which is what
 // someone types into a query; viewFieldDisplay is the reading form.
 // The place a task's asset is in, by walking its parent chain. An asset that IS
@@ -6734,7 +6842,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-28.6";
+const APP_VERSION = "2026-10-28.7";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -7951,6 +8059,15 @@ const MOCK_SNAPSHOT = {
     // so the Relationships tab's reverse-field step has data to find.
     "Thermostat",
   ],
+  // One event template, so Sandbox can schedule it (Settings > Templates, or the
+  // + menu). Rules cover days before/after and a weekday before the event.
+  taskTemplates: { list: [
+    { id: "tpl-service", name: "Sunday service", taskType: "", parent: { task: "Sunday service", notes: "", assetId: "" }, items: [
+      { id: "ti-1", parentItemId: "", task: "Set up the room", notes: "", taskType: "", owner: "", asset: "event", start: null, doOn: { kind: "days", n: 1, dir: "before" }, due: { kind: "days", n: 0, dir: "before" } },
+      { id: "ti-2", parentItemId: "ti-1", task: "Test the microphones", notes: "", taskType: "", owner: "", asset: "event", start: null, doOn: { kind: "weekday", weekday: 5, which: "preceding" }, due: null },
+      { id: "ti-3", parentItemId: "", task: "Tear down", notes: "", taskType: "", owner: "", asset: "event", start: null, doOn: { kind: "days", n: 0, dir: "after" }, due: { kind: "days", n: 1, dir: "after" } },
+    ] },
+  ] },
   // Two saved task lists. Sandbox shows every view (it has no sign-in), and
   // [CURRENT USERNAME] reads the sandbox name tag, so "Eric" sees his own tasks.
   views: { list: [
@@ -8836,6 +8953,10 @@ function AssetTracker() {
   const [workModel, setWorkModel] = useState(() => adoptWorkModel(null));
   // Views (saved task lists) -- see VIEWS. Wire key `views`.
   const [viewsCfg, setViewsCfg] = useState(() => adoptViews(null));
+  const [taskTemplates, setTaskTemplates] = useState(() => adoptTaskTemplates(null));
+  const [templateEdit, setTemplateEdit] = useState(null); // null | { id } | { id: "new" } -- Settings > Templates editor
+  const [scheduleDialog, setScheduleDialog] = useState(null); // null | { templateId, days: [], assetId } -- Schedule template
+  const [shiftAsk, setShiftAsk] = useState(null); // null | { assetId, itemId, days, ids } -- offer to move an event's tasks with it
   const [activeViewId, setActiveViewId] = useState(null);
   // On a phone the Views tab is two screens: the list of views, then one view.
   const [viewPaneOpen, setViewPaneOpen] = useState(false);
@@ -9726,6 +9847,7 @@ function AssetTracker() {
     ));
     setWorkModel(adoptWorkModel(data.workModel));
     setViewsCfg(adoptViews(data.views));
+    setTaskTemplates(adoptTaskTemplates(data.taskTemplates));
     // Absent/0/garbage all mean "never stored" — peekAssetNumber() seeds it
     // from the loaded assets instead, and the first asset created writes it.
     const storedNextNumber = Number(data.nextAssetNumber);
@@ -10290,6 +10412,7 @@ function AssetTracker() {
       typeCategories: nextTypeLabels = typeLabels,
       workModel: nextWorkModel = workModel,
       views: nextViews = viewsCfg,
+      taskTemplates: nextTemplates = taskTemplates,
       breakerTypes: nextBreakerTypes = breakerTypes,
       photos: nextPhotos = photos,
       nextAssetNumber: nextNumberToIssue = nextAssetNumber,
@@ -10348,7 +10471,7 @@ function AssetTracker() {
       config: nextColumns !== columns || nextChangeTypes !== changeTypes || nextVendors !== vendors
         || nextPeripheralsList !== peripheralsList || nextUsersList !== usersList || nextBulkItemTypes !== bulkItemTypes
         || nextTypesList !== typesList || nextTypeSettings !== typeSettings
-        || nextTypeLabels !== typeLabels || nextWorkModel !== workModel || nextViews !== viewsCfg
+        || nextTypeLabels !== typeLabels || nextWorkModel !== workModel || nextViews !== viewsCfg || nextTemplates !== taskTemplates
         || nextNumberToIssue !== nextAssetNumber
         || nextAuthUsers !== undefined,
       breakerTypes: nextBreakerTypes !== breakerTypes,
@@ -10390,6 +10513,7 @@ function AssetTracker() {
       setTypeLabels(nextTypeLabels);
       setWorkModel(nextWorkModel);
       setViewsCfg(nextViews);
+      setTaskTemplates(nextTemplates);
       setBreakerTypes(nextBreakerTypes);
       setPhotos(nextPhotos);
       setNextAssetNumber(nextNumberToIssue);
@@ -10407,6 +10531,7 @@ function AssetTracker() {
         typeSettings: nextTypeSettings, typeCategories: nextTypeLabels,
         workModel: nextWorkModel,
         views: nextViews,
+        taskTemplates: nextTemplates,
         breakerTypes: nextBreakerTypes,
         photos: nextPhotos,
         nextAssetNumber: nextNumberToIssue, _dirty: dirty,
@@ -10910,6 +11035,54 @@ function AssetTracker() {
   function deleteViewById(id) {
     persist(assets, { views: { list: viewsCfg.list.filter(v => v.id !== id) } });
     setViewEdit(null);
+  }
+  function saveTemplateDraft(t) {
+    const exists = taskTemplates.list.some(x => x.id === t.id);
+    persist(assets, { taskTemplates: { list: exists ? taskTemplates.list.map(x => (x.id === t.id ? t : x)) : [...taskTemplates.list, t] } });
+    setTemplateEdit(null);
+  }
+  function deleteTemplateById(id) {
+    persist(assets, { taskTemplates: { list: taskTemplates.list.filter(t => t.id !== id) } });
+    setTemplateEdit(null);
+  }
+  // Schedule a template on one or several dates: every task of every event is
+  // stamped and written in ONE save. Events already stamped are never touched.
+  async function runScheduleTemplate() {
+    const d = scheduleDialog;
+    const tpl = d && taskTemplates.list.find(t => t.id === d.templateId);
+    if (!tpl || !d.days.length || !d.assetId || !assets) return;
+    const assetIds = new Set(assets.filter(a => (a.status || "Active") !== "Archived").map(a => a.id));
+    if (!assetIds.has(d.assetId)) return;
+    const stamp = { at: new Date().toISOString(), by: currentUser || "" };
+    const made = [];
+    d.days.forEach(day => made.push(...stampTemplate(tpl, day, d.assetId, assetIds, stamp)));
+    const byAsset = new Map();
+    made.forEach(m => { if (!byAsset.has(m.assetId)) byAsset.set(m.assetId, []); byAsset.get(m.assetId).push(m.item); });
+    const next = assets.map(a => (byAsset.has(a.id) ? { ...a, maintenanceItems: [...(a.maintenanceItems || []), ...byAsset.get(a.id)] } : a));
+    setScheduleDialog(null);
+    await persist(next, {});
+    setNotice(`Scheduled "${tpl.name}" on ${d.days.length} date${d.days.length === 1 ? "" : "s"}: ${made.length} task${made.length === 1 ? "" : "s"} added.`);
+  }
+  // An event moved to another day: move everything under it by the same number
+  // of days, so each task keeps its offset (including ones adjusted by hand).
+  async function applyShiftAsk() {
+    const ask = shiftAsk;
+    setShiftAsk(null);
+    if (!ask || !assets) return;
+    const kids = taskDescendantsOf(assets, ask.itemId);
+    const patches = new Map(kids.map(k => [k.item.id, shiftTaskDates(k.item, ask.days)]).filter(([, p]) => Object.keys(p).length));
+    if (!patches.size) return;
+    const label = (ask.days > 0 ? "+" : "") + ask.days + " day" + (Math.abs(ask.days) === 1 ? "" : "s");
+    const entries = [];
+    const next = assets.map(a => {
+      if (!(a.maintenanceItems || []).some(m => m && patches.has(m.id))) return a;
+      return { ...a, maintenanceItems: a.maintenanceItems.map(m => {
+        if (!m || !patches.has(m.id)) return m;
+        entries.push({ at: new Date().toISOString(), by: currentUser || "", assetLabel: a.id, assetType: a.type, action: "maintenance_edited", field: `${m.task} — Dates`, from: "—", to: `moved ${label} with its event` });
+        return { ...m, ...patches.get(m.id) };
+      }) };
+    });
+    await persist(next, { auditLog: logAudit(entries) });
   }
 
   // The History table's rows: every change entry on every active asset,
@@ -13223,6 +13396,12 @@ function AssetTracker() {
     const next = assets.map(a => (a.id === workTargetId ? { ...a, maintenanceItems: nextItems } : a));
     await persist(next, { auditLog: entries.length ? logAudit(entries) : auditLog });
     setMaintenanceModal(null);
+    // An event moved to another day: offer to move what hangs under it as well.
+    const oldDay = dateOnly(original.doOn), newDay = dateOnly(updated.doOn);
+    if (oldDay && newDay && oldDay !== newDay) {
+      const kids = taskDescendantsOf(assets, original.id).filter(k => Object.keys(shiftTaskDates(k.item, 1)).length);
+      if (kids.length) setShiftAsk({ itemId: original.id, name: original.task, days: daysBetween(oldDay, newDay), count: kids.length });
+    }
   }
 
   // Completing a maintenance item (v34). This replaced a one-click "Mark done
@@ -16409,6 +16588,36 @@ function AssetTracker() {
         </div>
       );
     }
+    if (key === "templates") {
+      const editing = templateEdit && templateEdit.id !== "new" ? taskTemplates.list.find(t => t.id === templateEdit.id) : null;
+      return (
+        <div style={settingsCardStyle}>
+          <div style={{ ...settingsHeadingStyle, display: "flex", alignItems: "center", gap: 6 }}>
+            Templates
+            <HelpTip label="About templates" text="A template is a recipe for an event: a main task and the tasks under it, each with dates worked out from the event's day (three days before, the Monday before, and so on). Use Schedule template from the + button to stamp it onto one or several dates in one go. Changing a template later never changes events already scheduled." />
+          </div>
+          {taskTemplates.list.length === 0 && <div style={{ fontSize: 13, color: C.empty, marginBottom: 12 }}>No templates yet.</div>}
+          <div style={{ display: "flex", flexDirection: "column" }}>
+            {taskTemplates.list.map((t, i) => (
+              <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderTop: i === 0 ? "none" : `1px solid ${C.border}` }}>
+                <button type="button" onClick={() => setTemplateEdit({ id: t.id })} style={{ flex: 1, minWidth: 0, textAlign: "left", background: "none", border: "none", padding: 0, cursor: "pointer" }}>
+                  <div style={{ fontSize: 14, color: C.ink, display: "flex", alignItems: "center", gap: 6 }}><CalendarDays size={14} color={C.muted} />{t.name}</div>
+                  <div style={{ fontSize: 12, color: C.muted }}>{t.items.length} task{t.items.length === 1 ? "" : "s"} under the event</div>
+                </button>
+                <button onClick={() => setTemplateEdit({ id: t.id })} className="icon-btn" aria-label={`Edit ${t.name}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}><Pencil size={14} color={C.muted} /></button>
+              </div>
+            ))}
+          </div>
+          <button type="button" onClick={() => setTemplateEdit({ id: "new" })}
+            style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 4, padding: "6px 11px", borderRadius: 8, fontSize: 13, fontWeight: 600, border: `1.5px dashed ${C.border}`, background: "none", color: C.brandDark }}>
+            <Plus size={13} /> Add template
+          </button>
+          {templateEdit && (templateEdit.id === "new" || editing) && (
+            <TemplateEditor key={templateEdit.id} initial={editing} assets={assets || []} model={workModel} onSave={saveTemplateDraft} onDelete={deleteTemplateById} onCancel={() => setTemplateEdit(null)} />
+          )}
+        </div>
+      );
+    }
     if (key === "relationships") {
       const allTypeIds = (typesList || []).map(t => t.id);
       const custom = allRelationshipQueries(allTypeIds);
@@ -17437,6 +17646,24 @@ function AssetTracker() {
                 </div>
               </div>
             </div>
+          )}
+
+          {shiftAsk && (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 21, padding: 16 }}>
+              <div role="dialog" aria-label="Move the tasks with the event" style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 360 }}>
+                <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Move the tasks too?</div>
+                <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>
+                  "{shiftAsk.name}" moved {Math.abs(shiftAsk.days)} day{Math.abs(shiftAsk.days) === 1 ? "" : "s"} {shiftAsk.days > 0 ? "later" : "earlier"}. Shift the dates of the {shiftAsk.count} task{shiftAsk.count === 1 ? "" : "s"} under it by the same amount, so each keeps its place around the event?
+                </div>
+                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                  <button onClick={() => setShiftAsk(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Leave them</button>
+                  <button onClick={applyShiftAsk} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Shift {shiftAsk.count} task{shiftAsk.count === 1 ? "" : "s"}</button>
+                </div>
+              </div>
+            </div>
+          )}
+          {scheduleDialog && (
+            <ScheduleTemplateDialog templates={taskTemplates.list} assets={assets || []} dialog={scheduleDialog} onChange={setScheduleDialog} onRun={runScheduleTemplate} onClose={() => setScheduleDialog(null)} />
           )}
 
           {/* v34: the maintenance completion form. Opens prefilled, so a routine
@@ -20737,6 +20964,7 @@ function AssetTracker() {
                     { label: "Add asset", run: () => startAdd(mainTab === "map" ? (mapSelectedPlaceId || undefined) : undefined) },
                     { label: "Add task", run: () => openMaintenanceAdd(seed || "") },
                     { label: "Log work", run: () => openChangeAdd(seed || "") },
+                    ...(taskTemplates.list.length ? [{ label: "Schedule template", run: () => setScheduleDialog({ templateId: taskTemplates.list[0].id, days: [], assetId: taskTemplates.list[0].parent.assetId || (seed || "") }) }] : []),
                   ].map(item => (
                     <button
                       key={item.label}
@@ -21680,6 +21908,224 @@ function SettingsViewList({ views, arrange, nameFor, onEdit, onReorder }) {
         );
       })}
       {lineAt("views", slot) && <div style={DROP_LINE} />}
+    </div>
+  );
+}
+
+// One of a template item's three date rules: a mode picker, then the number of
+// days or the weekday that mode needs.
+function TemplateRuleRow({ label, rule, onChange }) {
+  const mode = templateRuleMode(rule);
+  const modeLabel = m => ({ none: "Not set", before: "Days before the event", after: "Days after the event", preceding: "Weekday before the event", following: "Weekday after the event" }[m]);
+  const numStyle = { width: 70, padding: "7px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink };
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+      <span style={{ width: 96, flexShrink: 0, fontSize: 13, color: C.muted }}>{label}</span>
+      <div style={{ width: 210 }}>
+        <PickerField label={label} hideLabel value={mode} onChange={m => onChange(templateRuleFrom(m, rule && rule.kind === "days" ? rule.n : 1, rule && rule.kind === "weekday" ? rule.weekday : 1))}
+          options={TEMPLATE_RULE_MODES} labelForOption={modeLabel} title={label} />
+      </div>
+      {rule && rule.kind === "days" && (
+        <input type="number" min="0" aria-label={`${label}: number of days`} value={rule.n} onChange={e => onChange(templateRuleFrom(mode, e.target.value, 0))} style={numStyle} />
+      )}
+      {rule && rule.kind === "weekday" && (
+        <div style={{ width: 150 }}>
+          <PickerField label={`${label}: weekday`} hideLabel value={String(rule.weekday)} onChange={v => onChange(templateRuleFrom(mode, 0, v))}
+            options={WEEKDAY_NAMES.map((_, i) => String(i))} labelForOption={k => WEEKDAY_NAMES[Number(k)] || k} title="Weekday" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// The Settings > Templates editor: the event's own task, then the tasks under
+// it with their date rules. A draft, saved once.
+function TemplateEditor({ initial, assets, model, onSave, onDelete, onCancel }) {
+  const [draft, setDraft] = useState(() => initial || { id: crypto.randomUUID(), name: "", taskType: "", parent: { task: "", notes: "", assetId: "" }, items: [] });
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const set = patch => setDraft(d => ({ ...d, ...patch }));
+  const setParent = patch => setDraft(d => ({ ...d, parent: { ...d.parent, ...patch } }));
+  const setItem = (id, patch) => setDraft(d => ({ ...d, items: d.items.map(i => (i.id === id ? { ...i, ...patch } : i)) }));
+  const addItem = () => setDraft(d => ({ ...d, items: [...d.items, { id: crypto.randomUUID(), parentItemId: "", task: "", notes: "", taskType: "", owner: "", asset: "event", start: null, doOn: null, due: null }] }));
+  // Removing an item takes the items under it up to the top level, rather than deleting them.
+  const removeItem = id => setDraft(d => ({ ...d, items: d.items.filter(i => i.id !== id).map(i => (i.parentItemId === id ? { ...i, parentItemId: "" } : i)) }));
+  const moveItem = (id, dir) => setDraft(d => {
+    const at = d.items.findIndex(i => i.id === id), to = at + dir;
+    if (at < 0 || to < 0 || to >= d.items.length) return d;
+    const n = [...d.items]; [n[at], n[to]] = [n[to], n[at]];
+    return { ...d, items: n };
+  });
+  const taskTypeIds = (model.taskTypes || []).map(t => t.id);
+  const typeOptions = ["", ...taskTypeIds];
+  const typeLabel = id => (id ? taskTypeNameOf(model, id) || id : "Default");
+  const lbl = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent };
+  const input = { padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink };
+  const iconBtn = { background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex", cursor: "pointer" };
+  const canSave = !!draft.name.trim();
+  const clean = () => adoptTaskTemplates({ list: [{ ...draft, name: draft.name.trim() }] }).list[0];
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
+      <div role="dialog" aria-label={initial ? "Edit template" : "New template"} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 22, boxShadow: "0 8px 24px rgba(42,52,57,0.16)", width: "100%", maxWidth: 720, maxHeight: "92vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ fontWeight: 700, color: C.brandDark }}>{initial ? "Edit template" : "New template"}</div>
+          <button onClick={onCancel} aria-label="Close" className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+        </div>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={lbl}>Template name</span>
+          <input value={draft.name} onChange={e => set({ name: e.target.value })} placeholder="e.g. Sunday service" style={input} />
+        </label>
+
+        <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.border}`, display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ ...lbl, display: "flex", alignItems: "center", gap: 6 }}>
+            The event
+            <HelpTip label="About the event task" text="Scheduling the template creates this task on the event's day, with every task below as a subtask of it. Leave the name blank to use the template's name." />
+          </div>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={{ fontSize: 13, color: C.muted }}>Task name</span>
+            <input value={draft.parent.task} onChange={e => setParent({ task: e.target.value })} placeholder={draft.name || "Same as the template"} style={input} />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={{ fontSize: 13, color: C.muted }}>Notes</span>
+            <textarea rows={2} value={draft.parent.notes} onChange={e => setParent({ notes: e.target.value })} style={{ ...input, resize: "vertical", fontFamily: "inherit" }} />
+          </label>
+          {taskTypeIds.length > 0 && (
+            <div style={{ maxWidth: 260 }}>
+              <PickerField label="Task type" value={draft.taskType} onChange={v => set({ taskType: v })} options={typeOptions} labelForOption={typeLabel} title="Task type" />
+            </div>
+          )}
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 8, flexWrap: "wrap" }}>
+            <div style={{ minWidth: 220, flex: "0 1 320px" }}>
+              <AssetPickerField label="Default asset" assets={assets} value={draft.parent.assetId} onChange={id => setParent({ assetId: id })} allowNone hint="Where the event is held. Leave it empty to choose each time." />
+            </div>
+            {draft.parent.assetId && <button type="button" onClick={() => setParent({ assetId: "" })} style={{ padding: "7px 11px", fontSize: 13, fontWeight: 600, border: `1px solid ${C.border}`, borderRadius: 8, background: "none", color: C.brandDark, cursor: "pointer" }}>Choose each time</button>}
+          </div>
+        </div>
+
+        <div style={{ marginTop: 18, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
+          <div style={{ ...lbl, marginBottom: 10, display: "flex", alignItems: "center", gap: 6 }}>
+            Tasks under the event
+            <HelpTip label="About template tasks" text="Each task can have a start date, a Scheduled for date and a due date, each worked out from the event's day: a number of days before or after it, or the nearest weekday before or after it. A task can sit inside another one here (a checklist item), one level deep." />
+          </div>
+          {draft.items.length === 0 && <div style={{ fontSize: 13, color: C.empty, marginBottom: 10 }}>No tasks yet.</div>}
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {draft.items.map((it, idx) => {
+              const hasKids = draft.items.some(x => x.parentItemId === it.id);
+              const parentOptions = ["", ...draft.items.filter(x => x.id !== it.id && !x.parentItemId).map(x => x.id)];
+              return (
+                <div key={it.id} data-template-item={it.id} style={{ border: `1.5px solid ${C.border}`, borderRadius: 10, padding: 12, background: C.bg, display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    <input value={it.task} onChange={e => setItem(it.id, { task: e.target.value })} aria-label={`Task ${idx + 1} name`} placeholder="Task name" style={{ ...input, flex: 1, minWidth: 0 }} />
+                    <button type="button" className="icon-btn" aria-label="Move task up" disabled={idx === 0} onClick={() => moveItem(it.id, -1)} style={{ ...iconBtn, opacity: idx === 0 ? 0.3 : 1 }}><ChevronUp size={14} color={C.muted} /></button>
+                    <button type="button" className="icon-btn" aria-label="Move task down" disabled={idx === draft.items.length - 1} onClick={() => moveItem(it.id, 1)} style={{ ...iconBtn, opacity: idx === draft.items.length - 1 ? 0.3 : 1 }}><ChevronDown size={14} color={C.muted} /></button>
+                    <button type="button" className="icon-btn" aria-label={`Remove task ${idx + 1}`} onClick={() => removeItem(it.id)} style={iconBtn}><Trash2 size={14} color={C.danger} /></button>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {!hasKids && parentOptions.length > 1 && (
+                      <div style={{ width: 200 }}>
+                        <PickerField label="Inside" hideLabel value={it.parentItemId} onChange={v => setItem(it.id, { parentItemId: v })} options={parentOptions}
+                          labelForOption={id => (id ? "Inside: " + ((draft.items.find(x => x.id === id) || {}).task || "(untitled)") : "Directly under the event")} title="Where this task sits" />
+                      </div>
+                    )}
+                    {taskTypeIds.length > 0 && (
+                      <div style={{ width: 170 }}>
+                        <PickerField label="Type" hideLabel value={it.taskType} onChange={v => setItem(it.id, { taskType: v })} options={typeOptions} labelForOption={id => "Type: " + typeLabel(id)} title="Task type" />
+                      </div>
+                    )}
+                    <input value={it.owner} onChange={e => setItem(it.id, { owner: e.target.value })} aria-label={`Task ${idx + 1} owner`} placeholder="Owner" style={{ ...input, width: 150 }} />
+                  </div>
+                  <TemplateRuleRow label="Start date" rule={it.start} onChange={r => setItem(it.id, { start: r })} />
+                  <TemplateRuleRow label="Scheduled for" rule={it.doOn} onChange={r => setItem(it.id, { doOn: r })} />
+                  <TemplateRuleRow label="Due date" rule={it.due} onChange={r => setItem(it.id, { due: r })} />
+                  <div style={{ display: "flex", alignItems: "flex-end", gap: 8, flexWrap: "wrap" }}>
+                    <div style={{ minWidth: 200, flex: "0 1 300px" }}>
+                      <AssetPickerField label="Asset" assets={assets} value={it.asset === "event" ? "" : it.asset} onChange={id => setItem(it.id, { asset: id })} allowNone hint="Where this task is done. By default it sits on the event's own asset." />
+                    </div>
+                    {it.asset !== "event" && <button type="button" onClick={() => setItem(it.id, { asset: "event" })} style={{ padding: "7px 11px", fontSize: 13, fontWeight: 600, border: `1px solid ${C.border}`, borderRadius: 8, background: "none", color: C.brandDark, cursor: "pointer" }}>Same as the event</button>}
+                    {it.asset === "event" && <span style={{ fontSize: 12, color: C.muted, paddingBottom: 9 }}>On the event's asset</span>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <button type="button" onClick={addItem}
+            style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 4, padding: "6px 11px", borderRadius: 8, fontSize: 13, fontWeight: 600, border: `1.5px dashed ${C.border}`, background: "none", color: C.brandDark }}>
+            <Plus size={13} /> Add task
+          </button>
+        </div>
+
+        <div style={{ position: "sticky", bottom: -22, zIndex: 3, display: "flex", gap: 10, alignItems: "center", justifyContent: "flex-end", margin: "20px -22px -22px", padding: "12px 22px", background: C.surface, borderTop: `1px solid ${C.border}`, borderRadius: "0 0 14px 14px", flexWrap: "wrap" }}>
+          {initial && !confirmDelete && (
+            <button onClick={() => setConfirmDelete(true)} style={{ marginRight: "auto", padding: "8px 12px", background: "transparent", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.danger, cursor: "pointer" }}>Delete template</button>
+          )}
+          {initial && confirmDelete && (
+            <span style={{ marginRight: "auto", display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: C.danger }}>
+              Delete this template? Events already scheduled stay.
+              <button onClick={() => onDelete(draft.id)} style={{ padding: "6px 12px", background: C.danger, color: "#fff", border: "none", borderRadius: 8, fontWeight: 600, fontSize: 13 }}>Delete</button>
+              <button onClick={() => setConfirmDelete(false)} style={{ padding: "6px 12px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 8, fontWeight: 600, fontSize: 13, color: C.ink }}>Keep</button>
+            </span>
+          )}
+          <button onClick={onCancel} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+          <button onClick={() => canSave && onSave(clean())} disabled={!canSave}
+            style={{ padding: "8px 14px", background: canSave ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Save template</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// "Schedule template": pick a template, one or several event dates and where the
+// event is held, and see what will be created before it is.
+function ScheduleTemplateDialog({ templates, assets, dialog, onChange, onRun, onClose }) {
+  const tpl = templates.find(t => t.id === dialog.templateId) || null;
+  const [dateKey, setDateKey] = useState(0);
+  const assetIds = new Set(assets.filter(a => (a.status || "Active") !== "Archived").map(a => a.id));
+  const chosenAsset = assetIds.has(dialog.assetId) ? dialog.assetId : "";
+  const days = [...dialog.days].sort();
+  const preview = tpl && days.length && chosenAsset ? stampTemplate(tpl, days[0], chosenAsset, assetIds, { newId: (() => { let n = 0; return () => "p" + (n++); })() }) : [];
+  const lbl = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent };
+  const canRun = !!tpl && days.length > 0 && !!chosenAsset;
+  const total = preview.length * days.length;
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
+      <div role="dialog" aria-label="Schedule template" style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 22, boxShadow: "0 8px 24px rgba(42,52,57,0.16)", width: "100%", maxWidth: 520, maxHeight: "92vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ fontWeight: 700, color: C.brandDark }}>Schedule template</div>
+          <button onClick={onClose} aria-label="Close" className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+        </div>
+        <PickerField label="Template" value={dialog.templateId} onChange={id => { const t = templates.find(x => x.id === id); onChange({ ...dialog, templateId: id, assetId: (t && t.parent.assetId) || dialog.assetId }); }}
+          options={templates.map(t => t.id)} labelForOption={id => (templates.find(t => t.id === id) || {}).name || id} title="Template" />
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <span style={lbl}>Event date{days.length === 1 ? "" : "s"}</span>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {days.map(d => (
+              <span key={d} data-event-day={d} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "4px 6px 4px 10px", borderRadius: 999, border: `1.5px solid ${C.border}`, background: C.bg, fontSize: 13, color: C.ink }}>
+                {formatDateOnly(d)}
+                <button type="button" aria-label={`Remove ${formatDateOnly(d)}`} onClick={() => onChange({ ...dialog, days: dialog.days.filter(x => x !== d) })} style={{ background: "none", border: "none", padding: 2, display: "flex", cursor: "pointer" }}><X size={13} color={C.muted} /></button>
+              </span>
+            ))}
+          </div>
+          <input key={dateKey} type="date" aria-label={days.length ? "Add another event date" : "Event date"}
+            onChange={e => { const v = e.target.value; if (v && !dialog.days.includes(v)) { onChange({ ...dialog, days: [...dialog.days, v] }); setDateKey(k => k + 1); } }}
+            style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, width: 180 }} />
+        </div>
+        <AssetPickerField label="Where is the event?" assets={assets} value={chosenAsset} onChange={id => onChange({ ...dialog, assetId: id })} allowNone hint="The asset the event is held at. Tasks set to the event's asset go here too." />
+        {preview.length > 0 && (
+          <div data-schedule-preview style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 10, background: C.bg, fontSize: 13, color: C.ink }}>
+            <div style={{ color: C.muted, marginBottom: 6 }}>For {formatDateOnly(days[0])}{days.length > 1 ? " (the others follow the same pattern)" : ""}:</div>
+            {preview.map((m, i) => (
+              <div key={i} style={{ display: "flex", gap: 8, padding: "2px 0", paddingLeft: m.item.parentTaskId ? (preview.find(x => x.item.id === m.item.parentTaskId && x.item.parentTaskId) ? 28 : 14) : 0 }}>
+                <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: m.item.parentTaskId ? 400 : 700 }}>{m.item.task}</span>
+                <span style={{ color: C.muted, flexShrink: 0 }}>{formatDateOnly(m.item.doOn || m.item.dueDate || m.item.startDate) || "No date"}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", alignItems: "center" }}>
+          {canRun && <span style={{ marginRight: "auto", fontSize: 12, color: C.muted }}>{total} task{total === 1 ? "" : "s"} in all</span>}
+          <button onClick={onClose} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+          <button onClick={onRun} disabled={!canRun} style={{ padding: "8px 14px", background: canRun ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Schedule</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -24483,6 +24929,7 @@ const SETTINGS_SECTIONS = [
   { key: "worktypes", label: "Work", group: "Types & fields", icon: Wrench, editor: true },
   { key: "relationships", label: "Relationships", icon: ArrowLeftRight, editor: true },
   { key: "views", label: "Views", icon: Eye, editor: true },
+  { key: "templates", label: "Templates", icon: CalendarDays, editor: true },
   { key: "lists", label: "Lists", icon: FileText, editor: true },
   { key: "electrical", label: "Electrical", icon: Zap, editor: true },
   { key: "access", label: "Access", icon: Users, editor: true, live: true },

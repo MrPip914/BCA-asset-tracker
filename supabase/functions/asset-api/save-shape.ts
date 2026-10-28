@@ -112,7 +112,7 @@ const extrasOf = (r: Row, keys: string[]): Row => {
   }
   return out;
 };
-const TASK_EXTRA_KEYS = ["taskType", "custom", "paneGroupIds", "startDate", "doOn", "parentTaskId", "blockedBy"];
+const TASK_EXTRA_KEYS = ["taskType", "custom", "paneGroupIds", "startDate", "doOn", "parentTaskId", "blockedBy", "origin"];
 const WORK_EXTRA_KEYS = ["custom"];
 
 // The assets, with every child array, as the .gs read would answer them.

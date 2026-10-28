@@ -845,6 +845,20 @@ asset per site (`GENERAL_ASSET_ID` = `"__general"`, type `General`, name "No ass
 - Covered by `test-frontend-general-asset.js`; driven in Chromium against Sandbox (add a task
   with "No asset" from the Tasks tab; it shows in the table and not in the Assets list).
 
+## Templates and events (2026-10-28)
+
+Phase 7 of `/mnt/project-files/plans/task-relationships-scheduling.md`. A **template** is a recipe for an event: a parent task plus tasks under it, each with dates set relative to the event's day. **Schedule template** stamps it on one or several dates at once. **Frontend plus `asset-api`: a push to dev redeploys the Edge Function; no migration, no Apps Script change.**
+
+- **Stored in ONE Config key, `taskTemplates` = `{ list: [template] }`** (an object, as for `views`, since the Edge Function keeps only optional keys that are objects; `OPTIONAL_CONFIG_KEYS` in `save.ts` and `inventory.ts`). Template: `{ id, name, taskType, parent: { task, notes, assetId }, items: [{ id, parentItemId, task, notes, taskType, owner, asset: "event" | assetId, start, doOn, due }] }`. The Apps Script fallback drops it, as for `views`.
+- **A rule is `null`, `{kind:"days", n, dir:"before"|"after"}` or `{kind:"weekday", weekday, which:"preceding"|"following"}`.** A weekday rule is STRICTLY before or after the event day (the Monday before a Monday event is a week earlier).
+- **Items nest one level** (`TEMPLATE_ITEM_MAX_DEPTH`), so with the event the deepest task is depth 3, the cap parent/child already has. `adoptTaskTemplates` drops a grandchild's parent link rather than rejecting the template.
+- **A template is a SNAPSHOT recipe.** Stamped tasks are ordinary one-offs (`parentTaskId` to the event or item above them) carrying `origin: { templateId, itemId, runDate }`; editing or deleting the template never touches events already made. `origin` is kept by `TASK_EXTRA_KEYS`; nothing reads it yet beyond recording where a task came from. An item whose asset is gone falls back to the event's asset.
+- **One `persist()` writes every task of every date**, then a notice says how many were added.
+- **Moving an event offers to move its tasks.** Changing a one-off's Scheduled for between two dates, when it has subtasks with dates, asks "Move the tasks too?" (`shiftAsk`); Yes shifts every descendant's start, scheduled and due dates by the same number of days, audited as "<task> - Dates". Never automatic, and never for a task with no dated descendants.
+- Managed in **Settings > Templates** (editors); **Schedule template** is also in the floating + menu once a template exists.
+- Not built: recurring templates (phase 8: a Schedule button is enough, no automatic generation), template-level custom fields.
+- Covered by `test-frontend-templates.js` (rule maths, stamping, adoption and shifting run for real; wiring read as source) and a case in `save_test.ts`; driven in Chromium against Sandbox (editor opens; scheduling the fixture on two dates added 8 tasks that appear on the Calendar). The shift prompt is covered as source only.
+
 ## Calendar view type (2026-10-28)
 
 Phase 6 of `/mnt/project-files/plans/task-relationships-scheduling.md`. A **Views** view can be a **Calendar** (`type: "calendar"`, the third beside list and Kanban): the tasks its query finds laid on a **month or a week** (Sunday first, Today / previous / next, per-visit state only). **Frontend only: no backend change, no migration, no deploy** (`adoptViews` just accepts the new type; the Edge Function keeps it as it keeps the other view fields).
