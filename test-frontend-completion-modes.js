@@ -47,12 +47,13 @@ const dm = setTaskCompletionMode(base, "__default", "simple");
 check('the built-in default can be switched, and untyped tasks follow', taskCompletionMode(dm, "") === "simple");
 
 check('quick complete writes the audit row but no change entry', (() => {
-  const f = src.slice(src.indexOf('async function completeTaskQuick'), src.indexOf('async function deleteMaintenanceItem'));
+  const f = src.slice(src.indexOf('async function completeTaskQuick'), src.indexOf('async function completeTaskAskWork'));
   return f.includes('maintenance_completed') && f.includes('lastPerformed: date') && !/changes:/.test(f);
 })());
-check('dialog button gated on mode', /mode !== "required"[\s\S]{0,200}completeTaskQuick\(maintenanceModal\.itemId/.test(src));
-check('card checkbox gated on mode', /mode !== "required"[\s\S]{0,400}completeTaskQuick\(item\.id\)/.test(src));
-check('required keeps the form button in dialog and card', (src.match(/mode !== "simple"/g) || []).length === 2);
+check('dialog button gated on mode', /mode !== "required"[\s\S]{0,200}completeTaskAskWork\(maintenanceModal\.itemId/.test(src));
+check('card checkbox gated on mode', /mode !== "required"[\s\S]{0,400}completeTaskAskWork\(item\.id\)/.test(src));
+check('only required types keep the Log work button in dialog and card', (src.match(/\{mode === "required" && \(\s*<button onClick=\{\(\) => guardComplete/g) || []).length === 2 && !/mode === "optional" \? "Log work/.test(src));
+check('an optional completion asks "Log work?" afterwards', /async function completeTaskAskWork[\s\S]{0,700}setLogWorkAsk/.test(src) && /Log work\?/.test(src));
 check('settings picker present', src.includes('setTaskCompletionMode(model, selected.id, v)'));
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

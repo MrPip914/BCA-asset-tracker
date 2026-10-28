@@ -6886,7 +6886,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-28.12";
+const APP_VERSION = "2026-10-28.13";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -9189,6 +9189,7 @@ function AssetTracker() {
   const [maintenanceModal, setMaintenanceModal] = useState(null);
   const [confirmMaintenanceDelete, setConfirmMaintenanceDelete] = useState(null);
   const [parentCompleteAsk, setParentCompleteAsk] = useState(null);
+  const [logWorkAsk, setLogWorkAsk] = useState(null);
   // Unticking a done task that has a completing work entry: keep it or delete it.
   const [reopenAsk, setReopenAsk] = useState(null);
   // v34: null when closed; otherwise the completion form for ONE maintenance
@@ -13601,6 +13602,17 @@ function AssetTracker() {
     const reset = isOneOffTask(item) ? { assets: next, entries: [] } : resetSubtasks(next, itemId, currentUser);
     await persist(reset.assets, { auditLog: logAudit([entry, ...reset.entries]) });
     if (!keepOpen) setMaintenanceModal(null);
+    return true;
+  }
+
+  // Completing a "Log work optional" task: done in one tap, then asked whether
+  // to log work. Yes opens the Log work form for the task; No leaves it done.
+  async function completeTaskAskWork(itemId, assetId, keepOpen) {
+    const tid = assetId || selectedId;
+    const target = assets ? assets.find(a => a.id === tid) : null;
+    const item = target ? (target.maintenanceItems || []).find(m => m && m.id === itemId) : null;
+    const ok = await completeTaskQuick(itemId, assetId, keepOpen);
+    if (ok && item && taskCompletionMode(workModel, item.taskType) === "optional") setLogWorkAsk({ itemId, assetId: tid, task: item.task });
   }
 
   // Reopen a finished one-off: clear its completed date, audited as the edit
@@ -13635,7 +13647,7 @@ function AssetTracker() {
     }
     guardComplete(item.id, () => {
       if (taskCompletionMode(workModel, item.taskType) === "required") openMaintenanceComplete(item.id, assetId);
-      else completeTaskQuick(item.id, assetId, true);
+      else completeTaskAskWork(item.id, assetId, true);
     }, () => completeTaskQuick(item.id, assetId, true));
   }
 
@@ -17692,7 +17704,7 @@ function AssetTracker() {
                       return (
                         <div key={k.item.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0", fontSize: 14 }}>
                           {kMode !== "required" && canEdit && !done
-                            ? <input type="checkbox" checked={false} onChange={() => guardComplete(k.item.id, () => completeTaskQuick(k.item.id, k.asset.id, true))} aria-label={`Mark ${k.item.task} done`} />
+                            ? <input type="checkbox" checked={false} onChange={() => guardComplete(k.item.id, () => completeTaskAskWork(k.item.id, k.asset.id, true))} aria-label={`Mark ${k.item.task} done`} />
                             : <input type="checkbox" checked={done} disabled aria-label={done ? "Done" : "Not done"} />}
                           <button onClick={() => openMaintenanceEdit(k.item.id, k.asset.id)} style={{ background: "none", border: "none", padding: 0, textAlign: "left", fontSize: 14, color: C.ink, cursor: "pointer", textDecoration: done ? "line-through" : "none", opacity: done ? 0.6 : 1, overflow: "hidden", textOverflow: "ellipsis" }}>{k.item.task}</button>
                           {k.asset.id !== workTargetId && <span style={{ fontSize: 12, color: C.muted, flexShrink: 0 }}>{nameOf(k.asset)}</span>}
@@ -17722,11 +17734,11 @@ function AssetTracker() {
                     return (
                       <>
                         {mode !== "required" && (
-                          <button onClick={() => guardComplete(maintenanceModal.itemId, () => completeTaskQuick(maintenanceModal.itemId, workDialogAssetId))} style={btn}>Mark done</button>
+                          <button onClick={() => guardComplete(maintenanceModal.itemId, () => completeTaskAskWork(maintenanceModal.itemId, workDialogAssetId))} style={btn}>Mark done</button>
                         )}
-                        {mode !== "simple" && (
+                        {mode === "required" && (
                           <button onClick={() => guardComplete(maintenanceModal.itemId, () => openMaintenanceComplete(maintenanceModal.itemId, workDialogAssetId), () => completeTaskQuick(maintenanceModal.itemId, workDialogAssetId))} style={btn}>
-                            {mode === "optional" ? "Log work…" : maintenanceDraft.kind === TASK_KIND_ONEOFF ? "Mark complete…" : "Log completion…"}
+                            {maintenanceDraft.kind === TASK_KIND_ONEOFF ? "Mark complete…" : "Log completion…"}
                           </button>
                         )}
                       </>
@@ -17789,6 +17801,18 @@ function AssetTracker() {
             </div>
           )}
 
+          {logWorkAsk && (
+            <div onClick={() => setLogWorkAsk(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 70, padding: 16 }}>
+              <div onClick={e => e.stopPropagation()} style={{ background: C.surface, borderRadius: 16, padding: 20, maxWidth: 380, width: "100%" }}>
+                <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Log work?</div>
+                <div style={{ fontSize: 13, color: C.ink, marginBottom: 14 }}>"{logWorkAsk.task}" is done. Add a work entry for it?</div>
+                <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                  <button onClick={() => setLogWorkAsk(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>No</button>
+                  <button onClick={() => { const a = logWorkAsk; setLogWorkAsk(null); openMaintenanceComplete(a.itemId, a.assetId); }} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Log work…</button>
+                </div>
+              </div>
+            </div>
+          )}
           {parentCompleteAsk && (
             <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 21, padding: 16 }}>
               <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 340 }}>
@@ -19022,13 +19046,13 @@ function AssetTracker() {
                                     <>
                                       {mode !== "required" && (
                                         <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, color: C.ink, cursor: "pointer" }}>
-                                          <input type="checkbox" checked={false} onChange={() => guardComplete(item.id, () => completeTaskQuick(item.id))} aria-label={`Mark ${item.task} done`} />
+                                          <input type="checkbox" checked={false} onChange={() => guardComplete(item.id, () => completeTaskAskWork(item.id))} aria-label={`Mark ${item.task} done`} />
                                           Done
                                         </label>
                                       )}
-                                      {mode !== "simple" && (
+                                      {mode === "required" && (
                                         <button onClick={() => guardComplete(item.id, () => openMaintenanceComplete(item.id), () => completeTaskQuick(item.id))} style={btn}>
-                                          {mode === "optional" ? "Log work…" : oneOff ? "Mark complete…" : "Log completion…"}
+                                          {oneOff ? "Mark complete…" : "Log completion…"}
                                         </button>
                                       )}
                                     </>
