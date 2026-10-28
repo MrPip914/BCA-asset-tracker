@@ -16,12 +16,6 @@ version that fixed them.
 
 ## Open
 
-### test-frontend-setters.js fails on the Views editor's `renderConds`
-**Found:** 2026-10-28, while building tasks with no asset (fails on `dev` without that change).
-**Needs a deploy:** no; test or one rename only.
-**Confirmed:** the test reports "setters called but never declared: setItems". `setItems` is a
-parameter of the arrow function `renderConds = (items, setItems, depth)` in the Views editor, so
-nothing is actually broken; the test's declared-setter scan does not count arrow parameters.
 
 ### A floor-plan group's audit rows read "undefined changed from ..." on the Audit tab
 **Found:** 2026-10-13, while building window pane groups.
@@ -819,11 +813,4 @@ returns whatever the sheet holds, so a column that gets written comes back on it
 never contacts Apps Script and the live backend needs a sign-in, so the write path this
 bug lived on is exactly what the usual check can't reach.
 
-## test-frontend-setters.js fails on `setItems` (2026-10-21)
-The test flags `setItems` in the Views editor's `renderConds(items, setItems, depth)` as a state setter that is never declared; it is a parameter name, so this is a false positive. Present on dev before this session, and the test is not in CI, so nothing has caught it. Fix by excluding parameter names or renaming the parameter. No deploy needed.
 
-## test-frontend-setters.js fails on dev: `setItems` called but never declared (found 2026-10-22)
-Pre-existing on `dev` (fails with and without the install-app change). Found while adding the PWA install row; not investigated. No backend deploy needed to fix.
-## test-frontend-setters.js fails on dev (found 2026-10-22)
-
-Reports "setters called but never declared: setItems". Fails without the asset-page + change too. Not investigated; does not block anything known.
