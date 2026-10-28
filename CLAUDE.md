@@ -823,6 +823,28 @@ instead, and still is for anything that takes that path.
   Driven in Chromium against the real function on a local Postgres: two pages saving
   different assets both land; a third, stale on the same asset, gets the not-saved modal.
 
+## Tasks with no asset (2026-10-28)
+
+Phase 1 of `/mnt/project-files/plans/task-relationships-scheduling.md`. **Frontend only: no
+backend change, no migration, no deploy.** Every task is a row of its asset's
+`maintenanceItems`, so a task that belongs to nothing physical lives on ONE hidden catch-all
+asset per site (`GENERAL_ASSET_ID` = `"__general"`, type `General`, name "No asset").
+
+- **To everything but the lists it is an ordinary asset**, which is why work entries, files,
+  audit rows, views, Kanban, the save path and per-record saves needed no change. The only code
+  that knows about it is code that LISTS assets (`isGeneralAsset`): the Assets list, the type
+  filter options, the workbook's Assets sheet, `openDetail` (it has no page), the task dialog's
+  asset link, and `AssetPickerField`, which never browses it and offers it as a "No asset" row
+  only where `allowNone` is passed (the task dialog; Log work does not).
+- **Created in memory at load (`ensureGeneralAsset`, in `applySnapshot`) and stored only with
+  the first task saved onto it**, so a site that never uses it never stores it. Same shape as
+  the other load-time adoptions. Two editors both saving the first no-asset task at once: the
+  second is refused as "already exists", the usual not-saved modal.
+- **Any NEW place that lists assets must skip it** (`isGeneralAsset`), or "No asset" turns up
+  as an asset. The connector does not know about it yet (queued).
+- Covered by `test-frontend-general-asset.js`; driven in Chromium against Sandbox (add a task
+  with "No asset" from the Tasks tab; it shows in the table and not in the Assets list).
+
 ## Views (2026-10-17, updated same day)
 
 A **Views** main tab shows saved task lists and boards an editor sets up in **Settings > Views**; each person sees only the views assigned to them. Tasks only. Plan: `/mnt/project-files/plans/views.md`. **Frontend plus `asset-api`: a push to dev redeploys the Edge Function; no Apps Script change, no version bump.**
