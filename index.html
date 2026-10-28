@@ -2385,6 +2385,25 @@ function isOneOffTask(item) { return taskKindOf(item) === TASK_KIND_ONEOFF; }
 function taskIsDone(item) {
   return isOneOffTask(item) && !!dateOnly(item && item.lastPerformed);
 }
+// Work entries logged against a task (change.maintenanceId), and the ones that
+// ARE its completion: same performed date as the task's completed date. The
+// reference lives on the change only, so this scans the asset's changes.
+function taskWorkEntries(asset, item) {
+  if (!asset || !item || !item.id) return [];
+  return (asset.changes || []).filter(c => c && c.maintenanceId === item.id);
+}
+function taskCompletionWork(asset, item) {
+  const done = dateOnly(item && item.lastPerformed);
+  if (!done) return [];
+  return taskWorkEntries(asset, item).filter(c => dateOnly(c.performedOn || c.at) === done);
+}
+// "1 work entry, $120.00" for the Completed row; blank with no work.
+function taskWorkSummary(asset, item) {
+  const w = taskWorkEntries(asset, item);
+  if (!w.length) return "";
+  const cost = w.reduce((s, c) => s + (parseFloat(c.cost) || 0), 0);
+  return `${w.length} work entr${w.length === 1 ? "y" : "ies"}` + (cost > 0 ? `, $${cost.toFixed(2)}` : "");
+}
 // When this task is due, or null when nothing says. A scheduled task counts
 // forward from its last completion; a one-off answers its own `dueDate`, which
 // is a real optional -- "some day" is a legitimate thing for a project to be.
@@ -6867,7 +6886,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-28.10";
+const APP_VERSION = "2026-10-28.11";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -9170,6 +9189,8 @@ function AssetTracker() {
   const [maintenanceModal, setMaintenanceModal] = useState(null);
   const [confirmMaintenanceDelete, setConfirmMaintenanceDelete] = useState(null);
   const [parentCompleteAsk, setParentCompleteAsk] = useState(null);
+  // Unticking a done task that has a completing work entry: keep it or delete it.
+  const [reopenAsk, setReopenAsk] = useState(null);
   // v34: null when closed; otherwise the completion form for ONE maintenance
   // item -- { itemId, date, changeType, vendor, cost, note, error }. One object
   // rather than seven parallel useStates, for the reason breakerModal is one:
@@ -9495,6 +9516,7 @@ function AssetTracker() {
   const [confirmDeleteCol, setConfirmDeleteCol] = useState(null);
   const [confirmCommentDelete, setConfirmCommentDelete] = useState(null);
   const [confirmChangeDelete, setConfirmChangeDelete] = useState(null);
+  const [confirmChangeReopen, setConfirmChangeReopen] = useState(false);
   const [showColManager, setShowColManager] = useState(false);
   const [newColName, setNewColName] = useState("");
   const [newColType, setNewColType] = useState("text");
@@ -13145,14 +13167,30 @@ function AssetTracker() {
     setChangeModal(null);
   }
 
-  async function deleteChange(changeId) {
+  // The done one-off task this work entry completed, if it is one (same performed
+  // date as the task's completed date). Deleting the entry can offer to reopen it.
+  function completedTaskOf(changeId) {
+    const a = assets && assets.find(x => x.id === selectedId);
+    const ch = a && (a.changes || []).find(c => c && c.id === changeId);
+    if (!ch || !ch.maintenanceId) return null;
+    const item = (a.maintenanceItems || []).find(m => m && m.id === ch.maintenanceId);
+    if (!item || !taskIsDone(item)) return null;
+    return taskCompletionWork(a, item).some(c => c.id === changeId) ? item : null;
+  }
+
+  async function deleteChange(changeId, reopen) {
     if (savingRef.current) return; // double-submit guard, see savingRef
+    const task = reopen ? completedTaskOf(changeId) : null;
+    const a0 = assets.find(a => a.id === selectedId);
     const next = assets.map(a => {
       if (a.id !== selectedId) return a;
       const changes = (a.changes || []).filter(c => !c || c.id !== changeId);
-      return { ...a, changes };
+      if (!task) return { ...a, changes };
+      return { ...a, changes, maintenanceItems: a.maintenanceItems.map(m => (m && m.id === task.id ? { ...m, lastPerformed: "" } : m)) };
     });
-    await persist(next, { columns });
+    // Reopening is the same audited edit the done circle writes.
+    const entry = task ? { at: new Date().toISOString(), by: currentUser || "", assetLabel: selectedId, assetType: a0.type, action: "maintenance_edited", field: `${task.task} — Completed`, from: formatDateOnly(task.lastPerformed), to: "—" } : null;
+    await persist(next, entry ? { auditLog: logAudit([entry]) } : { columns });
   }
 
   function getAllocatedTotal(asset) {
@@ -13281,8 +13319,11 @@ function AssetTracker() {
     const open = taskChildrenOf(assets, itemId).filter(c => !taskIsDone(c.item)).length;
     const index = taskIndexOf(assets);
     const blockers = taskOpenBlockers(index, (index.get(itemId) || {}).item).map(b => b.item.task);
-    if (open === 0 && blockers.length === 0) { proceed(); return; }
-    setParentCompleteAsk({ count: open, blockers, proceed });
+    // A reopened one-off that already has work logged: say so before logging more.
+    const ref = index.get(itemId);
+    const prior = ref && isOneOffTask(ref.item) ? taskWorkEntries(ref.asset, ref.item).length : 0;
+    if (open === 0 && blockers.length === 0 && prior === 0) { proceed(); return; }
+    setParentCompleteAsk({ count: open, blockers, prior, proceed });
   }
 
   async function addMaintenanceItem() {
@@ -13563,14 +13604,17 @@ function AssetTracker() {
 
   // Reopen a finished one-off: clear its completed date, audited as the edit
   // it is (the same row resetSubtasks writes). `assetId` follows the usual rule.
-  async function reopenTask(itemId, assetId, keepOpen) {
+  // `dropWork` also deletes the work entries that were the completion (same
+  // performed date); the default keeps them, since they record work that happened.
+  async function reopenTask(itemId, assetId, keepOpen, dropWork) {
     if (savingRef.current) return; // double-submit guard, see savingRef
     const tid = assetId || selectedId;
     const target = assets ? assets.find(a => a.id === tid) : null;
     const item = target ? (target.maintenanceItems || []).find(m => m && m.id === itemId) : null;
     if (!item || !item.lastPerformed) return;
+    const dropIds = dropWork ? new Set(taskCompletionWork(target, item).map(c => c.id)) : new Set();
     const entry = { at: new Date().toISOString(), by: currentUser || "", assetLabel: tid, assetType: target.type, action: "maintenance_edited", field: `${item.task} — Completed`, from: formatDateOnly(item.lastPerformed), to: "—" };
-    const next = assets.map(a => (a.id === tid ? { ...a, maintenanceItems: a.maintenanceItems.map(m => (m && m.id === itemId ? { ...m, lastPerformed: "" } : m)) } : a));
+    const next = assets.map(a => (a.id === tid ? { ...a, maintenanceItems: a.maintenanceItems.map(m => (m && m.id === itemId ? { ...m, lastPerformed: "" } : m)), changes: dropIds.size ? (a.changes || []).filter(c => !c || !dropIds.has(c.id)) : a.changes } : a));
     await persist(next, { auditLog: logAudit([entry]) });
     if (!keepOpen) setMaintenanceModal(null);
   }
@@ -13582,7 +13626,12 @@ function AssetTracker() {
   function toggleTaskDone(row) {
     const item = row.item;
     const assetId = row.asset.id;
-    if (isOneOffTask(item) && taskIsDone(item)) { reopenTask(item.id, assetId, true); return; }
+    if (isOneOffTask(item) && taskIsDone(item)) {
+      const work = taskCompletionWork(row.asset, item);
+      if (work.length) setReopenAsk({ itemId: item.id, assetId, task: item.task, count: work.length });
+      else reopenTask(item.id, assetId, true);
+      return;
+    }
     guardComplete(item.id, () => {
       if (taskCompletionMode(workModel, item.taskType) === "required") openMaintenanceComplete(item.id, assetId);
       else completeTaskQuick(item.id, assetId, true);
@@ -17258,7 +17307,11 @@ function AssetTracker() {
               // Read from the stored task, not the draft: the done circle can change it
               // while this view stays open, and a read view has no unsaved edits.
               if (vShow("status") && taskStatusMeta) addRow("Status", taskStatusMeta.label);
-              if (vShow("lastPerformed")) addRow(oneOff ? "Completed" : "Last performed", dayText(dateOnly(taskItem ? taskItem.lastPerformed : maintenanceDraft.lastPerformed)));
+              if (vShow("lastPerformed")) {
+                const lp = dayText(dateOnly(taskItem ? taskItem.lastPerformed : maintenanceDraft.lastPerformed));
+                const ws = oneOff ? taskWorkSummary(workTarget, taskItem) : "";
+                addRow(oneOff ? "Completed" : "Last performed", lp && ws ? `${lp} · ${ws}` : lp);
+              }
               if (oneOff && vShow("startDate")) addRow("Start", dayText(dateOnly(maintenanceDraft.startDate)));
               if (oneOff && vShow("doOn")) addRow("Scheduled for", dayText(dateOnly(maintenanceDraft.doOn)));
               if (vShow("dueDate")) {
@@ -17719,11 +17772,28 @@ function AssetTracker() {
             </div>
           )}
 
+          {reopenAsk && (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 21, padding: 16 }}>
+              <div role="dialog" aria-label="Reopen task" style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 360 }}>
+                <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Reopen this task?</div>
+                <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>
+                  Completing it logged {reopenAsk.count} work entr{reopenAsk.count === 1 ? "y" : "ies"}. Keep {reopenAsk.count === 1 ? "it" : "them"} as a record of work that happened, or delete {reopenAsk.count === 1 ? "it" : "them"} with the completion?
+                </div>
+                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
+                  <button onClick={() => setReopenAsk(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                  <button onClick={() => { const a = reopenAsk; setReopenAsk(null); reopenTask(a.itemId, a.assetId, true, true); }} style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Reopen and delete work</button>
+                  <button onClick={() => { const a = reopenAsk; setReopenAsk(null); reopenTask(a.itemId, a.assetId, true, false); }} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Reopen, keep work</button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {parentCompleteAsk && (
             <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 21, padding: 16 }}>
               <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 340 }}>
-                <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Not everything is done yet</div>
+                <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>{parentCompleteAsk.count > 0 || (parentCompleteAsk.blockers || []).length > 0 ? "Not everything is done yet" : "Work is already logged"}</div>
                 <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>
+                  {parentCompleteAsk.prior > 0 && <div>{parentCompleteAsk.prior} work entr{parentCompleteAsk.prior === 1 ? "y is" : "ies are"} already logged on this task.</div>}
                   {parentCompleteAsk.count > 0 && <div>{parentCompleteAsk.count} subtask{parentCompleteAsk.count === 1 ? " is" : "s are"} still open.</div>}
                   {(parentCompleteAsk.blockers || []).length > 0 && <div>Blocked by {parentCompleteAsk.blockers.join(", ")}.</div>}
                   <div style={{ marginTop: 6 }}>Complete this one anyway?</div>
@@ -19314,10 +19384,16 @@ function AssetTracker() {
             <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 340 }}>
               <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Delete this work entry?</div>
               <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>This can't be undone.</div>
+              {completedTaskOf(confirmChangeDelete) && (
+                <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, color: C.ink, marginBottom: 18 }}>
+                  <input type="checkbox" checked={confirmChangeReopen} onChange={e => setConfirmChangeReopen(e.target.checked)} />
+                  Also reopen "{completedTaskOf(confirmChangeDelete).task}"
+                </label>
+              )}
               <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-                <button onClick={() => setConfirmChangeDelete(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                <button onClick={() => { setConfirmChangeDelete(null); setConfirmChangeReopen(false); }} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                 <button
-                  onClick={() => { deleteChange(confirmChangeDelete); setConfirmChangeDelete(null); }}
+                  onClick={() => { deleteChange(confirmChangeDelete, confirmChangeReopen); setConfirmChangeDelete(null); setConfirmChangeReopen(false); }}
                   style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                 >
                   {"Delete"}
