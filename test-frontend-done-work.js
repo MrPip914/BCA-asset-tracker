@@ -29,5 +29,6 @@ const del = block('async function deleteChange', 'function getAllocatedTotal');
 check('deleting a completing entry can reopen the task in the same save', /reopen \? completedTaskOf/.test(del) && /lastPerformed: ""/.test(del) && (del.match(/await persist\(/g) || []).length === 1);
 check('re-completing a task with work warns', /prior > 0|prior === 0/.test(block('function guardComplete', 'async function addMaintenanceItem')));
 check('Completed row shows the work summary', /taskWorkSummary\(workTarget, taskItem\)/.test(src));
+check("the prompt offers completing without a new entry", /Complete without new entry/.test(src) && /quick: prior > 0 \? quick : null/.test(src));
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

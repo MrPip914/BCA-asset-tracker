@@ -6886,7 +6886,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-28.11";
+const APP_VERSION = "2026-10-28.12";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -13315,7 +13315,8 @@ function AssetTracker() {
   // Parents never complete themselves and never block: finishing one with open
   // subtasks asks first, and "Complete anyway" carries on.
   // A task still blocked by unfinished tasks asks the same way, naming them.
-  function guardComplete(itemId, proceed) {
+  // `quick` (optional) completes with no new work entry; offered when work is already logged.
+  function guardComplete(itemId, proceed, quick) {
     const open = taskChildrenOf(assets, itemId).filter(c => !taskIsDone(c.item)).length;
     const index = taskIndexOf(assets);
     const blockers = taskOpenBlockers(index, (index.get(itemId) || {}).item).map(b => b.item.task);
@@ -13323,7 +13324,7 @@ function AssetTracker() {
     const ref = index.get(itemId);
     const prior = ref && isOneOffTask(ref.item) ? taskWorkEntries(ref.asset, ref.item).length : 0;
     if (open === 0 && blockers.length === 0 && prior === 0) { proceed(); return; }
-    setParentCompleteAsk({ count: open, blockers, prior, proceed });
+    setParentCompleteAsk({ count: open, blockers, prior, proceed, quick: prior > 0 ? quick : null });
   }
 
   async function addMaintenanceItem() {
@@ -13635,7 +13636,7 @@ function AssetTracker() {
     guardComplete(item.id, () => {
       if (taskCompletionMode(workModel, item.taskType) === "required") openMaintenanceComplete(item.id, assetId);
       else completeTaskQuick(item.id, assetId, true);
-    });
+    }, () => completeTaskQuick(item.id, assetId, true));
   }
 
   async function deleteMaintenanceItem(itemId) {
@@ -17724,7 +17725,7 @@ function AssetTracker() {
                           <button onClick={() => guardComplete(maintenanceModal.itemId, () => completeTaskQuick(maintenanceModal.itemId, workDialogAssetId))} style={btn}>Mark done</button>
                         )}
                         {mode !== "simple" && (
-                          <button onClick={() => guardComplete(maintenanceModal.itemId, () => openMaintenanceComplete(maintenanceModal.itemId, workDialogAssetId))} style={btn}>
+                          <button onClick={() => guardComplete(maintenanceModal.itemId, () => openMaintenanceComplete(maintenanceModal.itemId, workDialogAssetId), () => completeTaskQuick(maintenanceModal.itemId, workDialogAssetId))} style={btn}>
                             {mode === "optional" ? "Log work…" : maintenanceDraft.kind === TASK_KIND_ONEOFF ? "Mark complete…" : "Log completion…"}
                           </button>
                         )}
@@ -17796,11 +17797,12 @@ function AssetTracker() {
                   {parentCompleteAsk.prior > 0 && <div>{parentCompleteAsk.prior} work entr{parentCompleteAsk.prior === 1 ? "y is" : "ies are"} already logged on this task.</div>}
                   {parentCompleteAsk.count > 0 && <div>{parentCompleteAsk.count} subtask{parentCompleteAsk.count === 1 ? " is" : "s are"} still open.</div>}
                   {(parentCompleteAsk.blockers || []).length > 0 && <div>Blocked by {parentCompleteAsk.blockers.join(", ")}.</div>}
-                  <div style={{ marginTop: 6 }}>Complete this one anyway?</div>
+                  <div style={{ marginTop: 6 }}>{parentCompleteAsk.quick ? "Log another entry, or complete it using the work already there?" : "Complete this one anyway?"}</div>
                 </div>
                 <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
                   <button onClick={() => setParentCompleteAsk(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
-                  <button onClick={() => { const go = parentCompleteAsk.proceed; setParentCompleteAsk(null); go(); }} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Complete anyway</button>
+                  <button onClick={() => { const go = parentCompleteAsk.proceed; setParentCompleteAsk(null); go(); }} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>{parentCompleteAsk.quick ? "Log new work" : "Complete anyway"}</button>
+                  {parentCompleteAsk.quick && <button onClick={() => { const go = parentCompleteAsk.quick; setParentCompleteAsk(null); go(); }} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Complete without new entry</button>}
                 </div>
               </div>
             </div>
@@ -19025,7 +19027,7 @@ function AssetTracker() {
                                         </label>
                                       )}
                                       {mode !== "simple" && (
-                                        <button onClick={() => guardComplete(item.id, () => openMaintenanceComplete(item.id))} style={btn}>
+                                        <button onClick={() => guardComplete(item.id, () => openMaintenanceComplete(item.id), () => completeTaskQuick(item.id))} style={btn}>
                                           {mode === "optional" ? "Log work…" : oneOff ? "Mark complete…" : "Log completion…"}
                                         </button>
                                       )}
