@@ -12,6 +12,15 @@ for (const m of src.matchAll(/\[\s*\w+\s*,\s*(set[A-Z]\w*)\s*\]/g)) declared.add
 for (const m of src.matchAll(/(?:function|const|let|var)\s+(set[A-Z]\w*)/g)) declared.add(m[1]);
 for (const m of src.matchAll(/\b(set[A-Z]\w*)\s*[,}]?\s*(?:=|:)/g)) declared.add(m[1]);
 
+// A setter passed in as a parameter -- `(items, setItems, depth) =>` or
+// `function f(setX)` -- is declared by the signature, not by a useState.
+for (const m of src.matchAll(/(?:\bfunction\s*\w*\s*)?\(([^()]*)\)\s*(?:=>|\{)/g)) {
+  for (const p of m[1].split(',')) {
+    const n = p.trim().replace(/\s*=.*$/, '');
+    if (/^set[A-Z]\w*$/.test(n)) declared.add(n);
+  }
+}
+
 const called = new Set();
 for (const m of src.matchAll(/(?<![\w.])(set[A-Z]\w*)\(/g)) called.add(m[1]);
 
