@@ -128,7 +128,7 @@ check('the task preview only mounts for a window whose task names a group (no fl
   /isWindowLayoutType\(selectedAsset\.type\) && taskPaneGroupsOf\(selectedAsset, item\)\.length > 0/.test(src));
 check('the Tasks search finds a task by its group name', /\.\.\.taskPaneGroupsOf\(r\.asset, r\.item\)\.map\(g => g\.name\)/.test(src));
 check('the edge function keeps paneGroupIds on a task',
-  /TASK_EXTRA_KEYS = \["taskType", "custom", "paneGroupIds"\]/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api/save-shape.ts'), 'utf8')));
+  /TASK_EXTRA_KEYS = \["taskType", "custom", "paneGroupIds"/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api/save-shape.ts'), 'utf8')));
 check('Sandbox carries a Window with a layout, groups and tasks that name them',
   /label: "BCA0121", type: "Window"/.test(src) && /floorPlanUrl: "data:image\/svg\+xml;utf8,"/.test(src)
   && /id: "wg-b1-lower"/.test(src) && /paneGroupIds: \["wg-b1-lower", "wg-b2-lower"\]/.test(src));
