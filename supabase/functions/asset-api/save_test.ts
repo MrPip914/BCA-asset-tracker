@@ -79,6 +79,18 @@ Deno.test("a subtask keeps its parentTaskId, and a top-level task stores none", 
   assert(!("parentTaskId" in a.maintenanceItems[0]));
 });
 
+Deno.test("a task keeps its blockedBy list, and an empty one is not stored", () => {
+  const [a] = shapeAssets([{
+    id: "a1", label: "a1", type: "Room",
+    maintenanceItems: [
+      { id: "m1", task: "Prime", kind: "oneoff", blockedBy: ["m0"] },
+      { id: "m2", task: "Paint", kind: "oneoff", blockedBy: [] },
+    ],
+  }], []);
+  assertEquals(a.maintenanceItems[0].blockedBy, ["m0"]);
+  assert(!("blockedBy" in a.maintenanceItems[1]));
+});
+
 const OWNER = "mrpip914@gmail.com";
 const verifyIdToken = (token: unknown) => {
   const [kind, email] = String(token).split(":");

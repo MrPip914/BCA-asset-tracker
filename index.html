@@ -2479,6 +2479,38 @@ function resetSubtasks(assets, parentId, by) {
   });
   return { assets: next, entries };
 }
+// Dependencies (2026-10-28). A one-off task may list tasks it is BLOCKED BY in
+// `blockedBy` (ids, on the blocked task only). Blocked is DERIVED, never stored:
+// a task is blocked while any listed task still exists and is not done. A
+// blocker that was deleted or finished simply stops counting. It warns and never
+// refuses: completing a blocked task asks first. Scheduled tasks are neither
+// blocked nor blockers (a repeating task is never "done"), and loops are refused
+// at the picker.
+function taskOpenBlockers(index, item) {
+  if (!item || !isOneOffTask(item) || !Array.isArray(item.blockedBy)) return [];
+  const out = [];
+  item.blockedBy.forEach(id => {
+    const ref = index.get(id);
+    if (ref && ref.item.id !== item.id && isOneOffTask(ref.item) && !taskIsDone(ref.item)) out.push(ref);
+  });
+  return out;
+}
+function taskIsBlocked(index, item) { return !taskIsDone(item) && taskOpenBlockers(index, item).length > 0; }
+// Would making `taskId` blocked by `candidateId` close a loop? True when the
+// candidate is the task itself or already depends on it, through any chain.
+function blockedByWouldLoop(index, taskId, candidateId) {
+  const seen = new Set();
+  const stack = [candidateId];
+  while (stack.length) {
+    const id = stack.pop();
+    if (id === taskId) return true;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const ref = index.get(id);
+    if (ref && Array.isArray(ref.item.blockedBy)) ref.item.blockedBy.forEach(b => stack.push(b));
+  }
+  return false;
+}
 // "overdue", "due-soon" (within 14 days) and "ok" mean the same thing for both
 // kinds. The two that do not are the point of this function:
 //
@@ -2572,6 +2604,8 @@ const VIEW_BUILTIN_FIELDS = [
   { key: "status", label: "Status" },
   { key: "type", label: "Type" },
   { key: "parent", label: "Parent task" },
+  { key: "blocked", label: "Blocked" },
+  { key: "blockedBy", label: "Blocked by" },
   { key: "owner", label: "Owner" },
   { key: "notes", label: "Notes" },
   { key: "frequency", label: "Frequency" },
@@ -2902,6 +2936,17 @@ function viewFieldValue(row, key, model, ctx) {
       const index = ctx.taskIndex || (ctx.taskIndex = taskIndexOf(ctx.assets));
       const ref = index.get(item.parentTaskId);
       return ref ? (ref.item.task || "") : "";
+    }
+    case "blocked": {
+      // "Yes" while any task it is blocked by is still open; "No" otherwise.
+      if (!ctx || !ctx.assets) return "";
+      const index = ctx.taskIndex || (ctx.taskIndex = taskIndexOf(ctx.assets));
+      return taskIsBlocked(index, item) ? "Yes" : "No";
+    }
+    case "blockedBy": {
+      if (!ctx || !ctx.assets) return "";
+      const index = ctx.taskIndex || (ctx.taskIndex = taskIndexOf(ctx.assets));
+      return taskOpenBlockers(index, item).map(b => b.item.task).join("; ");
     }
     case "owner": return item.owner || "";
     case "notes": return item.notes || "";
@@ -6606,7 +6651,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-28.4";
+const APP_VERSION = "2026-10-28.5";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -8882,7 +8927,7 @@ function AssetTracker() {
   // The draft behind the task dialog, filled by BOTH modes -- `id` is the item
   // the dialog acts on, minted on open in add mode so a photo can name the task
   // while the form is still being filled in.
-  const [maintenanceDraft, setMaintenanceDraft] = useState({ id: "", kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [], parentTaskId: "" });
+  const [maintenanceDraft, setMaintenanceDraft] = useState({ id: "", kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [], parentTaskId: "", blockedBy: [] });
   // null when closed; { mode: "add" } or { mode: "edit", itemId }. ONE dialog
   // for both, the shape changeModal already uses and for the same reason: a
   // separate edit form is a second copy of the same fields to keep in step, and
@@ -11151,7 +11196,7 @@ function AssetTracker() {
     setConfirmArchive(null);
     setAllocationDraft({ roomId: "", quantity: "", error: "" });
     setConfirmAllocationRemove(null);
-    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [], parentTaskId: "" });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [], parentTaskId: "", blockedBy: [] });
     setConfirmMaintenanceDelete(null);
     setMaintenanceCompleteModal(null);
     setOpenMaintenanceHistory(null);
@@ -12870,7 +12915,7 @@ function AssetTracker() {
     setWorkDialogAssetId(assetId === undefined ? null : assetId);
     // Minted on OPEN so a photo can name this schedule while the form is still
     // being filled in -- the same rule openChangeAdd follows.
-    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [], parentTaskId: "" });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [], parentTaskId: "", blockedBy: [] });
     setMaintenanceModal({ mode: "add" });
   }
 
@@ -12906,6 +12951,7 @@ function AssetTracker() {
       custom: item.custom && typeof item.custom === "object" ? { ...item.custom } : {},
       paneGroupIds: Array.isArray(item.paneGroupIds) ? [...item.paneGroupIds] : [],
       parentTaskId: item.parentTaskId || "",
+      blockedBy: Array.isArray(item.blockedBy) ? [...item.blockedBy] : [],
     });
     // `viewId` set means opened from a view: the dialog shows only that view's fields.
     // The view decides whether the task opens to read or to edit (an editor only).
@@ -12918,16 +12964,19 @@ function AssetTracker() {
   // one-off, since a child never repeats.
   function openSubtaskAdd(parentItem, parentAssetId) {
     setWorkDialogAssetId(parentAssetId);
-    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [], parentTaskId: parentItem.id });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [], parentTaskId: parentItem.id, blockedBy: [] });
     setMaintenanceModal({ mode: "add" });
   }
 
   // Parents never complete themselves and never block: finishing one with open
   // subtasks asks first, and "Complete anyway" carries on.
-  function guardParentComplete(itemId, proceed) {
+  // A task still blocked by unfinished tasks asks the same way, naming them.
+  function guardComplete(itemId, proceed) {
     const open = taskChildrenOf(assets, itemId).filter(c => !taskIsDone(c.item)).length;
-    if (open === 0) { proceed(); return; }
-    setParentCompleteAsk({ count: open, proceed });
+    const index = taskIndexOf(assets);
+    const blockers = taskOpenBlockers(index, (index.get(itemId) || {}).item).map(b => b.item.task);
+    if (open === 0 && blockers.length === 0) { proceed(); return; }
+    setParentCompleteAsk({ count: open, blockers, proceed });
   }
 
   async function addMaintenanceItem() {
@@ -12961,13 +13010,14 @@ function AssetTracker() {
       custom: { ...(maintenanceDraft.custom || {}) },
       ...(livePaneGroupIds(workTarget, maintenanceDraft.paneGroupIds).length ? { paneGroupIds: livePaneGroupIds(workTarget, maintenanceDraft.paneGroupIds) } : {}),
       ...(maintenanceDraft.parentTaskId ? { parentTaskId: maintenanceDraft.parentTaskId } : {}),
+      ...(oneOff && (maintenanceDraft.blockedBy || []).length ? { blockedBy: [...maintenanceDraft.blockedBy] } : {}),
       at: new Date().toISOString(),
       by: currentUser || "",
     };
     if (validateCustomValues(workModel, "task", item.taskType, item.custom)) return; // Save is disabled on it, with the reason on screen
     const next = assets.map(a => (a.id === workTargetId ? { ...a, maintenanceItems: [...(a.maintenanceItems || []), item] } : a));
     await persist(next, { columns });
-    setMaintenanceDraft({ id: crypto.randomUUID(), kind: maintenanceDraft.kind, task: "", notes: "", frequency: maintenanceDraft.frequency, recurrence: maintenanceDraft.recurrence, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [], parentTaskId: "" });
+    setMaintenanceDraft({ id: crypto.randomUUID(), kind: maintenanceDraft.kind, task: "", notes: "", frequency: maintenanceDraft.frequency, recurrence: maintenanceDraft.recurrence, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [], parentTaskId: "", blockedBy: [] });
     setMaintenanceModal(null);
   }
 
@@ -13009,6 +13059,8 @@ function AssetTracker() {
       custom: { ...(maintenanceDraft.custom || {}) },
       ...(livePaneGroupIds(workTarget, maintenanceDraft.paneGroupIds).length || original.paneGroupIds
         ? { paneGroupIds: livePaneGroupIds(workTarget, maintenanceDraft.paneGroupIds) } : {}),
+      // A schedule is never blocked, so flipping the kind drops the list with the dates.
+      blockedBy: oneOff ? [...(maintenanceDraft.blockedBy || [])] : [],
     };
     if (validateCustomValues(workModel, "task", updated.taskType, updated.custom, viewVisibleCustomKeys(viewsCfg.list.find(v => v.id === maintenanceModal.viewId)))) return;
     const mkEntry = (field, from, to) => ({
@@ -13029,6 +13081,12 @@ function AssetTracker() {
     }
     if ((original.dueDate || "") !== (updated.dueDate || "")) {
       entries.push(mkEntry("Due date", formatDateOnly(original.dueDate) || "—", formatDateOnly(updated.dueDate) || "—"));
+    }
+    {
+      const idx = taskIndexOf(assets);
+      const names = ids => (ids || []).map(id => (idx.get(id) || { item: { task: "(deleted task)" } }).item.task).join(", ");
+      const before = names(original.blockedBy), after = names(updated.blockedBy);
+      if (before !== after) entries.push(mkEntry("Blocked by", before || "—", after || "—"));
     }
     if ((original.owner || "") !== (updated.owner || "")) entries.push(mkEntry("Owner", original.owner || "—", updated.owner || "—"));
     if ((original.taskType || "") !== (updated.taskType || "")) {
@@ -16821,6 +16879,15 @@ function AssetTracker() {
               if (workBuiltinShown(workModel, "task", maintenanceDraft.taskType, "notes") && vShow("notes") && maintenanceDraft.notes) addRow("Notes", <span style={{ whiteSpace: "pre-wrap" }}>{maintenanceDraft.notes}</span>);
             }
             const tIndex = taskIndexOf(assets);
+            const isBlocked = editing && taskIsBlocked(tIndex, { ...(tIndex.get(maintenanceModal.itemId) || {}).item });
+            // Candidates for "blocked by": other one-off tasks anywhere, never itself or one that
+            // already depends on it (that would be a loop). A blocker already chosen stays listed.
+            const blockerOptions = [];
+            tIndex.forEach((ref, id) => {
+              if (id === maintenanceDraft.id || !isOneOffTask(ref.item)) return;
+              if ((maintenanceDraft.blockedBy || []).includes(id) || (!taskIsDone(ref.item) && !blockedByWouldLoop(tIndex, maintenanceDraft.id, id))) blockerOptions.push(id);
+            });
+            const blockerLabel = id => { const r = tIndex.get(id); return r ? `${r.item.task} — ${nameOf(r.asset)}` : "(deleted task)"; };
             const kids = editing ? taskChildrenOf(assets, maintenanceModal.itemId) : [];
             const parentRef = maintenanceDraft.parentTaskId ? tIndex.get(maintenanceDraft.parentTaskId) : null;
             const canSub = editing && canEdit && !dialogView && canAddSubtaskTo(tIndex, { id: maintenanceModal.itemId, parentTaskId: maintenanceDraft.parentTaskId });
@@ -16836,6 +16903,9 @@ function AssetTracker() {
                       : (maintenanceDraft.parentTaskId ? "Add subtask" : maintenanceDraft.kind === TASK_KIND_ONEOFF ? "Add one-off task" : "Add scheduled task")}
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                    {isBlocked && (
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: C.danger, flexShrink: 0 }}>Blocked</span>
+                    )}
                     {taskStatusMeta && (
                       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: taskStatusMeta.color, flexShrink: 0 }}>
                         {taskStatusMeta.label}
@@ -17131,6 +17201,13 @@ function AssetTracker() {
                     </div>
                   </div>
                 )}
+                {maintenanceDraft.kind === TASK_KIND_ONEOFF && !viewReadOnly && (blockerOptions.length > 0 || (maintenanceDraft.blockedBy || []).length > 0) && (
+                  <div style={{ marginTop: 14 }}>
+                    <PickerField multi searchable label="Blocked by" title="Blocked by which tasks?" value={maintenanceDraft.blockedBy || []}
+                      options={blockerOptions} labelForOption={blockerLabel} placeholder="Nothing"
+                      onChange={v => setMaintenanceDraft({ ...maintenanceDraft, blockedBy: v })} />
+                  </div>
+                )}
                 {parentRef && (
                   <button
                     onClick={() => openMaintenanceEdit(parentRef.item.id, parentRef.asset.id)}
@@ -17156,7 +17233,7 @@ function AssetTracker() {
                       return (
                         <div key={k.item.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0", fontSize: 14 }}>
                           {kMode !== "required" && canEdit && !done
-                            ? <input type="checkbox" checked={false} onChange={() => guardParentComplete(k.item.id, () => completeTaskQuick(k.item.id, k.asset.id, true))} aria-label={`Mark ${k.item.task} done`} />
+                            ? <input type="checkbox" checked={false} onChange={() => guardComplete(k.item.id, () => completeTaskQuick(k.item.id, k.asset.id, true))} aria-label={`Mark ${k.item.task} done`} />
                             : <input type="checkbox" checked={done} disabled aria-label={done ? "Done" : "Not done"} />}
                           <button onClick={() => openMaintenanceEdit(k.item.id, k.asset.id)} style={{ background: "none", border: "none", padding: 0, textAlign: "left", fontSize: 14, color: C.ink, cursor: "pointer", textDecoration: done ? "line-through" : "none", opacity: done ? 0.6 : 1, overflow: "hidden", textOverflow: "ellipsis" }}>{k.item.task}</button>
                           {k.asset.id !== workTargetId && <span style={{ fontSize: 12, color: C.muted, flexShrink: 0 }}>{nameOf(k.asset)}</span>}
@@ -17186,10 +17263,10 @@ function AssetTracker() {
                     return (
                       <>
                         {mode !== "required" && (
-                          <button onClick={() => guardParentComplete(maintenanceModal.itemId, () => completeTaskQuick(maintenanceModal.itemId, workDialogAssetId))} style={btn}>Mark done</button>
+                          <button onClick={() => guardComplete(maintenanceModal.itemId, () => completeTaskQuick(maintenanceModal.itemId, workDialogAssetId))} style={btn}>Mark done</button>
                         )}
                         {mode !== "simple" && (
-                          <button onClick={() => guardParentComplete(maintenanceModal.itemId, () => openMaintenanceComplete(maintenanceModal.itemId, workDialogAssetId))} style={btn}>
+                          <button onClick={() => guardComplete(maintenanceModal.itemId, () => openMaintenanceComplete(maintenanceModal.itemId, workDialogAssetId))} style={btn}>
                             {mode === "optional" ? "Log work…" : maintenanceDraft.kind === TASK_KIND_ONEOFF ? "Mark complete…" : "Log completion…"}
                           </button>
                         )}
@@ -17240,8 +17317,12 @@ function AssetTracker() {
           {parentCompleteAsk && (
             <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 21, padding: 16 }}>
               <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 340 }}>
-                <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Subtasks still open</div>
-                <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>{parentCompleteAsk.count} subtask{parentCompleteAsk.count === 1 ? " is" : "s are"} not done yet. Complete this one anyway?</div>
+                <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Not everything is done yet</div>
+                <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>
+                  {parentCompleteAsk.count > 0 && <div>{parentCompleteAsk.count} subtask{parentCompleteAsk.count === 1 ? " is" : "s are"} still open.</div>}
+                  {(parentCompleteAsk.blockers || []).length > 0 && <div>Blocked by {parentCompleteAsk.blockers.join(", ")}.</div>}
+                  <div style={{ marginTop: 6 }}>Complete this one anyway?</div>
+                </div>
                 <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
                   <button onClick={() => setParentCompleteAsk(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                   <button onClick={() => { const go = parentCompleteAsk.proceed; setParentCompleteAsk(null); go(); }} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Complete anyway</button>
@@ -18446,12 +18527,12 @@ function AssetTracker() {
                                     <>
                                       {mode !== "required" && (
                                         <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, color: C.ink, cursor: "pointer" }}>
-                                          <input type="checkbox" checked={false} onChange={() => guardParentComplete(item.id, () => completeTaskQuick(item.id))} aria-label={`Mark ${item.task} done`} />
+                                          <input type="checkbox" checked={false} onChange={() => guardComplete(item.id, () => completeTaskQuick(item.id))} aria-label={`Mark ${item.task} done`} />
                                           Done
                                         </label>
                                       )}
                                       {mode !== "simple" && (
-                                        <button onClick={() => guardParentComplete(item.id, () => openMaintenanceComplete(item.id))} style={btn}>
+                                        <button onClick={() => guardComplete(item.id, () => openMaintenanceComplete(item.id))} style={btn}>
                                           {mode === "optional" ? "Log work…" : oneOff ? "Mark complete…" : "Log completion…"}
                                         </button>
                                       )}
