@@ -23,7 +23,7 @@ check('the circle is offered in the column pickers only, never as a query field'
 check('the Views tab passes the toggle to editors only', /onToggleDone=\{canEdit \? toggleTaskDone : undefined\}/.test(src));
 
 const toggle = block('function toggleTaskDone', 'async function deleteMaintenanceItem');
-check('a finished one-off is reopened', /taskIsDone\(item\)\) \{ reopenTask\(/.test(toggle));
+check('a finished one-off is reopened', /else reopenTask\(item\.id, assetId, true\)/.test(toggle));
 check('completing goes through the open-subtasks / blocker guard', /guardComplete\(item\.id/.test(toggle));
 check('a type that requires a work entry opens the Log work form', /=== "required"\) openMaintenanceComplete/.test(toggle));
 check('other types complete in one tap and leave the dialog open', /completeTaskQuick\(item\.id, assetId, true\)/.test(toggle));
