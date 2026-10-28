@@ -1958,6 +1958,26 @@ function setWorkBuiltinShown(model, kind, typeId, key, on) {
   const hidden = (cur.hiddenFields || []).filter(x => x !== key);
   return { ...model, [k.settings]: { ...(model[k.settings] || {}), [typeId]: { ...cur, hiddenFields: on ? hidden : [...hidden, key] } } };
 }
+// How completing a task of a type works. "required" is today's completion form
+// (a work entry is written); "optional" completes in one tap and leaves Log work
+// as a separate choice; "simple" is a checkbox that never writes a work entry.
+// Stored as `completion` on taskTypeSettings[typeId]; absent reads "required", so
+// every existing type is unchanged until someone switches it.
+const TASK_COMPLETION_MODES = [
+  { value: "required", label: "Log work required" },
+  { value: "optional", label: "Log work optional" },
+  { value: "simple", label: "Checkbox only" },
+];
+function taskCompletionMode(model, typeId) {
+  const st = workModelParts(model, "task").settings[resolveWorkTypeId(model, "task", typeId)];
+  const c = st && st.completion;
+  return c === "optional" || c === "simple" ? c : "required";
+}
+function setTaskCompletionMode(model, typeId, mode) {
+  const cur = (model.taskTypeSettings || {})[typeId] || { fieldKeys: [], requiredFields: [], hiddenFields: [] };
+  const { completion, ...rest } = cur;
+  return { ...model, taskTypeSettings: { ...(model.taskTypeSettings || {}), [typeId]: mode === "optional" || mode === "simple" ? { ...rest, completion: mode } : rest } };
+}
 function adoptWorkModel(raw) {
   const m = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
   const list = v => (Array.isArray(v) ? v : []);
@@ -1971,7 +1991,7 @@ function adoptWorkModel(raw) {
   const settings = v => {
     const out = {};
     Object.entries(obj(v)).forEach(([id, st]) => {
-      out[id] = { fieldKeys: list(st && st.fieldKeys).map(String), requiredFields: list(st && st.requiredFields).map(String), hiddenFields: list(st && st.hiddenFields).map(String) };
+      out[id] = { fieldKeys: list(st && st.fieldKeys).map(String), requiredFields: list(st && st.requiredFields).map(String), hiddenFields: list(st && st.hiddenFields).map(String), ...(st && (st.completion === "optional" || st.completion === "simple") ? { completion: st.completion } : {}) };
     });
     return out;
   };
@@ -6511,7 +6531,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-28.2";
+const APP_VERSION = "2026-10-28.3";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -13050,6 +13070,29 @@ function AssetTracker() {
     setMaintenanceModal(null);
   }
 
+  // One-tap completion for a type whose mode is "optional" or "simple": stamps
+  // lastPerformed and writes the same maintenance_completed audit row as the
+  // form, but no work entry. `assetId` follows openMaintenanceComplete's rule.
+  async function completeTaskQuick(itemId, assetId) {
+    if (savingRef.current) return; // double-submit guard, see savingRef
+    const tid = assetId || selectedId;
+    const target = assets ? assets.find(a => a.id === tid) : null;
+    if (!target) return;
+    const items = target.maintenanceItems || [];
+    const item = items.find(m => m && m.id === itemId);
+    if (!item) return;
+    const date = localDateString();
+    const nextItems = items.map(it => (it && it.id === itemId ? { ...it, lastPerformed: date } : it));
+    const entry = {
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: tid, assetType: target.type,
+      action: "maintenance_completed", field: item.task,
+      from: item.lastPerformed ? formatDateOnly(item.lastPerformed) : "never", to: formatDateOnly(date),
+    };
+    const next = assets.map(a => (a.id === tid ? { ...a, maintenanceItems: nextItems } : a));
+    await persist(next, { auditLog: logAudit([entry]) });
+    setMaintenanceModal(null);
+  }
+
   async function deleteMaintenanceItem(itemId) {
     if (savingRef.current) return; // double-submit guard, see savingRef
     if (!workTarget) return;
@@ -16994,14 +17037,22 @@ function AssetTracker() {
                       button is: there is nothing left to complete, and offering
                       it would read as a way to log a SECOND completion of a job
                       that happens once. */}
-                  {editing && !taskDone && (!viewReadOnly || canEdit) && (
-                    <button
-                      onClick={() => openMaintenanceComplete(maintenanceModal.itemId, workDialogAssetId)}
-                      style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brand}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.brand }}
-                    >
-                      {maintenanceDraft.kind === TASK_KIND_ONEOFF ? "Mark complete…" : "Log completion…"}
-                    </button>
-                  )}
+                  {editing && !taskDone && (!viewReadOnly || canEdit) && (() => {
+                    const mode = taskCompletionMode(workModel, maintenanceDraft.taskType);
+                    const btn = { padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brand}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.brand };
+                    return (
+                      <>
+                        {mode !== "required" && (
+                          <button onClick={() => completeTaskQuick(maintenanceModal.itemId, workDialogAssetId)} style={btn}>Mark done</button>
+                        )}
+                        {mode !== "simple" && (
+                          <button onClick={() => openMaintenanceComplete(maintenanceModal.itemId, workDialogAssetId)} style={btn}>
+                            {mode === "optional" ? "Log work…" : maintenanceDraft.kind === TASK_KIND_ONEOFF ? "Mark complete…" : "Log completion…"}
+                          </button>
+                        )}
+                      </>
+                    );
+                  })()}
                   <button onClick={() => setMaintenanceModal(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>{viewReadOnly ? "Close" : "Cancel"}</button>
                   {!viewReadOnly && (
                   <button
@@ -18230,11 +18281,25 @@ function AssetTracker() {
                                     completion of a job that happens once.
                                     Reopening is clearing the date in the edit
                                     form, which is audited like any field. */}
-                                {canEdit && !done && (
-                                <button onClick={() => openMaintenanceComplete(item.id)} style={{ padding: "6px 12px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 12 }}>
-                                  {oneOff ? "Mark complete…" : "Log completion…"}
-                                </button>
-                                )}
+                                {canEdit && !done && (() => {
+                                  const mode = taskCompletionMode(workModel, item.taskType);
+                                  const btn = { padding: "6px 12px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 12 };
+                                  return (
+                                    <>
+                                      {mode !== "required" && (
+                                        <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, color: C.ink, cursor: "pointer" }}>
+                                          <input type="checkbox" checked={false} onChange={() => completeTaskQuick(item.id)} aria-label={`Mark ${item.task} done`} />
+                                          Done
+                                        </label>
+                                      )}
+                                      {mode !== "simple" && (
+                                        <button onClick={() => openMaintenanceComplete(item.id)} style={btn}>
+                                          {mode === "optional" ? "Log work…" : oneOff ? "Mark complete…" : "Log completion…"}
+                                        </button>
+                                      )}
+                                    </>
+                                  );
+                                })()}
                                 {history.length > 0 && (
                                 <button
                                   onClick={() => setOpenMaintenanceHistory(open ? null : item.id)}
@@ -20505,6 +20570,15 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
           {selected.id === defaultId
             ? <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>New and untyped {noun === "task" ? "tasks" : "work entries"} use this type.</div>
             : <button onClick={() => onModel(setDefaultWorkType(model, kind, selected.id))} style={{ marginBottom: 10, padding: "6px 12px", border: `1.5px solid ${C.border}`, background: "none", borderRadius: 8, fontSize: 13, color: C.ink }}>Use as default</button>}
+          {kind === "task" && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0 10px", fontSize: 14 }}>
+              <span>Completing</span>
+              <PickerField hideLabel label="Completing" title="How completing works" value={taskCompletionMode(model, selected.id)} options={TASK_COMPLETION_MODES.map(m => m.value)}
+                labelForOption={v => (TASK_COMPLETION_MODES.find(m => m.value === v) || {}).label || v}
+                onChange={v => onModel(setTaskCompletionMode(model, selected.id, v))} />
+              <HelpTip label="About completing" text="Log work required opens the completion form and records a work entry. Log work optional completes in one tap and keeps Log work as a separate button. Checkbox only completes in one tap and never records work." />
+            </div>
+          )}
           {WORK_BUILTIN_FIELDS[kind].map(b => (
             <div key={b.key} style={{ padding: "6px 0", fontSize: 14 }}>
               <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
