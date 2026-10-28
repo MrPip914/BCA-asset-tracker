@@ -845,6 +845,16 @@ asset per site (`GENERAL_ASSET_ID` = `"__general"`, type `General`, name "No ass
 - Covered by `test-frontend-general-asset.js`; driven in Chromium against Sandbox (add a task
   with "No asset" from the Tasks tab; it shows in the table and not in the Assets list).
 
+## Calendar view type (2026-10-28)
+
+Phase 6 of `/mnt/project-files/plans/task-relationships-scheduling.md`. A **Views** view can be a **Calendar** (`type: "calendar"`, the third beside list and Kanban): the tasks its query finds laid on a **month or a week** (Sunday first, Today / previous / next, per-visit state only). **Frontend only: no backend change, no migration, no deploy** (`adoptViews` just accepts the new type; the Edge Function keeps it as it keeps the other view fields).
+
+- **Where a task sits (`calendarPlacement`)**: a one-off with Scheduled for (`doOn`) on that day; with start AND due but no `doOn`, a dashed **span** strip across the week rows it touches ("anytime in this window"); else its due date (a schedule's derived next due); else its start date. A task with no date is listed under **No date**, never dropped. A finished task keeps its place, struck through.
+- **Drag to schedule** (editors, desktop): dragging a chip to another day sets the task's `doOn` and audits "<task> — Scheduled for" (`setTaskDoOn`). Only an open one-off can move; a schedule's due date is derived, so dropping one says why it cannot. It is the browser's own drag and drop, so on a phone the way to move a task is the Scheduled for field in its dialog.
+- Tapping a chip opens the task like any other view. The live filter works; ordering, grouping and card columns do not apply, so the editor hides them for a calendar. The preview in Settings is the calendar itself (not draggable).
+- Not built: a Day mode, calendar feed, time of day, drag for touch screens, a span's start/end handles.
+- Covered by `test-frontend-calendar.js` (the pure range, shift, placement and layout helpers run for real; wiring read as source); driven in Chromium against Sandbox (the new Calendar fixture view: a drag to another day, Week/Month, the span strip, the task opening).
+
 ## Task dependencies (2026-10-28)
 
 Phase 5 of `/mnt/project-files/plans/task-relationships-scheduling.md`. A one-off task can be **blocked by** other tasks: `blockedBy`, an array of task ids on the blocked task only. **Blocked is derived, never stored** (`taskOpenBlockers`, `taskIsBlocked`): a task is blocked while any listed task still exists and is not done, so a finished or deleted blocker just stops counting.

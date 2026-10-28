@@ -192,7 +192,7 @@ check('a value without * still has to match whole', !wc("jane"));
 check('the sidebar lists views with counts and is the first screen on a phone', /<nav aria-label="Views"/.test(src) && /aria-label="Back to views"/.test(src) && /viewPaneOpen/.test(src));
 check('no per-task Set order button remains', !/Set order/.test(src));
 check('tasks and views are ordered from an icon at the top right', /"Order tasks"/.test(src) && /"Order views"/.test(src));
-check('a Kanban has no order button and its cards always drag', /canArrange && !kanban && \(/.test(src) && /const arranging = canArrange && \(!view\.fieldBacked \|\| !!onField\) && \(kanban \|\| arrange\)/.test(src));
+check('a Kanban has no order button and its cards always drag', /canArrange && !kanban && !calendar && \(/.test(src) && /const arranging = canArrange && \(!view\.fieldBacked \|\| !!onField\) && \(kanban \|\| arrange\)/.test(src));
 check('search is an icon on a phone until opened', /aria-label="Search this view"/.test(src) && /searchShown = !phone \|\| searchOpen/.test(src));
 check('filter and order buttons carry no text label', !/ Filters\{filterCount/.test(src) && !/\{arranging \? "Done" : "Order"\}/.test(src));
 check('a task from a view opens read-only with a pencil for editors', /editView/.test(src) && /Edit this task/.test(src) && /viewReadOnly = !!dialogView && \(!canEdit \|\| !maintenanceModal\.editView\)/.test(src));
