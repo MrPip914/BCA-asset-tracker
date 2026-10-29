@@ -834,3 +834,7 @@ Pre-existing on `dev` (fails with and without the install-app change). Found whi
 ## test-frontend-setters.js fails on dev (found 2026-10-22)
 
 Reports "setters called but never declared: setItems". Fails without the asset-page + change too. Not investigated; does not block anything known.
+
+## test-frontend-setters.js fails on dev: `setItems` called but never declared (found 2026-10-29)
+
+Found while adding the views sidebar pin. It fails identically on a clean `origin/dev`, so it is not from that change. Not investigated; needs a look at which `setItems` call the test is seeing.
