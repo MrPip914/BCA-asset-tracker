@@ -6901,7 +6901,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-11-04.1";
+const APP_VERSION = "2026-11-04.2";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -21912,7 +21912,7 @@ function CalendarView({ view, rows, onOpen, onSchedule, emptyText }) {
   const layout = useMemo(() => calendarLayout(rows, range, dateField), [rows, range, dateField]);
   const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const navBtn = { display: "flex", alignItems: "center", padding: "6px 8px", borderRadius: 8, border: `1.5px solid ${C.border}`, background: C.surface, color: C.ink, cursor: "pointer", fontSize: 13, fontWeight: 600 };
-  const chipFor = (r, extra) => {
+  const chipFor = (r, extra, card) => {
     const meta = maintenanceStatusMeta(r.status);
     const key = viewTaskKey(r);
     const drag = !!onSchedule && calendarCanSchedule(r);
@@ -21923,7 +21923,7 @@ function CalendarView({ view, rows, onOpen, onSchedule, emptyText }) {
         role={onOpen ? "button" : undefined} tabIndex={onOpen ? 0 : undefined}
         onKeyDown={onOpen ? e => { if (e.key === "Enter") onOpen(r); } : undefined}
         title={r.item.task + " — " + r.assetName}
-        style={{ borderLeft: `3px solid ${meta.color}`, background: C.surface, border: `1px solid ${C.border}`, borderLeftWidth: 3, borderLeftColor: meta.color, borderRadius: 5, padding: "2px 6px", fontSize: 12, color: r.status === "done" ? C.muted : C.ink, textDecoration: r.status === "done" ? "line-through" : "none", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: drag ? "grab" : (onOpen ? "pointer" : "default") }}>
+        style={{ borderLeft: `3px solid ${meta.color}`, background: C.surface, border: `1px solid ${C.border}`, borderLeftWidth: 3, borderLeftColor: meta.color, borderRadius: card ? 8 : 5, padding: card ? "8px 10px" : "2px 6px", fontSize: card ? 13 : 12, color: r.status === "done" ? C.muted : C.ink, textDecoration: r.status === "done" ? "line-through" : "none", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: card ? "normal" : "nowrap", cursor: drag ? "grab" : (onOpen ? "pointer" : "default") }}>
         {r.item.task}
       </div>
     );
@@ -21942,22 +21942,50 @@ function CalendarView({ view, rows, onOpen, onSchedule, emptyText }) {
         <button type="button" aria-label={mode === "week" ? "Next week" : "Next month"} title="Next" onClick={() => setAnchor(calendarShift(mode, anchor, 1))} style={navBtn}><ChevronRight size={16} /></button>
         <button type="button" onClick={() => setAnchor(today)} style={navBtn}>Today</button>
         <div data-cal-title style={{ fontWeight: 700, fontSize: 15, color: C.brandDark, flex: 1, minWidth: 120 }}>{calendarTitle(range, anchor)}</div>
-        <div role="group" aria-label="Place tasks by" style={{ display: "flex", gap: 4, alignItems: "center" }}>
-          {CALENDAR_DATE_FIELDS.map(f => (
-            <button key={f.key} type="button" data-cal-datefield={f.key} aria-pressed={dateField === f.key} title={"Place tasks by " + f.label} onClick={() => setDateField(f.key)}
-              style={{ ...navBtn, borderColor: dateField === f.key ? C.brand : C.border, background: dateField === f.key ? C.bg : C.surface }}>{f.label}</button>
-          ))}
-          <HelpTip label="About placing tasks by date" text="Choose which date puts a task on the calendar. Dragging a task to another day changes that date. Repeating tasks have no entered dates, so they can't be dragged." size={14} />
+        <div style={{ width: 150, flexShrink: 0 }} data-cal-datefield-picker>
+          <PickerField label="Place tasks by" hideLabel value={dateField} onChange={setDateField} options={CALENDAR_DATE_FIELDS.map(f => f.key)}
+            labelForOption={k => (CALENDAR_DATE_FIELDS.find(f => f.key === k) || {}).label || k} title="Place tasks by" />
         </div>
-        <div style={{ display: "flex", gap: 4 }}>
+        <HelpTip label="About placing tasks by date" text="Choose which date puts a task on the calendar. Dragging a task to another day changes that date; dragging it onto the No date area clears it. Repeating tasks have no entered dates, so they can't be dragged." size={14} />
+        <div role="group" aria-label="Calendar range" data-cal-mode style={{ display: "flex", borderRadius: 8, overflow: "hidden", border: `1.5px solid ${C.border}` }}>
           {CALENDAR_MODES.map(m => (
-            <button key={m} type="button" aria-pressed={mode === m} onClick={() => setMode(m)}
-              style={{ ...navBtn, borderColor: mode === m ? C.brand : C.border, background: mode === m ? C.bg : C.surface }}>{m === "month" ? "Month" : "Week"}</button>
+            <button key={m} type="button" data-cal-mode-btn={m} aria-pressed={mode === m} onClick={() => setMode(m)}
+              style={{ padding: "6px 12px", border: "none", fontSize: 13, fontWeight: 600, cursor: "pointer", color: C.ink, background: mode === m ? C.bg : C.surface, boxShadow: mode === m ? `inset 0 -2px 0 ${C.brand}` : "none" }}>{m === "month" ? "Month" : "Week"}</button>
           ))}
         </div>
       </div>
+      {mode === "week" && (
+        <div data-cal-week style={{ display: "flex", gap: 12, overflowX: "auto", alignItems: "stretch", paddingBottom: 8 }}>
+          {range.weeks[0].map((day, di) => {
+            const items = layout.byDay[day] || [];
+            const wkSpans = layout.spans.filter(s => s.to >= day && s.from <= day);
+            return (
+              <div key={day} data-cal-day={day}
+                onDragOver={onSchedule ? e => { e.preventDefault(); setOver(day); } : undefined}
+                onDragLeave={onSchedule ? () => setOver(o => (o === day ? "" : o)) : undefined}
+                onDrop={onSchedule ? drop(day) : undefined}
+                style={{ flex: "1 1 0", minWidth: 120, display: "flex", flexDirection: "column", background: over === day ? C.surface : C.bg, border: `1px solid ${day === today ? C.brand : C.border}`, borderRadius: 10, padding: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, padding: "2px 4px 8px" }}>
+                  <span style={{ fontWeight: 700, fontSize: 13, color: C.brandDark }}>{dayNames[di]} {Number(day.slice(8))}</span>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted }}>{items.length + wkSpans.length}</span>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 120, paddingBottom: 40 }}>
+                  {wkSpans.map(s => (
+                    <div key={viewTaskKey(s.row)} data-cal-span={viewTaskKey(s.row)} onClick={onOpen ? () => onOpen(s.row) : undefined} title={s.row.item.task + " — anytime " + s.from + " to " + s.to}
+                      style={{ background: C.surface, border: `1px dashed ${maintenanceStatusMeta(s.row.status).color}`, borderRadius: 8, padding: "8px 10px", fontSize: 13, color: C.ink, cursor: onOpen ? "pointer" : "default" }}>
+                      {s.row.item.task}
+                    </div>
+                  ))}
+                  {items.map(it => chipFor(it.row, it.via, true))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {mode === "month" && (
       <div style={{ overflowX: "auto" }}>
-        <div style={{ minWidth: mode === "week" ? 560 : 640, border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden", background: C.surface }}>
+        <div style={{ minWidth: 640, border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden", background: C.surface }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", background: C.brandBar, color: C.onBrand }}>
             {dayNames.map(n => <div key={n} style={{ padding: "6px 8px", fontSize: 11, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase" }}>{n}</div>)}
           </div>
@@ -22002,9 +22030,14 @@ function CalendarView({ view, rows, onOpen, onSchedule, emptyText }) {
           })}
         </div>
       </div>
-      {layout.undated.length > 0 && (
-        <div data-cal-undated style={{ marginTop: 14 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: C.muted, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 6 }}>No date ({layout.undated.length})</div>
+      )}
+      {(layout.undated.length > 0 || onSchedule) && (
+        <div data-cal-undated
+          onDragOver={onSchedule ? e => { e.preventDefault(); setOver("__none"); } : undefined}
+          onDragLeave={onSchedule ? () => setOver(o => (o === "__none" ? "" : o)) : undefined}
+          onDrop={onSchedule ? drop("") : undefined}
+          style={{ marginTop: 14, padding: 8, borderRadius: 10, border: `1.5px dashed ${over === "__none" ? C.brand : C.border}`, background: over === "__none" ? C.bg : "transparent", minHeight: 44 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: C.muted, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: layout.undated.length ? 6 : 0 }}>No date ({layout.undated.length}){onSchedule ? " — drop a task here to clear its date" : ""}</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>{layout.undated.map(r => chipFor(r))}</div>
         </div>
       )}
