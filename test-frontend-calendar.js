@@ -64,6 +64,7 @@ check('only editors get the drag handler', /onSchedule=\{canEdit \? \(key, day, 
 check('a drag writes doOn and an audit row', (() => { const a = src.indexOf('async function setTaskDate'); const b = src.slice(a, a + 1500); return /\[field\]: day/.test(b) && /Scheduled for/.test(b) && /Start date/.test(b) && /Due date/.test(b) && /maintenance_edited/.test(b) && /isOneOffTask\(item\)/.test(b); })());
 check('one Month/Week toggle and a date-type dropdown', /data-cal-mode/.test(src) && /data-cal-datefield-picker/.test(src) && !/data-cal-datefield=/.test(src));
 check('week view is Kanban-style columns', /data-cal-week/.test(src));
-check('the No date area is a drop target that clears the date', /data-cal-undated\s+onDragOver/.test(src) && /onDrop=\{onSchedule \? drop\(""\)/.test(src));
+check('the No date area is a drop target that clears the date', /data-cal-undated data-drop-group=\{onSchedule \? "__none"/.test(src) && /area === "__none" \? "" : area/.test(src));
+check('cards drag with the Kanban pointer drag, and the week header has no count', /usePointerSort\(\(key, area\)/.test(src) && !/draggable=/.test(src.slice(src.indexOf('function CalendarView'))) && !/items\.length \+ wkSpans\.length/.test(src) && !/drop a task here/.test(src));
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
