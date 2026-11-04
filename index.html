@@ -6901,7 +6901,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-11-04.2";
+const APP_VERSION = "2026-11-04.3";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -21906,33 +21906,32 @@ function CalendarView({ view, rows, onOpen, onSchedule, emptyText }) {
   const today = localDateString(new Date());
   const [mode, setMode] = useState("month");
   const [anchor, setAnchor] = useState(today);
-  const [over, setOver] = useState("");
   const [dateField, setDateField] = useState("doOn");
   const range = useMemo(() => calendarRange(mode, anchor), [mode, anchor]);
   const layout = useMemo(() => calendarLayout(rows, range, dateField), [rows, range, dateField]);
   const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const navBtn = { display: "flex", alignItems: "center", padding: "6px 8px", borderRadius: 8, border: `1.5px solid ${C.border}`, background: C.surface, color: C.ink, cursor: "pointer", fontSize: 13, fontWeight: 600 };
+  // Cards move the way a Kanban card does (pointer drag, lifted card, works on touch).
+  // A calendar stores no order inside a day, so a drop only sets the date; the day
+  // (or the No date area) under the pointer is highlighted instead of a drop line.
+  const { drag: dragging, handle, lift, tappedIn } = usePointerSort((key, area) => {
+    if (onSchedule) onSchedule(key, area === "__none" ? "" : area, dateField);
+  });
+  const over = dragging ? dragging.group : null;
   const chipFor = (r, extra, card) => {
     const meta = maintenanceStatusMeta(r.status);
     const key = viewTaskKey(r);
     const drag = !!onSchedule && calendarCanSchedule(r);
     return (
-      <div key={key + (extra || "")} data-cal-task={key} draggable={drag}
-        onDragStart={drag ? e => { e.dataTransfer.setData("text/plain", key); e.dataTransfer.effectAllowed = "move"; } : undefined}
-        onClick={onOpen ? () => onOpen(r) : undefined}
+      <div key={key + (extra || "")} data-cal-task={key} data-drop-item={key} {...(drag ? handle(key) : {})}
+        onClick={onOpen ? () => { if (!drag || tappedIn("[data-cal-task]")) onOpen(r); } : undefined}
         role={onOpen ? "button" : undefined} tabIndex={onOpen ? 0 : undefined}
         onKeyDown={onOpen ? e => { if (e.key === "Enter") onOpen(r); } : undefined}
         title={r.item.task + " — " + r.assetName}
-        style={{ borderLeft: `3px solid ${meta.color}`, background: C.surface, border: `1px solid ${C.border}`, borderLeftWidth: 3, borderLeftColor: meta.color, borderRadius: card ? 8 : 5, padding: card ? "8px 10px" : "2px 6px", fontSize: card ? 13 : 12, color: r.status === "done" ? C.muted : C.ink, textDecoration: r.status === "done" ? "line-through" : "none", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: card ? "normal" : "nowrap", cursor: drag ? "grab" : (onOpen ? "pointer" : "default") }}>
+        style={{ borderLeft: `3px solid ${meta.color}`, background: C.surface, border: `1px solid ${C.border}`, borderLeftWidth: 3, borderLeftColor: meta.color, borderRadius: card ? 8 : 5, padding: card ? "8px 10px" : "2px 6px", fontSize: card ? 13 : 12, color: r.status === "done" ? C.muted : C.ink, textDecoration: r.status === "done" ? "line-through" : "none", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: card ? "normal" : "nowrap", cursor: drag ? "grab" : (onOpen ? "pointer" : "default"), ...(drag ? { touchAction: "none" } : {}), ...(lift(key) || {}) }}>
         {r.item.task}
       </div>
     );
-  };
-  const drop = day => e => {
-    e.preventDefault();
-    setOver("");
-    const key = e.dataTransfer.getData("text/plain");
-    if (key && onSchedule) onSchedule(key, day, dateField);
   };
   const spansForWeek = week => layout.spans.filter(s => s.to >= week[0] && s.from <= week[6]);
   return (
@@ -21960,16 +21959,12 @@ function CalendarView({ view, rows, onOpen, onSchedule, emptyText }) {
             const items = layout.byDay[day] || [];
             const wkSpans = layout.spans.filter(s => s.to >= day && s.from <= day);
             return (
-              <div key={day} data-cal-day={day}
-                onDragOver={onSchedule ? e => { e.preventDefault(); setOver(day); } : undefined}
-                onDragLeave={onSchedule ? () => setOver(o => (o === day ? "" : o)) : undefined}
-                onDrop={onSchedule ? drop(day) : undefined}
-                style={{ flex: "1 1 0", minWidth: 120, display: "flex", flexDirection: "column", background: over === day ? C.surface : C.bg, border: `1px solid ${day === today ? C.brand : C.border}`, borderRadius: 10, padding: 8 }}>
+              <div key={day} data-cal-day={day} data-drop-group={onSchedule ? day : undefined}
+                style={{ flex: "1 1 0", minWidth: 160, display: "flex", flexDirection: "column", background: over === day ? C.surface : C.bg, border: `1px solid ${day === today ? C.brand : C.border}`, borderRadius: 10, padding: 8 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, padding: "2px 4px 8px" }}>
                   <span style={{ fontWeight: 700, fontSize: 13, color: C.brandDark }}>{dayNames[di]} {Number(day.slice(8))}</span>
-                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: C.muted }}>{items.length + wkSpans.length}</span>
                 </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 120, paddingBottom: 40 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 420, paddingBottom: 72 }}>
                   {wkSpans.map(s => (
                     <div key={viewTaskKey(s.row)} data-cal-span={viewTaskKey(s.row)} onClick={onOpen ? () => onOpen(s.row) : undefined} title={s.row.item.task + " — anytime " + s.from + " to " + s.to}
                       style={{ background: C.surface, border: `1px dashed ${maintenanceStatusMeta(s.row.status).color}`, borderRadius: 8, padding: "8px 10px", fontSize: 13, color: C.ink, cursor: onOpen ? "pointer" : "default" }}>
@@ -22014,10 +22009,7 @@ function CalendarView({ view, rows, onOpen, onSchedule, emptyText }) {
                     const items = layout.byDay[day] || [];
                     const dim = mode === "month" && new Date(day + "T00:00:00").getMonth() !== range.month;
                     return (
-                      <div key={day} data-cal-day={day}
-                        onDragOver={onSchedule ? e => { e.preventDefault(); setOver(day); } : undefined}
-                        onDragLeave={onSchedule ? () => setOver(o => (o === day ? "" : o)) : undefined}
-                        onDrop={onSchedule ? drop(day) : undefined}
+                      <div key={day} data-cal-day={day} data-drop-group={onSchedule ? day : undefined}
                         style={{ minHeight: mode === "week" ? 160 : 92, padding: 4, borderLeft: di === 0 ? "none" : `1px solid ${C.border}`, background: over === day ? C.bg : (dim ? "rgba(0,0,0,0.025)" : "transparent"), outline: day === today ? `2px solid ${C.brand}` : "none", outlineOffset: -2, display: "flex", flexDirection: "column", gap: 3, minWidth: 0 }}>
                         <div style={{ fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", color: dim ? C.empty : C.muted, fontWeight: day === today ? 700 : 400 }}>{Number(day.slice(8))}</div>
                         {items.map(it => chipFor(it.row, it.via))}
@@ -22032,12 +22024,9 @@ function CalendarView({ view, rows, onOpen, onSchedule, emptyText }) {
       </div>
       )}
       {(layout.undated.length > 0 || onSchedule) && (
-        <div data-cal-undated
-          onDragOver={onSchedule ? e => { e.preventDefault(); setOver("__none"); } : undefined}
-          onDragLeave={onSchedule ? () => setOver(o => (o === "__none" ? "" : o)) : undefined}
-          onDrop={onSchedule ? drop("") : undefined}
+        <div data-cal-undated data-drop-group={onSchedule ? "__none" : undefined}
           style={{ marginTop: 14, padding: 8, borderRadius: 10, border: `1.5px dashed ${over === "__none" ? C.brand : C.border}`, background: over === "__none" ? C.bg : "transparent", minHeight: 44 }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: C.muted, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: layout.undated.length ? 6 : 0 }}>No date ({layout.undated.length}){onSchedule ? " — drop a task here to clear its date" : ""}</div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: C.muted, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: layout.undated.length ? 6 : 0 }}>No date ({layout.undated.length})</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>{layout.undated.map(r => chipFor(r))}</div>
         </div>
       )}
