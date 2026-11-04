@@ -43,6 +43,16 @@ check('a task outside the window is left out, not lost into another day', Object
 check('spans touching the window are kept, others dropped', L.spans.map(s => s.row.item.id).sort().join() === 'edge-span,span');
 check('an undated task is listed', L.undated.map(r => r.item.id).join() === 'none');
 
+// Date toggle
+const PD = (r, f) => H.calendarPlacement(r, f);
+const both = row('h', { startDate: '2026-10-03', doOn: '2026-10-12', dueDate: '2026-10-20' });
+check('Start date places by start only', PD(both, 'startDate').date === '2026-10-03');
+check('Due date places by due only', PD(both, 'dueDate').date === '2026-10-20');
+check('Start toggle ignores a task with no start date', PD(row('i', { dueDate: '2026-10-09' }), 'startDate') === null);
+check('Due toggle never makes a span', PD(row('j', { startDate: '2026-10-05', dueDate: '2026-10-09' }), 'dueDate').kind === 'day');
+check('a schedule shows under Due but not Start', PD(row('k', { kind: 'scheduled' }, '2026-10-22'), 'dueDate').date === '2026-10-22' && PD(row('l', { kind: 'scheduled' }, '2026-10-22'), 'startDate') === null);
+check('layout honours the toggle', H.calendarLayout([both], oct, 'dueDate').byDay['2026-10-20'].length === 1 && H.calendarLayout([both], oct, 'dueDate').spans.length === 0);
+
 // Dragging
 check('only an open one-off can be scheduled', H.calendarCanSchedule(row('x', {})) && !H.calendarCanSchedule(row('y', { lastPerformed: '2026-10-01' })) && !H.calendarCanSchedule(row('z', { kind: 'scheduled' })));
 
@@ -50,7 +60,7 @@ check('only an open one-off can be scheduled', H.calendarCanSchedule(row('x', {}
 check('the view type is stored and adopted', /VIEW_TYPE_CALENDAR = "calendar"/.test(src) && /v\.type === VIEW_TYPE_CALENDAR \? VIEW_TYPE_CALENDAR/.test(src));
 check('ViewBody renders the calendar for that type', /calendar \? \(\s*<CalendarView view=\{view\}/.test(src));
 check('the editor offers Calendar and hides ordering and grouping for it', /\[VIEW_TYPE_CALENDAR, "Calendar"\]/.test(src) && (src.match(/\{!calendar && <>/g) || []).length === 2);
-check('only editors get the drag handler', /onSchedule=\{canEdit \? \(key, day\) => setTaskDoOn\(key, day\) : undefined\}/.test(src) && /!!onSchedule && calendarCanSchedule\(r\)/.test(src));
-check('a drag writes doOn and an audit row', (() => { const a = src.indexOf('async function setTaskDoOn'); const b = src.slice(a, a + 1500); return /doOn: day/.test(b) && /Scheduled for/.test(b) && /maintenance_edited/.test(b) && /isOneOffTask\(item\)/.test(b); })());
+check('only editors get the drag handler', /onSchedule=\{canEdit \? \(key, day, field\) => setTaskDate\(key, day, field\) : undefined\}/.test(src) && /!!onSchedule && calendarCanSchedule\(r\)/.test(src));
+check('a drag writes doOn and an audit row', (() => { const a = src.indexOf('async function setTaskDate'); const b = src.slice(a, a + 1500); return /\[field\]: day/.test(b) && /Scheduled for/.test(b) && /Start date/.test(b) && /Due date/.test(b) && /maintenance_edited/.test(b) && /isOneOffTask\(item\)/.test(b); })());
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

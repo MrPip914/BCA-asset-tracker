@@ -2954,6 +2954,12 @@ function viewTaskKey(row) { return row.asset.id + "::" + row.item.id; }
 //   - a task with no date at all is listed under "No date" and is not lost.
 // Dates are yyyy-mm-dd strings throughout, so comparing them as text orders them.
 const CALENDAR_MODES = ["month", "week"];
+// Which of a one-off's three dates places it on the grid (the toggle in the toolbar).
+const CALENDAR_DATE_FIELDS = [
+  { key: "startDate", label: "Start date" },
+  { key: "doOn", label: "Scheduled for" },
+  { key: "dueDate", label: "Due date" },
+];
 function calendarDayAdd(day, n) {
   const d = new Date(day + "T00:00:00");
   d.setDate(d.getDate() + n);
@@ -2993,10 +2999,19 @@ function calendarTitle(range, anchor) {
   return new Date(anchor + "T00:00:00").toLocaleDateString(undefined, { month: "long", year: "numeric" });
 }
 // Where one row sits: { kind: "day", date, via } | { kind: "span", from, to } | null.
-function calendarPlacement(row) {
+// `dateField` is "doOn" (default: the rules above), or "startDate" / "dueDate",
+// which place a task by that date alone (none = "No date"). A schedule has no
+// entered dates, so only its derived next due shows, under Scheduled for or Due.
+function calendarPlacement(row, dateField) {
   const item = row && row.item;
   if (!item) return null;
-  if (isOneOffTask(item)) {
+  if (dateField === "startDate" || dateField === "dueDate") {
+    if (isOneOffTask(item)) {
+      const d = dateOnly(item[dateField]);
+      return d ? { kind: "day", date: d, via: dateField } : null;
+    }
+    if (dateField === "startDate") return null;
+  } else if (isOneOffTask(item)) {
     const doOn = dateOnly(item.doOn), start = dateOnly(item.startDate), due = dateOnly(item.dueDate);
     if (doOn) return { kind: "day", date: doOn, via: "doOn" };
     if (start && due && start < due) return { kind: "span", from: start, to: due };
@@ -3008,13 +3023,13 @@ function calendarPlacement(row) {
   return due ? { kind: "day", date: due, via: "due" } : null;
 }
 // Everything the grid needs: tasks per day, spans touching the window, the undated.
-function calendarLayout(rows, range) {
+function calendarLayout(rows, range, dateField) {
   const byDay = {};
   range.days.forEach(d => { byDay[d] = []; });
   const spans = [];
   const undated = [];
   (rows || []).forEach(r => {
-    const p = calendarPlacement(r);
+    const p = calendarPlacement(r, dateField);
     if (!p) { undated.push(r); return; }
     if (p.kind === "day") { if (byDay[p.date]) byDay[p.date].push({ row: r, via: p.via }); return; }
     if (p.to >= range.from && p.from <= range.to) spans.push({ row: r, from: p.from, to: p.to });
@@ -6886,7 +6901,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-10-29.1";
+const APP_VERSION = "2026-11-04.1";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -11064,10 +11079,13 @@ function AssetTracker() {
       action: "maintenance_edited", field: `${item.task} — ${field.label}`, from: (builtinType ? nameOf_(before) : before) || "—", to: (builtinType ? nameOf_(value) : value) || "—",
     }]) });
   }
-  // Dragging a task to another day on a Calendar view sets its "Scheduled for",
+  // Dragging a task to another day on a Calendar view sets the date the calendar is
+  // placing by (Start date, Scheduled for or Due date),
   // audited like the same edit in the task dialog. Only a one-off that is not
   // finished has one; a schedule's due date is worked out and cannot be dragged.
-  async function setTaskDoOn(taskKey, day) {
+  async function setTaskDate(taskKey, day, field) {
+    field = field === "startDate" || field === "dueDate" ? field : "doOn";
+    const fieldLabel = field === "startDate" ? "Start date" : field === "dueDate" ? "Due date" : "Scheduled for";
     if (!canEdit || !assets) return;
     const [assetId, itemId] = taskKey.split("::");
     const asset = assets.find(a => a.id === assetId);
@@ -11077,12 +11095,12 @@ function AssetTracker() {
       setNotice(`"${item.task}" ${taskIsDone(item) ? "is finished" : "repeats on a schedule"}, so it can't be moved to another day.`);
       return;
     }
-    const before = dateOnly(item.doOn);
+    const before = dateOnly(item[field]);
     if (before === day) return;
-    const next = assets.map(a => (a.id === assetId ? { ...a, maintenanceItems: a.maintenanceItems.map(m => (m.id === itemId ? { ...m, doOn: day } : m)) } : a));
+    const next = assets.map(a => (a.id === assetId ? { ...a, maintenanceItems: a.maintenanceItems.map(m => (m.id === itemId ? { ...m, [field]: day } : m)) } : a));
     await persist(next, { auditLog: logAudit([{
       at: new Date().toISOString(), by: currentUser || "", assetLabel: assetId, assetType: asset.type,
-      action: "maintenance_edited", field: `${item.task} — Scheduled for`, from: formatDateOnly(before) || "—", to: formatDateOnly(day) || "—",
+      action: "maintenance_edited", field: `${item.task} — ${fieldLabel}`, from: formatDateOnly(before) || "—", to: formatDateOnly(day) || "—",
     }]) });
   }
   function saveViewDraft(view) {
@@ -20895,7 +20913,7 @@ function AssetTracker() {
                 canArrange={viewCanArrange(activeView, canEdit)}
                 onState={patch => saveViewState(activeView.id, patch)}
                 onField={canEdit && activeView.fieldBacked && activeView.fieldWritable ? (key, value) => setTaskBoardValue(activeView, key, value) : undefined}
-                onSchedule={canEdit ? (key, day) => setTaskDoOn(key, day) : undefined}
+                onSchedule={canEdit ? (key, day, field) => setTaskDate(key, day, field) : undefined}
                 onOpen={r => openMaintenanceEdit(r.item.id, r.asset.id, activeView.id)}
                 onToggleDone={canEdit ? toggleTaskDone : undefined}
                 emptyText="No tasks match this view."
@@ -21889,8 +21907,9 @@ function CalendarView({ view, rows, onOpen, onSchedule, emptyText }) {
   const [mode, setMode] = useState("month");
   const [anchor, setAnchor] = useState(today);
   const [over, setOver] = useState("");
+  const [dateField, setDateField] = useState("doOn");
   const range = useMemo(() => calendarRange(mode, anchor), [mode, anchor]);
-  const layout = useMemo(() => calendarLayout(rows, range), [rows, range]);
+  const layout = useMemo(() => calendarLayout(rows, range, dateField), [rows, range, dateField]);
   const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const navBtn = { display: "flex", alignItems: "center", padding: "6px 8px", borderRadius: 8, border: `1.5px solid ${C.border}`, background: C.surface, color: C.ink, cursor: "pointer", fontSize: 13, fontWeight: 600 };
   const chipFor = (r, extra) => {
@@ -21913,7 +21932,7 @@ function CalendarView({ view, rows, onOpen, onSchedule, emptyText }) {
     e.preventDefault();
     setOver("");
     const key = e.dataTransfer.getData("text/plain");
-    if (key && onSchedule) onSchedule(key, day);
+    if (key && onSchedule) onSchedule(key, day, dateField);
   };
   const spansForWeek = week => layout.spans.filter(s => s.to >= week[0] && s.from <= week[6]);
   return (
@@ -21923,6 +21942,13 @@ function CalendarView({ view, rows, onOpen, onSchedule, emptyText }) {
         <button type="button" aria-label={mode === "week" ? "Next week" : "Next month"} title="Next" onClick={() => setAnchor(calendarShift(mode, anchor, 1))} style={navBtn}><ChevronRight size={16} /></button>
         <button type="button" onClick={() => setAnchor(today)} style={navBtn}>Today</button>
         <div data-cal-title style={{ fontWeight: 700, fontSize: 15, color: C.brandDark, flex: 1, minWidth: 120 }}>{calendarTitle(range, anchor)}</div>
+        <div role="group" aria-label="Place tasks by" style={{ display: "flex", gap: 4, alignItems: "center" }}>
+          {CALENDAR_DATE_FIELDS.map(f => (
+            <button key={f.key} type="button" data-cal-datefield={f.key} aria-pressed={dateField === f.key} title={"Place tasks by " + f.label} onClick={() => setDateField(f.key)}
+              style={{ ...navBtn, borderColor: dateField === f.key ? C.brand : C.border, background: dateField === f.key ? C.bg : C.surface }}>{f.label}</button>
+          ))}
+          <HelpTip label="About placing tasks by date" text="Choose which date puts a task on the calendar. Dragging a task to another day changes that date. Repeating tasks have no entered dates, so they can't be dragged." size={14} />
+        </div>
         <div style={{ display: "flex", gap: 4 }}>
           {CALENDAR_MODES.map(m => (
             <button key={m} type="button" aria-pressed={mode === m} onClick={() => setMode(m)}
