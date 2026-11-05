@@ -6901,7 +6901,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-11-04.4";
+const APP_VERSION = "2026-11-05.1";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -21913,8 +21913,76 @@ function CalendarView({ view, rows, onOpen, onSchedule, emptyText }) {
   const [mode, setMode] = useState("month");
   const [anchor, setAnchor] = useState(today);
   const [dateField, setDateField] = useState("doOn");
-  const range = useMemo(() => calendarRange(mode, anchor), [mode, anchor]);
+  // Week mode is an endless strip of consecutive days: a window of days around the
+  // anchor that grows at either edge as the strip is scrolled, so it never stops at
+  // a week boundary. Month mode is the fixed grid.
+  const CAL_CHUNK = 28;
+  const weekStartOf = d => calendarDayAdd(d, -new Date(d + "T00:00:00").getDay());
+  const [stripFrom, setStripFrom] = useState(() => calendarDayAdd(weekStartOf(today), -CAL_CHUNK));
+  const [stripCount, setStripCount] = useState(CAL_CHUNK * 2 + 7);
+  const [visFrom, setVisFrom] = useState(null);
+  const [jumpTick, setJumpTick] = useState(0);
+  const stripRef = useRef(null);
+  const scrollTargetRef = useRef(null);
+  const shiftRef = useRef(0);
+  const stripDayW = () => { const el = stripRef.current; const c = el && el.firstElementChild; return c ? c.offsetWidth + 12 : 172; };
+  // Re-centre the strip on a day and scroll it into the left edge.
+  const jumpStrip = day => {
+    const ws = weekStartOf(day);
+    setStripFrom(calendarDayAdd(ws, -CAL_CHUNK));
+    setStripCount(CAL_CHUNK * 2 + 7);
+    scrollTargetRef.current = ws;
+    setJumpTick(t => t + 1);
+  };
+  const range = useMemo(() => {
+    if (mode !== "week") return calendarRange(mode, anchor);
+    const days = [];
+    for (let i = 0; i < stripCount; i++) days.push(calendarDayAdd(stripFrom, i));
+    return { mode, from: days[0], to: days[days.length - 1], days, weeks: [days], month: 0 };
+  }, [mode, anchor, stripFrom, stripCount, jumpTick]);
   const layout = useMemo(() => calendarLayout(rows, range, dateField), [rows, range, dateField]);
+  useLayoutEffect(() => {
+    const el = stripRef.current;
+    if (mode !== "week" || !el) return;
+    if (scrollTargetRef.current) {
+      const idx = Math.max(0, range.days.indexOf(scrollTargetRef.current));
+      el.scrollLeft = idx * stripDayW();
+      scrollTargetRef.current = null;
+    } else if (shiftRef.current) {
+      el.scrollLeft += shiftRef.current * stripDayW();
+    }
+    shiftRef.current = 0;
+    const w = stripDayW();
+    setVisFrom(range.days[Math.min(range.days.length - 1, Math.round(el.scrollLeft / w))]);
+  }, [mode, range]);
+  useEffect(() => {
+    if (mode === "week") jumpStrip(anchor);
+  }, [mode]);
+  const onStripScroll = () => {
+    const el = stripRef.current;
+    if (!el || shiftRef.current || scrollTargetRef.current) return;
+    const w = stripDayW();
+    const idx = Math.round(el.scrollLeft / w);
+    const f = range.days[Math.min(range.days.length - 1, Math.max(0, idx))];
+    if (f !== visFrom) setVisFrom(f);
+    if (el.scrollLeft < w * 7) {
+      shiftRef.current = CAL_CHUNK;
+      setStripFrom(calendarDayAdd(stripFrom, -CAL_CHUNK));
+      setStripCount(c => c + CAL_CHUNK);
+    } else if (el.scrollLeft + el.clientWidth > el.scrollWidth - w * 7) {
+      setStripCount(c => c + CAL_CHUNK);
+    }
+  };
+  const stripShift = dir => {
+    const el = stripRef.current;
+    if (el) el.scrollBy({ left: dir * 7 * stripDayW(), behavior: "smooth" });
+  };
+  const weekTitle = () => {
+    const el = stripRef.current;
+    const f = visFrom || range.from;
+    const n = el ? Math.max(1, Math.floor(el.clientWidth / stripDayW())) : 7;
+    return calendarTitle({ mode: "week", from: f, to: calendarDayAdd(f, n - 1) }, anchor);
+  };
   const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const navBtn = { display: "flex", alignItems: "center", padding: "6px 8px", borderRadius: 8, border: `1.5px solid ${C.border}`, background: C.surface, color: C.ink, cursor: "pointer", fontSize: 13, fontWeight: 600 };
   // Cards move the way a Kanban card does (pointer drag, lifted card, works on touch).
@@ -21943,10 +22011,10 @@ function CalendarView({ view, rows, onOpen, onSchedule, emptyText }) {
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-        <button type="button" aria-label={mode === "week" ? "Previous week" : "Previous month"} title="Previous" onClick={() => setAnchor(calendarShift(mode, anchor, -1))} style={navBtn}><ChevronLeft size={16} /></button>
-        <button type="button" aria-label={mode === "week" ? "Next week" : "Next month"} title="Next" onClick={() => setAnchor(calendarShift(mode, anchor, 1))} style={navBtn}><ChevronRight size={16} /></button>
-        <button type="button" onClick={() => setAnchor(today)} style={navBtn}>Today</button>
-        <div data-cal-title style={{ fontWeight: 700, fontSize: 15, color: C.brandDark, flex: 1, minWidth: 120 }}>{calendarTitle(range, anchor)}</div>
+        <button type="button" aria-label={mode === "week" ? "Previous week" : "Previous month"} title="Previous" onClick={() => (mode === "week" ? stripShift(-1) : setAnchor(calendarShift(mode, anchor, -1)))} style={navBtn}><ChevronLeft size={16} /></button>
+        <button type="button" aria-label={mode === "week" ? "Next week" : "Next month"} title="Next" onClick={() => (mode === "week" ? stripShift(1) : setAnchor(calendarShift(mode, anchor, 1)))} style={navBtn}><ChevronRight size={16} /></button>
+        <button type="button" onClick={() => { setAnchor(today); if (mode === "week") jumpStrip(today); }} style={navBtn}>Today</button>
+        <div data-cal-title style={{ fontWeight: 700, fontSize: 15, color: C.brandDark, flex: 1, minWidth: 120 }}>{mode === "week" ? weekTitle() : calendarTitle(range, anchor)}</div>
         <div style={{ width: 150, flexShrink: 0 }} data-cal-datefield-picker>
           <PickerField label="Place tasks by" hideLabel value={dateField} onChange={setDateField} options={CALENDAR_DATE_FIELDS.map(f => f.key)}
             labelForOption={k => (CALENDAR_DATE_FIELDS.find(f => f.key === k) || {}).label || k} title="Place tasks by" />
@@ -21960,15 +22028,15 @@ function CalendarView({ view, rows, onOpen, onSchedule, emptyText }) {
         </div>
       </div>
       {mode === "week" && (
-        <div data-cal-week style={{ display: "flex", gap: 12, overflowX: "auto", alignItems: "stretch", paddingBottom: 8 }}>
-          {range.weeks[0].map((day, di) => {
+        <div data-cal-week ref={stripRef} onScroll={onStripScroll} style={{ display: "flex", gap: 12, overflowX: "auto", alignItems: "stretch", paddingBottom: 8 }}>
+          {range.days.map((day) => {
             const items = layout.byDay[day] || [];
             const wkSpans = layout.spans.filter(s => s.to >= day && s.from <= day);
             return (
               <div key={day} data-cal-day={day} data-drop-group={onSchedule ? day : undefined}
-                style={{ flex: "1 1 0", minWidth: 160, display: "flex", flexDirection: "column", background: over === day ? C.surface : C.bg, border: `1px solid ${day === today ? C.brand : C.border}`, borderRadius: 10, padding: 8 }}>
+                style={{ flex: "0 0 max(160px, calc((100% - 72px) / 7))", display: "flex", flexDirection: "column", background: over === day ? C.surface : C.bg, border: `1px solid ${day === today ? C.brand : C.border}`, borderRadius: 10, padding: 8 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, padding: "2px 4px 8px" }}>
-                  <span style={{ fontWeight: 700, fontSize: 13, color: C.brandDark }}>{dayNames[di]} {Number(day.slice(8))}</span>
+                  <span style={{ fontWeight: 700, fontSize: 13, color: C.brandDark }}>{dayNames[new Date(day + "T00:00:00").getDay()]} {Number(day.slice(8))}{day.slice(8) === "01" ? " · " + new Date(day + "T00:00:00").toLocaleDateString(undefined, { month: "short" }) : ""}</span>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minHeight: 420, paddingBottom: 72 }}>
                   {wkSpans.map(s => (

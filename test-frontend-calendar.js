@@ -66,5 +66,6 @@ check('one Month/Week toggle and a date-type dropdown', /data-cal-mode/.test(src
 check('week view is Kanban-style columns', /data-cal-week/.test(src));
 check('the No date area is a drop target that clears the date', /data-cal-undated data-drop-group=\{onSchedule \? "__none"/.test(src) && /area === "__none" \? "" : area/.test(src));
 check('cards drag with the Kanban pointer drag, and the week header has no count', /usePointerSort\(\(key, area\)/.test(src) && !/draggable=/.test(src.slice(src.indexOf('function CalendarView'))) && !/items\.length \+ wkSpans\.length/.test(src) && !/drop a task here/.test(src));
+check('week view is an endless strip that grows at both edges and keeps the scroll position', /ref=\{stripRef\} onScroll=\{onStripScroll\}/.test(src) && /setStripFrom\(calendarDayAdd\(stripFrom, -CAL_CHUNK\)\)/.test(src) && /el\.scrollLeft \+= shiftRef\.current/.test(src) && /setStripCount\(c => c \+ CAL_CHUNK\)/.test(src));
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
