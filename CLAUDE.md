@@ -898,6 +898,17 @@ Phase 4 of `/mnt/project-files/plans/task-relationships-scheduling.md`. A task c
 - Not built yet: a progress chip on the Tasks table and cards (the dialog shows it), a "top-level only" view setting, date warnings between parent and child, and a Parent picker for an existing task.
 - Covered by `test-frontend-subtasks.js` and a case in `save_test.ts`; driven in Chromium against Sandbox (Add subtask, progress, back-link).
 
+## Recurring tasks and the Completion board (2026-11-06)
+
+Plan: `/mnt/project-files/plans/completion-board-and-recurring-instances.md`. **Frontend plus `asset-api`** (`TASK_EXTRA_KEYS` gained `recurringId`, `instanced`, `skipped`): a push to dev redeploys the Edge Function; no migration, no Apps Script change (the fallback drops the new fields).
+
+- **Completion board source**: `builtin:completion` (Open / Done) in the Kanban "Columns come from" picker. Dragging a card runs `toggleTaskDone` (the done circle's path: completion mode, open subtasks, blockers); a cancelled form moves nothing. A repeating task is never done, so on an UN-converted board it stays in Open.
+- **A repeating task with `instanced: true` is a configuration**: name, notes, owner, type, custom fields, rule, template subtasks. Hidden from every task list, count, badge and board (`taskIsHidden`: the config and any task whose parent is a config) and shown only in a "Recurring tasks" section on the asset's Tasks tab. A **round** is an ordinary one-off with `recurringId`. Completing a round (form, one tap, or the dialog's Completed field) stamps the config's `lastPerformed` and creates the next round in the SAME save (`afterInstanceCompleted` > `spawnNextInstance`; due date counts from the completion date, today if never done). Exactly one open round; reopening a finished round while a newer one is open is refused.
+- **Links follow the round**: when a round is replaced by its successor, `blockedBy` entries naming the old round are moved to the new one (rather than pointing at the config, which the plan recommended: same outcome, no change to the blocked/parent code). The configuration's own subtasks are templates, copied under each new round.
+- **Config edits carry to the open round** if it is untouched since it was created; finished rounds never change. Deleting a config removes its open round; finished rounds stay as history. **Skip this round** closes the round as skipped (`skipped: true`, audited as a "Round" edit) and starts the next from today. A config with no open round gets a + to start one.
+- **Existing schedules are NOT rewritten at load.** Settings > Task types shows "N repeating tasks not yet set up" with a **Convert** button (`migrateSchedules`); until then a schedule behaves exactly as before. Past work entries stay on the config as history.
+- Covered by `test-frontend-recurring.js`; driven in Chromium against Sandbox (convert, the Recurring section, completing a round opened the next, due a month later).
+
 ## Task completion modes (2026-10-28)
 
 Phase 2 of `/mnt/project-files/plans/task-relationships-scheduling.md`. **Frontend only: no backend change, no migration, no deploy.** A task TYPE chooses how completing works, stored as `completion` on `taskTypeSettings[typeId]` (a property on an existing blob, so no release): `required` (today's completion form and a work entry; absent reads this, so every existing type is unchanged), `optional` (a "Done" checkbox completes in one tap, and "Log work…" stays as a separate button) and `simple` (the checkbox only; never a work entry).

@@ -37,6 +37,10 @@ const ctx = new Function(`
   ${sliceFn('descendantsOf')}
   ${sliceFn('maintenanceSortKey')}
   ${sliceFn('mapScopeAssets')}
+  ${sliceFn('isOneOffTask')}
+  ${sliceFn('isRecurringConfig')}
+  ${sliceFn('recurringConfigIds')}
+  ${sliceFn('taskIsHidden')}
   ${sliceFn('mapTaskRows')}
   ${sliceFn('mapWorkRows')}
   return { mapScopeAssets, mapTaskRows, mapWorkRows };
