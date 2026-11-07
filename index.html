@@ -6983,7 +6983,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-11-07.10";
+const APP_VERSION = "2026-11-07.11";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -9275,6 +9275,7 @@ function AssetTracker() {
   // the layout effect below. A ref, not state: it exists to be read during the
   // render that has already been scheduled, and must not cause another one.
   const scrollToTopRef = useRef(false);
+  const assetSheetScrollRef = useRef(null);
   const [commentDraft, setCommentDraft] = useState("");
   const [changeDraft, setChangeDraft] = useState({ changeType: "", vendor: "", cost: "", note: "", maintenanceId: "", markPerformed: false, performedOn: localDateString(), custom: {} });
   const [showChangeTypeManager, setShowChangeTypeManager] = useState(false);
@@ -10460,6 +10461,8 @@ function AssetTracker() {
     if (!scrollToTopRef.current) return;
     scrollToTopRef.current = false;
     window.scrollTo(0, 0);
+    // On a phone the open asset is a sheet that scrolls itself, not the page.
+    if (assetSheetScrollRef.current) assetSheetScrollRef.current.scrollTop = 0;
   });
 
   function toggleSandboxMode() {
@@ -18744,9 +18747,13 @@ function AssetTracker() {
     // full breakdown is only needed where ContentsList actually renders it.
     const { contentsCount } = contentsOf(selectedAsset, assets);
 
-    return (
-      <AppMenuContext.Provider value={appMenuContext}>
-      <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'IBM Plex Sans', sans-serif", color: C.ink, paddingBottom: isPhone ? `calc(${PHONE_NAV_PX}px + env(safe-area-inset-bottom))` : undefined }}>
+    // On a phone the open asset is a sheet: it slides up and is dragged down by its
+    // handle to close (PhoneAssetSheet), and swiping sideways inside it moves
+    // between the tabs. Everything it opens is rendered inside it, so dialogs stack
+    // above it; desktop is the full page, unchanged.
+    const detailTabKeys = detailEditing ? [] : availableTabsFor(selectedAsset.type);
+    const detailRoot = (
+      <div style={{ minHeight: isPhone ? undefined : "100vh", background: C.bg, fontFamily: "'IBM Plex Sans', sans-serif", color: C.ink, paddingBottom: isPhone ? `calc(${PHONE_NAV_PX}px + env(safe-area-inset-bottom))` : undefined }}>
         {globalStyle}
         {phoneBottomNav}
         {conflictModal}
@@ -18834,6 +18841,12 @@ function AssetTracker() {
             return (
               <button
                 key={tab.key}
+                ref={el => {
+                  // A swipe can land on a tab that is scrolled out of the strip; bring it in.
+                  if (!active || !el || !isPhone || !el.parentElement) return;
+                  const bar = el.parentElement;
+                  if (el.offsetLeft < bar.scrollLeft || el.offsetLeft + el.offsetWidth > bar.scrollLeft + bar.clientWidth) bar.scrollLeft = el.offsetLeft - 24;
+                }}
                 onClick={() => selectDetailTab(tab.key)}
                 style={{
                   background: "none", border: "none", padding: "10px 12px", whiteSpace: "nowrap",
@@ -18847,7 +18860,7 @@ function AssetTracker() {
           })}
         </div>
 
-        <div style={{ padding: "18px 20px 60px", maxWidth: 720, margin: "0 auto" }}>
+        <div {...(isPhone ? assetSwipeProps(detailTabKeys, detailTab, selectDetailTab) : {})} style={{ padding: "18px 20px 60px", maxWidth: 720, margin: "0 auto", minHeight: isPhone ? "60vh" : undefined }}>
           {/* Storage is permissive on purpose (see CLAUDE.md), so parentage the
               app itself would have refused can still arrive from a hand-edited
               sheet, a bulk script, or an asset deleted out from under this one.
@@ -20435,6 +20448,10 @@ function AssetTracker() {
         {settingsPage}
         {deleteColumnModal}
       </div>
+    );
+    return (
+      <AppMenuContext.Provider value={appMenuContext}>
+        {isPhone ? <PhoneAssetSheet scrollRef={assetSheetScrollRef} onClose={goBack}>{detailRoot}</PhoneAssetSheet> : detailRoot}
       </AppMenuContext.Provider>
     );
   }
@@ -28020,6 +28037,70 @@ function PhoneSheetFrame({ onClose, children }) {
       </div>
     </div>
   );
+}
+
+// The phone asset page: the same sheet mechanics as the task dialog (slides up, the
+// handle is dragged down to close) but the page scrolls inside it. No transform is
+// left on the sheet at rest, because a transformed ancestor would make every
+// position:fixed dialog opened from the asset anchor to the sheet instead of the screen.
+function PhoneAssetSheet({ onClose, scrollRef, children }) {
+  const [dy, setDy] = useState(0);
+  const [leaving, setLeaving] = useState(false);
+  const start = useRef(null);
+  const close = () => { setLeaving(true); setTimeout(onClose, 200); };
+  const down = e => { start.current = e.clientY; try { e.currentTarget.setPointerCapture(e.pointerId); } catch (x) {} };
+  const move = e => { if (start.current != null) setDy(Math.max(0, e.clientY - start.current)); };
+  const up = () => { if (start.current == null) return; start.current = null; if (dy > 110) close(); else setDy(0); };
+  const moving = leaving || dy > 0;
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", zIndex: 40, display: "flex", alignItems: "flex-end" }}>
+      <div role="dialog" aria-label="Asset"
+        style={{ background: C.bg, borderRadius: "18px 18px 0 0", width: "100%", height: "94vh", display: "flex", flexDirection: "column", boxSizing: "border-box", overflow: "hidden",
+          boxShadow: "0 -8px 24px rgba(42,52,57,0.2)", animation: "sheetUp 240ms ease-out", transform: moving ? (leaving ? "translateY(100%)" : `translateY(${dy}px)`) : undefined, transition: start.current == null ? "transform 200ms ease" : "none" }}>
+        <div onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={up}
+          style={{ padding: "10px 0 8px", display: "flex", justifyContent: "center", touchAction: "none", cursor: "grab", flexShrink: 0 }} aria-label="Drag down to close">
+          <span style={{ width: 40, height: 5, borderRadius: 3, background: C.border }} />
+        </div>
+        <div ref={scrollRef} style={{ flex: 1, minHeight: 0, overflowY: "auto", overscrollBehaviorY: "contain" }}>{children}</div>
+      </div>
+    </div>
+  );
+}
+
+// Swiping sideways on an open asset (phone) moves to the next or previous tab, in tab
+// order. Ignored where a sideways drag already means something: a form field, a drawing
+// or map, anything that scrolls sideways (wide tables, the tab strip), or a dialog.
+let ASSET_SWIPE_START = null;
+function assetSwipeBlocked(target, root) {
+  for (let el = target; el && el !== root; el = el.parentElement) {
+    if (!(el instanceof Element)) break;
+    const tag = el.tagName.toLowerCase();
+    if (tag === "input" || tag === "textarea" || tag === "svg" || tag === "canvas" || el.isContentEditable) return true;
+    if (el.getAttribute("role") === "dialog") return true;
+    if (el.scrollWidth > el.clientWidth + 2) {
+      const ox = getComputedStyle(el).overflowX;
+      if (ox === "auto" || ox === "scroll") return true;
+    }
+  }
+  return false;
+}
+function assetSwipeProps(keys, current, go) {
+  return {
+    onTouchStart: e => {
+      const t = e.touches[0];
+      ASSET_SWIPE_START = e.touches.length === 1 && !assetSwipeBlocked(e.target, e.currentTarget) ? { x: t.clientX, y: t.clientY } : null;
+    },
+    onTouchEnd: e => {
+      const s = ASSET_SWIPE_START;
+      ASSET_SWIPE_START = null;
+      if (!s || !e.changedTouches[0]) return;
+      const dx = e.changedTouches[0].clientX - s.x, dy = e.changedTouches[0].clientY - s.y;
+      if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 1.6) return;
+      const next = keys[keys.indexOf(current) + (dx < 0 ? 1 : -1)];
+      if (next) go(next);
+    },
+    onTouchCancel: () => { ASSET_SWIPE_START = null; },
+  };
 }
 
 // Details / Settings tabs for the sheet's swipeable panes; they follow the swipe.
