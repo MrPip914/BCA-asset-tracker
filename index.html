@@ -6983,7 +6983,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-11-07.3";
+const APP_VERSION = "2026-11-07.4";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -17608,6 +17608,7 @@ function AssetTracker() {
                   <PhotoGallery
                     photos={photosForOwner("maintenance", maintenanceDraft.id)}
                     canEdit={canEdit && !viewReadOnly}
+                    hideControls={!isPhone}
                     busy={photoBusy}
                     progress={photoProgress}
                     error={photoError}
@@ -18081,6 +18082,14 @@ function AssetTracker() {
                       button is: there is nothing left to complete, and offering
                       it would read as a way to log a SECOND completion of a job
                       that happens once. */}
+                  {!isPhone && vShow("files") && canEdit && !viewReadOnly && (
+                    <AttachButton
+                      busy={photoBusy}
+                      progress={photoProgress}
+                      onAdd={(files) => attachPhotos("maintenance", maintenanceDraft.id, files)}
+                      onAddLink={(url, name) => attachLink("maintenance", maintenanceDraft.id, url, name)}
+                    />
+                  )}
                   {editing && !taskDone && (!viewReadOnly || canEdit) && !doneRow && (() => {
                     const mode = taskCompletionMode(workModel, maintenanceDraft.taskType);
                     const btn = { padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brand}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.brand };
@@ -31932,10 +31941,90 @@ function AttachmentImage({ photo, src, alt, style, iconSize, hideName }) {
   return <img src={src} alt={alt} loading="lazy" onError={() => setFailed(true)} style={style} />;
 }
 
+// ONE paperclip icon that stands in for PhotoGallery's three buttons in the
+// desktop task dialog (2026-11-07, Eric). It owns the same hidden inputs and the
+// same link form, but renders them as a popup that opens UPWARD from the dialog's
+// footer. The gallery beside it is told `hideControls`, so there is one set of
+// controls on screen. Phone keeps the gallery's own buttons.
+function AttachButton({ busy, progress, onAdd, onAddLink }) {
+  const libraryRef = React.useRef(null);
+  const docRef = React.useRef(null);
+  const [menuOpen, setMenuOpen] = React.useState(false);
+  const [linkDraft, setLinkDraft] = React.useState(null);
+  function pick(e) {
+    const files = e.target.files ? Array.from(e.target.files) : [];
+    e.target.value = "";
+    if (files.length) onAdd(files);
+  }
+  function submitLink() {
+    if (!linkDraft) return;
+    if (!normalizeLinkUrl(linkDraft.url)) {
+      setLinkDraft({ ...linkDraft, error: "That isn't a web address. Paste the full link, starting with https://." });
+      return;
+    }
+    const failure = onAddLink(linkDraft.url, linkDraft.name);
+    if (failure) setLinkDraft({ ...linkDraft, error: failure });
+    else setLinkDraft(null);
+  }
+  const row = { display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6 };
+  const card = { position: "absolute", right: 0, bottom: "100%", marginBottom: 6, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", zIndex: 21 };
+  return (
+    <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
+      <input ref={libraryRef} type="file" accept="image/*" multiple onChange={pick} style={{ display: "none" }} />
+      <input ref={docRef} type="file" accept="application/pdf,image/*" multiple onChange={pick} style={{ display: "none" }} />
+      <button
+        type="button"
+        onClick={() => { setLinkDraft(null); setMenuOpen(v => !v); }}
+        disabled={busy}
+        aria-label="Attach photos, files or a link" title="Attach"
+        className="icon-btn"
+        style={{ display: "flex", alignItems: "center", gap: 6, padding: 8, background: "transparent", border: "none", borderRadius: 10, color: C.muted, cursor: busy ? "default" : "pointer", fontSize: 12, fontWeight: 600 }}
+      >
+        {busy ? <Loader2 size={16} className="spin" /> : <Paperclip size={16} />}
+        {busy && (progress && typeof progress.pct === "number" ? progress.pct + "%" : "…")}
+      </button>
+      {menuOpen && (
+        <>
+          <div onClick={() => setMenuOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 20 }} />
+          <div style={{ ...card, minWidth: 180, padding: 4 }}>
+            <button type="button" className="icon-btn" style={row} onClick={() => { setMenuOpen(false); libraryRef.current && libraryRef.current.click(); }}><ImagePlus size={15} /> Add photos</button>
+            <button type="button" className="icon-btn" style={row} onClick={() => { setMenuOpen(false); docRef.current && docRef.current.click(); }}><Paperclip size={15} /> Add files</button>
+            {onAddLink && <button type="button" className="icon-btn" style={row} onClick={() => { setMenuOpen(false); setLinkDraft({ url: "", name: "", error: "" }); }}><ExternalLink size={15} /> Add link</button>}
+          </div>
+        </>
+      )}
+      {onAddLink && linkDraft && (
+        <div onClick={() => setLinkDraft(null)} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30 }}>
+        <div onClick={e => e.stopPropagation()} style={{ ...card, position: "static", margin: 0, width: 360, maxWidth: "90vw", padding: 16, display: "flex", flexDirection: "column", gap: 8 }}>
+          <input autoFocus value={linkDraft.url}
+            onChange={e => setLinkDraft({ ...linkDraft, url: e.target.value, error: "" })}
+            onKeyDown={e => { if (e.key === "Enter") submitLink(); if (e.key === "Escape") setLinkDraft(null); }}
+            placeholder="Link — a Google Drive, OneDrive or Dropbox file" aria-label="Link address"
+            style={{ padding: "8px 10px", border: `1.5px solid ${linkDraft.error ? C.danger : C.border}`, borderRadius: 8, fontSize: 13, color: C.ink, background: C.surface }} />
+          <input value={linkDraft.name}
+            onChange={e => setLinkDraft({ ...linkDraft, name: e.target.value })}
+            onKeyDown={e => { if (e.key === "Enter") submitLink(); if (e.key === "Escape") setLinkDraft(null); }}
+            placeholder="Name (optional)" aria-label="Link name"
+            style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, borderRadius: 8, fontSize: 13, color: C.ink, background: C.surface }} />
+          {linkDraft.error && <div style={{ fontSize: 12, color: C.danger }}>{linkDraft.error}</div>}
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", alignItems: "center" }}>
+            <span style={{ marginRight: "auto", display: "flex" }}>
+              <HelpTip label="About attaching" text="Several photos or files at once. Photos are resized and stripped of location data; a PDF is uploaded as it is, up to 10MB. A link opens in a new tab, and whoever taps it needs access where the file lives." />
+            </span>
+            <button onClick={() => setLinkDraft(null)} style={{ padding: "7px 12px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+            <button onClick={submitLink} disabled={!linkDraft.url.trim()} style={{ padding: "7px 12px", background: linkDraft.url.trim() ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Add link</button>
+          </div>
+        </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // The gallery is called PhotoGallery and holds photos AND documents: the stored
 // key never moved when PDFs landed in v39, and the code follows the stored key.
 // See the Files section near the top of this file.
-function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onAddLink, onDelete, onToggleHidden, onOpen, emptyText }) {
+function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onAddLink, onDelete, onToggleHidden, onOpen, emptyText, hideControls }) {
   const [confirmDelete, setConfirmDelete] = React.useState(null);
   const cameraInputRef = React.useRef(null);
   const libraryInputRef = React.useRef(null);
@@ -31982,7 +32071,7 @@ function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onAddLink
 
   return (
     <div>
-      {canEdit && (
+      {canEdit && !hideControls && (
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
           {/* THE CAMERA INPUT AND THE LIBRARY INPUT ARE SEPARATE ELEMENTS,
               never one input with both `capture` and `multiple` -- a phone
@@ -32077,7 +32166,7 @@ function PhotoGallery({ photos, canEdit, busy, progress, error, onAdd, onAddLink
         </div>
       )}
 
-      {canEdit && onAddLink && linkDraft && (
+      {canEdit && !hideControls && onAddLink && linkDraft && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12, padding: 12, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface }}>
           <input
             autoFocus
