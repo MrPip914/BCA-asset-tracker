@@ -6983,7 +6983,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-11-07.5";
+const APP_VERSION = "2026-11-07.6";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -9294,6 +9294,9 @@ function AssetTracker() {
   // that lived in the asset's own card list -- which is why a task opened from
   // the site-wide list had nowhere to be edited at all.
   const [maintenanceModal, setMaintenanceModal] = useState(null);
+  // The inline "new subtask" line in the task dialog (desktop): { parentId, name } or null.
+  const [inlineSubtask, setInlineSubtask] = useState(null);
+  const inlineSubtaskBusyRef = useRef(false);
   const [confirmMaintenanceDelete, setConfirmMaintenanceDelete] = useState(null);
   const [parentCompleteAsk, setParentCompleteAsk] = useState(null);
   const [logWorkAsk, setLogWorkAsk] = useState(null);
@@ -13434,6 +13437,28 @@ function AssetTracker() {
     setMaintenanceModal({ mode: "add" });
   }
 
+  // Desktop: the + in a task's subtask list adds a LINE, not a dialog. The new
+  // subtask is a one-off with default settings, on the parent's asset.
+  async function addSubtaskInline(parentItemId, parentAssetId, name) {
+    const text = (name || "").trim();
+    if (!text || inlineSubtaskBusyRef.current || savingRef.current) return;
+    inlineSubtaskBusyRef.current = true;
+    try {
+      const item = {
+        id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: text, notes: "",
+        frequencyLabel: "", frequencyDays: "", recurrence: "",
+        startDate: "", doOn: "", dueDate: "", lastPerformed: "",
+        owner: "", taskType: "", custom: {}, parentTaskId: parentItemId,
+        at: new Date().toISOString(), by: currentUser || "",
+      };
+      const next = assets.map(a => (a.id === parentAssetId ? { ...a, maintenanceItems: [...(a.maintenanceItems || []), item] } : a));
+      setInlineSubtask(null);
+      await persist(next, { columns });
+    } finally {
+      inlineSubtaskBusyRef.current = false;
+    }
+  }
+
   // Parents never complete themselves and never block: finishing one with open
   // subtasks asks first, and "Complete anyway" carries on.
   // A task still blocked by unfinished tasks asks the same way, naming them.
@@ -15517,6 +15542,9 @@ function AssetTracker() {
       .icon-btn { transition: background-color 0.15s ease; }
       .icon-btn:hover { background: ${C.hover} !important; }
       .task-name-input:hover { background: ${C.hover} !important; }
+      .task-side input:not([type=checkbox]):not([type=radio]), .task-side textarea, .task-side .picker-trigger { border-color: transparent !important; background: transparent !important; }
+      .task-side input:not([type=checkbox]):not([type=radio]):hover, .task-side textarea:hover, .task-side .picker-trigger:hover, .task-side .side-link:hover { background: ${C.hover} !important; }
+      .task-side input:not([type=checkbox]):not([type=radio]):focus, .task-side textarea:focus, .task-side .picker-trigger:focus-visible { outline: none; border-color: ${C.brand} !important; background: ${C.surface} !important; }
       .task-desc-input { border-color: transparent !important; background: transparent !important; }
       .task-desc-input:hover { background: ${C.hover} !important; }
       .task-desc-input:focus { outline: none; border-color: ${C.brand} !important; background: ${C.surface} !important; }
@@ -17516,7 +17544,7 @@ function AssetTracker() {
             const doneCircle = doneRow ? <TaskDoneCircle row={doneRow} onToggle={canEdit ? toggleTaskDone : undefined} size={20} /> : null;
             // Desktop: the circle sits before the name whatever opened the dialog, not
             // only a view that ticked it. The footer buttons stay as they were.
-            const nameCircle = doneCircle || (!isPhone && taskItem && workTarget ? <TaskDoneCircle row={{ item: taskItem, asset: workTarget }} onToggle={canEdit && !viewReadOnly ? toggleTaskDone : undefined} size={20} /> : null);
+            const nameCircle = doneCircle || (!isPhone && taskItem && workTarget ? <TaskDoneCircle row={{ item: taskItem, asset: workTarget }} onToggle={canEdit ? toggleTaskDone : undefined} size={20} /> : null);
             // Only ever shown for a dialog opened somewhere OTHER than the
             // asset's own page -- workDialogAssetId is null exactly when the
             // asset is already open, where a link to it would lead nowhere.
@@ -17583,10 +17611,12 @@ function AssetTracker() {
                     what was tapped, and the asset is one tap further only if
                     it is wanted. It closes the dialog first, or the app would
                     navigate underneath an open form. */}
+                {linkAsset && !isPhone && <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, marginBottom: 2 }}>Asset</div>}
                 {linkAsset && (
                   <button
+                    className="side-link"
                     onClick={() => { setMaintenanceModal(null); openDetail(linkAsset, "maintenance"); }}
-                    style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", padding: "8px 10px", marginBottom: 12, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 13, fontWeight: 600, color: C.brandDark, cursor: "pointer", textAlign: "left" }}
+                    style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", padding: "8px 10px", marginBottom: 12, background: isPhone ? C.bg : "transparent", border: isPhone ? `1px solid ${C.border}` : "1px solid transparent", borderRadius: 10, fontSize: 13, fontWeight: 600, color: C.brandDark, cursor: "pointer", textAlign: "left" }}
                   >
                     <LinkAssetIcon size={14} style={{ flexShrink: 0, color: C.brand }} />
                     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{nameOf(linkAsset)}</span>
@@ -17692,7 +17722,7 @@ function AssetTracker() {
                       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Subtasks</span>
                       {kids.length > 0 && <span style={{ fontSize: 12, color: C.muted }}>{kids.filter(k => taskIsDone(k.item)).length} of {kids.length} done</span>}
                       {canSub && (
-                        <button onClick={() => openSubtaskAdd({ id: maintenanceModal.itemId }, workTargetId)} aria-label="Add subtask" title="Add subtask" className="icon-btn" style={{ marginLeft: "auto", background: "none", border: "none", padding: 4, borderRadius: 4 }}><Plus size={16} color={C.brand} /></button>
+                        <button onClick={() => (isPhone ? openSubtaskAdd({ id: maintenanceModal.itemId }, workTargetId) : setInlineSubtask({ parentId: maintenanceModal.itemId, name: "" }))} aria-label="Add subtask" title="Add subtask" className="icon-btn" style={{ marginLeft: "auto", background: "none", border: "none", padding: 4, borderRadius: 4 }}><Plus size={16} color={C.brand} /></button>
                       )}
                     </div>
                     {kids.map(k => {
@@ -17710,6 +17740,24 @@ function AssetTracker() {
                         </div>
                       );
                     })}
+                    {!isPhone && inlineSubtask && inlineSubtask.parentId === maintenanceModal.itemId && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0" }}>
+                        <input type="checkbox" disabled aria-hidden="true" />
+                        <input
+                          autoFocus
+                          value={inlineSubtask.name}
+                          onChange={e => setInlineSubtask({ ...inlineSubtask, name: e.target.value })}
+                          onKeyDown={e => {
+                            if (e.key === "Enter") { e.preventDefault(); addSubtaskInline(maintenanceModal.itemId, workTargetId, inlineSubtask.name); }
+                            if (e.key === "Escape") { e.stopPropagation(); setInlineSubtask(null); }
+                          }}
+                          onBlur={() => { if (inlineSubtask.name.trim()) addSubtaskInline(maintenanceModal.itemId, workTargetId, inlineSubtask.name); else setInlineSubtask(null); }}
+                          placeholder="New subtask name"
+                          aria-label="New subtask name"
+                          style={{ flex: 1, minWidth: 0, padding: "4px 8px", border: `1.5px solid ${C.brand}`, borderRadius: 8, fontSize: 14, color: C.ink, background: C.surface, fontFamily: "inherit" }}
+                        />
+                      </div>
+                    )}
                   </div>
                 )}
                 {!isPhone && (<>
@@ -17752,6 +17800,17 @@ function AssetTracker() {
                     </div>
                   )}
             </>);
+            const lastPerformedField = (
+                      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Last performed</span>
+                        <input
+                          type="date"
+                          value={maintenanceDraft.lastPerformed}
+                          onChange={e => setMaintenanceDraft({ ...maintenanceDraft, lastPerformed: e.target.value })}
+                          style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                        />
+                      </label>
+            );
             const schedBlock = (<>
                   {(maintenanceDraft.kind === TASK_KIND_ONEOFF ? (
                     <>
@@ -17815,7 +17874,8 @@ function AssetTracker() {
                     </>
                   ) : (
                     <>
-                      {vShow("frequency") && (
+                      {!isPhone && vShow("lastPerformed") && lastPerformedField}
+                      {vShow("frequency") && (isPhone ? (
                       <PickerField
                         label="Frequency"
                         value={maintenanceDraft.frequency}
@@ -17823,19 +17883,11 @@ function AssetTracker() {
                         options={[...MAINTENANCE_FREQUENCIES.map(f => f.label), MAINTENANCE_FREQUENCY_CUSTOM]}
                         title="Select frequency"
                       />
-                      )}
-                      {vShow("lastPerformed") && (
-                      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Last performed</span>
-                        <input
-                          type="date"
-                          value={maintenanceDraft.lastPerformed}
-                          onChange={e => setMaintenanceDraft({ ...maintenanceDraft, lastPerformed: e.target.value })}
-                          style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                        />
-                      </label>
-                      )}
-                      {vShow("frequency") && maintenanceDraft.frequency === MAINTENANCE_FREQUENCY_CUSTOM && (
+                      ) : (
+                      <FrequencyPicker draft={maintenanceDraft} onChange={p => setMaintenanceDraft({ ...maintenanceDraft, ...p })} />
+                      ))}
+                      {isPhone && vShow("lastPerformed") && lastPerformedField}
+                      {isPhone && vShow("frequency") && maintenanceDraft.frequency === MAINTENANCE_FREQUENCY_CUSTOM && (
                         <RecurrenceEditor
                           value={maintenanceDraft.recurrence || DEFAULT_RECURRENCE_DRAFT}
                           onChange={r => setMaintenanceDraft({ ...maintenanceDraft, recurrence: r })}
@@ -17873,6 +17925,8 @@ function AssetTracker() {
                         options={["", ...workModel.taskTypes.map(t => t.id)]}
                         labelForOption={id => (id ? (taskTypeNameOf(workModel, id) || "(removed type)") : (taskTypeNameOf(workModel, defaultWorkTypeId(workModel, "task")) || DEFAULT_WORK_TYPE_NAME))}
                         title="Select task type"
+                        placeholder={taskTypeNameOf(workModel, defaultWorkTypeId(workModel, "task")) || DEFAULT_WORK_TYPE_NAME}
+                        emptyAsValue
                       />
                     </div>
                   )}
@@ -18063,9 +18117,10 @@ function AssetTracker() {
                       className="task-desc-input"
                       value={maintenanceDraft.notes}
                       onChange={e => setMaintenanceDraft({ ...maintenanceDraft, notes: e.target.value })}
-                      rows={3}
+                      rows={1}
+                      ref={el => { if (el) { el.style.height = "auto"; el.style.height = el.scrollHeight + "px"; } }}
                       aria-label="Description"
-                      style={{ display: "block", width: "100%", boxSizing: "border-box", padding: "4px 8px", border: "1.5px solid transparent", fontSize: 14, borderRadius: 8, color: C.ink, fontFamily: "inherit", resize: "vertical", lineHeight: 1.4 }}
+                      style={{ display: "block", width: "100%", boxSizing: "border-box", padding: "4px 8px", border: "1.5px solid transparent", fontSize: 14, borderRadius: 8, color: C.ink, fontFamily: "inherit", resize: "none", overflow: "hidden", lineHeight: 1.4 }}
                     />
                     {!maintenanceDraft.notes && (
                       <span aria-hidden="true" style={{ position: "absolute", left: 8, top: 5, display: "flex", alignItems: "center", gap: 6, fontSize: 14, color: C.placeholder, pointerEvents: "none" }}><AlignLeft size={15} /> Description</span>
@@ -18102,7 +18157,7 @@ function AssetTracker() {
                       </>)}
                       {trailingBlocks}
                     </div>
-                    <div style={{ width: 230, flexShrink: 0, borderLeft: `1px solid ${C.border}`, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 14 }}>
+                    <div className="task-side" style={{ width: 230, flexShrink: 0, borderLeft: `1px solid ${C.border}`, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 14 }}>
                       {assetBlock}
                       {viewReadOnly ? (<>
                   {readRows.filter(r => !r.main).map(r => (
@@ -18140,7 +18195,7 @@ function AssetTracker() {
                       button is: there is nothing left to complete, and offering
                       it would read as a way to log a SECOND completion of a job
                       that happens once. */}
-                  {editing && !taskDone && (!viewReadOnly || canEdit) && !doneRow && (() => {
+                  {isPhone && editing && !taskDone && (!viewReadOnly || canEdit) && !doneRow && (() => {
                     const mode = taskCompletionMode(workModel, maintenanceDraft.taskType);
                     const btn = { padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brand}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.brand };
                     return (
@@ -23497,6 +23552,48 @@ function Field({ label, value, onChange, placeholder, wide, dataType, options, e
 // in a div rather than a <label>, since a picker inside a label re-opens after
 // a choice (BUGS.md). A sentence underneath reads the rule back, or says what
 // is missing while the count is not a whole number from 1 to 999.
+// Desktop task dialog: the Frequency field. The trigger shows the rule in words
+// (a Custom rule reads "Every 2 years"); the popup lists the presets and Custom,
+// and choosing Custom opens the repeat configurator inside it.
+function FrequencyPicker({ draft, onChange }) {
+  const [open, setOpen] = useState(false);
+  const isCustom = draft.frequency === MAINTENANCE_FREQUENCY_CUSTOM;
+  const freq = isCustom ? frequencyFromDraft(draft) : null;
+  const shown = isCustom ? (freq ? freq.label : "Custom…") : draft.frequency;
+  const options = [...MAINTENANCE_FREQUENCIES.map(f => f.label), MAINTENANCE_FREQUENCY_CUSTOM];
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Frequency</span>
+      <PickerTrigger value={shown} placeholder="Select…" onClick={() => setOpen(true)} ariaLabel="Select Frequency" />
+      {open && (
+        <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 30, padding: 16 }}>
+          <div onClick={e => e.stopPropagation()} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 16, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 360, maxHeight: "80vh", overflowY: "auto" }}>
+            <div style={{ fontWeight: 700, color: C.brandDark, marginBottom: 8 }}>Select frequency</div>
+            {options.map(o => {
+              const on = draft.frequency === o;
+              return (
+                <button key={o} type="button" className="icon-btn"
+                  onClick={() => { onChange({ frequency: o }); if (o !== MAINTENANCE_FREQUENCY_CUSTOM) setOpen(false); }}
+                  style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", padding: "9px 12px", background: "none", border: "none", fontSize: 14, color: C.ink, textAlign: "left", borderRadius: 6, fontWeight: on ? 700 : 400 }}>
+                  {o}{on && <Check size={15} color={C.brand} />}
+                </button>
+              );
+            })}
+            {isCustom && (
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.border}` }}>
+                <RecurrenceEditor value={draft.recurrence || DEFAULT_RECURRENCE_DRAFT} onChange={r => onChange({ recurrence: r })} />
+                <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
+                  <button type="button" onClick={() => setOpen(false)} style={{ padding: "7px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Done</button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function RecurrenceEditor({ value, onChange }) {
   const v = value || DEFAULT_RECURRENCE_DRAFT;
   const set = patch => onChange({ ...v, ...patch });
@@ -23629,6 +23726,7 @@ function PickerTrigger({ value, placeholder, onClick, ariaLabel, truncateStart, 
   return (
     <button
       type="button"
+      className="picker-trigger"
       onClick={onClick}
       aria-label={ariaLabel}
       style={{
@@ -24375,12 +24473,12 @@ function ParentField({ value, onChange, childType, childId, assets, error, note 
 // so every single-select field in the app looks and behaves the same way. To allow
 // clearing back to unselected, the caller prepends "" to `options` itself (see
 // BulkTypeField below) and maps it to a placeholder like "Select…" via labelForOption.
-function PickerField({ label, value, onChange, options, placeholder = "Select…", labelForOption, onManage, manageLabel, title, emptyLabel, wide, hideLabel, required, error, multi, searchable, headingFor }) {
+function PickerField({ label, value, onChange, options, placeholder = "Select…", labelForOption, onManage, manageLabel, title, emptyLabel, wide, hideLabel, required, error, multi, searchable, headingFor, emptyAsValue }) {
   const [open, setOpen] = useState(false);
   const getLabel = labelForOption || (o => o);
   // `multi`: value is an array, the modal stays open and toggles, Done closes.
   const displayValue = multi ? (value || []).map(getLabel).join(", ")
-    : value !== "" && value != null ? getLabel(value) : "";
+    : value !== "" && value != null ? getLabel(value) : (emptyAsValue ? placeholder : "");
   const Wrapper = hideLabel ? "div" : "label";
   return (
     <Wrapper style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: wide ? "1 / -1" : undefined }}>
