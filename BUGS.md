@@ -838,3 +838,9 @@ Reports "setters called but never declared: setItems". Fails without the asset-p
 ## test-frontend-setters.js fails on dev: `setItems` called but never declared (found 2026-10-29)
 
 Found while adding the views sidebar pin. It fails identically on a clean `origin/dev`, so it is not from that change. Not investigated; needs a look at which `setItems` call the test is seeing.
+
+## Two frontend tests fail on dev (found 2026-11-07, not caused by the task-dialog rework)
+
+`test-frontend-recurring.js` ("a never-done config is due today") and `test-frontend-setters.js`
+("setters called but never declared: setItems") both fail on a clean `origin/dev`. Frontend only;
+no deploy involved. Not investigated.
