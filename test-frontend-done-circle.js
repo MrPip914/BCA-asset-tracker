@@ -30,7 +30,7 @@ check('other types complete in one tap and leave the dialog open', /completeTask
 const reopen = block('async function reopenTask', '// The done circle.');
 check('reopening clears the completed date and audits it', /lastPerformed: ""/.test(reopen) && /— Completed/.test(reopen) && /action: "maintenance_edited"/.test(reopen));
 
-const dlg = block('{maintenanceModal && (() => {', 'const tIndex = taskIndexOf(assets);');
+const dlg = block('{maintenanceModal && ((phoneSheet) => {', 'const tIndex = taskIndexOf(assets);');
 check('the dialog circle only appears when the view asked for it', /dialogView && vShow\("done"\)/.test(dlg));
 check('the Mark done / Log work buttons give way to the circle', /!viewReadOnly \|\| canEdit\) && !doneRow/.test(src));
 check('the header no longer says One-off or Scheduled', !/"One-off task"|"Scheduled task"|"Add one-off task"|"Add scheduled task"/.test(src));
