@@ -6983,7 +6983,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-11-07.1";
+const APP_VERSION = "2026-11-07.2";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -15516,6 +15516,8 @@ function AssetTracker() {
       button:active { transform: translateY(0.5px); }
       .icon-btn { transition: background-color 0.15s ease; }
       .icon-btn:hover { background: ${C.hover} !important; }
+      .task-name-input:hover { background: ${C.hover} !important; }
+      .task-name-input:focus { outline: none; border-color: ${C.brand} !important; background: ${C.surface} !important; }
       /* The Settings page: a sidebar and a panel side by side on a laptop; on a
          phone, the section list OR the open section, never both. */
       .settings-nav { flex: 0 0 230px; border-right: 1px solid ${C.border}; }
@@ -17528,7 +17530,7 @@ function AssetTracker() {
               const oneOff = maintenanceDraft.kind === TASK_KIND_ONEOFF;
               const dayText = d => (d ? formatDateOnly(d) : "");
               const isoOf = d => (d ? d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0") : "");
-              const addRow = (label, value) => { if (value) readRows.push({ label, value }); };
+              const addRow = (label, value, main) => { if (value) readRows.push({ label, value, main: !!main }); };
               if (!oneOff && vShow("frequency")) addRow("Repeats", (taskItem && taskItem.frequencyLabel) || maintenanceDraft.frequency);
               // Read from the stored task, not the draft: the done circle can change it
               // while this view stays open, and a read view has no unsaved edits.
@@ -17550,7 +17552,7 @@ function AssetTracker() {
                 const v = (maintenanceDraft.custom || {})[f.key];
                 if (String(v ?? "") !== "") addRow(f.label, dataTypeDisplay(f, v));
               });
-              if (workBuiltinShown(workModel, "task", maintenanceDraft.taskType, "notes") && vShow("notes") && maintenanceDraft.notes) addRow("Notes", <span style={{ whiteSpace: "pre-wrap" }}>{maintenanceDraft.notes}</span>);
+              if (workBuiltinShown(workModel, "task", maintenanceDraft.taskType, "notes") && vShow("notes") && maintenanceDraft.notes) addRow("Notes", <span style={{ whiteSpace: "pre-wrap" }}>{maintenanceDraft.notes}</span>, true);
             }
             const tIndex = taskIndexOf(assets);
             const isBlocked = editing && taskIsBlocked(tIndex, { ...(tIndex.get(maintenanceModal.itemId) || {}).item });
@@ -17567,28 +17569,10 @@ function AssetTracker() {
             const canSub = editing && canEdit && !dialogView && canAddSubtaskTo(tIndex, { id: maintenanceModal.itemId, parentTaskId: maintenanceDraft.parentTaskId });
             const readGroups = viewReadOnly && workTarget && vShow("sections") && isWindowLayoutType(workTarget.type)
               ? windowGroupsOf(workTarget).filter(g => (maintenanceDraft.paneGroupIds || []).includes(g.id)) : [];
-            return (
-            <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20, padding: 16 }}>
-              <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: isPhone ? 520 : 640, maxHeight: "90vh", overflowY: "auto" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, marginBottom: 16 }}>
-                  {/* One-off or repeating is not a title: a repeating task shows an icon
-                      after its name, a one-off shows nothing. */}
-                  <div style={{ fontWeight: 700, color: C.brandDark, display: "flex", alignItems: "center" }}>
-                    {!viewReadOnly && isPhone && doneCircle}
-                    {viewReadOnly ? null : editing
-                      ? (maintenanceDraft.parentTaskId ? "Subtask" : "Task")
-                      : (maintenanceDraft.parentTaskId ? "Add subtask" : "Add task")}
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
-                    {isBlocked && (
-                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: C.danger, flexShrink: 0 }}>Blocked</span>
-                    )}
-                    {dialogView && canEdit && !maintenanceModal.editView && (
-                      <button onClick={() => { openMaintenanceEdit(maintenanceModal.itemId, workDialogAssetId, maintenanceModal.viewId); setMaintenanceModal(m => ({ ...m, editView: true })); }} aria-label="Edit this task" className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4 }}><Pencil size={16} color={C.muted} /></button>
-                    )}
-                    <button onClick={() => setMaintenanceModal(null)} aria-label="Close" className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
-                  </div>
-                </div>
+            // One definition of each field, placed by the layout below: phone keeps
+            // the single column it always had; desktop splits the dialog into a
+            // sidebar (the properties) and a main column (name, description, the rest).
+            const assetBlock = (<>
                 {/* The way out to the asset. Optional by design: the task is
                     what was tapped, and the asset is one tap further only if
                     it is wanted. It closes the dialog first, or the app would
@@ -17615,236 +17599,8 @@ function AssetTracker() {
                   />
                   </div>
                   )}
-                {/* The kind is chosen HERE and the fields below follow it,
-                    because the two halves are mutually exclusive: a repeating
-                    task is described by an interval and its last completion, a
-                    one-off by a single due date. Offering all four at once
-                    would let someone fill in a pair the app then ignores. */}
-                {viewReadOnly ? (
-                  <div style={isPhone ? { display: "flex", flexDirection: "column", gap: 12 } : { display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 14 }}>
-                    <div style={{ fontSize: 17, fontWeight: 700, color: C.ink, wordBreak: "break-word", display: "flex", alignItems: "center", gap: 8, gridColumn: "1 / -1" }}>
-                      {doneCircle}
-                      <span>{maintenanceDraft.task}</span>
-                      {maintenanceDraft.kind !== TASK_KIND_ONEOFF && <Repeat size={15} color={C.muted} aria-label="Repeating task" role="img" style={{ flexShrink: 0 }} />}
-                    </div>
-                    {readRows.map(r => (
-                      <div key={r.label} style={r.label === "Notes" ? { gridColumn: "1 / -1" } : undefined}>
-                        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>{r.label}</div>
-                        <div style={{ fontSize: 14, color: C.ink, marginTop: 2, wordBreak: "break-word" }}>{r.value}</div>
-                      </div>
-                    ))}
-                    {readGroups.length > 0 && (
-                      <div style={{ gridColumn: "1 / -1" }}>
-                        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Section groups</div>
-                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
-                          {readGroups.map(g => (
-                            <span key={g.id} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 999, fontSize: 13, border: `1.5px solid ${windowGroupColor(windowGroupsOf(workTarget), g.id)}`, color: C.ink }}>
-                              <span aria-hidden="true" style={{ width: 10, height: 10, borderRadius: 3, background: windowGroupColor(windowGroupsOf(workTarget), g.id) }} />{g.name}
-                            </span>
-                          ))}
-                        </div>
-                        <TaskPaneLayout asset={workTarget} groupIds={maintenanceDraft.paneGroupIds} maxHeight={200} />
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                <fieldset disabled={viewReadOnly} style={{ border: "none", padding: 0, margin: 0, minWidth: 0 }}>
-                {(vShow("frequency") || vShow("lastPerformed") || vShow("dueDate") || vShow("startDate") || vShow("doOn")) && !maintenanceDraft.parentTaskId && !(workTarget && (workTarget.maintenanceItems || []).some(m => m && m.id === maintenanceDraft.id && (m.recurringId || m.instanced))) && (
-                <TaskKindToggle
-                  value={maintenanceDraft.kind}
-                  onChange={k => setMaintenanceDraft({ ...maintenanceDraft, kind: k })}
-                />
-                )}
-                <div style={{ display: "grid", gridTemplateColumns: isPhone ? "repeat(auto-fill, minmax(150px, 1fr))" : "repeat(2, minmax(0, 1fr))", gap: isPhone ? 10 : 14 }}>
-                  {/* Status is worked out from the task's dates, so it is shown, not edited:
-                      one more field in the list, when the view (or no view) asks for it. */}
-                  {editing && taskStatusMeta && vShow("status") && (
-                    <div style={{ gridColumn: "1 / -1", order: isPhone ? 0 : -1 }}>
-                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Status</div>
-                      <div style={{ fontSize: 14, color: C.ink, marginTop: 2 }}>{taskStatusMeta.label}</div>
-                    </div>
-                  )}
-                  {/* Desktop: the name sits where the read view prints it -- done circle,
-                      title-sized text, the repeat icon -- and the fields below follow the
-                      read view's order (Notes last). Phone keeps the labelled input. */}
-                  <label style={{ display: "flex", flexDirection: isPhone ? "column" : "row", alignItems: isPhone ? "stretch" : "center", gap: isPhone ? 4 : 8, gridColumn: "1 / -1", order: isPhone ? 0 : -2 }}>
-                    {isPhone
-                      ? <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Task</span>
-                      : doneCircle}
-                    <input
-                      value={maintenanceDraft.task}
-                      onChange={e => setMaintenanceDraft({ ...maintenanceDraft, task: e.target.value })}
-                      aria-label="Task name"
-                      placeholder={maintenanceDraft.kind === TASK_KIND_ONEOFF ? "e.g. Replace the Room 101 projector" : "e.g. Replace HVAC filter"}
-                      style={isPhone
-                        ? { padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }
-                        : { flex: 1, minWidth: 0, padding: "6px 10px", border: `1.5px solid ${C.border}`, fontSize: 17, fontWeight: 700, borderRadius: 10, color: C.ink }}
-                    />
-                    {!isPhone && maintenanceDraft.kind !== TASK_KIND_ONEOFF && <Repeat size={15} color={C.muted} aria-label="Repeating task" role="img" style={{ flexShrink: 0 }} />}
-                  </label>
-                  {/* A schedule survives on its task string because "Filter
-                      clean" says everything. A project does not. */}
-                  {workBuiltinShown(workModel, "task", maintenanceDraft.taskType, "notes") && vShow("notes") && (
-<label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1", order: isPhone ? 0 : 99 }}>
-                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Notes</span>
-                    <textarea
-                      value={maintenanceDraft.notes}
-                      onChange={e => setMaintenanceDraft({ ...maintenanceDraft, notes: e.target.value })}
-                      rows={2}
-                      placeholder="What's involved, what's been agreed, what it's waiting on…"
-                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, fontFamily: "inherit", resize: "vertical" }}
-                    />
-                  </label>
-)}
-                  {(maintenanceDraft.kind === TASK_KIND_ONEOFF ? (
-                    <>
-                    {vShow("startDate") && (
-                    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, display: "flex", alignItems: "center", gap: 4 }}>Start date<HelpTip label="About Start date" text="Don't start before this day. Until then the task shows as Upcoming, not overdue." size={12} /></span>
-                      <input
-                        type="date"
-                        value={maintenanceDraft.startDate}
-                        onChange={e => setMaintenanceDraft({ ...maintenanceDraft, startDate: e.target.value })}
-                        style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                      />
-                    </label>
-                    )}
-                    {vShow("doOn") && (
-                    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, display: "flex", alignItems: "center", gap: 4 }}>Scheduled for<HelpTip label="About Scheduled for" text="The day this is meant to be done. Optional." size={12} /></span>
-                      <input
-                        type="date"
-                        value={maintenanceDraft.doOn}
-                        onChange={e => setMaintenanceDraft({ ...maintenanceDraft, doOn: e.target.value })}
-                        style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                      />
-                    </label>
-                    )}
-                    {vShow("dueDate") && (
-                    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, display: "flex", alignItems: "center", gap: 4 }}>Due date{!isPhone && <HelpTip label="About Due date" text="Optional. A task with no date sorts to the bottom instead of being refused." size={12} />}</span>
-                      <input
-                        type="date"
-                        value={maintenanceDraft.dueDate}
-                        onChange={e => setMaintenanceDraft({ ...maintenanceDraft, dueDate: e.target.value })}
-                        style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                      />
-                      {/* Optional on purpose: "some day" is a legitimate state
-                          for a project, and an undated one sorts to the bottom
-                          rather than being refused. */}
-                      {isPhone && <span style={{ fontSize: 11, color: C.placeholder }}>Optional</span>}
-                    </label>
-                    )}
-                    {/* Editing only: a task being created has no completion to
-                        record, and offering the field would invite someone to
-                        log a job as done in the act of adding it.
-
-                        Clearing this REOPENS a finished job. There is no done
-                        flag to unset -- the date is the whole of "is this
-                        done" -- so the field that records the completion is
-                        also the control that undoes it. */}
-                    {editing && vShow("lastPerformed") && (
-                    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, display: "flex", alignItems: "center", gap: 4 }}>Completed{!isPhone && <HelpTip label="About Completed" text="Clear this date to reopen a finished task." size={12} />}</span>
-                      <input
-                        type="date"
-                        value={maintenanceDraft.lastPerformed}
-                        onChange={e => setMaintenanceDraft({ ...maintenanceDraft, lastPerformed: e.target.value })}
-                        style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                      />
-                      {isPhone && <span style={{ fontSize: 11, color: C.placeholder }}>Clear to reopen</span>}
-                    </label>
-                    )}
-                    </>
-                  ) : (
-                    <>
-                      {vShow("frequency") && (
-                      <PickerField
-                        label="Frequency"
-                        value={maintenanceDraft.frequency}
-                        onChange={v => setMaintenanceDraft({ ...maintenanceDraft, frequency: v })}
-                        options={[...MAINTENANCE_FREQUENCIES.map(f => f.label), MAINTENANCE_FREQUENCY_CUSTOM]}
-                        title="Select frequency"
-                      />
-                      )}
-                      {vShow("lastPerformed") && (
-                      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Last performed</span>
-                        <input
-                          type="date"
-                          value={maintenanceDraft.lastPerformed}
-                          onChange={e => setMaintenanceDraft({ ...maintenanceDraft, lastPerformed: e.target.value })}
-                          style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                        />
-                      </label>
-                      )}
-                      {vShow("frequency") && maintenanceDraft.frequency === MAINTENANCE_FREQUENCY_CUSTOM && (
-                        <RecurrenceEditor
-                          value={maintenanceDraft.recurrence || DEFAULT_RECURRENCE_DRAFT}
-                          onChange={r => setMaintenanceDraft({ ...maintenanceDraft, recurrence: r })}
-                        />
-                      )}
-                    </>
-                  ))}
-                  {workBuiltinShown(workModel, "task", maintenanceDraft.taskType, "owner") && vShow("owner") && (
-<label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Owner</span>
-                    <input
-                      value={maintenanceDraft.owner}
-                      onChange={e => setMaintenanceDraft({ ...maintenanceDraft, owner: e.target.value })}
-                      placeholder="Who's responsible?"
-                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
-                    />
-                  </label>
-)}
-                  {/* Task type: decides which custom fields follow. Only offered
-                      once at least one type exists, so a school that never sets
-                      any up sees the dialog exactly as before. */}
-                  {(workModel.taskTypes.length > 0 || maintenanceDraft.taskType) && vShow("type") && (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Type</span>
-                      {/* hideLabel under our own heading: a labelled PickerField re-opens itself after a choice (BUGS.md). */}
-                      <PickerField
-                        label="Type"
-                        hideLabel
-                        value={maintenanceDraft.taskType || ""}
-                        onChange={v => setMaintenanceDraft({ ...maintenanceDraft, taskType: v })}
-                        options={["", ...workModel.taskTypes.map(t => t.id)]}
-                        labelForOption={id => (id ? (taskTypeNameOf(workModel, id) || "(removed type)") : (taskTypeNameOf(workModel, defaultWorkTypeId(workModel, "task")) || DEFAULT_WORK_TYPE_NAME))}
-                        title="Select task type"
-                      />
-                    </div>
-                  )}
-                  <CustomFieldInputs model={workModel} kind="task" typeId={maintenanceDraft.taskType} values={maintenanceDraft.custom}
-                    visibleKeys={viewVisibleCustomKeys(dialogView)}
-                    onChange={custom => setMaintenanceDraft({ ...maintenanceDraft, custom })} />
-                  {/* Which panes this task covers: only a window with at least one
-                      group has anything to pick. Chips rather than a PickerField --
-                      a window has a handful of groups and the choice is "which of
-                      these", several at once, with the layout lighting up below. */}
-                  {workTarget && vShow("sections") && isWindowLayoutType(workTarget.type) && windowGroupsOf(workTarget).length > 0 && (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6, gridColumn: "1 / -1", order: isPhone ? 0 : 98 }}>
-                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Section groups</span>
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                        {windowGroupsOf(workTarget).map(g => {
-                          const on = (maintenanceDraft.paneGroupIds || []).includes(g.id);
-                          return (
-                            <button key={g.id} type="button" aria-pressed={on}
-                              onClick={() => setMaintenanceDraft({ ...maintenanceDraft, paneGroupIds: on ? maintenanceDraft.paneGroupIds.filter(id => id !== g.id) : [...(maintenanceDraft.paneGroupIds || []), g.id] })}
-                              style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 11px", borderRadius: 999, fontSize: 13, fontWeight: on ? 700 : 500,
-                                border: `1.5px solid ${on ? windowGroupColor(windowGroupsOf(workTarget), g.id) : C.border}`, background: on ? C.bg : C.surface, color: C.ink }}>
-                              <span aria-hidden="true" style={{ width: 10, height: 10, borderRadius: 3, background: windowGroupColor(windowGroupsOf(workTarget), g.id) }} />
-                              {g.name}{on && <Check size={13} />}
-                            </button>
-                          );
-                        })}
-                      </div>
-                      <TaskPaneLayout asset={workTarget} groupIds={maintenanceDraft.paneGroupIds} maxHeight={200} />
-                    </div>
-                  )}
-                </div>
-                </fieldset>
-                )}
+            </>);
+            const trailingBlocks = (<>
                 {taskCustomError && <div role="alert" style={{ fontSize: 12, color: C.danger, marginTop: 8 }}>{taskCustomError}</div>}
                 {vShow("files") && (!viewReadOnly || photosForOwner("maintenance", maintenanceDraft.id).length > 0) && (
                 <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${C.border}` }}>
@@ -17935,7 +17691,380 @@ function AssetTracker() {
                     })}
                   </div>
                 )}
-                <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "flex-end", marginTop: 16, flexWrap: "wrap" }}>
+            </>);
+            const statusBlock = (<>
+                  {editing && taskStatusMeta && vShow("status") && (
+                    <div style={{ gridColumn: "1 / -1" }}>
+                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Status</div>
+                      <div style={{ fontSize: 14, color: C.ink, marginTop: 2 }}>{taskStatusMeta.label}</div>
+                    </div>
+                  )}
+            </>);
+            const schedBlock = (<>
+                  {(maintenanceDraft.kind === TASK_KIND_ONEOFF ? (
+                    <>
+                    {vShow("startDate") && (
+                    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, display: "flex", alignItems: "center", gap: 4 }}>Start date<HelpTip label="About Start date" text="Don't start before this day. Until then the task shows as Upcoming, not overdue." size={12} /></span>
+                      <input
+                        type="date"
+                        value={maintenanceDraft.startDate}
+                        onChange={e => setMaintenanceDraft({ ...maintenanceDraft, startDate: e.target.value })}
+                        style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                      />
+                    </label>
+                    )}
+                    {vShow("doOn") && (
+                    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, display: "flex", alignItems: "center", gap: 4 }}>Scheduled for<HelpTip label="About Scheduled for" text="The day this is meant to be done. Optional." size={12} /></span>
+                      <input
+                        type="date"
+                        value={maintenanceDraft.doOn}
+                        onChange={e => setMaintenanceDraft({ ...maintenanceDraft, doOn: e.target.value })}
+                        style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                      />
+                    </label>
+                    )}
+                    {vShow("dueDate") && (
+                    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, display: "flex", alignItems: "center", gap: 4 }}>Due date{!isPhone && <HelpTip label="About Due date" text="Optional. A task with no date sorts to the bottom instead of being refused." size={12} />}</span>
+                      <input
+                        type="date"
+                        value={maintenanceDraft.dueDate}
+                        onChange={e => setMaintenanceDraft({ ...maintenanceDraft, dueDate: e.target.value })}
+                        style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                      />
+                      {/* Optional on purpose: "some day" is a legitimate state
+                          for a project, and an undated one sorts to the bottom
+                          rather than being refused. */}
+                      {isPhone && <span style={{ fontSize: 11, color: C.placeholder }}>Optional</span>}
+                    </label>
+                    )}
+                    {/* Editing only: a task being created has no completion to
+                        record, and offering the field would invite someone to
+                        log a job as done in the act of adding it.
+
+                        Clearing this REOPENS a finished job. There is no done
+                        flag to unset -- the date is the whole of "is this
+                        done" -- so the field that records the completion is
+                        also the control that undoes it. */}
+                    {editing && vShow("lastPerformed") && (
+                    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, display: "flex", alignItems: "center", gap: 4 }}>Completed{!isPhone && <HelpTip label="About Completed" text="Clear this date to reopen a finished task." size={12} />}</span>
+                      <input
+                        type="date"
+                        value={maintenanceDraft.lastPerformed}
+                        onChange={e => setMaintenanceDraft({ ...maintenanceDraft, lastPerformed: e.target.value })}
+                        style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                      />
+                      {isPhone && <span style={{ fontSize: 11, color: C.placeholder }}>Clear to reopen</span>}
+                    </label>
+                    )}
+                    </>
+                  ) : (
+                    <>
+                      {vShow("frequency") && (
+                      <PickerField
+                        label="Frequency"
+                        value={maintenanceDraft.frequency}
+                        onChange={v => setMaintenanceDraft({ ...maintenanceDraft, frequency: v })}
+                        options={[...MAINTENANCE_FREQUENCIES.map(f => f.label), MAINTENANCE_FREQUENCY_CUSTOM]}
+                        title="Select frequency"
+                      />
+                      )}
+                      {vShow("lastPerformed") && (
+                      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Last performed</span>
+                        <input
+                          type="date"
+                          value={maintenanceDraft.lastPerformed}
+                          onChange={e => setMaintenanceDraft({ ...maintenanceDraft, lastPerformed: e.target.value })}
+                          style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                        />
+                      </label>
+                      )}
+                      {vShow("frequency") && maintenanceDraft.frequency === MAINTENANCE_FREQUENCY_CUSTOM && (
+                        <RecurrenceEditor
+                          value={maintenanceDraft.recurrence || DEFAULT_RECURRENCE_DRAFT}
+                          onChange={r => setMaintenanceDraft({ ...maintenanceDraft, recurrence: r })}
+                        />
+                      )}
+                    </>
+                  ))}
+            </>);
+            const ownerBlock = (<>
+                  {workBuiltinShown(workModel, "task", maintenanceDraft.taskType, "owner") && vShow("owner") && (
+<label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Owner</span>
+                    <input
+                      value={maintenanceDraft.owner}
+                      onChange={e => setMaintenanceDraft({ ...maintenanceDraft, owner: e.target.value })}
+                      placeholder="Who's responsible?"
+                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                    />
+                  </label>
+)}
+            </>);
+            const typeCustomBlock = (<>
+                  {/* Task type: decides which custom fields follow. Only offered
+                      once at least one type exists, so a school that never sets
+                      any up sees the dialog exactly as before. */}
+                  {(workModel.taskTypes.length > 0 || maintenanceDraft.taskType) && vShow("type") && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Type</span>
+                      {/* hideLabel under our own heading: a labelled PickerField re-opens itself after a choice (BUGS.md). */}
+                      <PickerField
+                        label="Type"
+                        hideLabel
+                        value={maintenanceDraft.taskType || ""}
+                        onChange={v => setMaintenanceDraft({ ...maintenanceDraft, taskType: v })}
+                        options={["", ...workModel.taskTypes.map(t => t.id)]}
+                        labelForOption={id => (id ? (taskTypeNameOf(workModel, id) || "(removed type)") : (taskTypeNameOf(workModel, defaultWorkTypeId(workModel, "task")) || DEFAULT_WORK_TYPE_NAME))}
+                        title="Select task type"
+                      />
+                    </div>
+                  )}
+                  <CustomFieldInputs model={workModel} kind="task" typeId={maintenanceDraft.taskType} values={maintenanceDraft.custom}
+                    visibleKeys={viewVisibleCustomKeys(dialogView)}
+                    onChange={custom => setMaintenanceDraft({ ...maintenanceDraft, custom })} />
+            </>);
+            const kindBlock = (<>
+                {(vShow("frequency") || vShow("lastPerformed") || vShow("dueDate") || vShow("startDate") || vShow("doOn")) && !maintenanceDraft.parentTaskId && !(workTarget && (workTarget.maintenanceItems || []).some(m => m && m.id === maintenanceDraft.id && (m.recurringId || m.instanced))) && (
+                <TaskKindToggle
+                  value={maintenanceDraft.kind}
+                  onChange={k => setMaintenanceDraft({ ...maintenanceDraft, kind: k })}
+                />
+                )}
+            </>);
+            const paneLayoutEl = <TaskPaneLayout asset={workTarget} groupIds={maintenanceDraft.paneGroupIds} maxHeight={200} />;
+            const nameRepeat = maintenanceDraft.kind !== TASK_KIND_ONEOFF ? <Repeat size={15} color={C.muted} aria-label="Repeating task" role="img" style={{ flexShrink: 0 }} /> : null;
+            // Desktop name: plain title text until it is clicked. The input is sized to
+            // its text by a hidden mirror, so the repeat icon sits right after the name;
+            // an empty name (a new task) shows its box.
+            const nameFont = { fontSize: 17, fontWeight: 700, lineHeight: 1.3, padding: "4px 8px", fontFamily: "inherit", border: "1.5px solid transparent", borderRadius: 8 };
+            const namePlaceholder = maintenanceDraft.kind === TASK_KIND_ONEOFF ? "e.g. Replace the Room 101 projector" : "e.g. Replace HVAC filter";
+            const nameRow = (
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12 }}>
+                {doneCircle}
+                {viewReadOnly ? (
+                  <span style={{ fontSize: 17, fontWeight: 700, color: C.ink, wordBreak: "break-word" }}>{maintenanceDraft.task}</span>
+                ) : (
+                  <span style={{ display: "inline-grid", minWidth: 0, maxWidth: "100%", marginLeft: -8 }}>
+                    <span aria-hidden="true" style={{ ...nameFont, gridArea: "1 / 1", visibility: "hidden", whiteSpace: "pre", overflow: "hidden" }}>{maintenanceDraft.task || namePlaceholder}</span>
+                    <input
+                      className="task-name-input"
+                      value={maintenanceDraft.task}
+                      onChange={e => setMaintenanceDraft({ ...maintenanceDraft, task: e.target.value })}
+                      aria-label="Task name"
+                      placeholder={namePlaceholder}
+                      style={{ ...nameFont, gridArea: "1 / 1", width: "100%", minWidth: 0, color: C.ink, background: "transparent", borderColor: maintenanceDraft.task ? "transparent" : C.border }}
+                    />
+                  </span>
+                )}
+                {nameRepeat}
+              </div>
+            );
+            const descRead = readRows.find(r => r.main);
+
+            return (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20, padding: 16 }}>
+              <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: isPhone ? 520 : 640, maxHeight: "90vh", overflowY: "auto" }}>
+                <div style={isPhone ? { display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, marginBottom: 16 } : { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 16, paddingBottom: 12, borderBottom: `1px solid ${C.border}` }}>
+                  {/* One-off or repeating is not a title: a repeating task shows an icon
+                      after its name, a one-off shows nothing. */}
+                  <div style={{ fontWeight: 700, color: C.brandDark, display: "flex", alignItems: "center" }}>
+                    {!viewReadOnly && isPhone && doneCircle}
+                    {viewReadOnly ? (isPhone ? null : (maintenanceDraft.parentTaskId ? "Subtask" : "Task")) : editing
+                      ? (maintenanceDraft.parentTaskId ? "Subtask" : "Task")
+                      : (maintenanceDraft.parentTaskId ? "Add subtask" : "Add task")}
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                    {isBlocked && (
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: C.danger, flexShrink: 0 }}>Blocked</span>
+                    )}
+                    {dialogView && canEdit && !maintenanceModal.editView && (
+                      <button onClick={() => { openMaintenanceEdit(maintenanceModal.itemId, workDialogAssetId, maintenanceModal.viewId); setMaintenanceModal(m => ({ ...m, editView: true })); }} aria-label="Edit this task" className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4 }}><Pencil size={16} color={C.muted} /></button>
+                    )}
+                    <button onClick={() => setMaintenanceModal(null)} aria-label="Close" className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+                  </div>
+                </div>
+                {isPhone ? (
+                  <>
+                    {assetBlock}
+                {viewReadOnly ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                    <div style={{ fontSize: 17, fontWeight: 700, color: C.ink, wordBreak: "break-word", display: "flex", alignItems: "center", gap: 8}}>
+                      {doneCircle}
+                      <span>{maintenanceDraft.task}</span>
+                      {maintenanceDraft.kind !== TASK_KIND_ONEOFF && <Repeat size={15} color={C.muted} aria-label="Repeating task" role="img" style={{ flexShrink: 0 }} />}
+                    </div>
+                    {readRows.map(r => (
+                      <div key={r.label}>
+                        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>{r.label}</div>
+                        <div style={{ fontSize: 14, color: C.ink, marginTop: 2, wordBreak: "break-word" }}>{r.value}</div>
+                      </div>
+                    ))}
+                    {readGroups.length > 0 && (
+                      <div>
+                        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Section groups</div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
+                          {readGroups.map(g => (
+                            <span key={g.id} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 999, fontSize: 13, border: `1.5px solid ${windowGroupColor(windowGroupsOf(workTarget), g.id)}`, color: C.ink }}>
+                              <span aria-hidden="true" style={{ width: 10, height: 10, borderRadius: 3, background: windowGroupColor(windowGroupsOf(workTarget), g.id) }} />{g.name}
+                            </span>
+                          ))}
+                        </div>
+                        {paneLayoutEl}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                <fieldset disabled={viewReadOnly} style={{ border: "none", padding: 0, margin: 0, minWidth: 0 }}>
+                {kindBlock}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
+                  {statusBlock}
+                  <label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Task</span>
+                    <input
+                      value={maintenanceDraft.task}
+                      onChange={e => setMaintenanceDraft({ ...maintenanceDraft, task: e.target.value })}
+                      aria-label="Task name"
+                      placeholder={maintenanceDraft.kind === TASK_KIND_ONEOFF ? "e.g. Replace the Room 101 projector" : "e.g. Replace HVAC filter"}
+                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }}
+                    />
+                  </label>
+                  {workBuiltinShown(workModel, "task", maintenanceDraft.taskType, "notes") && vShow("notes") && (
+<label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Notes</span>
+                    <textarea
+                      value={maintenanceDraft.notes}
+                      onChange={e => setMaintenanceDraft({ ...maintenanceDraft, notes: e.target.value })}
+                      rows={2}
+                      placeholder="What's involved, what's been agreed, what it's waiting on…"
+                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, fontFamily: "inherit", resize: "vertical" }}
+                    />
+                  </label>
+)}
+                  {schedBlock}
+                  {ownerBlock}
+                  {typeCustomBlock}
+                  {/* Which panes this task covers: only a window with at least one
+                      group has anything to pick. Chips rather than a PickerField --
+                      a window has a handful of groups and the choice is "which of
+                      these", several at once, with the layout lighting up below. */}
+                  {workTarget && vShow("sections") && isWindowLayoutType(workTarget.type) && windowGroupsOf(workTarget).length > 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6, gridColumn: "1 / -1" }}>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Section groups</span>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        {windowGroupsOf(workTarget).map(g => {
+                          const on = (maintenanceDraft.paneGroupIds || []).includes(g.id);
+                          return (
+                            <button key={g.id} type="button" aria-pressed={on}
+                              onClick={() => setMaintenanceDraft({ ...maintenanceDraft, paneGroupIds: on ? maintenanceDraft.paneGroupIds.filter(id => id !== g.id) : [...(maintenanceDraft.paneGroupIds || []), g.id] })}
+                              style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 11px", borderRadius: 999, fontSize: 13, fontWeight: on ? 700 : 500,
+                                border: `1.5px solid ${on ? windowGroupColor(windowGroupsOf(workTarget), g.id) : C.border}`, background: on ? C.bg : C.surface, color: C.ink }}>
+                              <span aria-hidden="true" style={{ width: 10, height: 10, borderRadius: 3, background: windowGroupColor(windowGroupsOf(workTarget), g.id) }} />
+                              {g.name}{on && <Check size={13} />}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {paneLayoutEl}
+                    </div>
+                  )}
+                </div>
+                </fieldset>
+                )}
+                    {trailingBlocks}
+                  </>
+
+                ) : (
+                  <div style={{ display: "flex", gap: 20, alignItems: "stretch" }}>
+                    <div style={{ width: 230, flexShrink: 0, borderRight: `1px solid ${C.border}`, paddingRight: 18, display: "flex", flexDirection: "column", gap: 14 }}>
+                      {assetBlock}
+                      {viewReadOnly ? (<>
+                  {readRows.filter(r => !r.main).map(r => (
+                    <div key={r.label}>
+                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>{r.label}</div>
+                      <div style={{ fontSize: 14, color: C.ink, marginTop: 2, wordBreak: "break-word" }}>{r.value}</div>
+                    </div>
+                  ))}
+                      </>) : (<>
+                        {kindBlock}
+                        {statusBlock}
+                        {schedBlock}
+                        {ownerBlock}
+                        {typeCustomBlock}
+                      </>)}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      {nameRow}
+                      {viewReadOnly ? (<>
+                        {descRead && <div style={{ marginBottom: 14 }}>
+                          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Description</div>
+                          <div style={{ fontSize: 14, color: C.ink, marginTop: 2, wordBreak: "break-word" }}>{descRead.value}</div>
+                        </div>}
+                    {readGroups.length > 0 && (
+                      <div>
+                        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Section groups</div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
+                          {readGroups.map(g => (
+                            <span key={g.id} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 999, fontSize: 13, border: `1.5px solid ${windowGroupColor(windowGroupsOf(workTarget), g.id)}`, color: C.ink }}>
+                              <span aria-hidden="true" style={{ width: 10, height: 10, borderRadius: 3, background: windowGroupColor(windowGroupsOf(workTarget), g.id) }} />{g.name}
+                            </span>
+                          ))}
+                        </div>
+                        {paneLayoutEl}
+                      </div>
+                    )}
+                      </>) : (<>
+                  {workBuiltinShown(workModel, "task", maintenanceDraft.taskType, "notes") && vShow("notes") && (
+<label style={{ display: "flex", flexDirection: "column", gap: 4, gridColumn: "1 / -1" }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Description</span>
+                    <textarea
+                      value={maintenanceDraft.notes}
+                      onChange={e => setMaintenanceDraft({ ...maintenanceDraft, notes: e.target.value })}
+                      rows={4}
+                      placeholder="What's involved, what's been agreed, what it's waiting on…"
+                      style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, fontFamily: "inherit", resize: "vertical" }}
+                    />
+                  </label>
+)}
+
+                        <div style={{ display: "flex", flexDirection: "column", gap: 14, marginTop: 14 }}>
+                  {/* Which panes this task covers: only a window with at least one
+                      group has anything to pick. Chips rather than a PickerField --
+                      a window has a handful of groups and the choice is "which of
+                      these", several at once, with the layout lighting up below. */}
+                  {workTarget && vShow("sections") && isWindowLayoutType(workTarget.type) && windowGroupsOf(workTarget).length > 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6, gridColumn: "1 / -1" }}>
+                      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>Section groups</span>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        {windowGroupsOf(workTarget).map(g => {
+                          const on = (maintenanceDraft.paneGroupIds || []).includes(g.id);
+                          return (
+                            <button key={g.id} type="button" aria-pressed={on}
+                              onClick={() => setMaintenanceDraft({ ...maintenanceDraft, paneGroupIds: on ? maintenanceDraft.paneGroupIds.filter(id => id !== g.id) : [...(maintenanceDraft.paneGroupIds || []), g.id] })}
+                              style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 11px", borderRadius: 999, fontSize: 13, fontWeight: on ? 700 : 500,
+                                border: `1.5px solid ${on ? windowGroupColor(windowGroupsOf(workTarget), g.id) : C.border}`, background: on ? C.bg : C.surface, color: C.ink }}>
+                              <span aria-hidden="true" style={{ width: 10, height: 10, borderRadius: 3, background: windowGroupColor(windowGroupsOf(workTarget), g.id) }} />
+                              {g.name}{on && <Check size={13} />}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {paneLayoutEl}
+                    </div>
+                  )}
+                        </div>
+                      </>)}
+                      {trailingBlocks}
+                    </div>
+                  </div>
+
+                )}
+
+                <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "flex-end", marginTop: 16, flexWrap: "wrap", ...(isPhone ? {} : { paddingTop: 14, borderTop: `1px solid ${C.border}` }) }}>
                   {/* Delete sits at the far left, away from Save, and still goes
                       through its own confirmation. */}
                   {editing && !dialogView && (
