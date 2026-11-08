@@ -1974,9 +1974,21 @@ function taskCompletionMode(model, typeId) {
   const c = st && st.completion;
   return c === "optional" || c === "simple" ? c : "required";
 }
+// Which work type the completion form opens on, for a type whose completing
+// records work. Stored as `completionWorkType` (a work type NAME) on the same
+// settings entry; absent means the old behaviour ("Maintenance" if it exists).
+function taskCompletionWorkType(model, typeId) {
+  const st = workModelParts(model, "task").settings[resolveWorkTypeId(model, "task", typeId)];
+  return st && typeof st.completionWorkType === "string" ? st.completionWorkType : "";
+}
+function setTaskCompletionWorkType(model, typeId, name) {
+  const cur = (model.taskTypeSettings || {})[typeId] || { fieldKeys: [], requiredFields: [], hiddenFields: [] };
+  const { completionWorkType, ...rest } = cur;
+  return { ...model, taskTypeSettings: { ...(model.taskTypeSettings || {}), [typeId]: name ? { ...rest, completionWorkType: name } : rest } };
+}
 function setTaskCompletionMode(model, typeId, mode) {
   const cur = (model.taskTypeSettings || {})[typeId] || { fieldKeys: [], requiredFields: [], hiddenFields: [] };
-  const { completion, ...rest } = cur;
+  const { completion, ...rest } = cur; // completionWorkType rides along in rest
   return { ...model, taskTypeSettings: { ...(model.taskTypeSettings || {}), [typeId]: mode === "optional" || mode === "simple" ? { ...rest, completion: mode } : rest } };
 }
 function adoptWorkModel(raw) {
@@ -1992,7 +2004,7 @@ function adoptWorkModel(raw) {
   const settings = v => {
     const out = {};
     Object.entries(obj(v)).forEach(([id, st]) => {
-      out[id] = { fieldKeys: list(st && st.fieldKeys).map(String), requiredFields: list(st && st.requiredFields).map(String), hiddenFields: list(st && st.hiddenFields).map(String), ...(st && (st.completion === "optional" || st.completion === "simple") ? { completion: st.completion } : {}) };
+      out[id] = { fieldKeys: list(st && st.fieldKeys).map(String), requiredFields: list(st && st.requiredFields).map(String), hiddenFields: list(st && st.hiddenFields).map(String), ...(st && (st.completion === "optional" || st.completion === "simple") ? { completion: st.completion } : {}), ...(st && typeof st.completionWorkType === "string" && st.completionWorkType ? { completionWorkType: st.completionWorkType } : {}) };
     });
     return out;
   };
@@ -6983,7 +6995,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-11-08.3";
+const APP_VERSION = "2026-11-08.4";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -13661,6 +13673,9 @@ function AssetTracker() {
   // the detail page and the row's asset on the site-wide table) straight back
   // through, so completing from inside it cannot retarget the write.
   function openMaintenanceComplete(itemId, assetId) {
+    const doneAsset = assets ? assets.find(a => a.id === (assetId || selectedId)) : null;
+    const doneItem = doneAsset && (doneAsset.maintenanceItems || []).find(m => m && m.id === itemId);
+    const wantedWorkType = doneItem ? taskCompletionWorkType(workModel, doneItem.taskType) : "";
     setWorkDialogAssetId(assetId === undefined ? null : assetId);
     setMaintenanceCompleteModal({
       itemId,
@@ -13676,7 +13691,7 @@ function AssetTracker() {
       // DEFAULT_CHANGE_TYPES but the list is user-managed and can be renamed or
       // removed, and seeding a value that isn't an option would render a picker
       // showing something it cannot re-select.
-      changeType: changeTypes.includes("Maintenance") ? "Maintenance" : "",
+      changeType: wantedWorkType && changeTypes.includes(wantedWorkType) ? wantedWorkType : (changeTypes.includes("Maintenance") ? "Maintenance" : ""),
       vendor: "", cost: "", note: "", custom: {}, error: "",
     });
   }
@@ -16884,7 +16899,7 @@ function AssetTracker() {
       return (
         <>
           <WorkTypesManager
-            kind="task"
+            kind="task" changeTypes={changeTypes}
             model={workModel}
             types={[{ id: DEFAULT_WORK_TYPE_ID, name: DEFAULT_WORK_TYPE_NAME }, ...workModel.taskTypes]}
             onModel={next => persist(assets, { workModel: next })}
@@ -21804,7 +21819,7 @@ function FieldError({ message }) {
 // rename / remove) is given when this screen owns the list, and each returns a
 // new model (add/rename as { model, error? }). Every change goes straight to
 // onModel -> persist, like the other Settings managers.
-function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
+function WorkTypesManager({ kind, model, onModel, types, typeActions, changeTypes = [] }) {
   const noun = kind === "task" ? "task" : "work";
   const fieldsKey = workModelKey(kind);
   const fields = model[fieldsKey.fields] || [];
@@ -21887,6 +21902,15 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions }) {
               <PickerField hideLabel label="Completing" title="How completing works" value={taskCompletionMode(model, selected.id)} options={TASK_COMPLETION_MODES.map(m => m.value)}
                 labelForOption={v => (TASK_COMPLETION_MODES.find(m => m.value === v) || {}).label || v}
                 onChange={v => onModel(setTaskCompletionMode(model, selected.id, v))} />
+              {taskCompletionMode(model, selected.id) !== "simple" && (
+                <>
+                  <span>Work type</span>
+                  <PickerField hideLabel label="Work type when completing" title="Work type when completing" value={taskCompletionWorkType(model, selected.id)} options={["", ...changeTypes]}
+                    labelForOption={v => v || "Default"}
+                    onChange={v => onModel(setTaskCompletionWorkType(model, selected.id, v))} />
+                  <HelpTip label="About the completion work type" text="The work type the completion form opens on. Default keeps the usual choice (Maintenance, when that type exists). It can still be changed in the form." />
+                </>
+              )}
               <HelpTip label="About completing" text="Log work required opens the completion form and records a work entry. Log work optional completes in one tap and keeps Log work as a separate button. Checkbox only completes in one tap and never records work." />
             </div>
           )}
