@@ -69,5 +69,10 @@ for (const m of moved) {
 check('no menu row carries a title= tooltip for Export/Import/Convert/Sandbox',
   !/title=\{?[`"](Exports the|Reads an exported|Gives each person|Local fixture data)/.test(src));
 
+// Dark mode: C.ink goes LIGHT there, so the popover's text must follow C.bg
+// (dark) rather than a hardcoded white, or it reads light on light.
+check('popover text colour is a theme token, not white',
+  /role="tooltip" style=\{\{[^}]*background: C\.ink, color: C\.bg/.test(src));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
