@@ -24,6 +24,8 @@ const code = [
   slice('function columnDataType(col) {'),
   slice('function columnOptions(col) {'),
   slice('function validateColumnValue(col, raw) {'),
+  slice('function taskCompletionWorkType(model, typeId) {'),
+  slice('function setTaskCompletionWorkType(model, typeId, name) {'),
   slice('function adoptWorkModel(raw) {'),
   'const DEFAULT_WORK_TYPE_ID = "__default";',
   slice('function workModelParts(model, kind) {'),
@@ -46,7 +48,7 @@ const code = [
   slice('function renameTaskType(model, id, name) {'),
   slice('function removeTaskType(model, id) {'),
   slice('function taskTypeNameOf(model, id) {'),
-  'return { defaultWorkTypeId, setDefaultWorkType, resolveWorkTypeId, workBuiltinShown, setWorkBuiltinShown, DEFAULT_WORK_TYPE_ID, addWorkField, addWorkFieldChoice, removeWorkField, setTypeHasField, setTypeFieldRequired, addTaskType, renameTaskType, removeTaskType, taskTypeNameOf, adoptWorkModel, customFieldsFor, requiredCustomFieldsFor, validateCustomValues, newWorkFieldKey };',
+  'return { taskCompletionWorkType, setTaskCompletionWorkType, defaultWorkTypeId, setDefaultWorkType, resolveWorkTypeId, workBuiltinShown, setWorkBuiltinShown, DEFAULT_WORK_TYPE_ID, addWorkField, addWorkFieldChoice, removeWorkField, setTypeHasField, setTypeFieldRequired, addTaskType, renameTaskType, removeTaskType, taskTypeNameOf, adoptWorkModel, customFieldsFor, requiredCustomFieldsFor, validateCustomValues, newWorkFieldKey };',
 ].join('\n');
 const H = new Function('DEFAULT_COLUMN_DATA_TYPES', code)({});
 
@@ -175,6 +177,16 @@ check('work search covers custom values', /Object\.values\(r\.change\.custom/.te
   check('several picks validate', H.validateCustomValues(on, 'task', '', { [mr.key]: 'Roof; Gym' }) === '' || !H.validateCustomValues(on, 'task', '', { [mr.key]: 'Roof; Gym' }));
   const bad = H.validateCustomValues(on, 'task', '', { [mr.key]: 'Roof; Pool' });
   check('a pick outside the list is refused', !!bad && bad.length > 0);
+}
+
+{
+  const m0 = H.adoptWorkModel(null);
+  check('completion work type defaults to unset', H.taskCompletionWorkType(m0, '__default') === '');
+  const m1 = H.setTaskCompletionWorkType(m0, '__default', 'Repair');
+  check('completion work type is stored', H.taskCompletionWorkType(m1, '__default') === 'Repair');
+  check('completion work type survives adoption', H.taskCompletionWorkType(H.adoptWorkModel(JSON.parse(JSON.stringify(m1))), '__default') === 'Repair');
+  check('clearing it removes the key', H.taskCompletionWorkType(H.setTaskCompletionWorkType(m1, '__default', ''), '__default') === '');
+  check('completion form reads it', /taskCompletionWorkType\(workModel, doneItem\.taskType\)/.test(src) && /changeTypes\.includes\(wantedWorkType\)/.test(src));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
