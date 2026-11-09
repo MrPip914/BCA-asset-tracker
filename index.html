@@ -2518,6 +2518,42 @@ function taskDepthOf(index, item) {
   return depth;
 }
 function canAddSubtaskTo(index, parentItem) { return taskDepthOf(index, parentItem) < TASK_MAX_DEPTH; }
+// The tasks above one, outermost first: [grandparent, parent] for a child whose
+// `parentTaskId` names the parent. Walks up with a visited set, so bad data
+// cannot loop; an id matching no task ends the chain.
+function taskAncestorsOf(index, parentTaskId) {
+  const out = [];
+  const seen = new Set();
+  let id = parentTaskId;
+  while (id && index.has(id) && !seen.has(id) && out.length < 50) {
+    seen.add(id);
+    const ref = index.get(id);
+    out.unshift(ref);
+    id = ref.item.parentTaskId;
+  }
+  return out;
+}
+// The trail at the top of the task and template dialogs: where the open task sits
+// in the hierarchy. Every crumb with an `onClick` goes there; the last is where
+// you are and is plain text.
+function DialogBreadcrumb({ crumbs, label }) {
+  return (
+    <nav aria-label={label || "Where this is"} data-breadcrumb style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 2, minWidth: 0, fontWeight: 700, color: C.brandDark, fontSize: 14 }}>
+      {crumbs.map((c, i) => {
+        const last = i === crumbs.length - 1;
+        const txt = { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 };
+        return (
+          <React.Fragment key={i}>
+            {i > 0 && <ChevronRight size={14} color={C.muted} style={{ flexShrink: 0 }} />}
+            {c.onClick && !last
+              ? <button type="button" onClick={c.onClick} title={`Go to ${c.label}`} style={{ ...txt, background: "none", border: "none", padding: 0, font: "inherit", color: C.brandDark, cursor: "pointer", textDecoration: "underline", textDecorationColor: C.border, textUnderlineOffset: 3 }}>{c.label}</button>
+              : <span aria-current={last ? "page" : undefined} style={{ ...txt, color: last ? C.ink : C.muted }}>{c.label}</span>}
+          </React.Fragment>
+        );
+      })}
+    </nav>
+  );
+}
 // Every task below `id`, at any depth.
 function taskDescendantsOf(assets, id) {
   const out = [];
@@ -7053,7 +7089,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-11-09.10";
+const APP_VERSION = "2026-11-09.11";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -17054,7 +17090,7 @@ function AssetTracker() {
         <div style={settingsCardStyle}>
           <div style={{ ...settingsHeadingStyle, display: "flex", alignItems: "center", gap: 6 }}>
             Templates
-            <HelpTip label="About templates" text="A template is a recipe for an event: a main task and the tasks under it, each with dates worked out from the event's day (three days before, the Monday before, and so on). Use Schedule template from the + button to stamp it onto one or several dates in one go. Changing a template later never changes events already scheduled." />
+            <HelpTip label="About templates" text="A template is a recipe for an event: a main task and its event tasks, each with dates worked out from the event's day (three days before, the Monday before, and so on). Use Schedule template from the + button to stamp it onto one or several dates in one go. Changing a template later never changes events already scheduled." />
           </div>
           {taskTemplates.list.length === 0 && <div style={{ fontSize: 13, color: C.empty, marginBottom: 12 }}>No templates yet.</div>}
           <div style={{ display: "flex", flexDirection: "column" }}>
@@ -17062,7 +17098,7 @@ function AssetTracker() {
               <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderTop: i === 0 ? "none" : `1px solid ${C.border}` }}>
                 <button type="button" onClick={() => setTemplateEdit({ id: t.id })} style={{ flex: 1, minWidth: 0, textAlign: "left", background: "none", border: "none", padding: 0, cursor: "pointer" }}>
                   <div style={{ fontSize: 14, color: C.ink, display: "flex", alignItems: "center", gap: 6 }}><CalendarDays size={14} color={C.muted} />{t.name}</div>
-                  <div style={{ fontSize: 12, color: C.muted }}>{t.items.length} task{t.items.length === 1 ? "" : "s"} under the event</div>
+                  <div style={{ fontSize: 12, color: C.muted }}>{t.items.length} event task{t.items.length === 1 ? "" : "s"}</div>
                 </button>
                 <button onClick={() => setTemplateEdit({ id: t.id })} className="icon-btn" aria-label={`Edit ${t.name}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}><Pencil size={14} color={C.muted} /></button>
               </div>
@@ -17830,16 +17866,6 @@ function AssetTracker() {
                       onChange={v => setMaintenanceDraft({ ...maintenanceDraft, blockedBy: v })} />
                   </div>
                 )}
-                {parentRef && isPhone && (
-                  <button
-                    onClick={() => openMaintenanceEdit(parentRef.item.id, parentRef.asset.id, maintenanceModal.viewId)}
-                    style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", marginTop: 14, padding: "8px 10px", background: C.bg, border: `1px solid ${C.border}`, borderRadius: 10, fontSize: 13, color: C.brandDark, cursor: "pointer", textAlign: "left" }}
-                  >
-                    <span style={{ color: C.muted }}>Subtask of</span>
-                    <span style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{parentRef.item.task}</span>
-                    <ChevronRight size={14} style={{ marginLeft: "auto", flexShrink: 0, color: C.muted }} />
-                  </button>
-                )}
                 {(kids.length > 0 || canSub) && (
                   <div style={{ marginTop: 14 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
@@ -18113,13 +18139,11 @@ function AssetTracker() {
                       after its name, a one-off shows nothing. */}
                   <div style={{ fontWeight: 700, color: C.brandDark, display: "flex", alignItems: "center" }}>
                     {!viewReadOnly && isPhone && doneCircle}
-                    {!isPhone && parentRef ? (
-                      <button onClick={() => openMaintenanceEdit(parentRef.item.id, parentRef.asset.id, maintenanceModal.viewId)} title="Back to the parent task" style={{ background: "none", border: "none", padding: 0, font: "inherit", fontWeight: 700, color: C.brandDark, cursor: "pointer", display: "flex", alignItems: "center", gap: 6, textAlign: "left" }}>
-                        Tasks <ChevronRight size={14} color={C.muted} /> {parentRef.item.task} <ChevronRight size={14} color={C.muted} />
-                      </button>
-                    ) : viewReadOnly ? (isPhone ? null : (maintenanceDraft.parentTaskId ? "Subtask" : "Task")) : editing
-                      ? (maintenanceDraft.parentTaskId ? "Subtask" : "Task")
-                      : (maintenanceDraft.parentTaskId ? "Add subtask" : "Add task")}
+                    <DialogBreadcrumb label="Where this task sits" crumbs={[
+                      { label: "Tasks" },
+                      ...taskAncestorsOf(tIndex, maintenanceDraft.parentTaskId).map(r => ({ label: r.item.task || "(untitled)", onClick: () => openMaintenanceEdit(r.item.id, r.asset.id, maintenanceModal.viewId) })),
+                      { label: maintenanceDraft.task || (editing ? "(untitled)" : maintenanceDraft.parentTaskId ? "New subtask" : "New task") },
+                    ]} />
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
                     {isBlocked && (
@@ -22984,20 +23008,28 @@ function TemplateEditor({ initial, assets, model, onSave, onDelete, onCancel }) 
   }, []);
   const set = patch => setDraft(d => ({ ...d, ...patch }));
   const setParent = patch => setDraft(d => ({ ...d, parent: { ...d.parent, ...patch } }));
-  // Which task's details are open, and the "new task" line being typed (a plain name, like a subtask).
+  // Which task is open in its own configuration view ("" = the template itself), and
+  // the "new task" line being typed (a plain name). Templates show a single level for
+  // now: a task nested under another (older data) is kept and still stamped when the
+  // template is scheduled, it just isn't listed here.
   const [openId, setOpenId] = useState("");
   const [adding, setAdding] = useState(null);
   const setItem = (id, patch) => setDraft(d => ({ ...d, items: d.items.map(i => (i.id === id ? { ...i, ...patch } : i)) }));
-  const addItem = (name, parentItemId) => setDraft(d => ({ ...d, items: [...d.items, { id: crypto.randomUUID(), parentItemId: parentItemId || "", task: name, notes: "", taskType: "", owner: "", asset: parentItemId ? "parent" : "event", start: null, doOn: null, due: null }] }));
-  const commitAdding = () => { if (adding && adding.name.trim()) addItem(adding.name.trim(), adding.parentItemId); setAdding(null); };
-  // Removing an item takes the items under it up to the top level, rather than deleting them.
-  const removeItem = id => setDraft(d => ({ ...d, items: d.items.filter(i => i.id !== id).map(i => (i.parentItemId === id ? { ...i, parentItemId: "" } : i)) }));
+  const addItem = name => setDraft(d => ({ ...d, items: [...d.items, { id: crypto.randomUUID(), parentItemId: "", task: name, notes: "", taskType: "", owner: "", asset: "event", start: null, doOn: null, due: null }] }));
+  const commitAdding = () => { if (adding && adding.trim()) addItem(adding.trim()); setAdding(null); };
+  // Removing a task removes anything nested under it too: it could no longer be reached here.
+  const removeItem = id => { setOpenId(""); setDraft(d => ({ ...d, items: d.items.filter(i => i.id !== id && i.parentItemId !== id) })); };
+  // Move among the tasks that are listed, so a hidden nested one is never swapped with.
   const moveItem = (id, dir) => setDraft(d => {
-    const at = d.items.findIndex(i => i.id === id), to = at + dir;
-    if (at < 0 || to < 0 || to >= d.items.length) return d;
-    const n = [...d.items]; [n[at], n[to]] = [n[to], n[at]];
+    const shown = d.items.filter(x => !x.parentItemId);
+    const at = shown.findIndex(i => i.id === id), to = at + dir;
+    if (at < 0 || to < 0 || to >= shown.length) return d;
+    const a1 = d.items.findIndex(i => i.id === shown[at].id), b1 = d.items.findIndex(i => i.id === shown[to].id);
+    const n = [...d.items]; [n[a1], n[b1]] = [n[b1], n[a1]];
     return { ...d, items: n };
   });
+  const shownItems = draft.items.filter(x => !x.parentItemId);
+  const curItem = openId ? draft.items.find(x => x.id === openId) || null : null;
   const taskTypeIds = (model.taskTypes || []).map(t => t.id);
   const typeOptions = ["", ...taskTypeIds];
   const typeLabel = id => (id ? taskTypeNameOf(model, id) || id : "Default");
@@ -23017,9 +23049,55 @@ function TemplateEditor({ initial, assets, model, onSave, onDelete, onCancel }) 
   const inner = (
     <>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 12, flexShrink: 0 }}>
-          <div style={{ fontWeight: 700, color: C.brandDark }}>{initial ? "Template" : "Add template"}</div>
+          <DialogBreadcrumb label="Where this is" crumbs={[
+            { label: initial ? "Template" : "New template", onClick: curItem ? () => setOpenId("") : undefined },
+            { label: draft.name.trim() || "(untitled)", onClick: curItem ? () => setOpenId("") : undefined },
+            ...(curItem ? [{ label: curItem.task || "(untitled)" }] : []),
+          ]} />
           <button onClick={onCancel} aria-label="Close" className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
         </div>
+        {curItem ? (
+        <div data-template-task-dialog style={phone
+          ? { display: "flex", flexDirection: "column", gap: 14, flex: 1, minHeight: 0, overflowY: "auto", paddingBottom: 12 }
+          : { display: "flex", gap: 20, alignItems: "stretch", flexWrap: "wrap" }}>
+          <div style={{ flex: "1 1 300px", minWidth: 0 }}>
+            <div style={{ marginLeft: -8, marginBottom: 12 }}>
+              <input className="task-name-input" value={curItem.task} onChange={e => setItem(curItem.id, { task: e.target.value })} aria-label="Task name" placeholder="Task name"
+                style={{ ...nameFont, width: "100%", boxSizing: "border-box", color: C.ink, background: "transparent", borderColor: curItem.task ? "transparent" : C.border }} />
+            </div>
+            <div style={{ position: "relative", marginLeft: -8, marginBottom: 14 }}>
+              <textarea className="task-desc-input" value={curItem.notes} onChange={e => setItem(curItem.id, { notes: e.target.value })} rows={1} ref={grow} aria-label="Description" style={descStyle} />
+              {!curItem.notes && (
+                <span aria-hidden="true" style={{ position: "absolute", left: 8, top: 5, display: "flex", alignItems: "center", gap: 6, fontSize: 14, color: C.placeholder, pointerEvents: "none" }}><AlignLeft size={15} /> Description</span>
+              )}
+            </div>
+            <div style={{ paddingTop: 14, borderTop: `1px solid ${C.border}`, display: "flex", flexDirection: "column", gap: 10 }}>
+              <TemplateRuleRow label="Start date" rule={curItem.start} onChange={r => setItem(curItem.id, { start: r })} />
+              <TemplateRuleRow label="Scheduled for" rule={curItem.doOn} onChange={r => setItem(curItem.id, { doOn: r })} />
+              <TemplateRuleRow label="Due date" rule={curItem.due} onChange={r => setItem(curItem.id, { due: r })} />
+            </div>
+          </div>
+          <SidebarCtx.Provider value={true}>
+            <div className="task-side" style={phone
+              ? { display: "flex", flexDirection: "column", gap: 14 }
+              : { flex: "0 0 230px", width: 230, maxWidth: "100%", boxSizing: "border-box", borderLeft: `1px solid ${C.border}`, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 14 }}>
+              {(() => {
+                // A task nested under another (older data) keeps its "parent" sentinel and resolves through that task.
+                const nested = !!curItem.parentItemId;
+                const pit = nested ? draft.items.find(x => x.id === curItem.parentItemId) : null;
+                const baseId = nested ? (pit && pit.asset !== "event" && pit.asset !== "parent" ? pit.asset : draft.parent.assetId) : draft.parent.assetId;
+                return (
+                  <AssetPickerField label="Asset" assets={assets} value={curItem.asset === "event" || curItem.asset === "parent" ? "" : curItem.asset} onChange={id => setItem(curItem.id, { asset: id })} allowNone
+                    parent={{ label: nested ? "Use parent asset" : "Use event asset", asset: (assets || []).find(a => a.id === baseId) || null, selected: curItem.asset === "event" || curItem.asset === "parent", onSelect: () => setItem(curItem.id, { asset: nested ? "parent" : "event" }) }} />
+                );
+              })()}
+              {taskTypeIds.length > 0 && (
+                <PickerField label="Type" value={curItem.taskType} onChange={v => setItem(curItem.id, { taskType: v })} options={typeOptions} labelForOption={id => typeLabel(id)} title="Task type" />
+              )}
+            </div>
+          </SidebarCtx.Provider>
+        </div>
+        ) : (<>
         {phone && <PhonePagerTabs targetId="template-pager" />}
         <div id={phone ? "template-pager" : undefined} style={phone
           ? { display: "flex", gap: 0, alignItems: "stretch", overflowX: "auto", overflowY: "hidden", scrollSnapType: "x mandatory", flex: 1, minHeight: 0, scrollbarWidth: "none", overscrollBehaviorX: "contain" }
@@ -23038,88 +23116,29 @@ function TemplateEditor({ initial, assets, model, onSave, onDelete, onCancel }) 
 
             <div style={{ paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
-                <span style={lbl}>Tasks under the event</span>
-                <HelpTip label="About template tasks" text="Each task can have a start date, a Scheduled for date and a due date, each worked out from the event's day: a number of days before or after it, or the nearest weekday before or after it. A task can sit inside another one here (a checklist item), one level deep." />
-                <button type="button" className="icon-btn" onClick={() => { setOpenId(""); setAdding({ name: "", parentItemId: "" }); }} aria-label="Add task" title="Add task" style={{ ...iconBtn, marginLeft: "auto" }}><Plus size={16} color={C.brand} /></button>
+                <span style={lbl}>Event tasks</span>
+                <HelpTip label="About event tasks" text="The tasks scheduling this template creates under the event. Tap one to set its dates, each worked out from the event's day: a number of days before or after it, or the nearest weekday before or after it." />
+                <button type="button" className="icon-btn" onClick={() => setAdding("")} aria-label="Add task" title="Add task" style={{ ...iconBtn, marginLeft: "auto" }}><Plus size={16} color={C.brand} /></button>
               </div>
-              {draft.items.length === 0 && !adding && <div style={{ fontSize: 13, color: C.empty }}>No tasks yet.</div>}
+              {shownItems.length === 0 && adding === null && <div style={{ fontSize: 13, color: C.empty }}>No tasks yet.</div>}
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                {[...draft.items.filter(x => !x.parentItemId).flatMap(x => [x, ...draft.items.filter(y => y.parentItemId === x.id)]), ...draft.items.filter(x => x.parentItemId && !draft.items.some(y => y.id === x.parentItemId))].map(it => {
-                  const idx = draft.items.findIndex(x => x.id === it.id);
-                  const nested = !!it.parentItemId;
-                  const open = openId === it.id;
-                  const hasKids = draft.items.some(x => x.parentItemId === it.id);
-                  const parentOptions = ["", ...draft.items.filter(x => x.id !== it.id && !x.parentItemId).map(x => x.id)];
-                  return (
-                    <React.Fragment key={it.id}>
-                    <div data-template-item={it.id} style={{ marginLeft: nested ? 20 : 0 }}>
-                      <div style={{ ...row, padding: "5px 0" }}>
-                        <button type="button" aria-expanded={open} onClick={() => setOpenId(open ? "" : it.id)}
-                          style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", padding: 0, textAlign: "left", fontSize: 14, color: it.task ? C.ink : C.placeholder, cursor: "pointer" }}>
-                          {open ? <ChevronDown size={14} color={C.muted} /> : <ChevronRight size={14} color={C.muted} />}
-                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.task || "(untitled)"}</span>
-                        </button>
-                        {!nested && <button type="button" className="icon-btn" aria-label="Add subtask" title="Add subtask" onClick={() => { setOpenId(""); setAdding({ name: "", parentItemId: it.id }); }} style={iconBtn}><Plus size={14} color={C.brand} /></button>}
-                        <button type="button" className="icon-btn" aria-label={`Remove task ${idx + 1}`} title="Remove task" onClick={() => removeItem(it.id)} style={iconBtn}><Trash2 size={14} color={C.danger} /></button>
-                      </div>
-                      {open && (
-                    <div style={{ border: `1.5px solid ${C.border}`, borderRadius: 10, padding: 12, background: C.bg, display: "flex", flexDirection: "column", gap: 8, marginBottom: 6 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                        <input value={it.task} onChange={e => setItem(it.id, { task: e.target.value })} aria-label={`Task ${idx + 1} name`} placeholder="Task name" style={{ ...input, flex: 1, minWidth: 0, fontWeight: 700 }} />
-                        <button type="button" className="icon-btn" aria-label="Move task up" title="Move up" disabled={idx === 0} onClick={() => moveItem(it.id, -1)} style={{ ...iconBtn, opacity: idx === 0 ? 0.3 : 1 }}><ChevronUp size={14} color={C.muted} /></button>
-                        <button type="button" className="icon-btn" aria-label="Move task down" title="Move down" disabled={idx === draft.items.length - 1} onClick={() => moveItem(it.id, 1)} style={{ ...iconBtn, opacity: idx === draft.items.length - 1 ? 0.3 : 1 }}><ChevronDown size={14} color={C.muted} /></button>
-                      </div>
-                      <textarea value={it.notes} onChange={e => setItem(it.id, { notes: e.target.value })} rows={2} aria-label={`Task ${idx + 1} description`} placeholder="Description" style={{ ...input, resize: "vertical", fontFamily: "inherit" }} />
-                      <TemplateRuleRow label="Start date" rule={it.start} onChange={r => setItem(it.id, { start: r })} />
-                      <TemplateRuleRow label="Scheduled for" rule={it.doOn} onChange={r => setItem(it.id, { doOn: r })} />
-                      <TemplateRuleRow label="Due date" rule={it.due} onChange={r => setItem(it.id, { due: r })} />
-                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                        {!hasKids && parentOptions.length > 1 && (
-                          <div style={{ width: 200 }}>
-                            <PickerField label="Inside" hideLabel value={it.parentItemId} onChange={v => setItem(it.id, { parentItemId: v, asset: v ? (it.asset === "event" ? "parent" : it.asset) : (it.asset === "parent" ? "event" : it.asset) })} options={parentOptions}
-                              labelForOption={id => (id ? "Inside: " + ((draft.items.find(x => x.id === id) || {}).task || "(untitled)") : "Directly under the event")} title="Where this task sits" />
-                          </div>
-                        )}
-                        {taskTypeIds.length > 0 && (
-                          <div style={{ width: 170 }}>
-                            <PickerField label="Type" hideLabel value={it.taskType} onChange={v => setItem(it.id, { taskType: v })} options={typeOptions} labelForOption={id => "Type: " + typeLabel(id)} title="Task type" />
-                          </div>
-                        )}
-                      </div>
-                      <div style={{ display: "flex", alignItems: "flex-end", gap: 4, flexWrap: "wrap" }}>
-                        <div style={{ minWidth: 200, flex: "0 1 300px" }}>
-                          {(() => {
-                            const sentinel = nested ? "parent" : "event";
-                            const eventAssetId = draft.parent.assetId;
-                            const pit = nested ? draft.items.find(x => x.id === it.parentItemId) : null;
-                            const pAssetId = nested ? (pit && pit.asset !== "event" && pit.asset !== "parent" ? pit.asset : eventAssetId) : eventAssetId;
-                            return (
-                              <AssetPickerField label="Asset" assets={assets} value={it.asset === "event" || it.asset === "parent" ? "" : it.asset} onChange={id => setItem(it.id, { asset: id })} allowNone
-                                parent={{ label: nested ? "Use parent asset" : "Use event asset", asset: (assets || []).find(a => a.id === pAssetId) || null, selected: it.asset === "event" || it.asset === "parent", onSelect: () => setItem(it.id, { asset: sentinel }) }} />
-                            );
-                          })()}
-                        </div>
-                      </div>
-                    </div>
-                      )}
-                    </div>
-                    {!nested && adding && adding.parentItemId === it.id && (
-                      <div style={{ ...row, padding: "4px 0", marginLeft: 20 }}>
-                      <input autoFocus value={adding.name} onChange={e => setAdding({ ...adding, name: e.target.value })}
-                        onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); commitAdding(); } if (e.key === "Escape") { e.stopPropagation(); setAdding(null); } }}
-                        onBlur={commitAdding} placeholder="New task name" aria-label="New task name"
-                        style={{ flex: 1, minWidth: 0, padding: "4px 8px", border: `1.5px solid ${C.brand}`, borderRadius: 8, fontSize: 14, color: C.ink, background: C.surface, fontFamily: "inherit" }} />
-                      </div>
-                    )}
-                    </React.Fragment>
-                  );
-                })}
-                {adding && !adding.parentItemId && (
+                {shownItems.map((it, idx) => (
+                  <div key={it.id} data-template-item={it.id} style={{ ...row, padding: "5px 0" }}>
+                    <button type="button" onClick={() => setOpenId(it.id)} title="Open task"
+                      style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", background: "none", border: "none", padding: 0, textAlign: "left", fontSize: 14, color: it.task ? C.ink : C.placeholder, cursor: "pointer" }}>
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.task || "(untitled)"}</span>
+                    </button>
+                    <button type="button" className="icon-btn" aria-label="Move task up" title="Move up" disabled={idx === 0} onClick={() => moveItem(it.id, -1)} style={{ ...iconBtn, opacity: idx === 0 ? 0.3 : 1 }}><ChevronUp size={14} color={C.muted} /></button>
+                    <button type="button" className="icon-btn" aria-label="Move task down" title="Move down" disabled={idx === shownItems.length - 1} onClick={() => moveItem(it.id, 1)} style={{ ...iconBtn, opacity: idx === shownItems.length - 1 ? 0.3 : 1 }}><ChevronDown size={14} color={C.muted} /></button>
+                    <button type="button" className="icon-btn" aria-label={`Remove task ${idx + 1}`} title="Remove task" onClick={() => removeItem(it.id)} style={iconBtn}><Trash2 size={14} color={C.danger} /></button>
+                  </div>
+                ))}
+                {adding !== null && (
                   <div style={{ ...row, padding: "4px 0" }}>
-                    <input autoFocus value={adding.name} onChange={e => setAdding({ ...adding, name: e.target.value })}
-                        onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); commitAdding(); } if (e.key === "Escape") { e.stopPropagation(); setAdding(null); } }}
-                        onBlur={commitAdding} placeholder="New task name" aria-label="New task name"
-                        style={{ flex: 1, minWidth: 0, padding: "4px 8px", border: `1.5px solid ${C.brand}`, borderRadius: 8, fontSize: 14, color: C.ink, background: C.surface, fontFamily: "inherit" }} />
+                    <input autoFocus value={adding} onChange={e => setAdding(e.target.value)}
+                      onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); commitAdding(); } if (e.key === "Escape") { e.stopPropagation(); setAdding(null); } }}
+                      onBlur={commitAdding} placeholder="New task name" aria-label="New task name"
+                      style={{ flex: 1, minWidth: 0, padding: "4px 8px", border: `1.5px solid ${C.brand}`, borderRadius: 8, fontSize: 14, color: C.ink, background: C.surface, fontFamily: "inherit" }} />
                   </div>
                 )}
               </div>
@@ -23149,23 +23168,30 @@ function TemplateEditor({ initial, assets, model, onSave, onDelete, onCancel }) 
             </div>
           </SidebarCtx.Provider>
         </div>
+        </>)}
 
         <div style={phone
           ? { display: "flex", gap: 10, alignItems: "center", justifyContent: "flex-end", marginTop: 8, flexWrap: "wrap", flexShrink: 0 }
           : { position: "sticky", bottom: -24, zIndex: 3, display: "flex", gap: 10, alignItems: "center", justifyContent: "flex-end", margin: "16px -24px -24px", padding: "14px 24px", background: C.surface, borderTop: `1px solid ${C.border}`, borderRadius: "0 0 14px 14px", flexWrap: "wrap" }}>
-          {initial && !confirmDelete && (
+          {curItem && (
+            <>
+              <button onClick={() => removeItem(curItem.id)} aria-label="Remove task" title="Remove task" className="icon-btn" style={{ marginRight: "auto", padding: 8, background: "transparent", border: "none", borderRadius: 10, color: C.danger, cursor: "pointer" }}><Trash2 size={16} /></button>
+              <button onClick={() => setOpenId("")} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Back to template</button>
+            </>
+          )}
+          {!curItem && initial && !confirmDelete && (
             <button onClick={() => setConfirmDelete(true)} aria-label="Delete template" title="Delete template" className="icon-btn" style={{ marginRight: "auto", padding: 8, background: "transparent", border: "none", borderRadius: 10, color: C.danger, cursor: "pointer" }}><Trash2 size={16} /></button>
           )}
-          {initial && confirmDelete && (
+          {!curItem && initial && confirmDelete && (
             <span style={{ marginRight: "auto", display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: C.danger }}>
               Delete this template? Events already scheduled stay.
               <button onClick={() => onDelete(draft.id)} style={{ padding: "6px 12px", background: C.danger, color: "#fff", border: "none", borderRadius: 8, fontWeight: 600, fontSize: 13 }}>Delete</button>
               <button onClick={() => setConfirmDelete(false)} style={{ padding: "6px 12px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 8, fontWeight: 600, fontSize: 13, color: C.ink }}>Keep</button>
             </span>
           )}
-          <button onClick={onCancel} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
-          <button onClick={() => canSave && onSave(clean())} disabled={!canSave}
-            style={{ padding: "8px 14px", background: canSave ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>{initial ? "Save changes" : "Add template"}</button>
+          {!curItem && <button onClick={onCancel} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>}
+          {!curItem && <button onClick={() => canSave && onSave(clean())} disabled={!canSave}
+            style={{ padding: "8px 14px", background: canSave ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>{initial ? "Save changes" : "Add template"}</button>}
         </div>
     </>
   );
