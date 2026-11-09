@@ -3182,7 +3182,7 @@ function calendarCanSchedule(row) {
 // for `views`, because the Edge Function keeps only optional keys that are).
 //   template = { id, name, taskType, parent: { task, notes, assetId },
 //                items: [{ id, parentItemId, task, notes, taskType, owner, asset, start, doOn, due }] }
-//   asset: "event" (the event's own asset) or an asset id.
+//   asset: "event" (the event's own asset), "parent" (the asset of the task it sits inside) or an asset id.
 //   rule (start / doOn / due) = null
 //        | { kind: "days", n, dir: "before" | "after" }
 //        | { kind: "weekday", weekday: 0-6, which: "preceding" | "following" }
@@ -3263,8 +3263,13 @@ function stampTemplate(template, eventDay, eventAssetId, assetIds, stamp) {
   const ids = new Map(t.items.map(i => [i.id, newId()]));
   // Parents before children, so a reader never meets a child ahead of its parent.
   const ordered = [...t.items.filter(i => !i.parentItemId), ...t.items.filter(i => i.parentItemId)];
+  const assetOf = new Map();
   ordered.forEach(i => {
-    out.push({ assetId: i.asset !== "event" && assetIds.has(i.asset) ? i.asset : eventAssetId, item: base(ids.get(i.id), {
+    // "event" = the event's asset; "parent" = the asset of the task it sits inside; else a chosen asset.
+    const parentAsset = i.parentItemId && assetOf.has(i.parentItemId) ? assetOf.get(i.parentItemId) : eventAssetId;
+    const assetId = i.asset === "parent" ? parentAsset : i.asset !== "event" && assetIds.has(i.asset) ? i.asset : eventAssetId;
+    assetOf.set(i.id, assetId);
+    out.push({ assetId, item: base(ids.get(i.id), {
       task: i.task.trim() || "Untitled task", notes: i.notes, taskType: i.taskType, owner: i.owner,
       startDate: resolveTemplateRule(i.start, eventDay), doOn: resolveTemplateRule(i.doOn, eventDay), dueDate: resolveTemplateRule(i.due, eventDay),
       parentTaskId: i.parentItemId ? ids.get(i.parentItemId) : parentId,
@@ -7033,7 +7038,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-11-09.5";
+const APP_VERSION = "2026-11-09.6";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -17705,6 +17710,10 @@ function AssetTracker() {
                       hint="Which asset is this task for?"
                       allowNone
                   />
+                  {parentRef && workDialogAssetId !== parentRef.asset.id && (
+                    <button type="button" onClick={() => setWorkDialogAssetId(parentRef.asset.id)} className="icon-btn" aria-label="Use the parent task's asset" title="Use the parent task's asset"
+                      style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4, padding: "4px 6px", background: "none", border: "none", borderRadius: 6, fontSize: 12, color: C.brandDark, cursor: "pointer" }}><X size={13} color={C.muted} />Same as the parent task</button>
+                  )}
                   </div>
                   )}
             </>);
@@ -22949,8 +22958,12 @@ function TemplateEditor({ initial, assets, model, onSave, onDelete, onCancel }) 
   }, []);
   const set = patch => setDraft(d => ({ ...d, ...patch }));
   const setParent = patch => setDraft(d => ({ ...d, parent: { ...d.parent, ...patch } }));
+  // Which task's details are open, and the "new task" line being typed (a plain name, like a subtask).
+  const [openId, setOpenId] = useState("");
+  const [adding, setAdding] = useState(null);
   const setItem = (id, patch) => setDraft(d => ({ ...d, items: d.items.map(i => (i.id === id ? { ...i, ...patch } : i)) }));
-  const addItem = () => setDraft(d => ({ ...d, items: [...d.items, { id: crypto.randomUUID(), parentItemId: "", task: "", notes: "", taskType: "", owner: "", asset: "event", start: null, doOn: null, due: null }] }));
+  const addItem = (name, parentItemId) => setDraft(d => ({ ...d, items: [...d.items, { id: crypto.randomUUID(), parentItemId: parentItemId || "", task: name, notes: "", taskType: "", owner: "", asset: parentItemId ? "parent" : "event", start: null, doOn: null, due: null }] }));
+  const commitAdding = () => { if (adding && adding.name.trim()) addItem(adding.name.trim(), adding.parentItemId); setAdding(null); };
   // Removing an item takes the items under it up to the top level, rather than deleting them.
   const removeItem = id => setDraft(d => ({ ...d, items: d.items.filter(i => i.id !== id).map(i => (i.parentItemId === id ? { ...i, parentItemId: "" } : i)) }));
   const moveItem = (id, dir) => setDraft(d => {
@@ -23000,20 +23013,35 @@ function TemplateEditor({ initial, assets, model, onSave, onDelete, onCancel }) 
               <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
                 <span style={lbl}>Tasks under the event</span>
                 <HelpTip label="About template tasks" text="Each task can have a start date, a Scheduled for date and a due date, each worked out from the event's day: a number of days before or after it, or the nearest weekday before or after it. A task can sit inside another one here (a checklist item), one level deep." />
-                <button type="button" className="icon-btn" onClick={addItem} aria-label="Add task" title="Add task" style={{ ...iconBtn, marginLeft: "auto" }}><Plus size={16} color={C.brand} /></button>
+                <button type="button" className="icon-btn" onClick={() => { setOpenId(""); setAdding({ name: "", parentItemId: "" }); }} aria-label="Add task" title="Add task" style={{ ...iconBtn, marginLeft: "auto" }}><Plus size={16} color={C.brand} /></button>
               </div>
-              {draft.items.length === 0 && <div style={{ fontSize: 13, color: C.empty }}>No tasks yet.</div>}
-              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                {draft.items.map((it, idx) => {
+              {draft.items.length === 0 && !adding && <div style={{ fontSize: 13, color: C.empty }}>No tasks yet.</div>}
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {[...draft.items.filter(x => !x.parentItemId).flatMap(x => [x, ...draft.items.filter(y => y.parentItemId === x.id)]), ...draft.items.filter(x => x.parentItemId && !draft.items.some(y => y.id === x.parentItemId))].map(it => {
+                  const idx = draft.items.findIndex(x => x.id === it.id);
+                  const nested = !!it.parentItemId;
+                  const open = openId === it.id;
                   const hasKids = draft.items.some(x => x.parentItemId === it.id);
                   const parentOptions = ["", ...draft.items.filter(x => x.id !== it.id && !x.parentItemId).map(x => x.id)];
+                  const row = { display: "flex", alignItems: "center", gap: 4 };
                   return (
-                    <div key={it.id} data-template-item={it.id} style={{ border: `1.5px solid ${C.border}`, borderRadius: 10, padding: 12, background: C.bg, display: "flex", flexDirection: "column", gap: 8 }}>
+                    <React.Fragment key={it.id}>
+                    <div data-template-item={it.id} style={{ marginLeft: nested ? 20 : 0 }}>
+                      <div style={{ ...row, padding: "5px 0" }}>
+                        <button type="button" aria-expanded={open} onClick={() => setOpenId(open ? "" : it.id)}
+                          style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", padding: 0, textAlign: "left", fontSize: 14, color: it.task ? C.ink : C.placeholder, cursor: "pointer" }}>
+                          {open ? <ChevronDown size={14} color={C.muted} /> : <ChevronRight size={14} color={C.muted} />}
+                          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.task || "(untitled)"}</span>
+                        </button>
+                        {!nested && <button type="button" className="icon-btn" aria-label="Add subtask" title="Add subtask" onClick={() => { setOpenId(""); setAdding({ name: "", parentItemId: it.id }); }} style={iconBtn}><Plus size={14} color={C.brand} /></button>}
+                        <button type="button" className="icon-btn" aria-label={`Remove task ${idx + 1}`} title="Remove task" onClick={() => removeItem(it.id)} style={iconBtn}><Trash2 size={14} color={C.danger} /></button>
+                      </div>
+                      {open && (
+                    <div style={{ border: `1.5px solid ${C.border}`, borderRadius: 10, padding: 12, background: C.bg, display: "flex", flexDirection: "column", gap: 8, marginBottom: 6 }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                         <input value={it.task} onChange={e => setItem(it.id, { task: e.target.value })} aria-label={`Task ${idx + 1} name`} placeholder="Task name" style={{ ...input, flex: 1, minWidth: 0, fontWeight: 700 }} />
                         <button type="button" className="icon-btn" aria-label="Move task up" title="Move up" disabled={idx === 0} onClick={() => moveItem(it.id, -1)} style={{ ...iconBtn, opacity: idx === 0 ? 0.3 : 1 }}><ChevronUp size={14} color={C.muted} /></button>
                         <button type="button" className="icon-btn" aria-label="Move task down" title="Move down" disabled={idx === draft.items.length - 1} onClick={() => moveItem(it.id, 1)} style={{ ...iconBtn, opacity: idx === draft.items.length - 1 ? 0.3 : 1 }}><ChevronDown size={14} color={C.muted} /></button>
-                        <button type="button" className="icon-btn" aria-label={`Remove task ${idx + 1}`} title="Remove task" onClick={() => removeItem(it.id)} style={iconBtn}><Trash2 size={14} color={C.danger} /></button>
                       </div>
                       <textarea value={it.notes} onChange={e => setItem(it.id, { notes: e.target.value })} rows={2} aria-label={`Task ${idx + 1} description`} placeholder="Description" style={{ ...input, resize: "vertical", fontFamily: "inherit" }} />
                       <TemplateRuleRow label="Start date" rule={it.start} onChange={r => setItem(it.id, { start: r })} />
@@ -23022,7 +23050,7 @@ function TemplateEditor({ initial, assets, model, onSave, onDelete, onCancel }) 
                       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                         {!hasKids && parentOptions.length > 1 && (
                           <div style={{ width: 200 }}>
-                            <PickerField label="Inside" hideLabel value={it.parentItemId} onChange={v => setItem(it.id, { parentItemId: v })} options={parentOptions}
+                            <PickerField label="Inside" hideLabel value={it.parentItemId} onChange={v => setItem(it.id, { parentItemId: v, asset: v ? (it.asset === "event" ? "parent" : it.asset) : (it.asset === "parent" ? "event" : it.asset) })} options={parentOptions}
                               labelForOption={id => (id ? "Inside: " + ((draft.items.find(x => x.id === id) || {}).task || "(untitled)") : "Directly under the event")} title="Where this task sits" />
                           </div>
                         )}
@@ -23035,15 +23063,34 @@ function TemplateEditor({ initial, assets, model, onSave, onDelete, onCancel }) 
                       </div>
                       <div style={{ display: "flex", alignItems: "flex-end", gap: 4, flexWrap: "wrap" }}>
                         <div style={{ minWidth: 200, flex: "0 1 300px" }}>
-                          <AssetPickerField label="Asset" assets={assets} value={it.asset === "event" ? "" : it.asset} onChange={id => setItem(it.id, { asset: id })} allowNone hint="Where this task is done. By default it sits on the event's own asset." />
+                          <AssetPickerField label="Asset" assets={assets} value={it.asset === "event" || it.asset === "parent" ? "" : it.asset} onChange={id => setItem(it.id, { asset: id })} allowNone hint={nested ? "Where this task is done. By default it uses its parent task's asset." : "Where this task is done. By default it sits on the event's own asset."} />
                         </div>
-                        {it.asset !== "event"
-                          ? clearBtn("Same as the event", () => setItem(it.id, { asset: "event" }))
-                          : <span style={{ fontSize: 12, color: C.muted, paddingBottom: 9 }}>On the event's asset</span>}
+                        {it.asset !== "event" && it.asset !== "parent"
+                          ? clearBtn(nested ? "Same as the parent task" : "Same as the event", () => setItem(it.id, { asset: nested ? "parent" : "event" }))
+                          : <span style={{ fontSize: 12, color: C.muted, paddingBottom: 9 }}>{nested && it.asset === "parent" ? "On the parent task's asset" : "On the event's asset"}</span>}
                       </div>
                     </div>
+                      )}
+                    </div>
+                    {!nested && adding && adding.parentItemId === it.id && (
+                      <div style={{ ...row, padding: "4px 0", marginLeft: 20 }}>
+                      <input autoFocus value={adding.name} onChange={e => setAdding({ ...adding, name: e.target.value })}
+                        onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); commitAdding(); } if (e.key === "Escape") { e.stopPropagation(); setAdding(null); } }}
+                        onBlur={commitAdding} placeholder="New task name" aria-label="New task name"
+                        style={{ flex: 1, minWidth: 0, padding: "4px 8px", border: `1.5px solid ${C.brand}`, borderRadius: 8, fontSize: 14, color: C.ink, background: C.surface, fontFamily: "inherit" }} />
+                      </div>
+                    )}
+                    </React.Fragment>
                   );
                 })}
+                {adding && !adding.parentItemId && (
+                  <div style={{ ...row, padding: "4px 0" }}>
+                    <input autoFocus value={adding.name} onChange={e => setAdding({ ...adding, name: e.target.value })}
+                        onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); commitAdding(); } if (e.key === "Escape") { e.stopPropagation(); setAdding(null); } }}
+                        onBlur={commitAdding} placeholder="New task name" aria-label="New task name"
+                        style={{ flex: 1, minWidth: 0, padding: "4px 8px", border: `1.5px solid ${C.brand}`, borderRadius: 8, fontSize: 14, color: C.ink, background: C.surface, fontFamily: "inherit" }} />
+                  </div>
+                )}
               </div>
             </div>
           </div>
