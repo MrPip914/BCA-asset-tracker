@@ -1434,7 +1434,7 @@ const DEFAULT_WORK_TYPE_ID = "__default";
 const DEFAULT_WORK_TYPE_NAME = "Default";
 
 const WORK_BUILTIN_FIELDS = {
-  task: [{ key: "notes", label: "Notes" }, { key: "owner", label: "Owner" }],
+  task: [{ key: "notes", label: "Notes" }],
   work: [{ key: "vendor", label: "Vendor" }, { key: "cost", label: "Cost" }, { key: "task", label: "Linked task" }, { key: "note", label: "Details" }],
 };
 

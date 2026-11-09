@@ -1137,7 +1137,7 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   const model = {
     taskTypes: [{ id: "tt-insp", name: "Inspection" }],
     taskTypeSettings: {
-      "tt-insp": { fieldKeys: ["cf_result", "cf_count"], requiredFields: ["cf_result"], hiddenFields: ["owner"] },
+      "tt-insp": { fieldKeys: ["cf_result", "cf_count"], requiredFields: ["cf_result"], hiddenFields: ["notes"] },
     },
     taskFields: [
       { key: "cf_result", label: "Result", dataType: "select", options: ["Pass", "Fail"] },
@@ -1157,7 +1157,7 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   eq("task types: get_schema lists them, Default first", tw.tasks.types.map((t) => t.name), ["Default", "Inspection"]);
   check("task types: a type's custom fields, required, and switched-off built-ins",
     JSON.stringify(tw.tasks.types[1].customFields.map((f) => [f.label, f.dataType, !!f.required, f.choices])) === JSON.stringify([["Result", "select", true, ["Pass", "Fail"]], ["Count", "number", false, null]])
-    && tw.tasks.types[1].switchedOff.join() === "Owner", r.text);
+    && tw.tasks.types[1].switchedOff.join() === "Notes", r.text);
   const repair = tw.work.types.find((t) => t.name === "Repair");
   check("work types: a work type's fields and switched-off built-ins", repair.customFields[0].label === "Part number" && repair.switchedOff.join() === "Cost", r.text);
 
@@ -1179,8 +1179,8 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   check("add_task: an unknown custom field is refused, not dropped", r.isError && /no custom field/.test(r.text) && c.writes.length === 0, r.text);
   r = await call("add_task", { asset: "ms1", task: "Roof look", kind: "one-off", task_type: "Inspection", custom: { Result: "Pass", Count: "lots" } }, c);
   check("add_task: the data type is checked", r.isError && c.writes.length === 0, r.text);
-  r = await call("add_task", { asset: "ms1", task: "Roof look", kind: "one-off", task_type: "Inspection", owner: "Bob", custom: { Result: "Pass" } }, c);
-  check("add_task: a switched-off built-in is refused", r.isError && /Owner.{1,3} switched off/.test(r.text) && c.writes.length === 0, r.text);
+  r = await call("add_task", { asset: "ms1", task: "Roof look", kind: "one-off", task_type: "Inspection", notes: "Bob", custom: { Result: "Pass" } }, c);
+  check("add_task: a switched-off built-in is refused", r.isError && /Notes.{1,3} switched off/.test(r.text) && c.writes.length === 0, r.text);
   r = await call("add_task", { asset: "ms1", task: "Roof look", kind: "one-off", task_type: "Nope" }, c);
   check("add_task: an unknown task type lists the real ones", r.isError && /Default, Inspection/.test(r.text), r.text);
 
