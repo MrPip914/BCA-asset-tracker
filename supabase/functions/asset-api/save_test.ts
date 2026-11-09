@@ -332,6 +332,23 @@ if (!DATABASE_URL) {
     assertEquals((await read(sid)).assets.length, 0);
   });
 
+  Deno.test("emptying the templates list is refused unless confirmed, and a shrink is logged", async () => {
+    await reset();
+    const sid = await signIn();
+    const cfg = { _dirty: { assets: false, config: true, breakerTypes: false, photos: false } };
+    const mk = (n: number) => ({ list: Array.from({ length: n }, (_, i) => ({ id: "t" + i, name: "T" + i, parent: {}, items: [] })) });
+    let q = await read(sid);
+    assertEquals((await post(bodyFrom(q, sid, { ...cfg, taskTemplates: mk(2) }))).ok, true);
+    q = await read(sid);
+    const r = await post(bodyFrom(q, sid, { ...cfg, taskTemplates: { list: [] } }));
+    assertEquals([r.ok, r.refused], [false, "emptyLists"]);
+    assertEquals((await read(sid)).taskTemplates.list.length, 2);
+    assertEquals((await post(bodyFrom(q, sid, { ...cfg, taskTemplates: mk(1) }))).ok, true);
+    assertEquals((await diag()).at(-1).event, "list_shrunk");
+    q = await read(sid);
+    assertEquals((await post(bodyFrom(q, sid, { ...cfg, taskTemplates: { list: [] }, confirmEmptyLists: true }))).ok, true);
+  });
+
   Deno.test("an allowlist in a config save replaces the list and ends a removed person's sessions", async () => {
     await reset();
     const sid = await signIn();

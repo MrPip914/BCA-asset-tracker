@@ -203,6 +203,30 @@ export async function saveInventory(tx: Tx, body: Body, ctx: SaveContext): Promi
   // 4. In a full-overwrite save, "the client sent nothing" and "delete
   //    everything" are the same request -- the 2026-08-21 incident. Only the
   //    jump straight to zero, and confirmEmpty* says it was meant.
+  // 4b. The same jump to zero for the lists people author in Settings. A save
+  //     carries the client's whole copy of each, so a stale or half-loaded
+  //     client sends an empty list and wipes what someone else made. Emptying
+  //     one is refused unless the save says it was meant (confirmEmptyLists,
+  //     sent only by the delete buttons); any shrink is logged, so the next
+  //     disappearance names who saved it and from what count.
+  if (dirty.config) {
+    for (const k of ["taskTemplates", "views"]) {
+      const next = body[k] && typeof body[k] === "object" && Array.isArray(body[k].list) ? body[k].list.length : null;
+      if (next === null) continue;
+      const [row] = await tx`select value from config where key = ${k}`;
+      const had = row && row.value && Array.isArray(row.value.list) ? row.value.list.length : 0;
+      if (next >= had) continue;
+      if (next === 0 && body.confirmEmptyLists !== true) {
+        diag.push({ event: "refused", email: auth.email, reason: "emptyLists", detail: k + ": stored " + had + ", posted 0" });
+        return {
+          ok: false, refused: "emptyLists", list: k,
+          error: "Refused: this save would have deleted all " + had + (k === "views" ? " views" : " templates") + " at once. Nothing was changed. Reload and try again.",
+        };
+      }
+      diag.push({ event: "list_shrunk", email: auth.email, detail: k + ": stored " + had + ", posted " + next });
+    }
+  }
+
   const assets = Array.isArray(body.assets) ? body.assets : [];
   if (dirty.assets && !changes && assets.length === 0 && body.confirmEmptyAssets !== true) {
     const [{ n }] = await tx`select count(*)::int as n from assets`;
