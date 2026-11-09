@@ -870,7 +870,8 @@ Plan: `/mnt/project-files/plans/calendar-events.md` (Eric chose option A). A Sun
 - **The event model is MODULE STATE** (`applyEventModel`, called at the top of render like `applyPersonNameOrder`), so `taskIsEvent` works inside plain functions. **A `useMemo` that derives a status must list `workModel` as a dependency** (`allMaintenanceRows` does).
 - The floating + menus gain **Add event** once a task type completes as an event (opens Add task on that type).
 - Sandbox: `MOCK_SNAPSHOT.workModel` carries an "Event" type and the Sunday service template uses it.
-- Not built yet: the repeat picker on Schedule template (second PR), event times of day, event-aware connector tools (queued).
+- **Repeat weekly on Schedule template**: once a date is chosen the dialog offers "Repeat weekly for N more weeks" (1-52, default 8; `templateRepeatDays`), which appends the same weekday each week after the LATEST chosen date, skipping dates already there. Each date is still its own event stamped in the one save. No scheduler and no deterministic ids or skipped-dates record (the plan's optional extras): a re-run simply stamps again, as Schedule always did.
+- Not built yet: event times of day, a monthly ("first Sunday") repeat, event-aware connector tools (queued).
 - Covered by `test-frontend-events.js` (the helpers run for real, wiring read as source); driven in Chromium against Sandbox (Add event in the + menu, scheduling the template, badge unchanged by the event, the dialog showing no completion controls).
 
 ## Calendar view type (2026-10-28)

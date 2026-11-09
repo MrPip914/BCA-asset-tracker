@@ -7033,7 +7033,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-11-09.4";
+const APP_VERSION = "2026-11-09.5";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -23101,11 +23101,24 @@ function TemplateEditor({ initial, assets, model, onSave, onDelete, onCancel }) 
   );
 }
 
+// The weekly dates a repeat adds: the same weekday as `fromDay`, one a week for
+// `weeks` weeks (1-52), leaving out any already chosen. Dates only; Schedule
+// template still stamps one event per date, in one save.
+function templateRepeatDays(fromDay, weeks, chosen) {
+  const d = dateOnly(fromDay);
+  const n = Math.max(1, Math.min(52, Math.floor(Number(weeks)) || 0));
+  if (!d) return [];
+  const have = new Set(chosen || []);
+  const out = [];
+  for (let i = 1; i <= n; i++) { const day = calendarDayAdd(d, 7 * i); if (!have.has(day)) out.push(day); }
+  return out;
+}
 // "Schedule template": pick a template, one or several event dates and where the
 // event is held, and see what will be created before it is.
 function ScheduleTemplateDialog({ templates, assets, dialog, onChange, onRun, onClose }) {
   const tpl = templates.find(t => t.id === dialog.templateId) || null;
   const [dateKey, setDateKey] = useState(0);
+  const [repeatWeeks, setRepeatWeeks] = useState(8);
   const assetIds = new Set(assets.filter(a => (a.status || "Active") !== "Archived").map(a => a.id));
   const chosenAsset = assetIds.has(dialog.assetId) ? dialog.assetId : "";
   const days = [...dialog.days].sort();
@@ -23135,6 +23148,19 @@ function ScheduleTemplateDialog({ templates, assets, dialog, onChange, onRun, on
           <input key={dateKey} type="date" aria-label={days.length ? "Add another event date" : "Event date"}
             onChange={e => { const v = e.target.value; if (v && !dialog.days.includes(v)) { onChange({ ...dialog, days: [...dialog.days, v] }); setDateKey(k => k + 1); } }}
             style={{ padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, width: 180 }} />
+          {days.length > 0 && (
+            <div data-repeat-weekly style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: C.ink }}>
+              <span>Repeat weekly for</span>
+              <input type="number" min={1} max={52} value={repeatWeeks} aria-label="Weeks to repeat"
+                onChange={e => setRepeatWeeks(e.target.value === "" ? "" : Math.max(1, Math.min(52, Math.floor(Number(e.target.value)) || 1)))}
+                style={{ padding: "6px 8px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, width: 64 }} />
+              <span>more weeks</span>
+              <button type="button" className="icon-btn" aria-label={`Add the next ${repeatWeeks || 1} weeks after ${formatDateOnly(days[days.length - 1])}`} title="Add the weekly dates"
+                onClick={() => onChange({ ...dialog, days: [...dialog.days, ...templateRepeatDays(days[days.length - 1], repeatWeeks || 1, dialog.days)] })}
+                style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }}><Repeat size={16} color={C.brand} /></button>
+              <HelpTip label="About repeating" text="Adds the same weekday each week after the last date above, so every Sunday for eight weeks is one date plus eight weeks. Each date becomes its own event with its own tasks, which you can move or delete one at a time afterwards." />
+            </div>
+          )}
         </div>
         <AssetPickerField label="Where is the event?" assets={assets} value={chosenAsset} onChange={id => onChange({ ...dialog, assetId: id })} allowNone hint="The asset the event is held at. Tasks set to the event's asset go here too." />
         {preview.length > 0 && (
