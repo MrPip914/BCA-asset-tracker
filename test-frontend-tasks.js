@@ -174,13 +174,13 @@ check('the Status filter defaults to Open, not All statuses',
       /useState\(MAINTENANCE_STATUS_OPEN\)/.test(src),
       'a finished job must leave the triage view without being destroyed');
 check('"Open" is filtered as "not done", not matched as a status',
-      /maintenanceStatusFilter === MAINTENANCE_STATUS_OPEN[\s\S]{0,120}r\.status === "done"/.test(src));
+      /maintenanceStatusFilter === MAINTENANCE_STATUS_OPEN[\s\S]{0,120}taskStatusFinished\(r\.status\)/.test(src));
 
 // The badges. maintenanceOverdueTotal already excludes done by construction
 // (status is "done", not "overdue"), but the COUNTS beside the tab names have
 // to be filtered explicitly or they grow with every job ever finished.
 check('the top-level Tasks badge counts open rows only',
-      /allOpenMaintenanceRows = allMaintenanceRows\.filter\(r => r\.status !== "done"\)/.test(src));
+      /allOpenMaintenanceRows = allMaintenanceRows\.filter\(r => taskStatusCounts\(r\.status\)\)/.test(src));
 check('the detail Tasks badge counts open items only',
       /label: "Tasks", count: openMaintenanceItems\.length/.test(src));
 
@@ -283,7 +283,7 @@ check('the dialog serves both modes off the same save buttons',
 // there is no done flag to unset. Offering it while ADDING one would invite
 // logging a job as done in the act of creating it.
 check('a one-off being edited can be reopened by clearing its date',
-      /\{editing && vShow\(\"lastPerformed\"\) && \([\s\S]{0,1200}?Clear to reopen/.test(src));
+      /\{editing && vShow\(\"lastPerformed\"\) && (?:!taskIsEvent\(taskItem\) && )?\([\s\S]{0,1200}?Clear to reopen/.test(src));
 check('the reopen field is editing-only',
       src.split('Clear to reopen').length - 1 === 1);
 
