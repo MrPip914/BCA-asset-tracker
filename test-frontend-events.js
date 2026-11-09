@@ -61,7 +61,7 @@ check('the Tasks badge counts only work to do', /allOpenMaintenanceRows = allMai
 check('the done circle becomes a calendar mark for an event', /function TaskDoneCircle[\s\S]{0,300}taskIsEvent\(row\.item\)\) return <CalendarDays/.test(src));
 check('every completing door refuses an event', /toggleTaskDone\(row\) \{[\s\S]{0,200}taskIsEvent\(item\)/.test(src) && /async function completeTaskQuick[\s\S]{0,600}if \(taskIsEvent\(item\)\) return;/.test(src));
 check('dialog and card buttons are hidden for an event', (src.match(/if \(mode === "event"\) return null;/g) || []).length === 2);
-check('Add event is in both + menus', (src.match(/label: "Add event"/g) || []).length === 2);
+check('no Add event shortcut in the + menus', !/label: "Add event"/.test(src));
 check('the statuses are filterable and shown', /value: "event", label: "Event"/.test(src) && /past: \{ label: "Past"/.test(src));
 check('the connector copy of the status rule is untouched', !/taskIsEvent/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/mcp/from-app.js'), 'utf8')));
 console.log(`\n${pass} passed, ${fail} failed`);
