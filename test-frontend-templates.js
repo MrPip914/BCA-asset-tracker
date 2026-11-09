@@ -66,5 +66,11 @@ check('Edge Function keeps origin on a task', /TASK_EXTRA_KEYS = \[[^\]]*"origin
 check('Settings has a Templates section for editors', /key: "templates", label: "Templates"[^}]*editor: true/.test(src));
 check('Sandbox carries a template', /taskTemplates: \{ list: \[/.test(src));
 check('rescheduling an event offers the shift', /setShiftAsk\(/.test(src));
+// The editor crashed (blank screen) when the add line used `row`, declared inside the list's map.
+{
+  const body = src.slice(src.indexOf('function TemplateEditor('), src.indexOf('function ScheduleTemplateDialog'));
+  const decl = body.indexOf('const row = ');
+  check('TemplateEditor declares row at component scope, before the list map', decl > -1 && decl < body.indexOf('const inner = ') && (body.match(/const row = /g) || []).length === 1);
+}
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
