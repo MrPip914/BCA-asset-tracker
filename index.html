@@ -3233,7 +3233,7 @@ function calendarCanSchedule(row) {
 // Stored in the Config key `taskTemplates` = { list: [template] } (an object, as
 // for `views`, because the Edge Function keeps only optional keys that are).
 //   template = { id, name, taskType, parent: { task, notes, assetId },
-//                items: [{ id, parentItemId, task, notes, taskType, owner, asset, start, doOn, due }] }
+//                items: [{ id, parentItemId, task, notes, taskType, custom, owner, asset, start, doOn, due }] }
 //   asset: "event" (the event's own asset), "parent" (the asset of the task it sits inside) or an asset id.
 //   rule (start / doOn / due) = null
 //        | { kind: "days", n, dir: "before" | "after" }
@@ -3252,6 +3252,12 @@ function adoptTemplateRule(r) {
   }
   return null;
 }
+// A template task's custom field values: text by field key, nothing else.
+function adoptTemplateCustom(c) {
+  const out = {};
+  if (c && typeof c === "object" && !Array.isArray(c)) Object.keys(c).forEach(k => { if (typeof c[k] === "string" && c[k] !== "") out[k] = c[k]; });
+  return out;
+}
 function adoptTaskTemplates(raw) {
   const list = Array.isArray(raw && raw.list) ? raw.list : [];
   const str = v => (typeof v === "string" ? v : "");
@@ -3260,6 +3266,7 @@ function adoptTaskTemplates(raw) {
       const items = (Array.isArray(t.items) ? t.items : []).filter(i => i && typeof i.id === "string" && i.id).map(i => ({
         id: i.id, parentItemId: str(i.parentItemId), task: str(i.task), notes: str(i.notes), taskType: str(i.taskType), owner: str(i.owner),
         asset: str(i.asset) || "event", start: adoptTemplateRule(i.start), doOn: adoptTemplateRule(i.doOn), due: adoptTemplateRule(i.due),
+        custom: adoptTemplateCustom(i.custom),
       }));
       // A parent item must exist, not be the item itself, and not itself sit under another.
       const byId = new Map(items.map(i => [i.id, i]));
@@ -3268,7 +3275,7 @@ function adoptTaskTemplates(raw) {
         if (!p || p.id === i.id || p.parentItemId) i.parentItemId = "";
       });
       const par = t.parent && typeof t.parent === "object" ? t.parent : {};
-      return { id: t.id, name: String(t.name || "Untitled template"), taskType: str(t.taskType), parent: { task: str(par.task), notes: str(par.notes), assetId: str(par.assetId) }, items };
+      return { id: t.id, name: String(t.name || "Untitled template"), taskType: str(t.taskType), parent: { task: str(par.task), notes: str(par.notes), assetId: str(par.assetId), custom: adoptTemplateCustom(par.custom) }, items };
     }),
   };
 }
@@ -3309,7 +3316,7 @@ function stampTemplate(template, eventDay, eventAssetId, assetIds, stamp) {
   const newId = (stamp && stamp.newId) || (() => crypto.randomUUID());
   const parentId = newId();
   out.push({ assetId: eventAssetId, item: base(parentId, {
-    task: t.parent.task.trim() || t.name, notes: t.parent.notes, taskType: t.taskType, doOn: eventDay,
+    task: t.parent.task.trim() || t.name, notes: t.parent.notes, taskType: t.taskType, custom: { ...(t.parent.custom || {}) }, doOn: eventDay,
     origin: { templateId: t.id, itemId: "", runDate: eventDay },
   }) });
   const ids = new Map(t.items.map(i => [i.id, newId()]));
@@ -3322,7 +3329,7 @@ function stampTemplate(template, eventDay, eventAssetId, assetIds, stamp) {
     const assetId = i.asset === "parent" ? parentAsset : i.asset !== "event" && assetIds.has(i.asset) ? i.asset : eventAssetId;
     assetOf.set(i.id, assetId);
     out.push({ assetId, item: base(ids.get(i.id), {
-      task: i.task.trim() || "Untitled task", notes: i.notes, taskType: i.taskType, owner: i.owner,
+      task: i.task.trim() || "Untitled task", notes: i.notes, taskType: i.taskType, custom: { ...(i.custom || {}) }, owner: i.owner,
       startDate: resolveTemplateRule(i.start, eventDay), doOn: resolveTemplateRule(i.doOn, eventDay), dueDate: resolveTemplateRule(i.due, eventDay),
       parentTaskId: i.parentItemId ? ids.get(i.parentItemId) : parentId,
       origin: { templateId: t.id, itemId: i.id, runDate: eventDay },
@@ -7089,7 +7096,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-11-09.11";
+const APP_VERSION = "2026-11-09.12";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -22968,14 +22975,14 @@ function SettingsViewList({ views, arrange, nameFor, onEdit, onReorder }) {
 
 // One of a template item's three date rules: a mode picker, then the number of
 // days or the weekday that mode needs.
-function TemplateRuleRow({ label, rule, onChange }) {
+function TemplateRuleRow({ label, rule, onChange, stacked }) {
   const mode = templateRuleMode(rule);
   const modeLabel = m => ({ none: "Not set", before: "Days before the event", after: "Days after the event", preceding: "Weekday before the event", following: "Weekday after the event" }[m]);
   const numStyle = { width: 70, padding: "7px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink };
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-      <span style={{ width: 110, flexShrink: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>{label}</span>
-      <div style={{ width: 210 }}>
+    <div style={{ display: "flex", alignItems: stacked ? "stretch" : "center", flexDirection: stacked ? "column" : "row", gap: stacked ? 4 : 8, flexWrap: "wrap" }}>
+      <span style={{ width: stacked ? "auto" : 110, flexShrink: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent }}>{label}</span>
+      <div style={{ width: stacked ? "100%" : 210 }}>
         <PickerField label={label} hideLabel value={mode} onChange={m => onChange(templateRuleFrom(m, rule && rule.kind === "days" ? rule.n : 1, rule && rule.kind === "weekday" ? rule.weekday : 1))}
           options={TEMPLATE_RULE_MODES} labelForOption={modeLabel} title={label} />
       </div>
@@ -22983,7 +22990,7 @@ function TemplateRuleRow({ label, rule, onChange }) {
         <input type="number" min="0" aria-label={`${label}: number of days`} value={rule.n} onChange={e => onChange(templateRuleFrom(mode, e.target.value, 0))} style={numStyle} />
       )}
       {rule && rule.kind === "weekday" && (
-        <div style={{ width: 150 }}>
+        <div style={{ width: stacked ? "100%" : 150 }}>
           <PickerField label={`${label}: weekday`} hideLabel value={String(rule.weekday)} onChange={v => onChange(templateRuleFrom(mode, 0, v))}
             options={WEEKDAY_NAMES.map((_, i) => String(i))} labelForOption={k => WEEKDAY_NAMES[Number(k)] || k} title="Weekday" />
         </div>
@@ -23009,16 +23016,17 @@ function TemplateEditor({ initial, assets, model, onSave, onDelete, onCancel }) 
   const set = patch => setDraft(d => ({ ...d, ...patch }));
   const setParent = patch => setDraft(d => ({ ...d, parent: { ...d.parent, ...patch } }));
   // Which task is open in its own configuration view ("" = the template itself), and
-  // the "new task" line being typed (a plain name). Templates show a single level for
-  // now: a task nested under another (older data) is kept and still stamped when the
-  // template is scheduled, it just isn't listed here.
+  // the "new task" line being typed (a plain name). The template lists one level; a
+  // task's own view lists the subtasks under it (one level deeper, no further).
   const [openId, setOpenId] = useState("");
   const [adding, setAdding] = useState(null);
   const setItem = (id, patch) => setDraft(d => ({ ...d, items: d.items.map(i => (i.id === id ? { ...i, ...patch } : i)) }));
-  const addItem = name => setDraft(d => ({ ...d, items: [...d.items, { id: crypto.randomUUID(), parentItemId: "", task: name, notes: "", taskType: "", owner: "", asset: "event", start: null, doOn: null, due: null }] }));
+  const addItem = (name, parentItemId) => setDraft(d => ({ ...d, items: [...d.items, { id: crypto.randomUUID(), parentItemId: parentItemId || "", task: name, notes: "", taskType: "", custom: {}, owner: "", asset: parentItemId ? "parent" : "event", start: null, doOn: null, due: null }] }));
   const commitAdding = () => { if (adding && adding.trim()) addItem(adding.trim()); setAdding(null); };
+  const [addingSub, setAddingSub] = useState(null);
+  const commitAddingSub = parentId => { if (addingSub && addingSub.trim()) addItem(addingSub.trim(), parentId); setAddingSub(null); };
   // Removing a task removes anything nested under it too: it could no longer be reached here.
-  const removeItem = id => { setOpenId(""); setDraft(d => ({ ...d, items: d.items.filter(i => i.id !== id && i.parentItemId !== id) })); };
+  const removeItem = id => { setOpenId((draft.items.find(x => x.id === id) || {}).parentItemId || ""); setAddingSub(null); setDraft(d => ({ ...d, items: d.items.filter(i => i.id !== id && i.parentItemId !== id) })); };
   // Move among the tasks that are listed, so a hidden nested one is never swapped with.
   const moveItem = (id, dir) => setDraft(d => {
     const shown = d.items.filter(x => !x.parentItemId);
@@ -23052,15 +23060,17 @@ function TemplateEditor({ initial, assets, model, onSave, onDelete, onCancel }) 
           <DialogBreadcrumb label="Where this is" crumbs={[
             { label: initial ? "Template" : "New template", onClick: curItem ? () => setOpenId("") : undefined },
             { label: draft.name.trim() || "(untitled)", onClick: curItem ? () => setOpenId("") : undefined },
+            ...(curItem && curItem.parentItemId ? [(() => { const pr = draft.items.find(x => x.id === curItem.parentItemId); return { label: (pr && pr.task) || "(untitled)", onClick: () => setOpenId(curItem.parentItemId) }; })()] : []),
             ...(curItem ? [{ label: curItem.task || "(untitled)" }] : []),
           ]} />
           <button onClick={onCancel} aria-label="Close" className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
         </div>
-        {curItem ? (
-        <div data-template-task-dialog style={phone
-          ? { display: "flex", flexDirection: "column", gap: 14, flex: 1, minHeight: 0, overflowY: "auto", paddingBottom: 12 }
+        {curItem ? (<>
+        {phone && <PhonePagerTabs targetId="template-pager" />}
+        <div id={phone ? "template-pager" : undefined} data-template-task-dialog style={phone
+          ? { display: "flex", gap: 0, alignItems: "stretch", overflowX: "auto", overflowY: "hidden", scrollSnapType: "x mandatory", flex: 1, minHeight: 0, scrollbarWidth: "none", overscrollBehaviorX: "contain" }
           : { display: "flex", gap: 20, alignItems: "stretch", flexWrap: "wrap" }}>
-          <div style={{ flex: "1 1 300px", minWidth: 0 }}>
+          <div style={phone ? { flex: "0 0 100%", minWidth: 0, scrollSnapAlign: "start", overflowY: "auto", paddingBottom: 12, boxSizing: "border-box" } : { flex: "1 1 300px", minWidth: 0 }}>
             <div style={{ marginLeft: -8, marginBottom: 12 }}>
               <input className="task-name-input" value={curItem.task} onChange={e => setItem(curItem.id, { task: e.target.value })} aria-label="Task name" placeholder="Task name"
                 style={{ ...nameFont, width: "100%", boxSizing: "border-box", color: C.ink, background: "transparent", borderColor: curItem.task ? "transparent" : C.border }} />
@@ -23071,18 +23081,47 @@ function TemplateEditor({ initial, assets, model, onSave, onDelete, onCancel }) 
                 <span aria-hidden="true" style={{ position: "absolute", left: 8, top: 5, display: "flex", alignItems: "center", gap: 6, fontSize: 14, color: C.placeholder, pointerEvents: "none" }}><AlignLeft size={15} /> Description</span>
               )}
             </div>
-            <div style={{ paddingTop: 14, borderTop: `1px solid ${C.border}`, display: "flex", flexDirection: "column", gap: 10 }}>
-              <TemplateRuleRow label="Start date" rule={curItem.start} onChange={r => setItem(curItem.id, { start: r })} />
-              <TemplateRuleRow label="Scheduled for" rule={curItem.doOn} onChange={r => setItem(curItem.id, { doOn: r })} />
-              <TemplateRuleRow label="Due date" rule={curItem.due} onChange={r => setItem(curItem.id, { due: r })} />
-            </div>
+            {customFieldsFor(model, "task", curItem.taskType).length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 14 }}>
+                <CustomFieldInputs model={model} kind="task" typeId={curItem.taskType} values={curItem.custom} onChange={v => setItem(curItem.id, { custom: v })} />
+              </div>
+            )}
+            {!curItem.parentItemId && (
+              <div style={{ paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                  <span style={lbl}>Subtasks</span>
+                  <button type="button" className="icon-btn" onClick={() => setAddingSub("")} aria-label="Add subtask" title="Add subtask" style={{ ...iconBtn, marginLeft: "auto" }}><Plus size={16} color={C.brand} /></button>
+                </div>
+                {draft.items.filter(x => x.parentItemId === curItem.id).map(k => (
+                  <div key={k.id} data-template-item={k.id} style={{ ...row, padding: "5px 0" }}>
+                    <button type="button" onClick={() => setOpenId(k.id)} title="Open subtask"
+                      style={{ flex: 1, minWidth: 0, display: "flex", background: "none", border: "none", padding: 0, textAlign: "left", fontSize: 14, color: k.task ? C.ink : C.placeholder, cursor: "pointer" }}>
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{k.task || "(untitled)"}</span>
+                    </button>
+                    <button type="button" className="icon-btn" aria-label="Remove subtask" title="Remove subtask" onClick={() => setDraft(d => ({ ...d, items: d.items.filter(i => i.id !== k.id) }))} style={iconBtn}><Trash2 size={14} color={C.danger} /></button>
+                  </div>
+                ))}
+                {addingSub !== null && (
+                  <div style={{ ...row, padding: "4px 0" }}>
+                    <input autoFocus value={addingSub} onChange={e => setAddingSub(e.target.value)}
+                      onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); commitAddingSub(curItem.id); } if (e.key === "Escape") { e.stopPropagation(); setAddingSub(null); } }}
+                      onBlur={() => commitAddingSub(curItem.id)} placeholder="New subtask name" aria-label="New subtask name"
+                      style={{ flex: 1, minWidth: 0, padding: "4px 8px", border: `1.5px solid ${C.brand}`, borderRadius: 8, fontSize: 14, color: C.ink, background: C.surface, fontFamily: "inherit" }} />
+                  </div>
+                )}
+                {!draft.items.some(x => x.parentItemId === curItem.id) && addingSub === null && <div style={{ fontSize: 13, color: C.empty }}>No subtasks.</div>}
+              </div>
+            )}
           </div>
           <SidebarCtx.Provider value={true}>
             <div className="task-side" style={phone
-              ? { display: "flex", flexDirection: "column", gap: 14 }
+              ? { flex: "0 0 100%", minWidth: 0, scrollSnapAlign: "start", overflowY: "auto", paddingBottom: 12, boxSizing: "border-box", paddingLeft: 2, paddingRight: 2, display: "flex", flexDirection: "column", gap: 14 }
               : { flex: "0 0 230px", width: 230, maxWidth: "100%", boxSizing: "border-box", borderLeft: `1px solid ${C.border}`, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 14 }}>
+              <TemplateRuleRow stacked label="Start date" rule={curItem.start} onChange={r => setItem(curItem.id, { start: r })} />
+              <TemplateRuleRow stacked label="Scheduled for" rule={curItem.doOn} onChange={r => setItem(curItem.id, { doOn: r })} />
+              <TemplateRuleRow stacked label="Due date" rule={curItem.due} onChange={r => setItem(curItem.id, { due: r })} />
               {(() => {
-                // A task nested under another (older data) keeps its "parent" sentinel and resolves through that task.
+                // A subtask keeps its "parent" sentinel and resolves through the task it sits under.
                 const nested = !!curItem.parentItemId;
                 const pit = nested ? draft.items.find(x => x.id === curItem.parentItemId) : null;
                 const baseId = nested ? (pit && pit.asset !== "event" && pit.asset !== "parent" ? pit.asset : draft.parent.assetId) : draft.parent.assetId;
@@ -23097,6 +23136,7 @@ function TemplateEditor({ initial, assets, model, onSave, onDelete, onCancel }) 
             </div>
           </SidebarCtx.Provider>
         </div>
+        </>
         ) : (<>
         {phone && <PhonePagerTabs targetId="template-pager" />}
         <div id={phone ? "template-pager" : undefined} style={phone
@@ -23117,7 +23157,7 @@ function TemplateEditor({ initial, assets, model, onSave, onDelete, onCancel }) 
             <div style={{ paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
                 <span style={lbl}>Event tasks</span>
-                <HelpTip label="About event tasks" text="The tasks scheduling this template creates under the event. Tap one to set its dates, each worked out from the event's day: a number of days before or after it, or the nearest weekday before or after it." />
+                <HelpTip label="About event tasks" text="The tasks scheduling this template creates under the event. Tap one to set its dates and subtasks, each date worked out from the event's day: a number of days before or after it, or the nearest weekday before or after it." />
                 <button type="button" className="icon-btn" onClick={() => setAdding("")} aria-label="Add task" title="Add task" style={{ ...iconBtn, marginLeft: "auto" }}><Plus size={16} color={C.brand} /></button>
               </div>
               {shownItems.length === 0 && adding === null && <div style={{ fontSize: 13, color: C.empty }}>No tasks yet.</div>}
@@ -23158,6 +23198,9 @@ function TemplateEditor({ initial, assets, model, onSave, onDelete, onCancel }) 
               {taskTypeIds.length > 0 && (
                 <PickerField label="Type" value={draft.taskType} onChange={v => set({ taskType: v })} options={typeOptions} labelForOption={typeLabel} title="Task type" />
               )}
+              {customFieldsFor(model, "task", draft.taskType).length > 0 && (
+                <CustomFieldInputs model={model} kind="task" typeId={draft.taskType} values={draft.parent.custom} onChange={v => setParent({ custom: v })} />
+              )}
               <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                 <span style={{ ...lbl, display: "flex", alignItems: "center", gap: 4 }}>
                   Event task name
@@ -23176,7 +23219,7 @@ function TemplateEditor({ initial, assets, model, onSave, onDelete, onCancel }) 
           {curItem && (
             <>
               <button onClick={() => removeItem(curItem.id)} aria-label="Remove task" title="Remove task" className="icon-btn" style={{ marginRight: "auto", padding: 8, background: "transparent", border: "none", borderRadius: 10, color: C.danger, cursor: "pointer" }}><Trash2 size={16} /></button>
-              <button onClick={() => setOpenId("")} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Back to template</button>
+              <button onClick={() => setOpenId(curItem.parentItemId || "")} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>{curItem.parentItemId ? "Back to task" : "Back to template"}</button>
             </>
           )}
           {!curItem && initial && !confirmDelete && (
