@@ -22,7 +22,9 @@ const H = new Function([
   fn('maintenanceStatusOf'),
   cst('TASK_COMPLETION_MODES'), fn('taskCompletionMode'), fn('setTaskCompletionMode'),
   'let EVENT_MODEL = null;', fn('applyEventModel'), fn('taskIsEvent'), fn('taskEventEnd'), fn('taskStatusFinished'), fn('taskStatusCounts'), fn('taskStatusOf'),
-  'return { taskStatusOf, taskIsEvent, applyEventModel, taskEventEnd, taskStatusFinished, taskStatusCounts, taskCompletionMode, setTaskCompletionMode, TASK_COMPLETION_MODES };',
+  'function calendarDayAdd(day, n) { const d = new Date(day + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }',
+  fn('templateRepeatDays'),
+  'return { templateRepeatDays, taskStatusOf, taskIsEvent, applyEventModel, taskEventEnd, taskStatusFinished, taskStatusCounts, taskCompletionMode, setTaskCompletionMode, TASK_COMPLETION_MODES };',
 ].join('\n'));
 let H1;
 try { H1 = H(); } catch (e) { console.log('FAIL  could not slice helpers: ' + e.message); process.exit(1); }
@@ -43,6 +45,12 @@ check('past events are finished, upcoming ones are open but not counted', H1.tas
 H1.applyEventModel({ taskTypeSettings: {} });
 check('switching the type back makes it an ordinary task again', H1.taskStatusOf(ev({ dueDate: '2020-01-01' })) === 'overdue');
 check('setTaskCompletionMode stores and clears event', H1.setTaskCompletionMode({ taskTypeSettings: {} }, 't', 'event').taskTypeSettings.t.completion === 'event' && !('completion' in H1.setTaskCompletionMode(model, 'ev', 'required').taskTypeSettings.ev));
+
+// Repeat weekly
+check('repeat adds one date a week on the same weekday', JSON.stringify(H1.templateRepeatDays('2026-11-15', 3, ['2026-11-15'])) === '["2026-11-22","2026-11-29","2026-12-06"]');
+check('repeat skips dates already chosen', JSON.stringify(H1.templateRepeatDays('2026-11-15', 2, ['2026-11-15', '2026-11-22'])) === '["2026-11-29"]');
+check('repeat is capped at 52 weeks and at least 1', H1.templateRepeatDays('2026-11-15', 500, []).length === 52 && H1.templateRepeatDays('2026-11-15', 0, []).length === 1 && H1.templateRepeatDays('', 4, []).length === 0);
+check('the dialog offers the repeat from the latest date', /templateRepeatDays\(days\[days\.length - 1\], repeatWeeks \|\| 1, dialog\.days\)/.test(src) && /data-repeat-weekly/.test(src));
 
 // Wiring
 check('adoptWorkModel keeps the event mode', /st\.completion === "simple" \|\| st\.completion === "event"/.test(src));
