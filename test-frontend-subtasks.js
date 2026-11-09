@@ -45,5 +45,6 @@ check('both completion paths reset a repeating parent', (src.match(/resetSubtask
 check('completing asks when subtasks are open', /guardComplete\(maintenanceModal\.itemId/.test(src) && /guardComplete\(item\.id/.test(src) && /Complete anyway/.test(src));
 check('Parent task is a view field', /key: "parent", label: "Parent task"/.test(src) && /case "parent":/.test(src));
 check('the Supabase save keeps parentTaskId', /"parentTaskId"/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api/save-shape.ts'), 'utf8')));
+check('Kanban card shows a done/total subtask counter only when there are subtasks', /data-subtask-counter/.test(src) && /taskProgressOf\(ctx\.assets, r\.item\.id\)/.test(src) && /!prog\.total\) return null/.test(src) && /<ListChecks size=\{13\}/.test(src));
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
