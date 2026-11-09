@@ -27,6 +27,7 @@ function sliceFn(name) {
 const ctx = new Function(`
   const isPlaceType = t => t === "Building" || t === "Room";
   const maintenanceStatusOf = it => it.status;
+  const taskStatusOf = it => it.status;
   const taskDueDate = it => it.due ? new Date(it.due) : null;
   const changePerformedOn = ch => ch.performedOn || "";
   function ancestorsOf(a, assets) {
@@ -35,6 +36,7 @@ const ctx = new Function(`
     return out;
   }
   ${sliceFn('descendantsOf')}
+  ${sliceFn('taskStatusFinished')}
   ${sliceFn('maintenanceSortKey')}
   ${sliceFn('mapScopeAssets')}
   ${sliceFn('isOneOffTask')}

@@ -1961,18 +1961,20 @@ function setWorkBuiltinShown(model, kind, typeId, key, on) {
 }
 // How completing a task of a type works. "required" is today's completion form
 // (a work entry is written); "optional" completes in one tap and leaves Log work
-// as a separate choice; "simple" is a checkbox that never writes a work entry.
+// as a separate choice; "simple" is a checkbox that never writes a work entry;
+// "event" (2026-11-09) is not completed at all: see taskIsEvent.
 // Stored as `completion` on taskTypeSettings[typeId]; absent reads "required", so
 // every existing type is unchanged until someone switches it.
 const TASK_COMPLETION_MODES = [
   { value: "required", label: "Log work required" },
   { value: "optional", label: "Log work optional" },
   { value: "simple", label: "Checkbox only" },
+  { value: "event", label: "Event (never completed)" },
 ];
 function taskCompletionMode(model, typeId) {
   const st = workModelParts(model, "task").settings[resolveWorkTypeId(model, "task", typeId)];
   const c = st && st.completion;
-  return c === "optional" || c === "simple" ? c : "required";
+  return c === "optional" || c === "simple" || c === "event" ? c : "required";
 }
 // Which work type the completion form opens on, for a type whose completing
 // records work. Stored as `completionWorkType` (a work type NAME) on the same
@@ -1989,7 +1991,7 @@ function setTaskCompletionWorkType(model, typeId, name) {
 function setTaskCompletionMode(model, typeId, mode) {
   const cur = (model.taskTypeSettings || {})[typeId] || { fieldKeys: [], requiredFields: [], hiddenFields: [] };
   const { completion, ...rest } = cur; // completionWorkType rides along in rest
-  return { ...model, taskTypeSettings: { ...(model.taskTypeSettings || {}), [typeId]: mode === "optional" || mode === "simple" ? { ...rest, completion: mode } : rest } };
+  return { ...model, taskTypeSettings: { ...(model.taskTypeSettings || {}), [typeId]: mode === "optional" || mode === "simple" || mode === "event" ? { ...rest, completion: mode } : rest } };
 }
 function adoptWorkModel(raw) {
   const m = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
@@ -2004,7 +2006,7 @@ function adoptWorkModel(raw) {
   const settings = v => {
     const out = {};
     Object.entries(obj(v)).forEach(([id, st]) => {
-      out[id] = { fieldKeys: list(st && st.fieldKeys).map(String), requiredFields: list(st && st.requiredFields).map(String), hiddenFields: list(st && st.hiddenFields).map(String), ...(st && (st.completion === "optional" || st.completion === "simple") ? { completion: st.completion } : {}), ...(st && typeof st.completionWorkType === "string" && st.completionWorkType ? { completionWorkType: st.completionWorkType } : {}) };
+      out[id] = { fieldKeys: list(st && st.fieldKeys).map(String), requiredFields: list(st && st.requiredFields).map(String), hiddenFields: list(st && st.hiddenFields).map(String), ...(st && (st.completion === "optional" || st.completion === "simple" || st.completion === "event") ? { completion: st.completion } : {}), ...(st && typeof st.completionWorkType === "string" && st.completionWorkType ? { completionWorkType: st.completionWorkType } : {}) };
     });
     return out;
   };
@@ -2218,6 +2220,8 @@ const MAINTENANCE_STATUS_FILTER_OPTIONS = [
   { value: "never", label: "Never done" },
   { value: "undated", label: "No date" },
   { value: "upcoming", label: "Upcoming" },
+  { value: "event", label: "Event" },
+  { value: "past", label: "Past event" },
   { value: "done", label: "Done" },
 ];
 // The Kind filter, which is what separates the two kinds of task inside ONE
@@ -2397,6 +2401,27 @@ function isOneOffTask(item) { return taskKindOf(item) === TASK_KIND_ONEOFF; }
 function taskIsDone(item) {
   return isOneOffTask(item) && !!dateOnly(item && item.lastPerformed);
 }
+// EVENTS (2026-11-09). A task whose type completes as "event" is a calendar
+// item with tasks under it (a Sunday service): it has no done circle, is never
+// done or overdue, and stays out of the open counts. Its status is "event"
+// until the last of its dates has passed, then "past". The type settings are
+// module state, mirrored from React state at the top of AssetTracker's render
+// (applyEventModel), the way PERSON_NAME_ORDER is; a useMemo that derives a
+// status must list workModel as a dependency.
+let EVENT_MODEL = null;
+function applyEventModel(model) { EVENT_MODEL = model || null; }
+function taskIsEvent(item) {
+  return !!item && !!EVENT_MODEL && taskCompletionMode(EVENT_MODEL, item.taskType) === "event";
+}
+// The last day an event occupies: the latest of its start, scheduled and due dates.
+function taskEventEnd(item) {
+  const days = ["startDate", "doOn", "dueDate"].map(k => dateOnly(item && item[k])).filter(Boolean).sort();
+  return days.length ? days[days.length - 1] : "";
+}
+// Statuses an item can no longer need attention in: a finished task or a past event.
+function taskStatusFinished(status) { return status === "done" || status === "past"; }
+// Statuses that count toward the Tasks badge: only work that is still to do.
+function taskStatusCounts(status) { return !taskStatusFinished(status) && status !== "event"; }
 // Work entries logged against a task (change.maintenanceId), and the ones that
 // ARE its completion: same performed date as the task's completed date. The
 // reference lives on the change only, so this scans the asset's changes.
@@ -2654,6 +2679,16 @@ function maintenanceStatusOf(item) {
   if (daysUntil <= 14) return "due-soon";
   return "ok";
 }
+// The status the app shows: maintenanceStatusOf plus the two event statuses.
+// Kept apart from maintenanceStatusOf because that function is copied verbatim
+// into the connector (from-app.js), which does not know events yet.
+function taskStatusOf(item) {
+  if (taskIsEvent(item)) {
+    const end = taskEventEnd(item);
+    return end && end < localDateString(new Date()) ? "past" : "event";
+  }
+  return maintenanceStatusOf(item);
+}
 // How the two lists order themselves when nobody has picked a column sort.
 //
 // A NULL DUE DATE MEANS TWO OPPOSITE THINGS, which is why this is a named
@@ -2663,7 +2698,7 @@ function maintenanceStatusOf(item) {
 // undated one-off, which would otherwise sit above everything actually overdue.
 // Done sinks below both.
 function maintenanceSortKey(row) {
-  if (row.status === "done") return Number.MAX_SAFE_INTEGER;
+  if (row.status === "done" || row.status === "past") return Number.MAX_SAFE_INTEGER;
   if (row.status === "never") return -Infinity;
   if (!row.due) return Number.MAX_SAFE_INTEGER - 1;
   return row.due.getTime();
@@ -2679,6 +2714,8 @@ function maintenanceStatusMeta(status) {
     never: { label: "Not yet done", color: C.muted },
     undated: { label: "No date", color: C.muted },
     upcoming: { label: "Upcoming", color: C.muted },
+    event: { label: "Event", color: C.brand },
+    past: { label: "Past", color: C.muted },
     done: { label: "Done", color: C.success },
   }[status] || { label: status || "", color: C.muted };
 }
@@ -2839,8 +2876,8 @@ function viewBuiltinBoardSource(view, model) {
     options = [{ id: "scheduled", name: "Scheduled" }, { id: "oneoff", name: "One-off" }];
     valueOf = item => (isOneOffTask(item) ? "oneoff" : "scheduled");
   } else {
-    options = ["overdue", "due-soon", "ok", "never", "undated", "upcoming", "done"].map(id => ({ id, name: maintenanceStatusMeta(id).label }));
-    valueOf = item => maintenanceStatusOf(item);
+    options = ["overdue", "due-soon", "ok", "never", "undated", "upcoming", "event", "past", "done"].map(id => ({ id, name: maintenanceStatusMeta(id).label }));
+    valueOf = item => taskStatusOf(item);
   }
   return { key: view.fieldKey, label: def.label, builtin: def.key, writable: def.writable, options, valueOf };
 }
@@ -5106,7 +5143,7 @@ function mapTaskRows(scopeAssets) {
   const hiddenIds = recurringConfigIds(scopeAssets);
   (scopeAssets || []).forEach(a => (a.maintenanceItems || []).forEach(item => {
     if (!item || taskIsHidden(item, hiddenIds)) return;
-    rows.push({ asset: a, item, status: maintenanceStatusOf(item), due: taskDueDate(item) });
+    rows.push({ asset: a, item, status: taskStatusOf(item), due: taskDueDate(item) });
   }));
   rows.sort((x, y) => maintenanceSortKey(x) - maintenanceSortKey(y));
   return rows;
@@ -5350,8 +5387,8 @@ function MapWorkList({ mode, scopeAssets, typesList, onOpenTask, onOpenWork, sin
   if (mode === "tasks") {
     const all = mapTaskRows(scopeAssets).filter(r => mapListFilterMatches("tasks", active, r, now) && taskMatchesSearch(r, assets || [], typesList, q));
     const byStatus = !!active.status;
-    const done = byStatus ? [] : all.filter(r => r.status === "done");
-    const open = byStatus ? all : all.filter(r => r.status !== "done");
+    const done = byStatus ? [] : all.filter(r => taskStatusFinished(r.status));
+    const open = byStatus ? all : all.filter(r => !taskStatusFinished(r.status));
     const shown = showDone ? all : open;
     return (
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -6995,7 +7032,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-11-09.3";
+const APP_VERSION = "2026-11-09.4";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -8214,8 +8251,11 @@ const MOCK_SNAPSHOT = {
   ],
   // One event template, so Sandbox can schedule it (Settings > Templates, or the
   // + menu). Rules cover days before/after and a weekday before the event.
+  // An "Event" task type (completes as an event) so Sandbox shows an item with
+  // tasks that is never checked off.
+  workModel: { taskTypes: [{ id: "tt-event", name: "Event" }], taskTypeSettings: { "tt-event": { fieldKeys: [], requiredFields: [], hiddenFields: [], completion: "event" } }, taskFields: [], workTypeSettings: {}, workFields: [] },
   taskTemplates: { list: [
-    { id: "tpl-service", name: "Sunday service", taskType: "", parent: { task: "Sunday service", notes: "", assetId: "" }, items: [
+    { id: "tpl-service", name: "Sunday service", taskType: "tt-event", parent: { task: "Sunday service", notes: "", assetId: "" }, items: [
       { id: "ti-1", parentItemId: "", task: "Set up the room", notes: "", taskType: "", owner: "", asset: "event", start: null, doOn: { kind: "days", n: 1, dir: "before" }, due: { kind: "days", n: 0, dir: "before" } },
       { id: "ti-2", parentItemId: "ti-1", task: "Test the microphones", notes: "", taskType: "", owner: "", asset: "event", start: null, doOn: { kind: "weekday", weekday: 5, which: "preceding" }, due: null },
       { id: "ti-3", parentItemId: "", task: "Tear down", notes: "", taskType: "", owner: "", asset: "event", start: null, doOn: { kind: "days", n: 0, dir: "after" }, due: { kind: "days", n: 1, dir: "after" } },
@@ -9558,6 +9598,7 @@ function AssetTracker() {
   const [personNameOrder, setPersonNameOrder] = useState(readStoredNameOrder);
   const [showNameOrderPicker, setShowNameOrderPicker] = useState(false);
   applyPersonNameOrder(personNameOrder);
+  applyEventModel(workModel);
   function chooseNameOrder(order) {
     setPersonNameOrder(order);
     // Per-device, like column visibility: never persisted through persist(), so
@@ -11069,17 +11110,17 @@ function AssetTracker() {
       const assetName = nameOf(a);
       (a.maintenanceItems || []).forEach(item => {
         if (taskIsHidden(item, hiddenIds)) return;
-        rows.push({ asset: a, assetName, item, status: maintenanceStatusOf(item), due: taskDueDate(item) });
+        rows.push({ asset: a, assetName, item, status: taskStatusOf(item), due: taskDueDate(item) });
       });
     });
     return rows;
     // personNameOrder: assetName is composed, so a person's row would keep the
     // previous order's spelling until `assets` itself changed.
-  }, [assets, personNameOrder]);
+  }, [assets, personNameOrder, workModel]);
   const maintenanceOverdueTotal = allMaintenanceRows.filter(r => r.status === "overdue").length;
   // The top-level Tasks badge counts what is OPEN. A count that grew with every
   // finished job would stop answering the only question a badge is for.
-  const allOpenMaintenanceRows = allMaintenanceRows.filter(r => r.status !== "done");
+  const allOpenMaintenanceRows = allMaintenanceRows.filter(r => taskStatusCounts(r.status));
 
   // ---- Views: the ones this person is assigned (Sandbox has no sign-in, so it
   // shows them all), the open one, and its tasks. [CURRENT USERNAME] is the
@@ -11382,7 +11423,7 @@ function AssetTracker() {
       // "Open" is not a status -- it is every status but done, and it is the
       // default so a finished job leaves the triage view without being deleted.
       if (maintenanceStatusFilter === MAINTENANCE_STATUS_OPEN) {
-        if (r.status === "done") return false;
+        if (taskStatusFinished(r.status)) return false;
       } else if (maintenanceStatusFilter !== "All statuses" && r.status !== maintenanceStatusFilter) return false;
       if (maintenanceKindFilter !== "All kinds" && taskKindOf(r.item) !== maintenanceKindFilter) return false;
       if (maintenanceFrequencyFilter !== "All frequencies" && r.item.frequencyLabel !== maintenanceFrequencyFilter) return false;
@@ -13396,11 +13437,14 @@ function AssetTracker() {
   // the next dialog -- the same reason entering breaker edit mode reseeds.
   // Both openers take an explicit asset id. The detail view passes none and
   // gets the open asset; the site-wide tab passes the one just picked.
-  function openMaintenanceAdd(assetId) {
+  // The first task type that completes as an event, for "Add event".
+  function firstEventType() { return ((workModel.taskTypes || []).find(t => taskCompletionMode(workModel, t.id) === "event") || {}).id || ""; }
+  function openMaintenanceAdd(assetId, taskType) {
     setWorkDialogAssetId(assetId === undefined ? null : assetId);
     // Minted on OPEN so a photo can name this schedule while the form is still
     // being filled in -- the same rule openChangeAdd follows.
     setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [], parentTaskId: "", blockedBy: [] });
+    if (taskType) setMaintenanceDraft(d => ({ ...d, taskType }));
     setMaintenanceModal({ mode: "add" });
   }
 
@@ -13781,6 +13825,7 @@ function AssetTracker() {
     const items = target.maintenanceItems || [];
     const item = items.find(m => m && m.id === itemId);
     if (!item) return;
+    if (taskIsEvent(item)) return; // an event is never completed
     const date = localDateString();
     const nextItems = items.map(it => (it && it.id === itemId ? { ...it, lastPerformed: date } : it));
     const entry = {
@@ -13833,6 +13878,7 @@ function AssetTracker() {
   // about open subtasks and blockers. The task dialog, if open, stays open.
   function toggleTaskDone(row) {
     const item = row.item;
+    if (taskIsEvent(item)) { setNotice("An event is never completed. Its tasks are what get checked off."); return; }
     const assetId = row.asset.id;
     if (isOneOffTask(item) && taskIsDone(item)) {
       const work = taskCompletionWork(row.asset, item);
@@ -17561,7 +17607,7 @@ function AssetTracker() {
             // A Custom frequency must describe a real rule before Save lights.
             const maintenanceFrequencyOk = maintenanceDraft.kind === TASK_KIND_ONEOFF || !!frequencyFromDraft(maintenanceDraft);
             const taskCustomError = validateCustomValues(workModel, "task", maintenanceDraft.taskType, maintenanceDraft.custom, viewVisibleCustomKeys(dialogView));
-            const taskStatusMeta = taskItem ? maintenanceStatusMeta(maintenanceStatusOf(taskItem)) : null;
+            const taskStatusMeta = taskItem ? maintenanceStatusMeta(taskStatusOf(taskItem)) : null;
             // The done circle lives in the dialog only when the view asked for it
             // (it replaces the Mark done / Log work buttons then). Dialogs opened
             // anywhere else keep their buttons.
@@ -17904,7 +17950,7 @@ function AssetTracker() {
                         flag to unset -- the date is the whole of "is this
                         done" -- so the field that records the completion is
                         also the control that undoes it. */}
-                    {editing && vShow("lastPerformed") && (
+                    {editing && vShow("lastPerformed") && !taskIsEvent(taskItem) && (
                     isPhone ? (
 <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                       <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, display: "flex", alignItems: "center", gap: 4 }}>Completed{!isPhone && <HelpTip label="About Completed" text="Clear this date to reopen a finished task." size={12} />}</span>
@@ -18214,6 +18260,7 @@ function AssetTracker() {
                       that happens once. */}
                   {isPhone && editing && !taskDone && (!viewReadOnly || canEdit) && !doneRow && (() => {
                     const mode = taskCompletionMode(workModel, maintenanceDraft.taskType);
+                    if (mode === "event") return null;
                     const btn = { padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brand}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.brand };
                     return (
                       <>
@@ -18703,7 +18750,7 @@ function AssetTracker() {
       .map(item => ({ item, open: recurringOpenInstance(assets, item.id) }));
     const maintenanceItems = (selectedAsset.maintenanceItems || [])
       .filter(item => !taskIsHidden(item, hiddenTaskIds))
-      .map(item => ({ item, status: maintenanceStatusOf(item), due: taskDueDate(item) }))
+      .map(item => ({ item, status: taskStatusOf(item), due: taskDueDate(item) }))
       .sort((a, b) => maintenanceSortKey(a) - maintenanceSortKey(b));
     const overdueMaintenanceCount = maintenanceItems.filter(m => m.status === "overdue").length;
     // The detail list has no status filter (it is cards, not a table), so this
@@ -18711,8 +18758,9 @@ function AssetTracker() {
     // forever. Hidden by default, counted so they are never merely gone, and
     // the tab's own badge counts what is OPEN -- a count that included finished
     // work would stop answering "is there anything I have to do".
-    const doneMaintenanceItems = maintenanceItems.filter(m => m.status === "done");
-    const openMaintenanceItems = maintenanceItems.filter(m => m.status !== "done");
+    const doneMaintenanceItems = maintenanceItems.filter(m => taskStatusFinished(m.status));
+    const openMaintenanceItems = maintenanceItems.filter(m => !taskStatusFinished(m.status));
+    const countedMaintenanceItems = maintenanceItems.filter(m => taskStatusCounts(m.status));
     const shownMaintenanceItems = showCompletedTasks ? maintenanceItems : openMaintenanceItems;
     // The header prints selectedAsset.tag immediately to the left of this, so
     // the name only earns a spot here when it's actually a name — nameOf() falls
@@ -19396,7 +19444,7 @@ function AssetTracker() {
           {detailTab === "maintenance" && (
             <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
               {[
-                { key: "scheduled", label: "Open", count: openMaintenanceItems.length, urgent: overdueMaintenanceCount > 0 },
+                { key: "scheduled", label: "Open", count: countedMaintenanceItems.length, urgent: overdueMaintenanceCount > 0 },
                 { key: "history", label: "History", count: changeEntries.length },
               ].map(st => {
                 const active = maintenanceSubTab === st.key;
@@ -19501,7 +19549,7 @@ function AssetTracker() {
                           <span style={{ fontWeight: 700, fontSize: 13, color: C.brandDark }}>{item.task}{taskTypeNameOf(workModel, item.taskType) && <span style={{ fontWeight: 500, color: C.muted }}> · {taskTypeNameOf(workModel, item.taskType)}</span>}</span>
                           <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
                             <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: statusMeta.color }}>
-                              {statusMeta.label}
+                              {statusMeta.label}{taskIsEvent(item) && (() => { const kids = taskChildrenOf(assets, item.id); return kids.length ? ` · ${kids.filter(k => taskIsDone(k.item)).length} of ${kids.length} done` : ""; })()}
                             </span>
                             {canEdit && (
                             <>
@@ -19585,6 +19633,7 @@ function AssetTracker() {
                                     form, which is audited like any field. */}
                                 {canEdit && !done && (() => {
                                   const mode = taskCompletionMode(workModel, item.taskType);
+                                  if (mode === "event") return null;
                                   const btn = { padding: "6px 12px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 12 };
                                   return (
                                     <>
@@ -20433,6 +20482,7 @@ function AssetTracker() {
                   {[
                     { label: "Add asset", run: () => startAdd(selectedAsset.id) },
                     { label: "Add task", run: () => openMaintenanceAdd() },
+                    ...(firstEventType() ? [{ label: "Add event", run: () => openMaintenanceAdd(undefined, firstEventType()) }] : []),
                     { label: "Log work", run: () => openChangeAdd() },
                   ].map(item => (
                     <button
@@ -21705,6 +21755,7 @@ function AssetTracker() {
                   {[
                     { label: "Add asset", run: () => startAdd(mainTab === "map" ? (mapSelectedPlaceId || undefined) : undefined) },
                     { label: "Add task", run: () => openMaintenanceAdd(seed || "") },
+                    ...(firstEventType() ? [{ label: "Add event", run: () => openMaintenanceAdd(seed || "", firstEventType()) }] : []),
                     { label: "Log work", run: () => openChangeAdd(seed || "") },
                     ...(taskTemplates.list.length ? [{ label: "Schedule template", run: () => setScheduleDialog({ templateId: taskTemplates.list[0].id, days: [], assetId: taskTemplates.list[0].parent.assetId || (seed || "") }) }] : []),
                   ].map(item => (
@@ -21977,8 +22028,8 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions, changeType
               <PickerField hideLabel label="Completing" title="How completing works" value={taskCompletionMode(model, cfgType.id)} options={TASK_COMPLETION_MODES.map(m => m.value)}
                 labelForOption={v => (TASK_COMPLETION_MODES.find(m => m.value === v) || {}).label || v}
                 onChange={v => onModel(setTaskCompletionMode(model, cfgType.id, v))} />
-              <HelpTip label="About completing" text="Log work required opens the completion form and records a work entry. Log work optional completes in one tap and keeps Log work as a separate button. Checkbox only completes in one tap and never records work." />
-              {taskCompletionMode(model, cfgType.id) !== "simple" && (
+              <HelpTip label="About completing" text="Log work required opens the completion form and records a work entry. Log work optional completes in one tap and keeps Log work as a separate button. Checkbox only completes in one tap and never records work. Event is for things like a Sunday service: it is never completed or overdue, sits on the calendar, and shows how many of its subtasks are done." />
+              {taskCompletionMode(model, cfgType.id) !== "simple" && taskCompletionMode(model, cfgType.id) !== "event" && (
                 <div style={{ flexBasis: "100%", display: "flex", alignItems: "center", gap: 8 }}>
                   <span>Work type</span>
                   <PickerField hideLabel label="Work type when completing" title="Work type when completing" value={taskCompletionWorkType(model, cfgType.id)} options={["", ...changeTypes]}
@@ -22180,6 +22231,8 @@ const DROP_LINE = { height: 3, borderRadius: 2, background: "var(--drop-line, #1
 // repeating task is never done, so its ring is always empty: pressing it logs
 // a completion and the task simply comes round again.
 function TaskDoneCircle({ row, onToggle, size = 18, model }) {
+  // An event is never completed: a calendar mark stands where the circle would.
+  if (taskIsEvent(row.item)) return <CalendarDays size={size - 2} color={C.brand} aria-label="Event" style={{ flexShrink: 0, marginRight: 8, verticalAlign: "middle" }} />;
   const done = isOneOffTask(row.item) && taskIsDone(row.item);
   // A task whose type requires logging work shows a greyed wrench in its open
   // ring, so it is clear before pressing that completing opens Log work.

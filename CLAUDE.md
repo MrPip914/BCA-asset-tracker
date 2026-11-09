@@ -859,6 +859,20 @@ Phase 7 of `/mnt/project-files/plans/task-relationships-scheduling.md`. A **temp
 - Not built: recurring templates (phase 8: a Schedule button is enough, no automatic generation), template-level custom fields.
 - Covered by `test-frontend-templates.js` (rule maths, stamping, adoption and shifting run for real; wiring read as source) and a case in `save_test.ts`; driven in Chromium against Sandbox (editor opens; scheduling the fixture on two dates added 8 tasks that appear on the Calendar). The shift prompt is covered as source only.
 
+## Events: a task type that is never completed (2026-11-09)
+
+Plan: `/mnt/project-files/plans/calendar-events.md` (Eric chose option A). A Sunday service or special event is a task with tasks under it that is itself never checked off. **Frontend only: no backend change, no migration, no deploy.**
+
+- **It is a fourth completion mode, `event`**, beside required / optional / simple: `completion: "event"` on `workModel.taskTypeSettings[typeId]`, so it is a property on an existing Config blob and cost no release. Settings > Task types > Completing > "Event (never completed)". Templates need no change: give a template an event type as its event type and Schedule template stamps events.
+- **An event has no done circle** (`TaskDoneCircle` draws a calendar mark), no Mark done / Log completion buttons, no Completed field, and every completing door refuses it (`toggleTaskDone`, `completeTaskQuick`). Its subtasks are ordinary tasks and still complete, so "N of M done" on the parent is the progress.
+- **Status**: `taskStatusOf` adds `event` (today or later, or undated) and `past` (after the LAST of its start, scheduled and due dates) on top of `maintenanceStatusOf`. **`maintenanceStatusOf` was deliberately left alone**, because it is copied verbatim into the connector's `from-app.js`, which does not know events yet. An event is never overdue.
+- **Counts**: the Tasks badge counts only work still to do (`taskStatusCounts`); an upcoming event is listed under Open but not counted, and a past event leaves Open like a finished task (`taskStatusFinished`) and shows under completed.
+- **The event model is MODULE STATE** (`applyEventModel`, called at the top of render like `applyPersonNameOrder`), so `taskIsEvent` works inside plain functions. **A `useMemo` that derives a status must list `workModel` as a dependency** (`allMaintenanceRows` does).
+- The floating + menus gain **Add event** once a task type completes as an event (opens Add task on that type).
+- Sandbox: `MOCK_SNAPSHOT.workModel` carries an "Event" type and the Sunday service template uses it.
+- Not built yet: the repeat picker on Schedule template (second PR), event times of day, event-aware connector tools (queued).
+- Covered by `test-frontend-events.js` (the helpers run for real, wiring read as source); driven in Chromium against Sandbox (Add event in the + menu, scheduling the template, badge unchanged by the event, the dialog showing no completion controls).
+
 ## Calendar view type (2026-10-28)
 
 Phase 6 of `/mnt/project-files/plans/task-relationships-scheduling.md`. A **Views** view can be a **Calendar** (`type: "calendar"`, the third beside list and Kanban): the tasks its query finds laid on a **month or a week** (Sunday first, Today / previous / next, per-visit state only). **Frontend only: no backend change, no migration, no deploy** (`adoptViews` just accepts the new type; the Edge Function keeps it as it keeps the other view fields).
