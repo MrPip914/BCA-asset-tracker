@@ -57,8 +57,8 @@ const picker = src.slice(pickerAt, pickerAt + 2500);
 check('the picker never browses it', /isGeneralAsset\(a\)\)\.map\(a => a\.id\)/.test(picker));
 check('the picker offers "No asset" only when asked, and maps it to the catch-all id',
   picker.includes('allowNone') && picker.includes('onChange(id || GENERAL_ASSET_ID)') && picker.includes('noneLabel={allowNone'));
-const taskPickerAt = src.indexOf('hint="Which asset is this task for?"');
-check('the task dialog asks for it', src.slice(taskPickerAt, taskPickerAt + 80).includes('allowNone'));
+const taskPickerAt = src.indexOf('onChange={id => setMaintenanceDraft({ ...maintenanceDraft, assetId: id })}');
+check('the task dialog asks for it', src.slice(taskPickerAt, taskPickerAt + 250).includes('allowNone'));
 const workPickerAt = src.indexOf('<AssetPickerField', src.indexOf('changeModal.mode === "add"') );
 check('the Log work dialog does not', !src.slice(workPickerAt, workPickerAt + 400).includes('allowNone'));
 

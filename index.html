@@ -129,6 +129,7 @@ import {
   GripVertical, ArrowUpDown,   // dragging to arrange (Views)
   ListChecks,   // a Kanban card's subtask counter
   Sun, Moon,   // the Appearance setting
+  Ban, CornerLeftUp,   // the asset picker's "No asset" and "Use parent asset" rows
 } from "lucide-react";
 
 // Starter managed peripherals/users/bulk-item-type lists — empty until the school
@@ -17733,14 +17734,10 @@ function AssetTracker() {
                       assets={assets}
                       value={draftAssetId}
                       onChange={id => setMaintenanceDraft({ ...maintenanceDraft, assetId: id })}
-                      hint="Which asset is this task for?"
                       allowNone
+                      parent={parentRef ? { label: "Use parent asset", asset: parentRef.asset, selected: draftAssetId === parentRef.asset.id, onSelect: () => setMaintenanceDraft({ ...maintenanceDraft, assetId: parentRef.asset.id }) } : undefined}
                     />
                     <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
-                      {parentRef && draftAssetId !== parentRef.asset.id && (
-                        <button type="button" onClick={() => setMaintenanceDraft({ ...maintenanceDraft, assetId: parentRef.asset.id })} className="icon-btn" aria-label="Use the parent task's asset" title="Use the parent task's asset"
-                          style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 6px", background: "none", border: "none", borderRadius: 6, fontSize: 12, color: C.brandDark, cursor: "pointer" }}><X size={13} color={C.muted} />Same as the parent task</button>
-                      )}
                       {!isGeneralAsset(workTarget) && workDialogAssetId !== null && (
                         <button type="button" onClick={() => { setMaintenanceModal(null); openDetail(workTarget, "maintenance"); }} className="icon-btn" aria-label="Open the asset" title="Open the asset"
                           style={{ marginLeft: "auto", display: "flex", padding: 4, background: "none", border: "none", borderRadius: 6, cursor: "pointer" }}><ChevronRight size={16} color={C.muted} /></button>
@@ -17755,13 +17752,9 @@ function AssetTracker() {
                       assets={assets}
                       value={workDialogAssetId}
                       onChange={id => setWorkDialogAssetId(id)}
-                      hint="Which asset is this task for?"
                       allowNone
+                      parent={parentRef ? { label: "Use parent asset", asset: parentRef.asset, selected: workDialogAssetId === parentRef.asset.id, onSelect: () => setWorkDialogAssetId(parentRef.asset.id) } : undefined}
                   />
-                  {parentRef && workDialogAssetId !== parentRef.asset.id && (
-                    <button type="button" onClick={() => setWorkDialogAssetId(parentRef.asset.id)} className="icon-btn" aria-label="Use the parent task's asset" title="Use the parent task's asset"
-                      style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4, padding: "4px 6px", background: "none", border: "none", borderRadius: 6, fontSize: 12, color: C.brandDark, cursor: "pointer" }}><X size={13} color={C.muted} />Same as the parent task</button>
-                  )}
                   </div>
                   )}
             </>);
@@ -23093,11 +23086,17 @@ function TemplateEditor({ initial, assets, model, onSave, onDelete, onCancel }) 
                       </div>
                       <div style={{ display: "flex", alignItems: "flex-end", gap: 4, flexWrap: "wrap" }}>
                         <div style={{ minWidth: 200, flex: "0 1 300px" }}>
-                          <AssetPickerField label="Asset" assets={assets} value={it.asset === "event" || it.asset === "parent" ? "" : it.asset} onChange={id => setItem(it.id, { asset: id })} allowNone hint={nested ? "Where this task is done. By default it uses its parent task's asset." : "Where this task is done. By default it sits on the event's own asset."} />
+                          {(() => {
+                            const sentinel = nested ? "parent" : "event";
+                            const eventAssetId = draft.parent.assetId;
+                            const pit = nested ? draft.items.find(x => x.id === it.parentItemId) : null;
+                            const pAssetId = nested ? (pit && pit.asset !== "event" && pit.asset !== "parent" ? pit.asset : eventAssetId) : eventAssetId;
+                            return (
+                              <AssetPickerField label="Asset" assets={assets} value={it.asset === "event" || it.asset === "parent" ? "" : it.asset} onChange={id => setItem(it.id, { asset: id })} allowNone
+                                parent={{ label: nested ? "Use parent asset" : "Use event asset", asset: (assets || []).find(a => a.id === pAssetId) || null, selected: it.asset === "event" || it.asset === "parent", onSelect: () => setItem(it.id, { asset: sentinel }) }} />
+                            );
+                          })()}
                         </div>
-                        {it.asset !== "event" && it.asset !== "parent"
-                          ? clearBtn(nested ? "Same as the parent task" : "Same as the event", () => setItem(it.id, { asset: nested ? "parent" : "event" }))
-                          : <span style={{ fontSize: 12, color: C.muted, paddingBottom: 9 }}>{nested && it.asset === "parent" ? "On the parent task's asset" : "On the event's asset"}</span>}
                       </div>
                     </div>
                       )}
@@ -24232,14 +24231,20 @@ function SpaceRoomPickerField({ shapeId, value, onChange, assets, floorPlanLinks
 // Archived assets are excluded. They are out of service, so scheduling
 // maintenance on one is almost certainly a mis-click, and the site-wide lists
 // already exclude them.
-function AssetPickerField({ label, assets, value, onChange, hint, allowNone }) {
+// `parent` (optional): { label, asset, selected, onSelect } adds a "Use parent
+// asset" row under "No asset". `asset` is the parent's asset (or null when it
+// is not known yet); when `selected`, the trigger reads the label with that
+// asset's name as its subtext.
+function AssetPickerField({ label, assets, value, onChange, hint, allowNone, parent }) {
   const [open, setOpen] = useState(false);
   const all = assets || [];
   const chosen = all.find(a => a.id === value);
+  const usingParent = !!(parent && parent.selected);
   // The full path, for the same reason ParentField shows one: two rooms can
   // share a name and the breadcrumb is gone once the modal closes.
-  const triggerText = chosen ? nameOf(chosen) : "";
-  const triggerPath = chosen ? pathOf(chosen, all) : "";
+  const parentName = parent && parent.asset ? nameOf(parent.asset) : "";
+  const triggerText = usingParent ? parent.label : (chosen ? nameOf(chosen) : "");
+  const triggerPath = usingParent ? parentName : (chosen ? pathOf(chosen, all) : "");
   // The catch-all asset is never browsable; it is offered as the "No asset" row
   // when the caller allows it (tasks), and otherwise not at all.
   const archived = new Set(all.filter(a => (a.status || "Active") === "Archived" || isGeneralAsset(a)).map(a => a.id));
@@ -24250,14 +24255,15 @@ function AssetPickerField({ label, assets, value, onChange, hint, allowNone }) {
       {open && (
         <HierarchyBrowserModal
           title="Select asset"
-          hint={hint || "Drill in and pick the asset this is for"}
           assets={all}
           isSelectable={a => !archived.has(a.id)}
           excluded={archived}
           searchable
           value={value === GENERAL_ASSET_ID ? "" : (value || "")}
           onChange={allowNone ? (id => onChange(id || GENERAL_ASSET_ID)) : onChange}
-          noneLabel={allowNone ? "No asset (not tied to anything)" : undefined}
+          noneLabel={allowNone ? "No asset" : undefined}
+          noneIcon={allowNone ? <Ban size={15} /> : undefined}
+          parentOption={parent ? { label: parent.label, subtext: parentName, selected: usingParent, onSelect: parent.onSelect } : undefined}
           onClose={() => setOpen(false)}
         />
       )}
@@ -24436,9 +24442,18 @@ function HierarchyBrowserModal({
   // it has anything in it, else beside it. Used by the map Options choosers so
   // they open on the location being configured.
   startAt,
+  // Optional: an icon for the "none" row (the asset picker passes a circle with
+  // a slash).
+  noneIcon,
+  // Optional: a second row under "none", { label, subtext, selected, onSelect },
+  // for "use the parent's value". The caller owns what selecting it means.
+  parentOption,
 }) {
   const all = assets || [];
   const blocked = excluded || new Set();
+  // Search is an icon in the header that opens the field (autoFocusSearch
+  // callers start with it open).
+  const [searchOpen, setSearchOpen] = useState(!!autoFocusSearch);
 
   // Multi keeps its own working copy so the caller only hears about the change
   // once, on Done — a circuit's rooms are saved as one edit, and firing per
@@ -24538,14 +24553,18 @@ function HierarchyBrowserModal({
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>{title}</div>
           <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
             {headerAction}
-            <button onClick={onClose} className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+            {searchable && (
+              <button type="button" onClick={() => { if (searchOpen) setSearchQuery(""); setSearchOpen(!searchOpen); }} className="icon-btn" aria-label="Search" title="Search" aria-pressed={searchOpen}
+                style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: searchOpen ? C.brand : C.ink }}><Search size={18} /></button>
+            )}
+            <button onClick={onClose} className="icon-btn" aria-label="Close" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
           </div>
         </div>
 
         {/* Says what you're looking for, which matters most at the top level,
             where (choosing a Room) nothing on screen is pickable yet and the
             list is all buildings. */}
-        <div style={{ fontSize: 12, color: C.empty, marginBottom: 8 }}>{hint}</div>
+        {hint && <div style={{ fontSize: 12, color: C.empty, marginBottom: 8 }}>{hint}</div>}
         {filterNote && <div style={{ marginBottom: 8 }}>{filterNote}</div>}
 
         {/* Multi-select only: what's picked so far, as removable chips. Without
@@ -24573,17 +24592,47 @@ function HierarchyBrowserModal({
           </div>
         )}
 
-        {searchable && (
+        {searchable && searchOpen && (
           <div style={{ position: "relative", marginBottom: 8 }}>
             <Search size={14} style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: C.placeholder, pointerEvents: "none" }} />
             <input
               type="text"
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
-              autoFocus={autoFocusSearch && !(typeof window !== "undefined" && window.matchMedia && window.matchMedia("(pointer: coarse)").matches)}
+              autoFocus={!(autoFocusSearch && typeof window !== "undefined" && window.matchMedia && window.matchMedia("(pointer: coarse)").matches)}
               placeholder="Search…"
               style={{ width: "100%", boxSizing: "border-box", padding: "8px 10px 8px 30px", borderRadius: 10, border: `1.5px solid ${C.border}`, fontSize: 14, color: C.ink, background: C.bg }}
             />
+          </div>
+        )}
+
+        {/* The "none" and "use the parent's" rows sit ABOVE the hierarchy, at
+            every level of browse mode: they are the absence of a choice, not
+            something a search for a name could match. Single-select only. */}
+        {!multi && !searchResults && (noneLabel || parentOption) && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 2, marginBottom: 8, paddingBottom: 8, borderBottom: `1px solid ${C.border}` }}>
+            {noneLabel && (() => {
+              const on = !value && !(parentOption && parentOption.selected);
+              return (
+                <button type="button" onClick={() => { onChange(""); onClose(); }}
+                  style={{ display: "flex", alignItems: "center", gap: 8, padding: "9px 10px", background: on ? C.hover : "transparent", border: "none", borderRadius: 10, fontSize: 14, textAlign: "left", color: C.ink, fontWeight: on ? 600 : 400 }}>
+                  {noneIcon && <span style={{ display: "flex", flexShrink: 0, color: C.muted }}>{noneIcon}</span>}
+                  <span style={{ flex: 1 }}>{noneLabel}</span>
+                  {on && <Check size={15} color={C.brand} />}
+                </button>
+              );
+            })()}
+            {parentOption && (
+              <button type="button" onClick={() => { parentOption.onSelect(); onClose(); }}
+                style={{ display: "flex", alignItems: "center", gap: 8, padding: "9px 10px", background: parentOption.selected ? C.hover : "transparent", border: "none", borderRadius: 10, fontSize: 14, textAlign: "left", color: C.ink, fontWeight: parentOption.selected ? 600 : 400 }}>
+                <span style={{ display: "flex", flexShrink: 0, color: C.muted }}><CornerLeftUp size={15} /></span>
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ display: "block" }}>{parentOption.label}</span>
+                  {parentOption.subtext && <span style={{ display: "block", fontSize: 11.5, color: C.empty, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{parentOption.subtext}</span>}
+                </span>
+                {parentOption.selected && <Check size={15} color={C.brand} />}
+              </button>
+            )}
           </div>
         )}
 
@@ -24602,20 +24651,6 @@ function HierarchyBrowserModal({
               it's the absence of a choice, not something a search for a name
               could ever match. Single-select only: in multi-select, picking
               nothing is just an empty chip row. */}
-          {!multi && !searchResults && !effectiveLevelId && noneLabel && (
-            <button
-              onClick={() => { onChange(""); onClose(); }}
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "space-between", padding: "9px 10px",
-                background: !value ? C.hover : "transparent", border: "none", borderRadius: 10,
-                fontSize: 14, textAlign: "left", color: C.empty, fontWeight: !value ? 600 : 400,
-              }}
-            >
-              {noneLabel}
-              {!value && <Check size={15} color={C.brand} />}
-            </button>
-          )}
-
           {searchResults && searchResults.length === 0 && (
             <div style={{ fontSize: 13, color: C.empty, padding: "8px 2px" }}>Nothing matches "{searchQuery.trim()}".</div>
           )}
