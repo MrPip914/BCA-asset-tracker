@@ -2808,7 +2808,7 @@ const VIEW_DIALOG_FIELDS = [
   { key: "sections", label: "Section groups" },
   { key: "files", label: "Files" },
   { key: "history", label: "Service history" },
-  { key: "asset", label: "Link to the asset" },
+  { key: "asset", label: "Asset" },
 ];
 const VIEW_CUSTOM_PREFIX = "custom:";
 const VIEW_TYPE_LIST = "list";
@@ -3075,6 +3075,23 @@ function viewVisibleCustomKeys(view) {
 }
 
 function viewTaskKey(row) { return row.asset.id + "::" + row.item.id; }
+// A task moved to another asset changes its key, so a board's placement of it and
+// its place in a view's order follow it. Returns the SAME object when nothing used it.
+function rekeyViewsTask(cfg, fromAssetId, toAssetId, itemId) {
+  const oldKey = fromAssetId + "::" + itemId, newKey = toAssetId + "::" + itemId;
+  let changed = false;
+  const list = (cfg.list || []).map(v => {
+    const hasA = v.assignments && Object.prototype.hasOwnProperty.call(v.assignments, oldKey);
+    const hasO = (v.order || []).includes(oldKey);
+    if (!hasA && !hasO) return v;
+    changed = true;
+    const out = { ...v };
+    if (hasA) { const a = { ...v.assignments }; a[newKey] = a[oldKey]; delete a[oldKey]; out.assignments = a; }
+    if (hasO) out.order = v.order.map(k => (k === oldKey ? newKey : k));
+    return out;
+  });
+  return changed ? { ...cfg, list } : cfg;
+}
 
 // ---------- CALENDAR VIEW (2026-10-28) ----------
 // A calendar lays the view's tasks on a month or a week. Where a task sits:
@@ -7038,7 +7055,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-11-09.6";
+const APP_VERSION = "2026-11-09.7";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -13686,7 +13703,22 @@ function AssetTracker() {
       }
     }
     const nextItems = items.map(it => (it && it.id === original.id ? updated : it));
-    let next = assets.map(a => (a.id === workTargetId ? { ...a, maintenanceItems: nextItems } : a));
+    // Moving the task to another asset: it leaves this asset's list and joins the
+    // other's. Its id (and so its files, subtasks and recurring link) is unchanged;
+    // the drawing's section groups belong to the old asset and are dropped.
+    const destId = maintenanceDraft.assetId && maintenanceDraft.assetId !== workTargetId ? maintenanceDraft.assetId : null;
+    const dest = destId ? assets.find(a => a.id === destId) : null;
+    if (destId && !dest) return;
+    if (dest) {
+      delete updated.paneGroupIds;
+      entries.push({ ...mkEntry("Asset", nameOf(workTarget), nameOf(dest)), related: relate({ from: workTargetId, to: destId }) });
+    }
+    let next = assets.map(a => {
+      if (a.id === workTargetId) return { ...a, maintenanceItems: dest ? items.filter(it => !(it && it.id === original.id)) : nextItems };
+      if (dest && a.id === destId) return { ...a, maintenanceItems: [...(a.maintenanceItems || []), updated] };
+      return a;
+    });
+    const movedViews = dest ? rekeyViewsTask(viewsCfg, workTargetId, destId, original.id) : viewsCfg;
     if (isRecurringConfig(original)) {
       // Editing the configuration carries to the open round if nobody changed it
       // since it was created; finished rounds are never touched.
@@ -13699,7 +13731,7 @@ function AssetTracker() {
     } else if (original.recurringId && !original.lastPerformed && updated.lastPerformed) {
       next = afterInstanceCompleted(next, updated, updated.lastPerformed, currentUser);
     }
-    await persist(next, { auditLog: entries.length ? logAudit(entries) : auditLog });
+    await persist(next, { auditLog: entries.length ? logAudit(entries) : auditLog, ...(movedViews !== viewsCfg ? { views: movedViews } : {}) });
     setMaintenanceModal(null);
     // An event moved to another day: offer to move what hangs under it as well.
     const oldDay = dateOnly(original.doOn), newDay = dateOnly(updated.doOn);
@@ -17627,6 +17659,10 @@ function AssetTracker() {
             // asset is already open, where a link to it would lead nowhere.
             const linkAsset = editing && workDialogAssetId !== null && vShow("asset") && !isGeneralAsset(workTarget) ? workTarget : null;
             const LinkAssetIcon = linkAsset ? iconFor(linkAsset.type) : null;
+            // Editing: the asset is a picker, not a link. A view that does not tick
+            // "Asset" keeps it out of its edit form as it keeps it out of the read view.
+            const canMoveAsset = editing && canEdit && !viewReadOnly && !!workTarget && (!dialogView || vShow("asset"));
+            const draftAssetId = maintenanceDraft.assetId || workTargetId;
             // This item's own service history, newest first. Read off the
             // target asset rather than changesByMaintenance, which is built
             // from the OPEN asset and is empty on the main page.
@@ -17677,7 +17713,7 @@ function AssetTracker() {
             const blockerLabel = id => { const r = tIndex.get(id); return r ? `${r.item.task} — ${nameOf(r.asset)}` : "(deleted task)"; };
             const kids = editing ? taskChildrenOf(assets, maintenanceModal.itemId) : [];
             const parentRef = maintenanceDraft.parentTaskId ? tIndex.get(maintenanceDraft.parentTaskId) : null;
-            const canSub = editing && canEdit && !dialogView && canAddSubtaskTo(tIndex, { id: maintenanceModal.itemId, parentTaskId: maintenanceDraft.parentTaskId });
+            const canSub = editing && canEdit && !viewReadOnly && canAddSubtaskTo(tIndex, { id: maintenanceModal.itemId, parentTaskId: maintenanceDraft.parentTaskId });
             const readGroups = viewReadOnly && workTarget && vShow("sections") && isWindowLayoutType(workTarget.type)
               ? windowGroupsOf(workTarget).filter(g => (maintenanceDraft.paneGroupIds || []).includes(g.id)) : [];
             // One definition of each field, placed by the layout below: phone keeps
@@ -17688,8 +17724,8 @@ function AssetTracker() {
                     what was tapped, and the asset is one tap further only if
                     it is wanted. It closes the dialog first, or the app would
                     navigate underneath an open form. */}
-                {linkAsset && !isPhone && <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, marginBottom: 2 }}>Asset</div>}
-                {linkAsset && (
+                {linkAsset && !canMoveAsset && !isPhone && <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, marginBottom: 2 }}>Asset</div>}
+                {linkAsset && !canMoveAsset && (
                   <button
                     className="side-link"
                     onClick={() => { setMaintenanceModal(null); openDetail(linkAsset, "maintenance"); }}
@@ -17699,6 +17735,28 @@ function AssetTracker() {
                     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{nameOf(linkAsset)}</span>
                     <ChevronRight size={14} style={{ marginLeft: "auto", flexShrink: 0, color: C.muted }} />
                   </button>
+                )}
+                {canMoveAsset && (
+                  <div style={{ marginBottom: 12 }}>
+                    <AssetPickerField
+                      label="Asset"
+                      assets={assets}
+                      value={draftAssetId}
+                      onChange={id => setMaintenanceDraft({ ...maintenanceDraft, assetId: id })}
+                      hint="Which asset is this task for?"
+                      allowNone
+                    />
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+                      {parentRef && draftAssetId !== parentRef.asset.id && (
+                        <button type="button" onClick={() => setMaintenanceDraft({ ...maintenanceDraft, assetId: parentRef.asset.id })} className="icon-btn" aria-label="Use the parent task's asset" title="Use the parent task's asset"
+                          style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 6px", background: "none", border: "none", borderRadius: 6, fontSize: 12, color: C.brandDark, cursor: "pointer" }}><X size={13} color={C.muted} />Same as the parent task</button>
+                      )}
+                      {!isGeneralAsset(workTarget) && workDialogAssetId !== null && (
+                        <button type="button" onClick={() => { setMaintenanceModal(null); openDetail(workTarget, "maintenance"); }} className="icon-btn" aria-label="Open the asset" title="Open the asset"
+                          style={{ marginLeft: "auto", display: "flex", padding: 4, background: "none", border: "none", borderRadius: 6, cursor: "pointer" }}><ChevronRight size={16} color={C.muted} /></button>
+                      )}
+                    </div>
+                  </div>
                 )}
                   {workDialogAssetId !== null && !editing && (
                   <div style={{ marginBottom: 12 }}>
