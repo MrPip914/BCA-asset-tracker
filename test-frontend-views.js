@@ -122,7 +122,7 @@ check('the Views section is an editors-only Settings section', /\{ key: "views",
 check('Views is a main tab', /const MAIN_TABS = \[[^\]]*"views"/.test(src));
 check('the tab only appears when a view is assigned', /\.\.\.\(visibleViews\.length \? \[\{ key: "views", label: "Views" \}\] : \[\]\)/.test(src));
 check('persist carries views as a config key', /views: nextViews = viewsCfg/.test(src) && /nextViews !== viewsCfg/.test(src) && /views: nextViews,/.test(src));
-check('a per-record save sends views', /"workModel", "views", "nextAssetNumber"/.test(src));
+check('a per-record save sends views', /"workModel", "views", "taskTemplates", "nextAssetNumber"/.test(src));
 check('a load adopts views', /setViewsCfg\(adoptViews\(data\.views\)\)/.test(src));
 check('opening from a view passes the view id', /openMaintenanceEdit\(r\.item\.id, r\.asset\.id, activeView\.id\)/.test(src));
 check('no Delete on a task opened from a view', /\{editing && !dialogView && \(\s*<button\s+onClick=\{\(\) => setConfirmMaintenanceDelete/.test(src));
