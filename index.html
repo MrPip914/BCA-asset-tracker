@@ -6995,7 +6995,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-11-09.2";
+const APP_VERSION = "2026-11-09.3";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -21823,23 +21823,47 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions, changeType
   const noun = kind === "task" ? "task" : "work";
   const fieldsKey = workModelKey(kind);
   const fields = model[fieldsKey.fields] || [];
-  const [selId, setSelId] = useState("");
   const [newName, setNewName] = useState("");
   // The new-type line and the new-field form only exist after the + is pressed.
   const [addingType, setAddingType] = useState(false);
   const [addingField, setAddingField] = useState(false);
-  const [renameVal, setRenameVal] = useState(null);
+  // The gear on a type opens its configuration window; the gear on a custom
+  // field opens that field's options.
+  const [cfgTypeId, setCfgTypeId] = useState("");
+  const [cfgFieldKey, setCfgFieldKey] = useState("");
+  const [nameDraft, setNameDraft] = useState("");
   const [error, setError] = useState("");
   const [fieldError, setFieldError] = useState("");
   const [fieldDraft, setFieldDraft] = useState({ label: "", dataType: "text", optionsText: "", format: "plain" });
-  const [choiceDraft, setChoiceDraft] = useState({ key: "", text: "" });
-  const selected = types.find(t => t.id === selId) || null;
+  const [choiceText, setChoiceText] = useState("");
+  const cfgType = types.find(t => t.id === cfgTypeId) || null;
+  const cfgField = fields.find(f => f.key === cfgFieldKey) || null;
   const defaultId = defaultWorkTypeId(model, kind);
-  const st = selected ? ((model[fieldsKey.settings] || {})[selected.id] || { fieldKeys: [], requiredFields: [], hiddenFields: [] }) : null;
+  const st = cfgType ? ((model[fieldsKey.settings] || {})[cfgType.id] || { fieldKeys: [], requiredFields: [], hiddenFields: [] }) : null;
   const inputStyle = { padding: "8px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink, minWidth: 0 };
   const card = { background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, width: "100%", maxWidth: 460 };
   const heading = { display: "flex", alignItems: "center", gap: 6, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent, marginBottom: 12 };
+  const iconBtn = { background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" };
+  // A list row: a line above every row but the first, no box around it.
+  const rowStyle = i => ({ display: "flex", alignItems: "center", gap: 6, padding: "9px 0", fontSize: 14, borderTop: i === 0 ? "none" : `1px solid ${C.border}` });
   const apply = r => { if (r.error) { setError(r.error); return false; } setError(""); onModel(r.model || r); return true; };
+  const openType = t => { setCfgTypeId(t.id); setNameDraft(t.name); setError(""); };
+  const closeType = () => { setCfgTypeId(""); setError(""); };
+  const commitName = () => {
+    if (!cfgType || !typeActions || cfgType.id === DEFAULT_WORK_TYPE_ID || nameDraft === cfgType.name) return;
+    if (!apply(typeActions.rename(cfgType.id, nameDraft))) setNameDraft(cfgType.name);
+  };
+  const dialog = (title, onClose, body) => (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16 }}>
+      <div role="dialog" aria-label={title} onClick={e => e.stopPropagation()} style={{ ...card, maxWidth: 440, maxHeight: "85vh", overflowY: "auto", boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)" }}>
+        <div style={{ ...heading, justifyContent: "space-between" }}>
+          <span>{title}</span>
+          <button onClick={onClose} className="icon-btn" aria-label="Close" title="Close" style={iconBtn}><X size={18} color={C.ink} /></button>
+        </div>
+        {body}
+      </div>
+    </div>
+  );
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
@@ -21847,133 +21871,63 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions, changeType
         <div style={card}>
           <div style={heading}>
             {kind === "task" ? "Task types" : "Work types"}
-            <HelpTip label={`About ${noun} types`} text={`A type decides which extra fields show on a ${noun} and which of them are required. A ${noun} with no type uses the Default type. Pick a type to choose its fields.`} />
-            {typeActions && <button onClick={() => { setAddingType(true); setError(""); }} className="icon-btn" aria-label="Add a type" title="Add a type" style={{ marginLeft: "auto", background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }}><Plus size={16} color={C.brand} /></button>}
+            <HelpTip label={`About ${noun} types`} text={`A type decides which extra fields show on a ${noun} and which of them are required. A ${noun} with no type uses the Default type. Press a type's gear to set it up.`} />
+            {typeActions && <button onClick={() => { setAddingType(true); setError(""); }} className="icon-btn" aria-label="Add a type" title="Add a type" style={{ ...iconBtn, marginLeft: "auto" }}><Plus size={16} color={C.brand} /></button>}
           </div>
           {types.length === 0 && <div style={{ fontSize: 13, color: C.empty, marginBottom: 12 }}>No types yet.</div>}
-          <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 14 }}>
-            {types.map(t => (
-              <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                {renameVal && renameVal.id === t.id ? (
-                  <>
-                    <input value={renameVal.name} autoFocus onChange={e => setRenameVal({ id: t.id, name: e.target.value })}
-                      onKeyDown={e => { if (e.key === "Enter" && apply(typeActions.rename(t.id, renameVal.name))) setRenameVal(null); }}
-                      style={{ ...inputStyle, flex: 1 }} aria-label="Type name" />
-                    <button onClick={() => { if (apply(typeActions.rename(t.id, renameVal.name))) setRenameVal(null); }} style={{ padding: "6px 10px", background: C.brand, color: "#fff", border: "none", borderRadius: 8, fontSize: 13, fontWeight: 600 }}>Save</button>
-                    <button onClick={() => { setRenameVal(null); setError(""); }} className="icon-btn" aria-label="Cancel rename" style={{ background: "none", border: "none", padding: 4 }}><X size={14} color={C.muted} /></button>
-                  </>
-                ) : (
-                  <>
-                    <button onClick={() => setSelId(t.id === selId ? "" : t.id)} aria-pressed={t.id === selId}
-                      style={{ flex: 1, textAlign: "left", padding: "8px 10px", border: `1.5px solid ${t.id === selId ? C.brand : C.border}`, background: t.id === selId ? C.hover : "none", borderRadius: 10, fontSize: 14, color: C.ink }}>
-                      {t.name}{t.id === defaultId && t.id !== DEFAULT_WORK_TYPE_ID ? <span style={{ fontSize: 12, color: C.muted }}> (default)</span> : null}
-                    </button>
-                    {typeActions && t.id !== DEFAULT_WORK_TYPE_ID && <button onClick={() => setRenameVal({ id: t.id, name: t.name })} className="icon-btn" aria-label={`Rename ${t.name}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}><Pencil size={14} color={C.muted} /></button>}
-                    {typeActions && t.id !== DEFAULT_WORK_TYPE_ID && <button onClick={() => { if (selId === t.id) setSelId(""); onModel(typeActions.remove(t.id)); }} className="icon-btn" aria-label={`Remove ${t.name}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}><Trash2 size={14} color={C.danger} /></button>}
-                  </>
-                )}
+          <div style={{ display: "flex", flexDirection: "column", marginBottom: 6 }}>
+            {types.map((t, i) => (
+              <div key={t.id} style={rowStyle(i)}>
+                <span style={{ flex: 1, minWidth: 0, color: C.ink }}>
+                  {t.name}{t.id === defaultId ? <span style={{ fontSize: 12, color: C.muted }}> (default)</span> : null}
+                </span>
+                <button onClick={() => openType(t)} className="icon-btn" aria-label={`Configure ${t.name}`} title="Configure" style={iconBtn}><Settings size={14} color={C.muted} /></button>
+                {typeActions && t.id !== DEFAULT_WORK_TYPE_ID && <button onClick={() => { if (cfgTypeId === t.id) closeType(); onModel(typeActions.remove(t.id)); }} className="icon-btn" aria-label={`Remove ${t.name}`} title="Remove" style={iconBtn}><Trash2 size={14} color={C.danger} /></button>}
               </div>
             ))}
           </div>
-          {!typeActions && <div style={{ fontSize: 12, color: C.muted }}>Work types are added and removed under Lists. Pick one here to choose its fields.</div>}
-          {typeActions && addingType && <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {!typeActions && <div style={{ marginBottom: 6 }}><HelpTip label="About work types" text="Work types are added and removed under Lists. Press a type's gear here to choose its fields." /></div>}
+          {typeActions && addingType && <div style={{ display: "flex", alignItems: "center", gap: 6, borderTop: types.length ? `1px solid ${C.border}` : "none", paddingTop: 9 }}>
             <input value={newName} autoFocus onChange={e => setNewName(e.target.value)} placeholder="New type name" aria-label="New type name"
               onKeyDown={e => {
                 if (e.key === "Escape") { setAddingType(false); setNewName(""); setError(""); }
-                if (e.key === "Enter") { const r = typeActions.add(newName); if (apply(r)) { setNewName(""); setAddingType(false); if (r.id) setSelId(r.id); } }
+                if (e.key === "Enter") { const r = typeActions.add(newName); if (apply(r)) { setNewName(""); setAddingType(false); if (r.id) openType({ id: r.id, name: newName.trim() }); } }
               }}
               style={{ ...inputStyle, flex: 1 }} />
-            <button onClick={() => { const r = typeActions.add(newName); if (apply(r)) { setNewName(""); setAddingType(false); if (r.id) setSelId(r.id); } }}
-              className="icon-btn" aria-label="Save new type" title="Save" style={{ background: "none", border: "none", padding: 4 }}><Check size={16} color={C.success} /></button>
-            <button onClick={() => { setAddingType(false); setNewName(""); setError(""); }} className="icon-btn" aria-label="Cancel new type" title="Cancel" style={{ background: "none", border: "none", padding: 4 }}><X size={14} color={C.muted} /></button>
+            <button onClick={() => { const r = typeActions.add(newName); if (apply(r)) { setNewName(""); setAddingType(false); if (r.id) openType({ id: r.id, name: newName.trim() }); } }}
+              className="icon-btn" aria-label="Save new type" title="Save" style={iconBtn}><Check size={16} color={C.success} /></button>
+            <button onClick={() => { setAddingType(false); setNewName(""); setError(""); }} className="icon-btn" aria-label="Cancel new type" title="Cancel" style={iconBtn}><X size={14} color={C.muted} /></button>
           </div>}
-          {error && <div role="alert" style={{ fontSize: 12, color: C.danger, marginTop: 8 }}>{error}</div>}
-        </div>
-      )}
-      {selected && (
-        <div style={card}>
-          <div style={heading}>Fields on {selected.name}</div>
-          {selected.id === defaultId
-            ? <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>New and untyped {noun === "task" ? "tasks" : "work entries"} use this type.</div>
-            : <button onClick={() => onModel(setDefaultWorkType(model, kind, selected.id))} style={{ marginBottom: 10, padding: "6px 12px", border: `1.5px solid ${C.border}`, background: "none", borderRadius: 8, fontSize: 13, color: C.ink }}>Use as default</button>}
-          {kind === "task" && (
-            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0 10px", fontSize: 14 }}>
-              <span>Completing</span>
-              <PickerField hideLabel label="Completing" title="How completing works" value={taskCompletionMode(model, selected.id)} options={TASK_COMPLETION_MODES.map(m => m.value)}
-                labelForOption={v => (TASK_COMPLETION_MODES.find(m => m.value === v) || {}).label || v}
-                onChange={v => onModel(setTaskCompletionMode(model, selected.id, v))} />
-              {taskCompletionMode(model, selected.id) !== "simple" && (
-                <>
-                  <span>Work type</span>
-                  <PickerField hideLabel label="Work type when completing" title="Work type when completing" value={taskCompletionWorkType(model, selected.id)} options={["", ...changeTypes]}
-                    labelForOption={v => v || "Default"}
-                    onChange={v => onModel(setTaskCompletionWorkType(model, selected.id, v))} />
-                  <HelpTip label="About the completion work type" text="The work type the completion form opens on. Default keeps the usual choice (Maintenance, when that type exists). It can still be changed in the form." />
-                </>
-              )}
-              <HelpTip label="About completing" text="Log work required opens the completion form and records a work entry. Log work optional completes in one tap and keeps Log work as a separate button. Checkbox only completes in one tap and never records work." />
+          {error && !cfgType && <div role="alert" style={{ fontSize: 12, color: C.danger, marginTop: 8 }}>{error}</div>}
+          {types.length > 1 && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, borderTop: `1px solid ${C.border}`, marginTop: 8, paddingTop: 12, fontSize: 14 }}>
+              <span>Default type</span>
+              <HelpTip label="About the default type" text={`New and untyped ${noun === "task" ? "tasks" : "work entries"} use this type.`} />
+              <div style={{ width: 180, marginLeft: "auto" }}>
+                <PickerField hideLabel label="Default type" title="Default type" value={defaultId} options={types.map(t => t.id)}
+                  labelForOption={id => (types.find(t => t.id === id) || {}).name || id}
+                  onChange={v => onModel(setDefaultWorkType(model, kind, v))} />
+              </div>
             </div>
           )}
-          {WORK_BUILTIN_FIELDS[kind].map(b => (
-            <div key={b.key} style={{ padding: "6px 0", fontSize: 14 }}>
-              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <input type="checkbox" checked={workBuiltinShown(model, kind, selected.id, b.key)} onChange={e => onModel(setWorkBuiltinShown(model, kind, selected.id, b.key, e.target.checked))} />
-                <span>{b.label}</span>
-                <span style={{ fontSize: 12, color: C.muted }}>built in</span>
-              </label>
-            </div>
-          ))}
-          {fields.length === 0 && <div style={{ fontSize: 13, color: C.empty }}>Add a custom field with the + above, then tick it here.</div>}
-          {fields.map(f => {
-            const on = st.fieldKeys.includes(f.key);
-            return (
-              <div key={f.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0", fontSize: 14 }}>
-                <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
-                  <input type="checkbox" checked={on} onChange={e => onModel(setTypeHasField(model, kind, selected.id, f.key, e.target.checked))} />
-                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{f.label}</span>
-                </label>
-                <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: on ? C.ink : C.muted }}>
-                  <input type="checkbox" disabled={!on} checked={on && st.requiredFields.includes(f.key)} onChange={e => onModel(setTypeFieldRequired(model, kind, selected.id, f.key, e.target.checked))} />
-                  Required
-                </label>
-              </div>
-            );
-          })}
         </div>
       )}
       <div style={card}>
         <div style={heading}>
           Custom fields
           <HelpTip label="About custom fields" text={`A custom field is an extra box on ${noun}s. Make it here, then tick it on the types that should show it. The kind of value cannot be changed once it is made.`} />
-          <button onClick={() => { setAddingField(true); setFieldError(""); }} className="icon-btn" aria-label="Add a custom field" title="Add a custom field" style={{ marginLeft: "auto", background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }}><Plus size={16} color={C.brand} /></button>
+          <button onClick={() => { setAddingField(true); setFieldError(""); }} className="icon-btn" aria-label="Add a custom field" title="Add a custom field" style={{ ...iconBtn, marginLeft: "auto" }}><Plus size={16} color={C.brand} /></button>
         </div>
         {fields.length === 0 && <div style={{ fontSize: 13, color: C.empty, marginBottom: 12 }}>No custom fields yet.</div>}
-        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
-          {fields.map(f => (
-            <div key={f.key} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", fontSize: 14 }}>
-              <span>
+        <div style={{ display: "flex", flexDirection: "column", marginBottom: 6 }}>
+          {fields.map((f, i) => (
+            <div key={f.key} style={rowStyle(i)}>
+              <span style={{ flex: 1, minWidth: 0 }}>
                 {f.label}
-                <span style={{ fontSize: 12, color: C.muted, marginLeft: 8 }}>
-                  {(COLUMN_DATA_TYPES.find(t => t.value === f.dataType) || {}).label || ""}
-                  {isChoiceKind(f.dataType) && f.options.length ? ` (${f.options.join(", ")})` : ""}
-                </span>
+                <span style={{ fontSize: 12, color: C.muted, marginLeft: 8 }}>{(COLUMN_DATA_TYPES.find(t => t.value === f.dataType) || {}).label || ""}</span>
               </span>
-              {f.dataType === "number" && (
-                <div style={{ width: 150, marginLeft: "auto", marginRight: 8 }}>
-                  <PickerField label={`${f.label} format`} hideLabel value={fieldNumberFormat(f, "number")} onChange={v => onModel(setWorkFieldFormat(model, kind, f.key, v))}
-                    options={NUMBER_FORMATS.map(x => x.value)} labelForOption={numberFormatLabel} title="How the number is shown" />
-                </div>
-              )}
-              <button onClick={() => onModel(removeWorkField(model, kind, f.key))} className="icon-btn" aria-label={`Remove ${f.label}`} style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}><Trash2 size={14} color={C.danger} /></button>
-              {isChoiceKind(f.dataType) && (
-                <div style={{ flexBasis: "100%", display: "flex", gap: 6, marginTop: 4 }}>
-                  <input value={choiceDraft.key === f.key ? choiceDraft.text : ""} onChange={e => setChoiceDraft({ key: f.key, text: e.target.value })}
-                    onKeyDown={e => { if (e.key === "Enter") { onModel(addWorkFieldChoice(model, kind, f.key, choiceDraft.text)); setChoiceDraft({ key: "", text: "" }); } }}
-                    placeholder="Add a choice" aria-label={`Add a choice to ${f.label}`} style={{ ...inputStyle, flex: 1, minWidth: 0 }} />
-                  <button onClick={() => { onModel(addWorkFieldChoice(model, kind, f.key, choiceDraft.key === f.key ? choiceDraft.text : "")); setChoiceDraft({ key: "", text: "" }); }}
-                    style={{ padding: "6px 12px", background: C.brand, color: "#fff", border: "none", borderRadius: 8, fontSize: 13, fontWeight: 600 }}>Add</button>
-                </div>
-              )}
+              {(f.dataType === "number" || isChoiceKind(f.dataType)) && <button onClick={() => { setCfgFieldKey(f.key); setChoiceText(""); }} className="icon-btn" aria-label={`Configure ${f.label}`} title="Options" style={iconBtn}><Settings size={14} color={C.muted} /></button>}
+              <button onClick={() => { if (cfgFieldKey === f.key) setCfgFieldKey(""); onModel(removeWorkField(model, kind, f.key)); }} className="icon-btn" aria-label={`Remove ${f.label}`} title="Remove" style={iconBtn}><Trash2 size={14} color={C.danger} /></button>
             </div>
           ))}
         </div>
@@ -21997,16 +21951,100 @@ function WorkTypesManager({ kind, model, onModel, types, typeActions, changeType
           <button onClick={() => {
             const r = addWorkField(model, kind, { label: fieldDraft.label, dataType: fieldDraft.dataType, options: fieldDraft.optionsText.split(","), format: fieldDraft.format });
             if (r.error) { setFieldError(r.error); return; }
-            // Ticked on the open type straight away: the usual reason to make a field.
+            // Ticked on the type being configured straight away, if one is open.
             let next = r.model;
-            if (selected) next = setTypeHasField(next, kind, selected.id, r.key, true);
+            if (cfgType) next = setTypeHasField(next, kind, cfgType.id, r.key, true);
             setFieldError(""); setFieldDraft({ label: "", dataType: "text", optionsText: "", format: "plain" }); setAddingField(false); onModel(next);
-          }} className="icon-btn" aria-label="Save new field" title="Save" style={{ background: "none", border: "none", padding: 4 }}><Check size={16} color={C.success} /></button>
-          <button onClick={() => { setAddingField(false); setFieldError(""); setFieldDraft({ label: "", dataType: "text", optionsText: "", format: "plain" }); }} className="icon-btn" aria-label="Cancel new field" title="Cancel" style={{ background: "none", border: "none", padding: 4 }}><X size={14} color={C.muted} /></button>
+          }} className="icon-btn" aria-label="Save new field" title="Save" style={iconBtn}><Check size={16} color={C.success} /></button>
+          <button onClick={() => { setAddingField(false); setFieldError(""); setFieldDraft({ label: "", dataType: "text", optionsText: "", format: "plain" }); }} className="icon-btn" aria-label="Cancel new field" title="Cancel" style={iconBtn}><X size={14} color={C.muted} /></button>
           </div>
           {fieldError && <div role="alert" style={{ fontSize: 12, color: C.danger }}>{fieldError}</div>}
         </div>}
       </div>
+      {cfgType && dialog(`${cfgType.name} type`, closeType, (
+        <div>
+          {typeActions && cfgType.id !== DEFAULT_WORK_TYPE_ID && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, paddingBottom: 12 }}>
+              <span style={{ fontSize: 14 }}>Name</span>
+              <input value={nameDraft} onChange={e => setNameDraft(e.target.value)} onBlur={commitName}
+                onKeyDown={e => { if (e.key === "Enter") commitName(); }} aria-label="Type name" style={{ ...inputStyle, flex: 1 }} />
+            </div>
+          )}
+          {error && <div role="alert" style={{ fontSize: 12, color: C.danger, marginBottom: 8 }}>{error}</div>}
+          {kind === "task" && (
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, padding: "10px 0", fontSize: 14, borderTop: `1px solid ${C.border}` }}>
+              <span>Completing</span>
+              <PickerField hideLabel label="Completing" title="How completing works" value={taskCompletionMode(model, cfgType.id)} options={TASK_COMPLETION_MODES.map(m => m.value)}
+                labelForOption={v => (TASK_COMPLETION_MODES.find(m => m.value === v) || {}).label || v}
+                onChange={v => onModel(setTaskCompletionMode(model, cfgType.id, v))} />
+              <HelpTip label="About completing" text="Log work required opens the completion form and records a work entry. Log work optional completes in one tap and keeps Log work as a separate button. Checkbox only completes in one tap and never records work." />
+              {taskCompletionMode(model, cfgType.id) !== "simple" && (
+                <div style={{ flexBasis: "100%", display: "flex", alignItems: "center", gap: 8 }}>
+                  <span>Work type</span>
+                  <PickerField hideLabel label="Work type when completing" title="Work type when completing" value={taskCompletionWorkType(model, cfgType.id)} options={["", ...changeTypes]}
+                    labelForOption={v => v || "Default"}
+                    onChange={v => onModel(setTaskCompletionWorkType(model, cfgType.id, v))} />
+                  <HelpTip label="About the completion work type" text="The work type the completion form opens on. Default keeps the usual choice (Maintenance, when that type exists). It can still be changed in the form." />
+                </div>
+              )}
+            </div>
+          )}
+          <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 10, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12, letterSpacing: 1, textTransform: "uppercase", color: C.accent }}>Included fields</div>
+          {WORK_BUILTIN_FIELDS[kind].map(b => (
+            <div key={b.key} style={{ padding: "6px 0", fontSize: 14 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input type="checkbox" checked={workBuiltinShown(model, kind, cfgType.id, b.key)} onChange={e => onModel(setWorkBuiltinShown(model, kind, cfgType.id, b.key, e.target.checked))} />
+                <span>{b.label}</span>
+                <span style={{ fontSize: 12, color: C.muted }}>built in</span>
+              </label>
+            </div>
+          ))}
+          {fields.length === 0 && <div style={{ fontSize: 13, color: C.empty, padding: "6px 0" }}>Add a custom field on the settings page, then tick it here.</div>}
+          {fields.map(f => {
+            const on = st.fieldKeys.includes(f.key);
+            return (
+              <div key={f.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0", fontSize: 14 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0 }}>
+                  <input type="checkbox" checked={on} onChange={e => onModel(setTypeHasField(model, kind, cfgType.id, f.key, e.target.checked))} />
+                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{f.label}</span>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: on ? C.ink : C.muted }}>
+                  <input type="checkbox" disabled={!on} checked={on && st.requiredFields.includes(f.key)} onChange={e => onModel(setTypeFieldRequired(model, kind, cfgType.id, f.key, e.target.checked))} />
+                  Required
+                </label>
+              </div>
+            );
+          })}
+        </div>
+      ))}
+      {cfgField && dialog(`${cfgField.label} field`, () => setCfgFieldKey(""), (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ fontSize: 13, color: C.muted }}>{(COLUMN_DATA_TYPES.find(t => t.value === cfgField.dataType) || {}).label || ""}</div>
+          {cfgField.dataType === "number" && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14 }}>
+              <span>Format</span>
+              <div style={{ width: 170 }}>
+                <PickerField label={`${cfgField.label} format`} hideLabel value={fieldNumberFormat(cfgField, "number")} onChange={v => onModel(setWorkFieldFormat(model, kind, cfgField.key, v))}
+                  options={NUMBER_FORMATS.map(x => x.value)} labelForOption={numberFormatLabel} title="How the number is shown" />
+              </div>
+            </div>
+          )}
+          {isChoiceKind(cfgField.dataType) && (
+            <>
+              <div style={{ display: "flex", flexDirection: "column" }}>
+                {(cfgField.options || []).length === 0 && <div style={{ fontSize: 13, color: C.empty }}>No choices yet.</div>}
+                {(cfgField.options || []).map((o, i) => <div key={o} style={rowStyle(i)}>{o}</div>)}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <input value={choiceText} onChange={e => setChoiceText(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter") { onModel(addWorkFieldChoice(model, kind, cfgField.key, choiceText)); setChoiceText(""); } }}
+                  placeholder="Add a choice" aria-label={`Add a choice to ${cfgField.label}`} style={{ ...inputStyle, flex: 1 }} />
+                <button onClick={() => { onModel(addWorkFieldChoice(model, kind, cfgField.key, choiceText)); setChoiceText(""); }} className="icon-btn" aria-label="Add choice" title="Add choice" style={iconBtn}><Plus size={16} color={C.brand} /></button>
+              </div>
+            </>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
