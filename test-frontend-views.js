@@ -125,7 +125,7 @@ check('persist carries views as a config key', /views: nextViews = viewsCfg/.tes
 check('a per-record save sends views', /"workModel", "views", "taskTemplates", "nextAssetNumber"/.test(src));
 check('a load adopts views', /setViewsCfg\(adoptViews\(data\.views\)\)/.test(src));
 check('opening from a view passes the view id', /openMaintenanceEdit\(r\.item\.id, r\.asset\.id, activeView\.id\)/.test(src));
-check('no Delete on a task opened from a view', /\{editing && !dialogView && \(\s*<button\s+onClick=\{\(\) => setConfirmMaintenanceDelete/.test(src));
+check('Delete shows on a view task only while editing it, never read-only', /\{editing && canEdit && !viewReadOnly && \(\s*<button\s+onClick=\{\(\) => setConfirmMaintenanceDelete/.test(src));
 check('the save validates only the fields the view shows', /viewVisibleCustomKeys\(viewsCfg\.list\.find\(v => v\.id === maintenanceModal\.viewId\)\)/.test(src));
 check('a view-only person gets the dialog read-only', /<fieldset disabled=\{viewReadOnly\}/.test(src));
 check('the Edge Function stores and reads the key', ['save.ts', 'inventory.ts'].every(f => /OPTIONAL_CONFIG_KEYS = \["workModel", "views"/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api', f), 'utf8'))));
