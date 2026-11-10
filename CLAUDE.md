@@ -889,6 +889,8 @@ Phase 6 of `/mnt/project-files/plans/task-relationships-scheduling.md`. A **View
 
 ## Task dependencies (2026-10-28)
 
+**SWITCHED OFF (2026-11-10, Eric: not ready to test it, may return).** One flag, `TASK_BLOCKED_BY_ENABLED = false` beside `taskOpenBlockers`, turns it all off: no Blocked by picker, no Blocked label, no Blocked / Blocked by view fields, no completion warning (`taskOpenBlockers` returns nothing). **Stored `blockedBy` lists are untouched and still saved** (the draft carries them through an edit; `TASK_EXTRA_KEYS` and the round-to-round relinking are unchanged), so setting the flag to `true` brings it back exactly as it was. A saved view that queries Blocked now matches nothing. Frontend only; no backend change.
+
 Phase 5 of `/mnt/project-files/plans/task-relationships-scheduling.md`. A one-off task can be **blocked by** other tasks: `blockedBy`, an array of task ids on the blocked task only. **Blocked is derived, never stored** (`taskOpenBlockers`, `taskIsBlocked`): a task is blocked while any listed task still exists and is not done, so a finished or deleted blocker just stops counting.
 
 - **It warns and never refuses.** Completing a blocked task (the dialog and card buttons, through `guardComplete`, the same prompt as open subtasks) says "Blocked by X" and offers Complete anyway.
