@@ -21,6 +21,7 @@ const block = src.slice(src.indexOf('// ---------- VIEWS (2026-10-17)'), src.ind
 const code = [
   'const C = { danger: "r", accent: "a", success: "g", muted: "m" };',
   'const TASK_KIND_ONEOFF = "oneoff";',
+  'const TASK_BLOCKED_BY_ENABLED = false;',
   'const DEFAULT_WORK_TYPE_ID = "__default"; const DEFAULT_WORK_TYPE_NAME = "Default";',
   'const dateOnly = s => String(s || "").slice(0, 10);',
   'const localDateString = d => d.toISOString().slice(0, 10);',

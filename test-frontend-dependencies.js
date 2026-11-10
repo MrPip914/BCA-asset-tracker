@@ -11,7 +11,7 @@ const check = (name, ok, detail) => {
 const fn = name => { const a = src.indexOf('function ' + name + '('); if (a < 0) throw new Error(name); return src.slice(a, src.indexOf('\n}', a) + 2); };
 const cst = name => { const a = src.indexOf('const ' + name + ' ='); return src.slice(a, src.indexOf('\n', a) + 1); };
 const H = new Function([
-  cst('TASK_KIND_SCHEDULED'), cst('TASK_KIND_ONEOFF'), fn('dateOnly'), fn('taskKindOf'), fn('isOneOffTask'), fn('taskIsDone'),
+  cst('TASK_KIND_SCHEDULED'), cst('TASK_BLOCKED_BY_ENABLED').replace('= false', '= true'), cst('TASK_KIND_ONEOFF'), fn('dateOnly'), fn('taskKindOf'), fn('isOneOffTask'), fn('taskIsDone'),
   fn('taskIndexOf'), fn('taskOpenBlockers'), fn('taskIsBlocked'), fn('blockedByWouldLoop'),
   'return { taskIndexOf, taskOpenBlockers, taskIsBlocked, blockedByWouldLoop };',
 ].join('\n'))();
@@ -44,5 +44,9 @@ check('completing a blocked task asks, naming the blockers', /taskOpenBlockers\(
 check('the picker leaves out loops, the task itself and finished tasks', /blockedByWouldLoop\(tIndex, maintenanceDraft\.id, id\)/.test(src) && /id === maintenanceDraft\.id/.test(src));
 check('Blocked and Blocked by are view fields', /key: "blocked", label: "Blocked"/.test(src) && /case "blocked":/.test(src) && /case "blockedBy":/.test(src));
 check('the Supabase save keeps blockedBy', /"blockedBy"/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api/save-shape.ts'), 'utf8')));
+check('the feature ships SWITCHED OFF behind one flag', /const TASK_BLOCKED_BY_ENABLED = false;/.test(src));
+check('flag gates blockers, the picker and the view fields', /if \(!TASK_BLOCKED_BY_ENABLED\) return \[\];/.test(src) && /\{TASK_BLOCKED_BY_ENABLED && maintenanceDraft\.kind === TASK_KIND_ONEOFF/.test(src) && /\.\.\.\(TASK_BLOCKED_BY_ENABLED \? \[\{ key: "blocked"/.test(src));
+const Off = new Function([cst('TASK_KIND_SCHEDULED'), cst('TASK_KIND_ONEOFF'), cst('TASK_BLOCKED_BY_ENABLED'), fn('dateOnly'), fn('taskKindOf'), fn('isOneOffTask'), fn('taskIsDone'), fn('taskIndexOf'), fn('taskOpenBlockers'), fn('taskIsBlocked'), 'return { taskIndexOf, taskIsBlocked };'].join('\n'))();
+check('with the flag off nothing is blocked and data is left alone', !Off.taskIsBlocked(Off.taskIndexOf(assets), assets[0].maintenanceItems[1]) && assets[0].maintenanceItems[1].blockedBy[0] === 'paint');
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
