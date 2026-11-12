@@ -2787,6 +2787,42 @@ function makeRecurringFrom(assets, itemId, freq, lastDone, by) {
   });
   return { assets: next, config };
 }
+// Old-model schedules (a scheduled task with no `instanced` flag and no parent):
+// the rows Settings > Convert offers to move to the one-entity model.
+function legacyScheduleRows(assets) {
+  const out = [];
+  (assets || []).forEach(a => (a.maintenanceItems || []).forEach(m => {
+    if (!m || taskKindOf(m) !== TASK_KIND_SCHEDULED || m.instanced || m.recurringId || m.parentTaskId) return;
+    if (!m.frequencyDays && !m.recurrence) return;
+    if (taskIsEvent(m)) return;
+    out.push({ item: m, asset: a });
+  }));
+  return out;
+}
+// Converts every old-model schedule. Each existing row becomes the OPEN instance
+// (same id, so its work, files and history stay attached) with the next due date as
+// its Due date; a hidden configuration takes the frequency and Last performed, and
+// the row's existing subtasks are copied as the template. Returns the assets, how
+// many were converted and one audit row per task.
+function convertSchedulesToRecurring(assets, by) {
+  let next = assets, count = 0;
+  const entries = [];
+  legacyScheduleRows(assets).forEach(row => {
+    const ref = taskIndexOf(next).get(row.item.id);
+    if (!ref) return;
+    const it = ref.item;
+    const due = taskDueDate(it);
+    const freq = { label: it.frequencyLabel || "", days: it.frequencyDays, recurrence: it.recurrence || "" };
+    const res = makeRecurringFrom(next, it.id, freq, it.lastPerformed || "", by);
+    if (!res.config) return;
+    next = res.assets.map(a => (a.id === ref.asset.id ? { ...a, maintenanceItems: a.maintenanceItems.map(m => (m && m.id === it.id
+      ? { ...m, kind: TASK_KIND_ONEOFF, frequencyLabel: "", frequencyDays: "", recurrence: "", startDate: "", doOn: "", lastPerformed: "",
+          dueDate: due ? localDateString(due) : localDateString(new Date()) } : m)) } : a));
+    count += 1;
+    entries.push({ at: new Date().toISOString(), by: by || "", assetLabel: ref.asset.id, assetType: ref.asset.type, action: "maintenance_edited", field: `${it.task} — Kind`, from: "Scheduled", to: "Repeating" });
+  });
+  return { assets: next, count, entries };
+}
 // Dependencies (2026-10-28). A one-off task may list tasks it is BLOCKED BY in
 // `blockedBy` (ids, on the blocked task only). Blocked is DERIVED, never stored:
 // a task is blocked while any listed task still exists and is not done. A
@@ -7225,7 +7261,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-11-12.6";
+const APP_VERSION = "2026-11-12.7";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -9555,6 +9591,7 @@ function AssetTracker() {
   const [recurringHistory, setRecurringHistory] = useState(null);
   const [recurringDeleteAsk, setRecurringDeleteAsk] = useState(null);
   const [recurringReplaceAsk, setRecurringReplaceAsk] = useState(null);
+  const [convertSchedulesAsk, setConvertSchedulesAsk] = useState(false);
   const [recurringDueAsk, setRecurringDueAsk] = useState(null); // { itemId, assetId, task, from, to }
   const [stopRepeatAsk, setStopRepeatAsk] = useState(null);
   const [templateSubtaskName, setTemplateSubtaskName] = useState("");
@@ -14074,6 +14111,15 @@ function AssetTracker() {
     setMaintenanceModal(null);
   }
 
+  async function convertOldSchedules() {
+    setConvertSchedulesAsk(false);
+    if (savingRef.current || !assets) return;
+    const res = convertSchedulesToRecurring(assets, currentUser);
+    if (!res.count) return;
+    await persist(res.assets, { auditLog: logAudit(res.entries) });
+    setNotice(`${res.count} scheduled task${res.count === 1 ? "" : "s"} converted to repeating.`);
+  }
+
   // One-tap completion for a type whose mode is "optional" or "simple": stamps
   // lastPerformed and writes the same maintenance_completed audit row as the
   // form, but no work entry. `assetId` follows openMaintenanceComplete's rule.
@@ -17245,6 +17291,40 @@ function AssetTracker() {
               remove: id => removeTaskType(workModel, id),
             }}
           />
+          {(() => {
+            const old = legacyScheduleRows(assets);
+            return (
+              <div style={settingsCardStyle}>
+                <div style={{ ...settingsHeadingStyle, display: "flex", alignItems: "center", gap: 6 }}>
+                  Old scheduled tasks
+                  <HelpTip label="About converting old schedules" text="Scheduled tasks made before repeating tasks still work the old way and show Scheduled in the Kind column. Converting turns each one into a repeating task: the task itself becomes the open instance (its work, files and history stay with it), and its frequency, last performed date and subtasks move to the repeating task." />
+                </div>
+                <div style={{ fontSize: 13, color: C.muted, marginBottom: 12 }}>
+                  {old.length ? `${old.length} scheduled task${old.length === 1 ? "" : "s"} still use the old model.` : "No old scheduled tasks. Everything repeating uses the current model."}
+                </div>
+                {old.length > 0 && (
+                  <button type="button" onClick={() => setConvertSchedulesAsk(true)} disabled={!canEdit}
+                    style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600 }}>
+                    <Repeat size={15} /> Convert {old.length} to repeating
+                  </button>
+                )}
+                {convertSchedulesAsk && (
+                  <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 70, padding: 16 }}>
+                    <div role="dialog" aria-label="Convert old scheduled tasks" style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 380 }}>
+                      <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Convert {old.length} scheduled task{old.length === 1 ? "" : "s"}?</div>
+                      <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>
+                        Each becomes a repeating task whose open instance keeps its work, files and history. Its next due date becomes the instance's due date. This can't be undone in one step.
+                      </div>
+                      <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                        <button onClick={() => setConvertSchedulesAsk(false)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                        <button onClick={convertOldSchedules} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Convert</button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </>
       );
     }

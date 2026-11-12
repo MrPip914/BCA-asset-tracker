@@ -19,8 +19,8 @@ const H = new Function([
   fn('taskDueDate'), cst('TASK_MAX_DEPTH'), fn('taskIndexOf'), fn('taskChildrenOf'), fn('taskDescendantsOf'),
   fn('isRecurringConfig'), fn('recurringConfigIds'), fn('taskIsHidden'), fn('recurringInstancesOf'), fn('recurringOpenInstance'),
   fn('spawnNextInstance'), fn('afterInstanceCompleted'), fn('recurringLatestDone'), fn('recurringHistoryOf'), fn('recurringSyncLastDone'),
-  fn('removeTasksWithChildren'), fn('recurringReopenReplacing'), fn('recurringDeleteInstance'), fn('recurringDetach'), fn('makeRecurringFrom'),
-  'return { isRecurringConfig, recurringConfigIds, taskIsHidden, recurringOpenInstance, spawnNextInstance, afterInstanceCompleted, recurringLatestDone, recurringHistoryOf, recurringSyncLastDone, recurringReopenReplacing, recurringDeleteInstance, recurringDetach, makeRecurringFrom };',
+  fn('removeTasksWithChildren'), fn('recurringReopenReplacing'), fn('recurringDeleteInstance'), fn('recurringDetach'), fn('makeRecurringFrom'), fn('legacyScheduleRows'), fn('convertSchedulesToRecurring'), 'function taskIsEvent() { return false; }',
+  'return { isRecurringConfig, recurringConfigIds, taskIsHidden, recurringOpenInstance, spawnNextInstance, afterInstanceCompleted, recurringLatestDone, recurringHistoryOf, recurringSyncLastDone, recurringReopenReplacing, recurringDeleteInstance, recurringDetach, makeRecurringFrom, legacyScheduleRows, convertSchedulesToRecurring };',
 ].join('\n'))();
 
 const cfg = { id: 'cfg', kind: 'scheduled', instanced: true, task: 'Change filter', notes: 'n', owner: 'Sam', frequencyLabel: 'Weekly', frequencyDays: 7, lastPerformed: '' };
@@ -103,7 +103,7 @@ check('a Repeats toggle replaces the One-off/Repeats choice', /function RepeatsT
 check('the toggle has a gear that opens the recurring settings (frequency and subtask template)', /aria-label="Recurring task settings"/.test(src) && /aria-label="Recurring task settings" style/.test(src) && /Subtask template/.test(src));
 check('turning Repeats off on an instance asks first and keeps the instances', /setStopRepeatAsk\(\{ configId: maintenanceDraft\.recurringId/.test(src) && /recurringDetach\(assets, configId, false\)/.test(src));
 check('an instance links to its History and a finished one links to the open instance', /History of this task/.test(src) && /Open current instance/.test(src) && /recurringHistoryOf\(assets, recurringHistory\)/.test(src));
-check('the old Recurring tasks section, Convert, Skip and Start-next are gone', !/recurringConfigRows/.test(src) && !/skipRound|startNextRound|migrateSchedules/.test(src) && !/Recurring tasks<\/div>|>Convert</.test(src));
+check('the old Recurring tasks section, the old per-task Convert, Skip and Start-next are gone', !/recurringConfigRows/.test(src) && !/skipRound|startNextRound|migrateSchedules/.test(src) && !/Recurring tasks<\/div>/.test(src));
 check('the word "round" is gone from the recurring wording', !/Skip this round|next round|open round|one open round|a newer round/.test(src));
 check('Supabase keeps recurringId, instanced and skipped', /TASK_EXTRA_KEYS = \[[^\]]*"recurringId", "instanced", "skipped"/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api/save-shape.ts'), 'utf8')));
 
@@ -127,5 +127,26 @@ check('the prompt comes BEFORE the save: nothing persists until the person answe
 check('Update writes the due date and an audit row in the same save; Keep and Cancel do not touch it', /dueChoice === "update"\)[\s\S]{0,700}dueDate: dueAsk\.to[\s\S]{0,700}— Due date/.test(src) && /saveMaintenanceEdit\(true, "keep"\)/.test(src) && /saveMaintenanceEdit\(true, "update"\)/.test(src));
 check('Cancel on the prompt only closes it', /onClick=\{\(\) => setRecurringDueAsk\(null\)\} style=[^\n]*>Cancel<\/button>/.test(src));
 check('a quick completion refreshes an open dialog draft', /else \{ setMaintenanceDraft\(d => \(d && d\.id === itemId \? \{ \.\.\.d, lastPerformed: date \} : d\)\); setMaintenanceBaseline/.test(src));
+// Converting old schedules
+{
+  const old = [{ id: 'S', type: 'Room', maintenanceItems: [
+    { id: 's1', kind: 'scheduled', task: 'Old filter', frequencyLabel: 'Weekly', frequencyDays: 7, lastPerformed: '2026-11-01', notes: 'n' },
+    { id: 's1c', kind: 'oneoff', task: 'Check seal', parentTaskId: 's1', lastPerformed: '' },
+    { id: 's2', kind: 'scheduled', task: 'Never done', frequencyLabel: 'Monthly', frequencyDays: 30, lastPerformed: '' },
+    { id: 'new', kind: 'scheduled', instanced: true, task: 'Already new', frequencyDays: 7 },
+    { id: 'plain', kind: 'oneoff', task: 'One-off' } ] }];
+  check('only old-model schedules are offered', H.legacyScheduleRows(old).map(r => r.item.id).join() === 's1,s2');
+  const res = H.convertSchedulesToRecurring(old, 'Eric');
+  const its = res.assets[0].maintenanceItems;
+  const inst = its.find(m => m.id === 's1');
+  const cfgN = its.find(m => m.id === inst.recurringId);
+  check('the row keeps its id and becomes the open instance due at its next due date', inst.kind === 'oneoff' && !inst.lastPerformed && inst.dueDate === '2026-11-08' && !inst.frequencyDays);
+  check('a configuration takes the frequency and last performed', cfgN && cfgN.instanced && cfgN.kind === 'scheduled' && cfgN.frequencyDays === 7 && cfgN.lastPerformed === '2026-11-01');
+  check('its subtasks stay and are copied as the template', its.filter(m => m.task === 'Check seal').length === 2 && its.some(m => m.task === 'Check seal' && m.parentTaskId === cfgN.id));
+  check('a never-done schedule becomes an instance due today', its.find(m => m.id === 's2').dueDate === (() => { const d = new Date(), p = n => String(n).padStart(2, '0'); return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()); })());
+  check('count, audit rows, and nothing left to convert', res.count === 2 && res.entries.length === 2 && H.legacyScheduleRows(res.assets).length === 0);
+  check('the already-new task and the one-off are untouched', JSON.stringify(its.find(m => m.id === 'new')) === JSON.stringify(old[0].maintenanceItems[3]) && JSON.stringify(its.find(m => m.id === 'plain')) === JSON.stringify(old[0].maintenanceItems[4]));
+}
+check('the Settings card and handler wire the conversion into one save', /convertSchedulesToRecurring\(assets, currentUser\)[\s\S]{0,300}await persist\(res\.assets, \{ auditLog: logAudit\(res\.entries\) \}\)/.test(src) && /Convert \{old\.length\} to repeating/.test(src));
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
