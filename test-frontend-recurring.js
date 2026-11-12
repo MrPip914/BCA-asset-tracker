@@ -13,7 +13,7 @@ const check = (name, ok, detail) => {
 const fn = name => { const a = src.indexOf('function ' + name + '('); if (a < 0) throw new Error(name); return src.slice(a, src.indexOf('\n}', a) + 2); };
 const cst = name => { const a = src.indexOf('const ' + name + ' ='); return src.slice(a, src.indexOf('\n', a) + 1); };
 const H = new Function([
-  cst('TASK_KIND_SCHEDULED'), cst('TASK_KIND_ONEOFF'), fn('dateOnly'), fn('taskKindOf'), fn('taskKindShown'), fn('isOneOffTask'), fn('taskIsDone'),
+  cst('TASK_KIND_SCHEDULED'), cst('TASK_KIND_ONEOFF'), fn('dateOnly'), fn('taskKindOf'), fn('taskKindShown'), fn('taskKindShownLabel'), cst('TASK_KIND_REPEATING'), fn('isOneOffTask'), fn('taskIsDone'),
   'function parseRecurrence() { return null; }', 'function nextRecurrenceDate() { return null; }',
   'function localDateString(d) { d = d || new Date("2026-11-06T12:00:00"); const p = n => String(n).padStart(2, "0"); return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()); }',
   fn('taskDueDate'), cst('TASK_MAX_DEPTH'), fn('taskIndexOf'), fn('taskChildrenOf'), fn('taskDescendantsOf'),
@@ -111,7 +111,7 @@ check('Supabase keeps recurringId, instanced and skipped', /TASK_EXTRA_KEYS = \[
 check('Completion is a writable built-in board source with Open and Done', /key: "completion", label: "Completion", writable: true/.test(src) && /options = \[\{ id: "open", name: "Open" \}, \{ id: "done", name: "Done" \}\]/.test(src));
 check('dragging on it runs the done circle path', /field\.builtin === "completion"[\s\S]{0,400}toggleTaskDone\(\{ item, asset \}\)/.test(src));
 // Kind column
-check('an instance (stored one-off) shows as Repeating', /taskKindShown\(item\) \{ return \(item && item\.recurringId\)/.test(src) && /label: "Repeating"/.test(src));
-check('the Kind column, filter and view field read taskKindShown', (src.match(/taskKindShown\(/g) || []).length >= 8);
+check('an instance (stored one-off) shows as Repeating', /taskKindShown\(item\) \{ return \(item && item\.recurringId\) \? TASK_KIND_REPEATING/.test(src) && /label: "Repeating"/.test(src) && /label: "Scheduled"/.test(src));
+check('the Kind column, filter and view field read taskKindShown', (src.match(/taskKindShown(Label)?\(/g) || []).length >= 8);
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
