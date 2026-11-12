@@ -113,5 +113,17 @@ check('dragging on it runs the done circle path', /field\.builtin === "completio
 // Kind column
 check('an instance (stored one-off) shows as Repeating', /taskKindShown\(item\) \{ return \(item && item\.recurringId\) \? TASK_KIND_REPEATING/.test(src) && /label: "Repeating"/.test(src) && /label: "Scheduled"/.test(src));
 check('the Kind column, filter and view field read taskKindShown', (src.match(/taskKindShown(Label)?\(/g) || []).length >= 8);
+// Correcting a Completed date, and the dialog staying in step
+{
+  const base = H.spawnNextInstance(mk(), 'cfg', '2026-11-01', '').assets;
+  const doneInst = items(base).find(m => m.recurringId === 'cfg');
+  const done = base.map(a => ({ ...a, maintenanceItems: a.maintenanceItems.map(m => (m.id === doneInst.id ? { ...m, lastPerformed: '2026-11-05' } : m.id === 'cfg' ? { ...m, lastPerformed: '2026-11-05' } : m)) }));
+  const edited = done.map(a => ({ ...a, maintenanceItems: a.maintenanceItems.map(m => (m.id === doneInst.id ? { ...m, lastPerformed: '2026-11-02' } : m)) }));
+  const synced = H.recurringSyncLastDone(edited, 'cfg');
+  check('an earlier Completed date moves the config last performed back', items(synced).find(m => m.id === 'cfg').lastPerformed === '2026-11-02');
+}
+check('editing a Completed date re-syncs the config and offers the due date', /else if \(original\.lastPerformed && updated\.lastPerformed && original\.lastPerformed !== updated\.lastPerformed\) \{[\s\S]{0,900}recurringSyncLastDone\(next, original\.recurringId\)[\s\S]{0,900}dueAsk = \{/.test(src));
+check('the prompt is shown after the save and Yes writes the due date with an audit row', /if \(dueAsk\) setRecurringDueAsk\(dueAsk\)/.test(src) && /async function applyRecurringDueDate\(\)[\s\S]{0,900}dueDate: ask\.to[\s\S]{0,200}\} \}[\s\S]{0,400}— Due date/.test(src) || /— Due date`, from: ask\.from/.test(src));
+check('a quick completion refreshes an open dialog draft', /else setMaintenanceDraft\(d => \(d && d\.id === itemId \? \{ \.\.\.d, lastPerformed: date \} : d\)\)/.test(src));
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -7225,7 +7225,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-11-12.4";
+const APP_VERSION = "2026-11-12.5";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -9553,6 +9553,7 @@ function AssetTracker() {
   const [recurringHistory, setRecurringHistory] = useState(null);
   const [recurringDeleteAsk, setRecurringDeleteAsk] = useState(null);
   const [recurringReplaceAsk, setRecurringReplaceAsk] = useState(null);
+  const [recurringDueAsk, setRecurringDueAsk] = useState(null); // { itemId, assetId, task, from, to }
   const [stopRepeatAsk, setStopRepeatAsk] = useState(null);
   const [templateSubtaskName, setTemplateSubtaskName] = useState("");
   const [parentCompleteAsk, setParentCompleteAsk] = useState(null);
@@ -13896,6 +13897,7 @@ function AssetTracker() {
       delete updated.paneGroupIds;
       entries.push({ ...mkEntry("Asset", nameOf(workTarget), nameOf(dest)), related: relate({ from: workTargetId, to: destId }) });
     }
+    let dueAsk = null;
     let next = assets.map(a => {
       if (a.id === workTargetId) return { ...a, maintenanceItems: dest ? items.filter(it => !(it && it.id === original.id)) : nextItems };
       if (dest && a.id === destId) return { ...a, maintenanceItems: [...(a.maintenanceItems || []), updated] };
@@ -13917,6 +13919,19 @@ function AssetTracker() {
         res.removed.forEach(r => entries.push({ at: new Date().toISOString(), by: currentUser || "", assetLabel: r.asset.id, assetType: r.asset.type, action: "maintenance_removed", field: r.item.task }));
       } else if (!original.lastPerformed && updated.lastPerformed) {
         next = afterInstanceCompleted(next, updated, updated.lastPerformed, currentUser);
+      } else if (original.lastPerformed && updated.lastPerformed && original.lastPerformed !== updated.lastPerformed) {
+        // A finished instance's Completed date was corrected: the recurring task's
+        // Last performed follows its newest finished instance. If that moved, offer
+        // to move the open instance's due date with it.
+        const before = (taskIndexOf(assets).get(original.recurringId) || { item: {} }).item.lastPerformed || "";
+        next = recurringSyncLastDone(next, original.recurringId);
+        const cfgNow = taskIndexOf(next).get(original.recurringId);
+        const open = recurringOpenInstance(next, original.recurringId);
+        if (cfgNow && open && (cfgNow.item.lastPerformed || "") !== before) {
+          const due = taskDueDate(cfgNow.item);
+          const nd = due ? localDateString(due) : "";
+          if (nd && nd !== (open.item.dueDate || "")) dueAsk = { itemId: open.item.id, assetId: open.asset.id, task: open.item.task, from: open.item.dueDate || "", to: nd };
+        }
       }
       // The configuration follows this instance: name, details and frequency carry
       // to the next instances (this and past ones are never rewritten).
@@ -13929,6 +13944,7 @@ function AssetTracker() {
     }
     await persist(next, { auditLog: entries.length ? logAudit(entries) : auditLog, ...(movedViews !== viewsCfg ? { views: movedViews } : {}) });
     setMaintenanceModal(null);
+    if (dueAsk) setRecurringDueAsk(dueAsk);
     // An event moved to another day: offer to move what hangs under it as well.
     const oldDay = dateOnly(original.doOn), newDay = dateOnly(updated.doOn);
     if (oldDay && newDay && oldDay !== newDay) {
@@ -14048,6 +14064,19 @@ function AssetTracker() {
     setMaintenanceModal(null);
   }
 
+  // Yes on the "move the due date?" prompt after a Completed date was corrected.
+  async function applyRecurringDueDate() {
+    const ask = recurringDueAsk;
+    setRecurringDueAsk(null);
+    if (!ask || savingRef.current) return;
+    const target = assets ? assets.find(a => a.id === ask.assetId) : null;
+    const item = target && (target.maintenanceItems || []).find(m => m && m.id === ask.itemId);
+    if (!item || taskIsDone(item)) return;
+    const entry = { at: new Date().toISOString(), by: currentUser || "", assetLabel: target.id, assetType: target.type, action: "maintenance_edited", field: `${item.task} — Due date`, from: ask.from ? formatDateOnly(ask.from) : "—", to: formatDateOnly(ask.to) };
+    const next = assets.map(a => (a.id === target.id ? { ...a, maintenanceItems: a.maintenanceItems.map(m => (m && m.id === ask.itemId ? { ...m, dueDate: ask.to } : m)) } : a));
+    await persist(next, { auditLog: logAudit([entry]) });
+  }
+
   // One-tap completion for a type whose mode is "optional" or "simple": stamps
   // lastPerformed and writes the same maintenance_completed audit row as the
   // form, but no work entry. `assetId` follows openMaintenanceComplete's rule.
@@ -14071,6 +14100,8 @@ function AssetTracker() {
     const reset = isOneOffTask(item) ? { assets: afterInstanceCompleted(next, item, date, currentUser), entries: [] } : resetSubtasks(next, itemId, currentUser);
     await persist(reset.assets, { auditLog: logAudit([entry, ...reset.entries]) });
     if (!keepOpen) setMaintenanceModal(null);
+    // A dialog left open shows the completion at once (its draft was seeded while open).
+    else setMaintenanceDraft(d => (d && d.id === itemId ? { ...d, lastPerformed: date } : d));
     return true;
   }
 
@@ -18680,6 +18711,21 @@ function AssetTracker() {
                   <button onClick={() => setRecurringDeleteAsk(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
                   {recurringDeleteAsk.hasPrev && <button onClick={() => deleteCurrentInstance(recurringDeleteAsk.itemId)} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Delete this instance</button>}
                   <button onClick={() => deleteRecurringTask(recurringDeleteAsk.configId)} style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Delete the recurring task</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {recurringDueAsk && (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 70, padding: 16 }}>
+              <div role="dialog" aria-label="Update the due date" style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 380 }}>
+                <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Update the due date?</div>
+                <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>
+                  Last performed changed, so the next "{recurringDueAsk.task}" would now be due {formatDateOnly(recurringDueAsk.to)}. The current instance is due {recurringDueAsk.from ? formatDateOnly(recurringDueAsk.from) : "on no date"}.
+                </div>
+                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                  <button onClick={() => setRecurringDueAsk(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Keep {recurringDueAsk.from ? formatDateOnly(recurringDueAsk.from) : "as is"}</button>
+                  <button onClick={applyRecurringDueDate} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Update to {formatDateOnly(recurringDueAsk.to)}</button>
                 </div>
               </div>
             </div>
