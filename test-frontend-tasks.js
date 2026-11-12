@@ -277,7 +277,7 @@ check('there is no second task form left behind',
       !/maintenanceEditDraft/.test(src),
       'add and edit are one dialog over one draft');
 check('the dialog serves both modes off the same save buttons',
-      /onClick=\{editing \? saveMaintenanceEdit : addMaintenanceItem\}/.test(src));
+      /onClick=\{editing \? \(\) => saveMaintenanceEdit\(\) : addMaintenanceItem\}/.test(src));
 
 // Clearing the completion date is the ONLY way to reopen a finished one-off --
 // there is no done flag to unset. Offering it while ADDING one would invite
