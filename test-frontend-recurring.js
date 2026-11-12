@@ -123,7 +123,9 @@ check('the Kind column, filter and view field read taskKindShown', (src.match(/t
   check('an earlier Completed date moves the config last performed back', items(synced).find(m => m.id === 'cfg').lastPerformed === '2026-11-02');
 }
 check('editing a Completed date re-syncs the config and offers the due date', /else if \(original\.lastPerformed && updated\.lastPerformed && original\.lastPerformed !== updated\.lastPerformed\) \{[\s\S]{0,900}recurringSyncLastDone\(next, original\.recurringId\)[\s\S]{0,900}dueAsk = \{/.test(src));
-check('the prompt is shown after the save and Yes writes the due date with an audit row', /if \(dueAsk\) setRecurringDueAsk\(dueAsk\)/.test(src) && /async function applyRecurringDueDate\(\)[\s\S]{0,900}dueDate: ask\.to[\s\S]{0,200}\} \}[\s\S]{0,400}— Due date/.test(src) || /— Due date`, from: ask\.from/.test(src));
+check('the prompt comes BEFORE the save: nothing persists until the person answers', /if \(dueAsk && !dueChoice\) \{ setRecurringDueAsk\(dueAsk\); return; \}[\s\S]{0,900}await persist\(next/.test(src));
+check('Update writes the due date and an audit row in the same save; Keep and Cancel do not touch it', /dueChoice === "update"\)[\s\S]{0,700}dueDate: dueAsk\.to[\s\S]{0,700}— Due date/.test(src) && /saveMaintenanceEdit\(true, "keep"\)/.test(src) && /saveMaintenanceEdit\(true, "update"\)/.test(src));
+check('Cancel on the prompt only closes it', /onClick=\{\(\) => setRecurringDueAsk\(null\)\} style=[^\n]*>Cancel<\/button>/.test(src));
 check('a quick completion refreshes an open dialog draft', /else \{ setMaintenanceDraft\(d => \(d && d\.id === itemId \? \{ \.\.\.d, lastPerformed: date \} : d\)\); setMaintenanceBaseline/.test(src));
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

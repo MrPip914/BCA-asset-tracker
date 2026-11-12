@@ -13789,7 +13789,7 @@ function AssetTracker() {
 
   // Mutating an existing schedule (unlike adding one) loses the prior value, so
   // it's logged field-by-field — same approach as the main asset edit diff.
-  async function saveMaintenanceEdit(replaceOk) {
+  async function saveMaintenanceEdit(replaceOk, dueChoice) {
     if (savingRef.current) return; // double-submit guard, see savingRef
     // workTarget, not selectedAsset: the dialog is reachable from the site-wide
     // Tasks table, where no asset is open and the row's own asset is the one
@@ -13946,9 +13946,15 @@ function AssetTracker() {
           ? { ...a, maintenanceItems: a.maintenanceItems.map(m => (m && m.id === original.recurringId ? { ...m, ...carry } : m)) } : a));
       }
     }
+    // Nothing is saved until the person has answered: the task dialog stays open
+    // under the prompt, Cancel saves nothing, and both other answers save the edit.
+    if (dueAsk && !dueChoice) { setRecurringDueAsk(dueAsk); return; }
+    if (dueAsk && dueChoice === "update") {
+      next = next.map(a => (a.id === dueAsk.assetId ? { ...a, maintenanceItems: a.maintenanceItems.map(m => (m && m.id === dueAsk.itemId ? { ...m, dueDate: dueAsk.to } : m)) } : a));
+      entries.push({ at: new Date().toISOString(), by: currentUser || "", assetLabel: dueAsk.assetId, assetType: (assets.find(a => a.id === dueAsk.assetId) || {}).type, action: "maintenance_edited", field: `${dueAsk.task} — Due date`, from: dueAsk.from ? formatDateOnly(dueAsk.from) : "—", to: formatDateOnly(dueAsk.to) });
+    }
     await persist(next, { auditLog: entries.length ? logAudit(entries) : auditLog, ...(movedViews !== viewsCfg ? { views: movedViews } : {}) });
     setMaintenanceModal(null);
-    if (dueAsk) setRecurringDueAsk(dueAsk);
     // An event moved to another day: offer to move what hangs under it as well.
     const oldDay = dateOnly(original.doOn), newDay = dateOnly(updated.doOn);
     if (oldDay && newDay && oldDay !== newDay) {
@@ -14066,19 +14072,6 @@ function AssetTracker() {
     // lastPerformed on screen, and its Save would write that back over the
     // completion just logged -- silently, since the form looks untouched.
     setMaintenanceModal(null);
-  }
-
-  // Yes on the "move the due date?" prompt after a Completed date was corrected.
-  async function applyRecurringDueDate() {
-    const ask = recurringDueAsk;
-    setRecurringDueAsk(null);
-    if (!ask || savingRef.current) return;
-    const target = assets ? assets.find(a => a.id === ask.assetId) : null;
-    const item = target && (target.maintenanceItems || []).find(m => m && m.id === ask.itemId);
-    if (!item || taskIsDone(item)) return;
-    const entry = { at: new Date().toISOString(), by: currentUser || "", assetLabel: target.id, assetType: target.type, action: "maintenance_edited", field: `${item.task} — Due date`, from: ask.from ? formatDateOnly(ask.from) : "—", to: formatDateOnly(ask.to) };
-    const next = assets.map(a => (a.id === target.id ? { ...a, maintenanceItems: a.maintenanceItems.map(m => (m && m.id === ask.itemId ? { ...m, dueDate: ask.to } : m)) } : a));
-    await persist(next, { auditLog: logAudit([entry]) });
   }
 
   // One-tap completion for a type whose mode is "optional" or "simple": stamps
@@ -18729,11 +18722,12 @@ function AssetTracker() {
               <div role="dialog" aria-label="Update the due date" style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 380 }}>
                 <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Update the due date?</div>
                 <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>
-                  Last performed changed, so the next "{recurringDueAsk.task}" would now be due {formatDateOnly(recurringDueAsk.to)}. The current instance is due {recurringDueAsk.from ? formatDateOnly(recurringDueAsk.from) : "on no date"}.
+                  Last performed changes with this date, so the next "{recurringDueAsk.task}" would now be due {formatDateOnly(recurringDueAsk.to)}. The current instance is due {recurringDueAsk.from ? formatDateOnly(recurringDueAsk.from) : "on no date"}. Cancel leaves this task unsaved.
                 </div>
                 <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-                  <button onClick={() => setRecurringDueAsk(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Keep {recurringDueAsk.from ? formatDateOnly(recurringDueAsk.from) : "as is"}</button>
-                  <button onClick={applyRecurringDueDate} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Update to {formatDateOnly(recurringDueAsk.to)}</button>
+                  <button onClick={() => setRecurringDueAsk(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.border}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.muted }}>Cancel</button>
+                  <button onClick={() => { setRecurringDueAsk(null); saveMaintenanceEdit(true, "keep"); }} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Keep {recurringDueAsk.from ? formatDateOnly(recurringDueAsk.from) : "as is"}</button>
+                  <button onClick={() => { setRecurringDueAsk(null); saveMaintenanceEdit(true, "update"); }} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Update to {formatDateOnly(recurringDueAsk.to)}</button>
                 </div>
               </div>
             </div>
