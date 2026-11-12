@@ -341,5 +341,10 @@ check('the edge function keeps both dates',
 check('editing either date is audited',
       /mkEntry\("Start date"/.test(src) && /mkEntry\("Scheduled for"/.test(src));
 
+// Save on the task dialog: reads "Save" and stays grey until the draft differs from what opened.
+check('task dialog Save is labelled Save and gated on a change',
+  /\{editing \? "Save" : "Add task"\}/.test(src) && /maintenanceDirty/.test(src) &&
+  /\|\| !maintenanceDirty\}/.test(src) && /setMaintenanceBaseline\(editSeed\)/.test(src) && !/"Save changes"/.test(src));
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
