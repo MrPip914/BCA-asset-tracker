@@ -2589,17 +2589,18 @@ function resetSubtasks(assets, parentId, by) {
   });
   return { assets: next, entries };
 }
-// Recurring tasks as a CONFIGURATION plus INSTANCES (2026-11-06). A repeating task
-// marked `instanced: true` is the configuration: it keeps the name, notes, owner,
-// type, custom fields, schedule rule and its template subtasks, and is never
-// scheduled, done or put on a board. Each round is an INSTANCE: an ordinary
-// one-off whose `recurringId` names the configuration. Completing an instance
-// stamps the configuration's last-done date and spawns the next instance in the
-// SAME save, so exactly one is open at a time. A schedule without `instanced`
-// (not migrated yet) behaves exactly as before. All of this is pure.
+// Recurring tasks: ONE entity with instances (2026-11-12). A task with Repeats on
+// is stored as a hidden CONFIGURATION (`instanced: true`: name, notes, owner, type,
+// custom fields, frequency, and its template subtasks; never scheduled, done or
+// on a board) plus INSTANCES: ordinary one-offs whose `recurringId` names the
+// configuration. The user never meets the configuration as an object: it is
+// reached only through the gear beside the Repeats toggle on an instance.
+// Completing an instance stamps the configuration's last-done date and spawns the
+// next instance in the SAME save, so exactly one is open at a time. A schedule
+// without `instanced` (never converted) behaves exactly as before. All pure.
 function isRecurringConfig(item) { return !!item && item.instanced === true && !isOneOffTask(item); }
-// A task "repeats" when it is a schedule, or one round (instance) of a repeating
-// task: an instance is stored as a one-off, so kind alone shows no repeat icon.
+// A task "repeats" when it is a schedule, or one instance of a repeating task:
+// an instance is stored as a one-off, so kind alone shows no repeat icon.
 function taskRepeatsDraft(item) { return !!item && (item.kind !== TASK_KIND_ONEOFF || !!item.recurringId); }
 function recurringConfigIds(assets) {
   const ids = new Set();
@@ -2620,8 +2621,8 @@ function recurringOpenInstance(assets, configId) {
 }
 // Adds the next instance of `configId` (and a fresh copy of its template
 // subtasks) unless one is already open. `fromDate` is the completion date the
-// next round counts from; blank uses the configuration's own last-done date,
-// and a never-done configuration is due today. Blockers pointing at the round
+// next instance counts from; blank uses the configuration's own last-done date,
+// and a never-done configuration is due today. Blockers pointing at the instance
 // that just finished (`oldInstanceId`) are moved to the new one, so a link never
 // goes stale. Returns the new assets and the instance added (null if none).
 function spawnNextInstance(assets, configId, fromDate, by, oldInstanceId) {
@@ -2659,12 +2660,124 @@ function spawnNextInstance(assets, configId, fromDate, by, oldInstanceId) {
   return { assets: next, spawned: instance };
 }
 // Called with `assets` in which `item` has just been stamped done on `date`: if
-// it is an instance, stamps its configuration and starts the next round.
+// it is an instance, stamps its configuration and starts the next instance.
 function afterInstanceCompleted(assets, item, date, by) {
   if (!item || !item.recurringId || !isOneOffTask(item)) return assets;
   const stamped = assets.map(a => ((a.maintenanceItems || []).some(m => m && m.id === item.recurringId)
     ? { ...a, maintenanceItems: a.maintenanceItems.map(m => (m && m.id === item.recurringId ? { ...m, lastPerformed: date } : m)) } : a));
   return spawnNextInstance(stamped, item.recurringId, date, by, item.id).assets;
+}
+// The newest finished instance of a configuration (by completed date), or null.
+function recurringLatestDone(assets, configId, exceptId) {
+  let best = null;
+  recurringInstancesOf(assets, configId).forEach(r => {
+    if (!taskIsDone(r.item) || r.item.id === exceptId) return;
+    const key = String(r.item.lastPerformed || "") + "|" + String(r.item.at || "");
+    if (!best || key > best.key) best = { ...r, key };
+  });
+  return best;
+}
+// Every instance of a configuration, newest first: the open one on top, then the
+// finished ones by completed date. This is the History list.
+function recurringHistoryOf(assets, configId) {
+  const rows = recurringInstancesOf(assets, configId);
+  const open = rows.filter(r => !taskIsDone(r.item));
+  const done = rows.filter(r => taskIsDone(r.item)).sort((a, b) =>
+    (String(b.item.lastPerformed || "") + String(b.item.at || "")).localeCompare(String(a.item.lastPerformed || "") + String(a.item.at || "")));
+  return [...open, ...done];
+}
+// Sets the configuration's last-done date from its newest finished instance (blank
+// when none), so deleting or reopening an instance never leaves a stale date.
+function recurringSyncLastDone(assets, configId) {
+  const latest = recurringLatestDone(assets, configId);
+  const date = latest ? latest.item.lastPerformed : "";
+  return assets.map(a => ((a.maintenanceItems || []).some(m => m && m.id === configId && (m.lastPerformed || "") !== date)
+    ? { ...a, maintenanceItems: a.maintenanceItems.map(m => (m && m.id === configId ? { ...m, lastPerformed: date } : m)) } : a));
+}
+// Removes the given task ids and everything below them, on any asset.
+function removeTasksWithChildren(assets, ids) {
+  const gone = new Set();
+  ids.forEach(id => { gone.add(id); taskDescendantsOf(assets, id).forEach(c => gone.add(c.item.id)); });
+  const removed = [];
+  const next = assets.map(a => {
+    const items = a.maintenanceItems || [];
+    if (!items.some(m => m && gone.has(m.id))) return a;
+    items.forEach(m => { if (m && gone.has(m.id)) removed.push({ item: m, asset: a }); });
+    return { ...a, maintenanceItems: items.filter(m => !m || !gone.has(m.id)) };
+  });
+  return { assets: next, removed };
+}
+// Reopens a finished instance. Only one instance may be open, so the current open
+// one (and its subtasks) is deleted first. Returns the assets and what was removed.
+function recurringReopenReplacing(assets, instanceId) {
+  const ref = taskIndexOf(assets).get(instanceId);
+  if (!ref || !ref.item.recurringId) return { assets, removed: [] };
+  const others = recurringInstancesOf(assets, ref.item.recurringId).filter(r => !taskIsDone(r.item) && r.item.id !== instanceId);
+  let next = assets, removed = [];
+  if (others.length) { const res = removeTasksWithChildren(assets, others.map(r => r.item.id)); next = res.assets; removed = res.removed; }
+  next = next.map(a => ((a.maintenanceItems || []).some(m => m && m.id === instanceId)
+    ? { ...a, maintenanceItems: a.maintenanceItems.map(m => { if (!m || m.id !== instanceId) return m; const { skipped, ...rest } = m; return { ...rest, lastPerformed: "" }; }) } : a));
+  return { assets: recurringSyncLastDone(next, ref.item.recurringId), removed };
+}
+// Deletes one instance. When it was the open one, the previous instance is marked
+// incomplete again (it becomes the open one). Returns the assets, what was removed
+// and the instance that was reopened (null if none).
+function recurringDeleteInstance(assets, instanceId) {
+  const ref = taskIndexOf(assets).get(instanceId);
+  if (!ref || !ref.item.recurringId) return { assets, removed: [], reopened: null };
+  const configId = ref.item.recurringId;
+  const wasOpen = !taskIsDone(ref.item);
+  const prev = wasOpen ? recurringLatestDone(assets, configId, instanceId) : null;
+  const res = removeTasksWithChildren(assets, [instanceId]);
+  let next = res.assets;
+  if (prev) next = next.map(a => ((a.maintenanceItems || []).some(m => m && m.id === prev.item.id)
+    ? { ...a, maintenanceItems: a.maintenanceItems.map(m => { if (!m || m.id !== prev.item.id) return m; const { skipped, ...rest } = m; return { ...rest, lastPerformed: "" }; }) } : a));
+  return { assets: recurringSyncLastDone(next, configId), removed: res.removed, reopened: prev ? prev.item : null };
+}
+// Stops a task repeating: the configuration and its template subtasks are deleted
+// and every instance becomes a plain one-off (finished ones stay completed). With
+// `dropOpen`, the open instance (and its subtasks) is deleted as well.
+function recurringDetach(assets, configId, dropOpen) {
+  let next = assets, removed = [];
+  const open = dropOpen ? recurringOpenInstance(assets, configId) : null;
+  const res = removeTasksWithChildren(next, [configId, ...(open ? [open.item.id] : [])]);
+  next = res.assets; removed = res.removed;
+  next = next.map(a => ((a.maintenanceItems || []).some(m => m && m.recurringId === configId)
+    ? { ...a, maintenanceItems: a.maintenanceItems.map(m => { if (!m || m.recurringId !== configId) return m; const { recurringId, skipped, ...rest } = m; return rest; }) } : a));
+  return { assets: next, removed };
+}
+// Turns an existing one-off into the first instance of a new recurring task: a
+// configuration is created beside it (same asset) from its fields and the chosen
+// frequency, its subtasks are copied as the template, and `lastDone` is the
+// configuration's last-performed date. The one-off keeps its id, files and work.
+function makeRecurringFrom(assets, itemId, freq, lastDone, by) {
+  const ref = taskIndexOf(assets).get(itemId);
+  if (!ref || !freq) return { assets, config: null };
+  const it = ref.item;
+  const now = new Date().toISOString();
+  const config = {
+    id: crypto.randomUUID(), kind: TASK_KIND_SCHEDULED, instanced: true,
+    task: it.task, notes: it.notes || "", owner: it.owner || "", taskType: it.taskType || "", custom: { ...(it.custom || {}) },
+    frequencyLabel: freq.label, frequencyDays: freq.days, recurrence: freq.recurrence,
+    startDate: "", doOn: "", dueDate: "", lastPerformed: lastDone || "",
+    ...(it.paneGroupIds && it.paneGroupIds.length ? { paneGroupIds: [...it.paneGroupIds] } : {}),
+    at: now, by: by || "",
+  };
+  const added = new Map([[ref.asset.id, [config]]]);
+  const idMap = new Map([[it.id, config.id]]);
+  taskDescendantsOf(assets, it.id).forEach(c => {
+    const copy = { ...c.item, id: crypto.randomUUID(), lastPerformed: "", at: now, by: by || "", blockedBy: [] };
+    delete copy.recurringId;
+    idMap.set(c.item.id, copy.id);
+    copy.parentTaskId = idMap.get(c.item.parentTaskId) || config.id;
+    added.set(c.asset.id, [...(added.get(c.asset.id) || []), copy]);
+  });
+  const next = assets.map(a => {
+    const add = added.get(a.id);
+    const items = (a.maintenanceItems || []).map(m => (m && m.id === itemId ? { ...m, recurringId: config.id } : m));
+    return { ...a, maintenanceItems: [...items, ...(add || [])] };
+  });
+  return { assets: next, config };
 }
 // Dependencies (2026-10-28). A one-off task may list tasks it is BLOCKED BY in
 // `blockedBy` (ids, on the blocked task only). Blocked is DERIVED, never stored:
@@ -7104,7 +7217,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-11-12.1";
+const APP_VERSION = "2026-11-12.2";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -9426,6 +9539,14 @@ function AssetTracker() {
   const [inlineSubtask, setInlineSubtask] = useState(null);
   const inlineSubtaskBusyRef = useRef(false);
   const [confirmMaintenanceDelete, setConfirmMaintenanceDelete] = useState(null);
+  // Recurring tasks: the gear dialog, the history list, and the three questions
+  // (delete which, replace the open instance, stop repeating).
+  const [recurringGear, setRecurringGear] = useState(false);
+  const [recurringHistory, setRecurringHistory] = useState(null);
+  const [recurringDeleteAsk, setRecurringDeleteAsk] = useState(null);
+  const [recurringReplaceAsk, setRecurringReplaceAsk] = useState(null);
+  const [stopRepeatAsk, setStopRepeatAsk] = useState(null);
+  const [templateSubtaskName, setTemplateSubtaskName] = useState("");
   const [parentCompleteAsk, setParentCompleteAsk] = useState(null);
   const [logWorkAsk, setLogWorkAsk] = useState(null);
   // Unticking a done task that has a completing work entry: keep it or delete it.
@@ -13508,6 +13629,7 @@ function AssetTracker() {
   // gets the open asset; the site-wide tab passes the one just picked.
   function openMaintenanceAdd(assetId, taskType) {
     setWorkDialogAssetId(assetId === undefined ? null : assetId);
+    setRecurringGear(false);
     // Minted on OPEN so a photo can name this schedule while the form is still
     // being filled in -- the same rule openChangeAdd follows.
     setMaintenanceDraft({ id: crypto.randomUUID(), kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [], parentTaskId: "", blockedBy: [] });
@@ -13529,6 +13651,10 @@ function AssetTracker() {
     const item = asset ? (asset.maintenanceItems || []).find(m => m && m.id === itemId) : null;
     if (!item) return;
     setWorkDialogAssetId(assetId === undefined ? null : assetId);
+    setRecurringGear(false);
+    // An instance shows its configuration's frequency (edited through the gear).
+    const cfgRef = item.recurringId ? taskIndexOf(assets).get(item.recurringId) : null;
+    const freqSrc = cfgRef ? cfgRef.item : item;
     setMaintenanceDraft({
       id: item.id,
       kind: taskKindOf(item),
@@ -13536,8 +13662,8 @@ function AssetTracker() {
       notes: item.notes || "",
       // A task carrying a readable rule opens on Custom with its controls
       // seeded; everything else opens on its preset as before.
-      frequency: parseRecurrence(item.recurrence) ? MAINTENANCE_FREQUENCY_CUSTOM : (item.frequencyLabel || MAINTENANCE_FREQUENCIES[1].label),
-      recurrence: recurrenceToDraft(parseRecurrence(item.recurrence)),
+      frequency: parseRecurrence(freqSrc.recurrence) ? MAINTENANCE_FREQUENCY_CUSTOM : (freqSrc.frequencyLabel || MAINTENANCE_FREQUENCIES[1].label),
+      recurrence: recurrenceToDraft(parseRecurrence(freqSrc.recurrence)),
       startDate: dateOnly(item.startDate),
       doOn: dateOnly(item.doOn),
       dueDate: dateOnly(item.dueDate),
@@ -13634,7 +13760,7 @@ function AssetTracker() {
       ...(livePaneGroupIds(workTarget, maintenanceDraft.paneGroupIds).length ? { paneGroupIds: livePaneGroupIds(workTarget, maintenanceDraft.paneGroupIds) } : {}),
       ...(maintenanceDraft.parentTaskId ? { parentTaskId: maintenanceDraft.parentTaskId } : {}),
       ...(oneOff && (maintenanceDraft.blockedBy || []).length ? { blockedBy: [...maintenanceDraft.blockedBy] } : {}),
-      // A new repeating task is a configuration from the start; its first round
+      // A new repeating task is a configuration from the start; its first instance
       // is created just below.
       ...(!oneOff ? { instanced: true } : {}),
       at: new Date().toISOString(),
@@ -13650,7 +13776,7 @@ function AssetTracker() {
 
   // Mutating an existing schedule (unlike adding one) loses the prior value, so
   // it's logged field-by-field — same approach as the main asset edit diff.
-  async function saveMaintenanceEdit() {
+  async function saveMaintenanceEdit(replaceOk) {
     if (savingRef.current) return; // double-submit guard, see savingRef
     // workTarget, not selectedAsset: the dialog is reachable from the site-wide
     // Tasks table, where no asset is open and the row's own asset is the one
@@ -13659,9 +13785,13 @@ function AssetTracker() {
     const items = workTarget.maintenanceItems || [];
     const original = items.find(m => m && m.id === maintenanceModal.itemId);
     if (!original) { setMaintenanceModal(null); return; }
-    const oneOff = maintenanceDraft.kind === TASK_KIND_ONEOFF || !!original.parentTaskId;
+    const oneOffDraft = maintenanceDraft.kind === TASK_KIND_ONEOFF || !!original.parentTaskId;
     const freq = frequencyFromDraft(maintenanceDraft);
-    if (!oneOff && !freq) return; // a Custom choice that isn't a rule yet; Save is disabled on it
+    if (!oneOffDraft && !freq) return; // a Custom choice that isn't a rule yet; Save is disabled on it
+    // Repeats turned ON for an existing one-off: it stays as the first instance and
+    // a configuration is created beside it (below).
+    const becomesRecurring = !oneOffDraft && taskKindOf(original) === TASK_KIND_ONEOFF && !original.recurringId && !original.parentTaskId;
+    const oneOff = oneOffDraft || becomesRecurring;
     const updated = {
       ...original,
       // Always written, never left to the blank-means-scheduled default: an
@@ -13680,7 +13810,7 @@ function AssetTracker() {
       // Clearing this on a one-off is how a finished job is REOPENED -- there
       // is no separate done flag to unset, and the change is audited below
       // like any other field edit.
-      lastPerformed: maintenanceDraft.lastPerformed || "",
+      lastPerformed: becomesRecurring ? (original.lastPerformed || "") : (maintenanceDraft.lastPerformed || ""),
       owner: maintenanceDraft.owner.trim(),
       taskType: maintenanceDraft.taskType || "",
       custom: { ...(maintenanceDraft.custom || {}) },
@@ -13696,10 +13826,13 @@ function AssetTracker() {
     });
     const entries = [];
     const kindWord = k => (k === TASK_KIND_ONEOFF ? "One-off" : "Scheduled");
-    if (taskKindOf(original) !== taskKindOf(updated)) entries.push(mkEntry("Kind", kindWord(taskKindOf(original)), kindWord(taskKindOf(updated))));
+    if (becomesRecurring) entries.push(mkEntry("Repeats", "Off", freq.label));
+    else if (taskKindOf(original) !== taskKindOf(updated)) entries.push(mkEntry("Kind", kindWord(taskKindOf(original)), kindWord(taskKindOf(updated))));
     if (original.task !== updated.task) entries.push(mkEntry("Task", original.task, updated.task));
     if ((original.notes || "") !== (updated.notes || "")) entries.push(mkEntry("Notes", original.notes || "—", updated.notes || "—"));
-    if ((original.frequencyLabel || "") !== (updated.frequencyLabel || "")) entries.push(mkEntry("Frequency", original.frequencyLabel || "—", updated.frequencyLabel || "—"));
+    const cfgRef = original.recurringId ? taskIndexOf(assets).get(original.recurringId) : null;
+    if (cfgRef && freq && (cfgRef.item.frequencyLabel || "") !== freq.label) entries.push(mkEntry("Frequency", cfgRef.item.frequencyLabel || "—", freq.label));
+    else if (!cfgRef && (original.frequencyLabel || "") !== (updated.frequencyLabel || "")) entries.push(mkEntry("Frequency", original.frequencyLabel || "—", updated.frequencyLabel || "—"));
     if ((original.startDate || "") !== (updated.startDate || "")) {
       entries.push(mkEntry("Start date", formatDateOnly(original.startDate) || "—", formatDateOnly(updated.startDate) || "—"));
     }
@@ -13737,14 +13870,12 @@ function AssetTracker() {
       const dateField = isOneOffTask(updated) ? "Completed" : "Last performed";
       entries.push(mkEntry(dateField, formatDateOnly(original.lastPerformed) || "—", formatDateOnly(updated.lastPerformed) || "—"));
     }
-    // Reopening a finished round while a newer one is open would break the
-    // one-open-round rule.
-    if (original.recurringId && original.lastPerformed && !updated.lastPerformed) {
+    // Reopening a finished instance while a newer one is open: only one instance
+    // can be open, so ask before replacing the current one.
+    const reopening = !!(original.recurringId && original.lastPerformed && !updated.lastPerformed);
+    if (reopening && !replaceOk) {
       const successor = recurringOpenInstance(assets, original.recurringId);
-      if (successor && successor.item.id !== original.id) {
-        setNotice(`"${original.task}" can't be reopened while a newer round is open. Finish or delete that round first.`);
-        return;
-      }
+      if (successor && successor.item.id !== original.id) { setRecurringReplaceAsk({ itemId: original.id, assetId: workTargetId, task: original.task, from: "save" }); return; }
     }
     const nextItems = items.map(it => (it && it.id === original.id ? updated : it));
     // Moving the task to another asset: it leaves this asset's list and joins the
@@ -13763,17 +13894,30 @@ function AssetTracker() {
       return a;
     });
     const movedViews = dest ? rekeyViewsTask(viewsCfg, workTargetId, destId, original.id) : viewsCfg;
-    if (isRecurringConfig(original)) {
-      // Editing the configuration carries to the open round if nobody changed it
-      // since it was created; finished rounds are never touched.
-      const open = recurringOpenInstance(assets, original.id);
-      const same = (x, y) => JSON.stringify([x.task, x.notes || "", x.owner || "", x.taskType || "", x.custom || {}]) === JSON.stringify([y.task, y.notes || "", y.owner || "", y.taskType || "", y.custom || {}]);
-      if (open && same(open.item, original)) {
-        const carry = { task: updated.task, notes: updated.notes, owner: updated.owner, taskType: updated.taskType, custom: { ...updated.custom } };
-        next = next.map(a => (a.id === open.asset.id ? { ...a, maintenanceItems: a.maintenanceItems.map(m => (m && m.id === open.item.id ? { ...m, ...carry } : m)) } : a));
+    if (becomesRecurring) {
+      const res = makeRecurringFrom(next, original.id, freq, original.lastPerformed || maintenanceDraft.lastPerformed || "", currentUser);
+      next = res.assets;
+      // A finished one-off turned recurring starts the next instance right away.
+      if (original.lastPerformed) next = spawnNextInstance(next, res.config.id, original.lastPerformed, currentUser, original.id).assets;
+    } else if (original.recurringId) {
+      // Reopening replaces the open instance; finished instances never change.
+      if (reopening) {
+        const res = recurringReopenReplacing(next, original.id);
+        next = res.assets;
+        // recurringReopenReplacing cleared the stored copy; keep this save's other edits.
+        next = next.map(a => (a.id === workTargetId ? { ...a, maintenanceItems: a.maintenanceItems.map(m => (m && m.id === original.id ? { ...updated, lastPerformed: "" } : m)) } : a));
+        res.removed.forEach(r => entries.push({ at: new Date().toISOString(), by: currentUser || "", assetLabel: r.asset.id, assetType: r.asset.type, action: "maintenance_removed", field: r.item.task }));
+      } else if (!original.lastPerformed && updated.lastPerformed) {
+        next = afterInstanceCompleted(next, updated, updated.lastPerformed, currentUser);
       }
-    } else if (original.recurringId && !original.lastPerformed && updated.lastPerformed) {
-      next = afterInstanceCompleted(next, updated, updated.lastPerformed, currentUser);
+      // The configuration follows this instance: name, details and frequency carry
+      // to the next instances (this and past ones are never rewritten).
+      if (!original.lastPerformed || reopening) {
+        const carry = { task: updated.task, notes: updated.notes, owner: updated.owner, taskType: updated.taskType, custom: { ...updated.custom },
+          ...(freq ? { frequencyLabel: freq.label, frequencyDays: freq.days, recurrence: freq.recurrence } : {}) };
+        next = next.map(a => ((a.maintenanceItems || []).some(m => m && m.id === original.recurringId)
+          ? { ...a, maintenanceItems: a.maintenanceItems.map(m => (m && m.id === original.recurringId ? { ...m, ...carry } : m)) } : a));
+      }
     }
     await persist(next, { auditLog: entries.length ? logAudit(entries) : auditLog, ...(movedViews !== viewsCfg ? { views: movedViews } : {}) });
     setMaintenanceModal(null);
@@ -13936,21 +14080,28 @@ function AssetTracker() {
   // it is (the same row resetSubtasks writes). `assetId` follows the usual rule.
   // `dropWork` also deletes the work entries that were the completion (same
   // performed date); the default keeps them, since they record work that happened.
-  async function reopenTask(itemId, assetId, keepOpen, dropWork) {
+  async function reopenTask(itemId, assetId, keepOpen, dropWork, replaceOk) {
     if (savingRef.current) return; // double-submit guard, see savingRef
     const tid = assetId || selectedId;
     const target = assets ? assets.find(a => a.id === tid) : null;
     const item = target ? (target.maintenanceItems || []).find(m => m && m.id === itemId) : null;
     if (!item || !item.lastPerformed) return;
+    // Only one instance of a recurring task can be open: ask before replacing it.
     const successor = item.recurringId ? recurringOpenInstance(assets, item.recurringId) : null;
-    if (successor && successor.item.id !== item.id) {
-      setNotice(`"${item.task}" can't be reopened while a newer round is open. Finish or delete that round first.`);
-      return;
-    }
+    const replacing = !!(successor && successor.item.id !== item.id);
+    if (replacing && !replaceOk) { setRecurringReplaceAsk({ itemId, assetId: tid, task: item.task, from: "reopen", keepOpen: !!keepOpen, dropWork: !!dropWork }); return; }
     const dropIds = dropWork ? new Set(taskCompletionWork(target, item).map(c => c.id)) : new Set();
     const entry = { at: new Date().toISOString(), by: currentUser || "", assetLabel: tid, assetType: target.type, action: "maintenance_edited", field: `${item.task} — Completed`, from: formatDateOnly(item.lastPerformed), to: "—" };
-    const next = assets.map(a => (a.id === tid ? { ...a, maintenanceItems: a.maintenanceItems.map(m => (m && m.id === itemId ? { ...m, lastPerformed: "" } : m)), changes: dropIds.size ? (a.changes || []).filter(c => !c || !dropIds.has(c.id)) : a.changes } : a));
-    await persist(next, { auditLog: logAudit([entry]) });
+    let next = assets.map(a => (a.id === tid ? { ...a, maintenanceItems: a.maintenanceItems.map(m => (m && m.id === itemId ? { ...m, lastPerformed: "" } : m)), changes: dropIds.size ? (a.changes || []).filter(c => !c || !dropIds.has(c.id)) : a.changes } : a));
+    const entries = [entry];
+    if (item.recurringId) {
+      const res = recurringReopenReplacing(next, itemId);
+      next = res.assets;
+      res.removed.forEach(r => entries.push({ at: new Date().toISOString(), by: currentUser || "", assetLabel: r.asset.id, assetType: r.asset.type, action: "maintenance_removed", field: r.item.task }));
+    }
+    // An open dialog on this task shows it open again (its draft was seeded while done).
+    setMaintenanceDraft(d => (d && d.id === itemId ? { ...d, lastPerformed: "" } : d));
+    await persist(next, { auditLog: logAudit(entries) });
     if (!keepOpen) setMaintenanceModal(null);
   }
 
@@ -13984,19 +14135,13 @@ function AssetTracker() {
     // confirmation has already said how many.
     const gone = new Map([[itemId, workTarget]]);
     taskDescendantsOf(assets, itemId).forEach(c => gone.set(c.item.id, c.asset));
-    // Deleting a recurring task also removes its open round (and that round's
-    // subtasks); finished rounds stay as history.
-    if (isRecurringConfig(item)) {
-      const open = recurringOpenInstance(assets, itemId);
-      if (open) {
-        gone.set(open.item.id, open.asset);
-        taskDescendantsOf(assets, open.item.id).forEach(c => gone.set(c.item.id, c.asset));
-      }
-    }
-    const next = assets.map(a => (
+    let next = assets.map(a => (
       (a.maintenanceItems || []).some(m => m && gone.has(m.id))
         ? { ...a, maintenanceItems: a.maintenanceItems.filter(m => !m || !gone.has(m.id)) } : a
     ));
+    // A finished instance deleted from the history: the configuration's last-done
+    // date follows the newest one that is left.
+    if (item.recurringId) next = recurringSyncLastDone(next, item.recurringId);
     const removedRows = [{ item, asset: workTarget }, ...taskDescendantsOf(assets, itemId)];
     const entries = removedRows.map(r => ({
       at: new Date().toISOString(), by: currentUser || "", assetLabel: r.asset.id,
@@ -14015,47 +14160,67 @@ function AssetTracker() {
     }
   }
 
-  // Recurring tasks (configuration plus rounds). "Skip this round" completes
-  // nothing: the round is closed as skipped (audited) and the next one is
-  // created counting from today, so skipped work stays visible in the history.
-  async function skipRound(itemId, assetId) {
-    if (savingRef.current || !canEdit) return;
-    const target = assets ? assets.find(a => a.id === assetId) : null;
+  // Recurring tasks (one entity, many instances). Deleting asks what is meant
+  // when the task repeats: the open instance only, or the whole recurring task.
+  // Anything else deletes as before.
+  function requestDeleteTask(itemId, assetId) {
+    const tid = assetId || selectedId;
+    const target = assets ? assets.find(a => a.id === tid) : null;
     const item = target ? (target.maintenanceItems || []).find(m => m && m.id === itemId) : null;
-    if (!item || !item.recurringId || taskIsDone(item)) return;
-    const date = localDateString();
-    const stamped = assets.map(a => (a.id === assetId ? { ...a, maintenanceItems: a.maintenanceItems.map(m => (m && m.id === itemId ? { ...m, lastPerformed: date, skipped: true } : m)) } : a));
-    const next = spawnNextInstance(stamped, item.recurringId, date, currentUser, item.id).assets;
-    await persist(next, { auditLog: logAudit([{
-      at: new Date().toISOString(), by: currentUser || "", assetLabel: assetId, assetType: target.type,
-      action: "maintenance_edited", field: `${item.task} — Round`, from: "Open", to: `Skipped ${formatDateOnly(date)}`,
-    }]) });
+    if (!item) return;
+    if (item.recurringId && !taskIsDone(item)) {
+      const hasPrev = !!recurringLatestDone(assets, item.recurringId, itemId);
+      setRecurringDeleteAsk({ itemId, assetId: tid, task: item.task, configId: item.recurringId, hasPrev });
+      return;
+    }
+    setConfirmMaintenanceDelete(itemId);
+  }
+  function auditRemoved(removed) {
+    return removed.map(r => ({ at: new Date().toISOString(), by: currentUser || "", assetLabel: r.asset.id, assetType: r.asset.type, action: "maintenance_removed", field: r.item.task }));
+  }
+  // "Delete this instance": the open instance goes and the previous one is marked
+  // incomplete again.
+  async function deleteCurrentInstance(itemId) {
+    if (savingRef.current) return;
+    const res = recurringDeleteInstance(assets, itemId);
+    if (!res.removed.length) { setRecurringDeleteAsk(null); return; }
+    const entries = auditRemoved(res.removed);
+    if (res.reopened) {
+      const ra = assets.find(a => (a.maintenanceItems || []).some(m => m && m.id === res.reopened.id));
+      entries.push({ at: new Date().toISOString(), by: currentUser || "", assetLabel: ra ? ra.id : "", assetType: ra ? ra.type : "", action: "maintenance_edited", field: `${res.reopened.task} — Completed`, from: formatDateOnly(res.reopened.lastPerformed), to: "—" });
+    }
+    await persist(res.assets, { auditLog: logAudit(entries) });
+    setRecurringDeleteAsk(null);
     setMaintenanceModal(null);
   }
-  // A recurring task whose open round was deleted can start a new one.
-  async function startNextRound(configId) {
-    if (savingRef.current || !canEdit) return;
-    const res = spawnNextInstance(assets, configId, "", currentUser);
-    if (!res.spawned) return;
-    await persist(res.assets);
+  // "Delete the recurring task": the configuration and the open instance go;
+  // finished instances stay as ordinary completed tasks.
+  async function deleteRecurringTask(configId) {
+    if (savingRef.current) return;
+    const res = recurringDetach(assets, configId, true);
+    await persist(res.assets, { auditLog: logAudit(auditRemoved(res.removed)) });
+    setRecurringDeleteAsk(null);
+    setMaintenanceModal(null);
   }
-  // One explicit button (Settings), never a load-time rewrite: every schedule
-  // that is not yet a configuration becomes one and gets its open round. Past
-  // work entries stay attached to the configuration as its history.
-  async function migrateSchedules() {
-    if (savingRef.current || !canEdit || !assets) return;
-    let next = assets;
-    let count = 0;
-    assets.forEach(a => (a.maintenanceItems || []).forEach(m => {
-      if (m && !isOneOffTask(m) && !m.instanced && !m.parentTaskId) {
-        next = next.map(x => (x.id === a.id ? { ...x, maintenanceItems: x.maintenanceItems.map(i => (i && i.id === m.id ? { ...i, instanced: true } : i)) } : x));
-        next = spawnNextInstance(next, m.id, "", currentUser).assets;
-        count += 1;
-      }
-    }));
-    if (!count) { setNotice("Every repeating task is already set up this way."); return; }
-    await persist(next);
-    setNotice(`${count} repeating task${count === 1 ? "" : "s"} converted. Each now has one open round.`);
+  // Turning Repeats off on a task that has instances: the configuration goes and
+  // every instance stays as a plain one-off.
+  async function stopRepeating(configId) {
+    if (savingRef.current) return;
+    const cfg = taskIndexOf(assets).get(configId);
+    const res = recurringDetach(assets, configId, false);
+    await persist(res.assets, { auditLog: logAudit([{
+      at: new Date().toISOString(), by: currentUser || "", assetLabel: cfg ? cfg.asset.id : "", assetType: cfg ? cfg.asset.type : "",
+      action: "maintenance_edited", field: `${cfg ? cfg.item.task : "Task"} — Repeats`, from: "On", to: "Off",
+    }]) });
+    setStopRepeatAsk(null);
+    setMaintenanceDraft(d => ({ ...d, recurringId: "", kind: TASK_KIND_ONEOFF }));
+    setRecurringGear(false);
+  }
+  // Template subtasks live under the configuration and are edited in the gear dialog.
+  async function deleteTemplateSubtask(taskId) {
+    if (savingRef.current) return;
+    const res = removeTasksWithChildren(assets, [taskId]);
+    await persist(res.assets);
   }
 
   // ---------- Breakers / Circuits (Electrical Panel assets only) ----------
@@ -17029,7 +17194,6 @@ function AssetTracker() {
       );
     }
     if (key === "tasktypes") {
-      const unconverted = (assets || []).reduce((n, a) => n + (a.maintenanceItems || []).filter(m => m && !isOneOffTask(m) && !m.instanced && !m.parentTaskId).length, 0);
       return (
         <>
           <WorkTypesManager
@@ -17043,13 +17207,6 @@ function AssetTracker() {
               remove: id => removeTaskType(workModel, id),
             }}
           />
-          {canEdit && unconverted > 0 && (
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 14, fontSize: 13, color: C.ink }}>
-              <span>{unconverted} repeating task{unconverted === 1 ? "" : "s"} not yet set up as recurring tasks</span>
-              <HelpTip text="Converts each repeating task into a recurring task (the template) with one open round on the schedule. Past work entries stay with the recurring task as its history. Do this once, when nobody else is editing." />
-              <button onClick={migrateSchedules} style={{ padding: "6px 12px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Convert</button>
-            </div>
-          )}
         </>
       );
     }
@@ -18049,6 +18206,15 @@ function AssetTracker() {
                         flag to unset -- the date is the whole of "is this
                         done" -- so the field that records the completion is
                         also the control that undoes it. */}
+                    {editing && maintenanceDraft.recurringId && vShow("lastPerformed") && (() => {
+                      const cfgRef = tIndex.get(maintenanceDraft.recurringId);
+                      return (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, display: "flex", alignItems: "center", gap: 4 }}>Last performed<HelpTip label="About Last performed" text="When an instance of this task was last completed. It updates when an instance is completed." size={12} /></span>
+                          <span style={{ fontSize: 14, color: C.ink, padding: "2px 0" }}>{cfgRef && cfgRef.item.lastPerformed ? formatDateOnly(cfgRef.item.lastPerformed) : "Never"}</span>
+                        </div>
+                      );
+                    })()}
                     {editing && vShow("lastPerformed") && !taskIsEvent(taskItem) && (
                     isPhone ? (
 <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -18066,25 +18232,7 @@ function AssetTracker() {
                     </>
                   ) : (
                     <>
-                      {!isPhone && vShow("lastPerformed") && lastPerformedField}
-                      {vShow("frequency") && (isPhone ? (
-                      <PickerField
-                        label="Frequency"
-                        value={maintenanceDraft.frequency}
-                        onChange={v => setMaintenanceDraft({ ...maintenanceDraft, frequency: v })}
-                        options={[...MAINTENANCE_FREQUENCIES.map(f => f.label), MAINTENANCE_FREQUENCY_CUSTOM]}
-                        title="Select frequency"
-                      />
-                      ) : (
-                      <FrequencyPicker draft={maintenanceDraft} onChange={p => setMaintenanceDraft({ ...maintenanceDraft, ...p })} />
-                      ))}
-                      {isPhone && vShow("lastPerformed") && lastPerformedField}
-                      {isPhone && vShow("frequency") && maintenanceDraft.frequency === MAINTENANCE_FREQUENCY_CUSTOM && (
-                        <RecurrenceEditor
-                          value={maintenanceDraft.recurrence || DEFAULT_RECURRENCE_DRAFT}
-                          onChange={r => setMaintenanceDraft({ ...maintenanceDraft, recurrence: r })}
-                        />
-                      )}
+                      {vShow("lastPerformed") && lastPerformedField}
                     </>
                   ))}
             </>);
@@ -18113,14 +18261,38 @@ function AssetTracker() {
                     visibleKeys={viewVisibleCustomKeys(dialogView)}
                     onChange={custom => setMaintenanceDraft({ ...maintenanceDraft, custom })} />
             </>);
+            // Repeats toggle (off by default). On an instance it is on; turning it off
+            // asks first. On, a gear beside it edits the configuration.
+            const repeatsOn = maintenanceDraft.kind !== TASK_KIND_ONEOFF || !!maintenanceDraft.recurringId;
+            const repeatsFreq = frequencyFromDraft(maintenanceDraft);
+            const toggleRepeats = () => {
+              if (maintenanceDraft.recurringId) {
+                const cfg = tIndex.get(maintenanceDraft.recurringId);
+                setStopRepeatAsk({ configId: maintenanceDraft.recurringId, task: maintenanceDraft.task || (taskItem && taskItem.task) || "", count: cfg ? recurringInstancesOf(assets, cfg.item.id).length : 0 });
+                return;
+              }
+              setMaintenanceDraft({ ...maintenanceDraft, kind: repeatsOn ? TASK_KIND_ONEOFF : TASK_KIND_SCHEDULED });
+            };
             const kindBlock = (<>
-                {(vShow("frequency") || vShow("lastPerformed") || vShow("dueDate") || vShow("startDate") || vShow("doOn")) && !maintenanceDraft.parentTaskId && !(workTarget && (workTarget.maintenanceItems || []).some(m => m && m.id === maintenanceDraft.id && (m.recurringId || m.instanced))) && (
-                <TaskKindToggle
-                  value={maintenanceDraft.kind}
-                  onChange={k => setMaintenanceDraft({ ...maintenanceDraft, kind: k })}
-                />
+                {(vShow("frequency") || vShow("lastPerformed") || vShow("dueDate") || vShow("startDate") || vShow("doOn")) && !maintenanceDraft.parentTaskId && !taskIsEvent(taskItem || { taskType: maintenanceDraft.taskType }) && (
+                <RepeatsToggle on={repeatsOn} summary={repeatsOn && repeatsFreq ? repeatsFreq.label : ""} onToggle={toggleRepeats} onGear={() => setRecurringGear(true)} />
                 )}
             </>);
+            // A finished instance links to the open one under the task's name.
+            const currentInstance = editing && taskItem && maintenanceDraft.recurringId && taskIsDone(taskItem) ? recurringOpenInstance(assets, maintenanceDraft.recurringId) : null;
+            const currentInstanceLink = currentInstance ? (
+              <button type="button" onClick={() => openMaintenanceEdit(currentInstance.item.id, currentInstance.asset.id, maintenanceModal.viewId)}
+                style={{ display: "flex", alignItems: "center", gap: 4, margin: "-6px 0 12px", padding: "2px 0", background: "none", border: "none", color: C.brand, fontWeight: 600, fontSize: 13, cursor: "pointer" }}>
+                <Repeat size={13} /> Open current instance
+              </button>
+            ) : null;
+            const historyConfigId = editing && maintenanceDraft.recurringId ? maintenanceDraft.recurringId : "";
+            const historyLink = historyConfigId ? (
+              <button type="button" onClick={() => setRecurringHistory(historyConfigId)}
+                style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 16, padding: "6px 0", background: "none", border: "none", color: C.brand, fontWeight: 600, fontSize: 13, cursor: "pointer" }}>
+                <History size={14} /> History of this task
+              </button>
+            ) : null;
             const paneLayoutEl = <TaskPaneLayout asset={workTarget} groupIds={maintenanceDraft.paneGroupIds} maxHeight={200} />;
             const nameRepeat = taskRepeatsDraft(maintenanceDraft) ? <Repeat size={15} color={C.muted} aria-label="Repeating task" role="img" style={{ flexShrink: 0 }} /> : null;
             // Desktop name: plain title text until it is clicked. The input is sized to
@@ -18272,6 +18444,7 @@ function AssetTracker() {
                     : { display: "flex", gap: 20, alignItems: "stretch" }}>
                     <div style={phoneSheet ? { flex: "0 0 100%", minWidth: 0, scrollSnapAlign: "start", overflowY: "auto", paddingBottom: 12, boxSizing: "border-box" } : { flex: 1, minWidth: 0 }}>
                       {nameRow}
+                      {currentInstanceLink}
                       {viewReadOnly ? (<>
                         {descRead ? <div style={{ marginBottom: 14, fontSize: 14, color: C.ink, wordBreak: "break-word", padding: "4px 8px", marginLeft: -8 }}>{descRead.value}</div>
                           : (canEdit && descPlaceholder)}
@@ -18297,6 +18470,7 @@ function AssetTracker() {
                         </div>
                       </>)}
                       {trailingBlocks}
+                      {historyLink}
                     </div>
                     <SidebarCtx.Provider value={true}>
                     <div className="task-side" style={phoneSheet
@@ -18328,7 +18502,7 @@ function AssetTracker() {
                       through its own confirmation. */}
                   {editing && canEdit && !viewReadOnly && (
                     <button
-                      onClick={() => setConfirmMaintenanceDelete(maintenanceModal.itemId)}
+                      onClick={() => requestDeleteTask(maintenanceModal.itemId, workDialogAssetId)}
                       aria-label="Delete task" title="Delete task"
                       className={isPhone ? undefined : "icon-btn"}
                       style={{ marginRight: "auto", padding: isPhone ? "8px 12px" : 8, background: "transparent", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.danger, cursor: "pointer" }}
@@ -18360,11 +18534,11 @@ function AssetTracker() {
                   <button onClick={() => setMaintenanceModal(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>{viewReadOnly ? "Close" : "Cancel"}</button>
                   {!viewReadOnly && (
                   <button
-                    onClick={editing ? saveMaintenanceEdit : addMaintenanceItem}
+                    onClick={editing ? () => saveMaintenanceEdit() : addMaintenanceItem}
                     disabled={!maintenanceDraft.task.trim() || !workTarget || !maintenanceFrequencyOk || !!taskCustomError}
                     style={{ padding: "8px 14px", background: (maintenanceDraft.task.trim() && workTarget && maintenanceFrequencyOk && !taskCustomError) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                   >
-                    {editing ? "Save changes" : (maintenanceDraft.kind === TASK_KIND_ONEOFF ? "Add task" : "Schedule")}
+                    {editing ? "Save changes" : "Add task"}
                   </button>
                   )}
                 </div>
@@ -18400,6 +18574,135 @@ function AssetTracker() {
                   >
                     {"Delete"}
                   </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Recurring tasks. The gear sits above the task dialog (z 25) and below
+              its own pickers (30) and the questions (70). */}
+          {recurringGear && maintenanceModal && (() => {
+            const cfgId = maintenanceDraft.recurringId;
+            const tpl = cfgId ? taskChildrenOf(assets, cfgId) : [];
+            const cfgRef = cfgId ? taskIndexOf(assets).get(cfgId) : null;
+            return (
+              <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 25, padding: 16 }}>
+                <div role="dialog" aria-label="Recurring task settings" style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 420, maxHeight: "90vh", overflowY: "auto" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+                    <div style={{ fontWeight: 700, color: C.brandDark, display: "flex", alignItems: "center", gap: 6 }}>
+                      Recurring task settings
+                      <HelpTip text="The frequency, and the subtasks every new instance starts with. Changes apply to instances created from now on; the open instance and past ones keep what they have." />
+                    </div>
+                    <button onClick={() => setRecurringGear(false)} aria-label="Close" className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+                  </div>
+                  <FrequencyPicker draft={maintenanceDraft} onChange={pt => setMaintenanceDraft({ ...maintenanceDraft, ...pt })} />
+                  <div style={{ marginTop: 16 }}>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: 0.5, textTransform: "uppercase", color: C.accent, marginBottom: 6, display: "flex", alignItems: "center", gap: 4 }}>
+                      Subtask template
+                      <HelpTip text="Each new instance gets a fresh copy of these subtasks." size={12} />
+                    </div>
+                    {!cfgRef ? (
+                      <div style={{ fontSize: 13, color: C.muted }}>Save the task first, then add subtasks here.</div>
+                    ) : (
+                      <>
+                        {tpl.length === 0 && <div style={{ fontSize: 13, color: C.muted, marginBottom: 6 }}>No subtasks.</div>}
+                        {tpl.map(r => (
+                          <div key={r.item.id} style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 0", fontSize: 14, color: C.ink }}>
+                            <span style={{ flex: 1, minWidth: 0, wordBreak: "break-word" }}>{r.item.task}</span>
+                            <button onClick={() => deleteTemplateSubtask(r.item.id)} aria-label={`Remove ${r.item.task}`} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4 }}><Trash2 size={14} color={C.danger} /></button>
+                          </div>
+                        ))}
+                        <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                          <input value={templateSubtaskName} onChange={e => setTemplateSubtaskName(e.target.value)} placeholder="Add a subtask" aria-label="Add a template subtask"
+                            onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); const nm = templateSubtaskName; setTemplateSubtaskName(""); addSubtaskInline(cfgId, cfgRef.asset.id, nm); } }}
+                            style={{ flex: 1, minWidth: 0, padding: "7px 10px", border: `1.5px solid ${C.border}`, fontSize: 14, borderRadius: 10, color: C.ink }} />
+                          <button onClick={() => { const nm = templateSubtaskName; setTemplateSubtaskName(""); addSubtaskInline(cfgId, cfgRef.asset.id, nm); }} aria-label="Add template subtask" title="Add template subtask" disabled={!templateSubtaskName.trim()}
+                            style={{ padding: "0 10px", background: templateSubtaskName.trim() ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10 }}><Plus size={16} /></button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 18 }}>
+                    <button onClick={() => setRecurringGear(false)} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Done</button>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {recurringHistory && (() => {
+            const rows = recurringHistoryOf(assets, recurringHistory);
+            const cfg = taskIndexOf(assets).get(recurringHistory);
+            return (
+              <div onClick={() => setRecurringHistory(null)} style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 60, padding: 16 }}>
+                <div onClick={e => e.stopPropagation()} role="dialog" aria-label="Task history" style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", width: "100%", maxWidth: 460, maxHeight: "85vh", overflowY: "auto" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                    <div style={{ fontWeight: 700, color: C.brandDark }}>History{cfg ? ` · ${cfg.item.task}` : ""}</div>
+                    <button onClick={() => setRecurringHistory(null)} aria-label="Close" className="icon-btn" style={{ background: "none", border: "none", padding: 6, borderRadius: 4, color: C.ink }}><X size={18} /></button>
+                  </div>
+                  {rows.length === 0 && <div style={{ fontSize: 13, color: C.muted }}>No instances yet.</div>}
+                  {rows.map(r => {
+                    const done = taskIsDone(r.item);
+                    return (
+                      <button key={r.item.id} type="button" onClick={() => { setRecurringHistory(null); openMaintenanceEdit(r.item.id, r.asset.id, maintenanceModal ? maintenanceModal.viewId : undefined); }}
+                        style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", padding: "10px 8px", background: "none", border: "none", borderTop: `1px solid ${C.border}`, textAlign: "left", cursor: "pointer", color: C.ink, fontSize: 14 }}>
+                        <span style={{ flex: 1, minWidth: 0 }}>
+                          <span style={{ display: "block", fontWeight: 600 }}>{done ? (r.item.skipped ? `Skipped ${formatDateOnly(r.item.lastPerformed)}` : `Completed ${formatDateOnly(r.item.lastPerformed)}`) : "Open"}</span>
+                          <span style={{ display: "block", fontSize: 12, color: C.muted }}>{r.item.dueDate ? `Due ${formatDateOnly(r.item.dueDate)}` : "No due date"}</span>
+                        </span>
+                        <ChevronRight size={16} color={C.muted} />
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
+
+          {recurringDeleteAsk && (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 70, padding: 16 }}>
+              <div role="dialog" aria-label="Delete recurring task" style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 380 }}>
+                <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Delete this task?</div>
+                <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>
+                  "{recurringDeleteAsk.task}" repeats. {recurringDeleteAsk.hasPrev
+                    ? "Delete just this instance (the previous instance becomes open again), or the whole recurring task? Finished instances stay as completed tasks."
+                    : "This is its only instance, so deleting it deletes the recurring task."}
+                </div>
+                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
+                  <button onClick={() => setRecurringDeleteAsk(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                  {recurringDeleteAsk.hasPrev && <button onClick={() => deleteCurrentInstance(recurringDeleteAsk.itemId)} style={{ padding: "8px 14px", background: C.brand, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Delete this instance</button>}
+                  <button onClick={() => deleteRecurringTask(recurringDeleteAsk.configId)} style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Delete the recurring task</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {recurringReplaceAsk && (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 70, padding: 16 }}>
+              <div role="dialog" aria-label="Replace the current instance" style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 380 }}>
+                <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Replace the current instance?</div>
+                <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>
+                  A new instance of "{recurringReplaceAsk.task}" is already open, and only one instance can be open at a time. Reopening this one deletes the current instance and its subtasks.
+                </div>
+                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                  <button onClick={() => setRecurringReplaceAsk(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                  <button onClick={() => { const a = recurringReplaceAsk; setRecurringReplaceAsk(null); if (a.from === "save") saveMaintenanceEdit(true); else reopenTask(a.itemId, a.assetId, a.keepOpen, a.dropWork, true); }}
+                    style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Replace current instance</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {stopRepeatAsk && (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(42,52,57,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 70, padding: 16 }}>
+              <div role="dialog" aria-label="Stop repeating" style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 24, boxShadow: "0 8px 24px rgba(42,52,57,0.16), 0 2px 8px rgba(42,52,57,0.1)", maxWidth: 380 }}>
+                <div style={{ fontWeight: 700, marginBottom: 8, color: C.brandDark }}>Stop repeating?</div>
+                <div style={{ fontSize: 14, color: C.muted, marginBottom: 18 }}>
+                  The frequency and subtask template are deleted. {stopRepeatAsk.count > 1 ? `The ${stopRepeatAsk.count} instances` : "The instance"} stay as ordinary one-off tasks, and nothing new is created.
+                </div>
+                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                  <button onClick={() => setStopRepeatAsk(null)} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>
+                  <button onClick={() => stopRepeating(stopRepeatAsk.configId)} style={{ padding: "8px 14px", background: C.danger, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>Stop repeating</button>
                 </div>
               </div>
             </div>
@@ -18826,10 +19129,8 @@ function AssetTracker() {
     // Never-performed items sort first (need scheduling attention); the rest by
     // ascending next-due date, which naturally puts the most-overdue on top.
     // Recurring-task configurations (and their template subtasks) are not tasks to
-    // do; they get their own section above the list.
+    // do and are never listed; the instances are the tasks.
     const hiddenTaskIds = recurringConfigIds(assets);
-    const recurringConfigRows = (selectedAsset.maintenanceItems || []).filter(m => isRecurringConfig(m))
-      .map(item => ({ item, open: recurringOpenInstance(assets, item.id) }));
     const maintenanceItems = (selectedAsset.maintenanceItems || [])
       .filter(item => !taskIsHidden(item, hiddenTaskIds))
       .map(item => ({ item, status: taskStatusOf(item), due: taskDueDate(item) }))
@@ -19566,43 +19867,6 @@ function AssetTracker() {
               </div>
               )}
 
-              {recurringConfigRows.length > 0 && (
-                <div style={{ marginBottom: 16 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: C.muted, marginBottom: 6 }}>
-                    <Repeat size={13} /> Recurring tasks
-                    <HelpTip text="A recurring task is the template: its name, schedule and details. Each round shows below as an ordinary task. Finishing a round creates the next one." />
-                  </div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                    {recurringConfigRows.map(({ item, open }) => (
-                      <div key={item.id} style={{ display: "flex", alignItems: "center", gap: 8, border: `1px solid ${C.border}`, borderRadius: 10, background: C.surface, padding: "8px 12px" }}>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontWeight: 600, fontSize: 13, color: C.ink }}>{item.task}</div>
-                          <div style={{ fontSize: 12, color: C.muted }}>
-                            {item.frequencyLabel || "Repeats"}
-                            {open ? ` · next round ${open.item.dueDate ? formatDateOnly(open.item.dueDate) : "undated"}` : " · no open round"}
-                          </div>
-                        </div>
-                        {canEdit && open && (
-                          <button onClick={() => skipRound(open.item.id, open.asset.id)} title="Skip this round" aria-label="Skip this round" style={{ background: "none", border: "none", padding: 4, color: C.muted, cursor: "pointer" }}>
-                            <SkipForward size={15} />
-                          </button>
-                        )}
-                        {canEdit && !open && (
-                          <button onClick={() => startNextRound(item.id)} title="Start the next round" aria-label="Start the next round" style={{ background: "none", border: "none", padding: 4, color: C.muted, cursor: "pointer" }}>
-                            <Plus size={15} />
-                          </button>
-                        )}
-                        {canEdit && (
-                          <button onClick={() => openMaintenanceEdit(item.id)} title="Edit recurring task" aria-label="Edit recurring task" style={{ background: "none", border: "none", padding: 4, cursor: "pointer" }}>
-                            <Pencil size={14} color={C.muted} />
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
               {doneMaintenanceItems.length > 0 && (
                 <div style={{ marginBottom: 10 }}>
                   <button
@@ -19638,7 +19902,7 @@ function AssetTracker() {
                             <button onClick={() => openMaintenanceEdit(item.id)} className="icon-btn" style={{ background: "none", border: "none", padding: 4, borderRadius: 4, display: "flex" }} aria-label={`Edit maintenance item ${item.task}`}>
                               <Pencil size={14} color={C.muted} />
                             </button>
-                            <button onClick={() => setConfirmMaintenanceDelete(item.id)} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4 }} aria-label={`Delete maintenance item ${item.task}`}>
+                            <button onClick={() => requestDeleteTask(item.id, selectedAsset.id)} className="icon-btn" style={{ background: "none", border: "none", padding: 2, borderRadius: 4 }} aria-label={`Delete maintenance item ${item.task}`}>
                               <X size={13} color={C.placeholder} />
                             </button>
                             </>
@@ -24052,39 +24316,24 @@ function RecurrenceEditor({ value, onChange }) {
   );
 }
 
-// Does this task repeat? Two buttons rather than a PickerField, for the same
-// reason the Circuit form's serves-rooms/feeds-sub-panel pair is a toggle: it
-// is a binary that CHANGES WHICH FIELDS ARE BELOW IT, and a modal picker hides
-// that consequence behind a tap. Both options are visible at once, and the
-// fields under them redraw as the choice moves.
-function TaskKindToggle({ value, onChange }) {
-  const opts = [
-    { key: TASK_KIND_SCHEDULED, label: "Repeats", hint: "On a schedule" },
-    { key: TASK_KIND_ONEOFF, label: "One-off", hint: "A job or project" },
-  ];
+// Does this task repeat? A plain on/off switch, off by default. On, it shows the
+// frequency in words and a gear that edits the recurring configuration (frequency
+// and the subtask template); the fields it reveals sit below it.
+function RepeatsToggle({ on, summary, onToggle, onGear }) {
   return (
-    <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
-      {opts.map(o => {
-        const active = value === o.key;
-        return (
-          <button
-            key={o.key}
-            type="button"
-            onClick={() => onChange(o.key)}
-            aria-pressed={active}
-            style={{
-              flex: 1, padding: "8px 12px", borderRadius: 10, textAlign: "left",
-              background: active ? C.brand : "transparent",
-              color: active ? "#fff" : C.ink,
-              border: `1.5px solid ${active ? C.brand : C.border}`,
-              fontWeight: active ? 700 : 500, fontSize: 13, cursor: "pointer",
-            }}
-          >
-            {o.label}
-            <span style={{ display: "block", fontSize: 11, fontWeight: 500, color: active ? "rgba(255,255,255,0.8)" : C.placeholder }}>{o.hint}</span>
-          </button>
-        );
-      })}
+    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+      <button type="button" role="switch" aria-checked={on} aria-label="Repeats" onClick={onToggle}
+        style={{ display: "flex", alignItems: "center", gap: 8, background: "none", border: "none", padding: 0, cursor: "pointer", color: C.ink, fontWeight: 600, fontSize: 13 }}>
+        <span aria-hidden="true" style={{ width: 34, height: 20, borderRadius: 999, background: on ? C.brand : C.border, position: "relative", flexShrink: 0, transition: "background 0.15s" }}>
+          <span style={{ position: "absolute", top: 2, left: on ? 16 : 2, width: 16, height: 16, borderRadius: "50%", background: "#fff", transition: "left 0.15s" }} />
+        </span>
+        Repeats
+      </button>
+      {on && (
+        <button type="button" onClick={onGear} aria-label="Recurring task settings" title="Recurring task settings" className="icon-btn"
+          style={{ display: "flex", background: "none", border: "none", padding: 4, borderRadius: 6, cursor: "pointer" }}><Settings size={16} color={C.muted} /></button>
+      )}
+      {on && summary && <span style={{ fontSize: 12, color: C.muted, flexBasis: "100%" }}>{summary}</span>}
     </div>
   );
 }
