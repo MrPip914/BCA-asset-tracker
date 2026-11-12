@@ -2231,7 +2231,7 @@ const MAINTENANCE_STATUS_FILTER_OPTIONS = [
 // question; splitting it in two makes the overdue badge answer half of it.
 const TASK_KIND_FILTER_OPTIONS = [
   { value: "All kinds", label: "All kinds" },
-  { value: TASK_KIND_SCHEDULED, label: "Scheduled" },
+  { value: TASK_KIND_SCHEDULED, label: "Repeating" },
   { value: TASK_KIND_ONEOFF, label: "One-off" },
 ];
 
@@ -2388,6 +2388,10 @@ function localDateString(d) {
 function taskKindOf(item) {
   return (item && item.kind === TASK_KIND_ONEOFF) ? TASK_KIND_ONEOFF : TASK_KIND_SCHEDULED;
 }
+// What the Kind column, filter and view field show: a task that repeats
+// (a legacy schedule, or an instance of a recurring task, which is STORED as a
+// one-off) reads "Repeating". Logic that needs the stored kind keeps using taskKindOf.
+function taskKindShown(item) { return (item && item.recurringId) ? TASK_KIND_SCHEDULED : taskKindOf(item); }
 function isOneOffTask(item) { return taskKindOf(item) === TASK_KIND_ONEOFF; }
 // THERE IS NO `doneOn` COLUMN, AND THAT IS DELIBERATE. A one-off with a
 // non-empty `lastPerformed` is done; an empty one is open. `lastPerformed`
@@ -3030,8 +3034,8 @@ function viewBuiltinBoardSource(view, model) {
     options = [{ id: "open", name: "Open" }, { id: "done", name: "Done" }];
     valueOf = item => (isOneOffTask(item) && taskIsDone(item) ? "done" : "open");
   } else if (def.key === "kind") {
-    options = [{ id: "scheduled", name: "Scheduled" }, { id: "oneoff", name: "One-off" }];
-    valueOf = item => (isOneOffTask(item) ? "oneoff" : "scheduled");
+    options = [{ id: "scheduled", name: "Repeating" }, { id: "oneoff", name: "One-off" }];
+    valueOf = item => (taskKindShown(item) === TASK_KIND_ONEOFF ? "oneoff" : "scheduled");
   } else {
     options = ["overdue", "due-soon", "ok", "never", "undated", "upcoming", "event", "past", "done"].map(id => ({ id, name: maintenanceStatusMeta(id).label }));
     valueOf = item => taskStatusOf(item);
@@ -3489,7 +3493,7 @@ function viewFieldValue(row, key, model, ctx) {
   switch (key) {
     case "task": return item.task || "";
     case "asset": return row.assetName || "";
-    case "kind": return isOneOffTask(item) ? "One-off" : "Scheduled";
+    case "kind": return taskKindShown(item) === TASK_KIND_ONEOFF ? "One-off" : "Repeating";
     case "status": return maintenanceStatusMeta(row.status).label;
     case "type": {
       const id = resolveWorkTypeId(model, "task", item.taskType);
@@ -5421,7 +5425,7 @@ function mapListFilterGroups(mode, items, typesList, assets) {
     const present = new Set((items || []).map(r => r.status));
     groups.push({ key: "status", label: "Status",
       options: MAP_TASK_STATUS_ORDER.filter(st => present.has(st)).map(st => ({ value: st, label: maintenanceStatusMeta(st).label })) });
-    const kinds = new Set((items || []).map(r => taskKindOf(r.item)));
+    const kinds = new Set((items || []).map(r => taskKindShown(r.item)));
     groups.push({ key: "kind", label: "Kind",
       options: TASK_KIND_FILTER_OPTIONS.filter(o => kinds.has(o.value)) });
   } else if (mode === "history") {
@@ -5450,7 +5454,7 @@ function mapListFilterMatches(mode, active, item, now, assets) {
     return has("type", item.type || "")
       && (!active.user || mapAssetPersonKeys(item, assets).some(k => active.user.includes(k.value)));
   }
-  if (mode === "tasks") return has("status", item.status) && has("kind", taskKindOf(item.item));
+  if (mode === "tasks") return has("status", item.status) && has("kind", taskKindShown(item.item));
   if (mode === "history") {
     return has("workType", item.change.changeType || "")
       && (!active.period || withinAuditPeriod(item.performedOn, active.period[0], now));
@@ -7217,7 +7221,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-11-12.2";
+const APP_VERSION = "2026-11-12.3";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -11597,7 +11601,7 @@ function AssetTracker() {
     switch (key) {
       case "task": return row.item.task || "";
       case "asset": return row.assetName || "";
-      case "kind": return isOneOffTask(row.item) ? "One-off" : "Scheduled";
+      case "kind": return taskKindShown(row.item) === TASK_KIND_ONEOFF ? "One-off" : "Repeating";
       case "frequency": return row.item.frequencyLabel || "";
       case "lastPerformed": return dateOnly(row.item.lastPerformed);
       case "nextDue": return row.due ? row.due.getTime() : Infinity;
@@ -11616,7 +11620,7 @@ function AssetTracker() {
       if (maintenanceStatusFilter === MAINTENANCE_STATUS_OPEN) {
         if (taskStatusFinished(r.status)) return false;
       } else if (maintenanceStatusFilter !== "All statuses" && r.status !== maintenanceStatusFilter) return false;
-      if (maintenanceKindFilter !== "All kinds" && taskKindOf(r.item) !== maintenanceKindFilter) return false;
+      if (maintenanceKindFilter !== "All kinds" && taskKindShown(r.item) !== maintenanceKindFilter) return false;
       if (maintenanceFrequencyFilter !== "All frequencies" && r.item.frequencyLabel !== maintenanceFrequencyFilter) return false;
       return taskMatchesSearch(r, assets, typesList, q, workModel);
     });
@@ -21737,7 +21741,7 @@ function AssetTracker() {
                       <AssetIcon size={14} style={{ flexShrink: 0, color: C.brand }} />
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{assetName}</span>
                     </div>
-                    <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted }}>{isOneOffTask(item) ? "One-off" : "Scheduled"}</div>
+                    <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted }}>{taskKindShown(item) === TASK_KIND_ONEOFF ? "One-off" : "Repeating"}</div>
                     <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted }}>{item.frequencyLabel || "—"}</div>
                     <div style={{ padding: "12px 14px", fontSize: 13, color: C.muted }}>{item.lastPerformed ? formatDateOnly(item.lastPerformed) : "Never"}</div>
                     <div style={{ padding: "12px 14px", fontSize: 13, fontWeight: 600, color: statusMeta.color }}>{due ? formatDateOnly(localDateString(due)) : "—"}</div>
