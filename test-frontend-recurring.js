@@ -124,6 +124,6 @@ check('the Kind column, filter and view field read taskKindShown', (src.match(/t
 }
 check('editing a Completed date re-syncs the config and offers the due date', /else if \(original\.lastPerformed && updated\.lastPerformed && original\.lastPerformed !== updated\.lastPerformed\) \{[\s\S]{0,900}recurringSyncLastDone\(next, original\.recurringId\)[\s\S]{0,900}dueAsk = \{/.test(src));
 check('the prompt is shown after the save and Yes writes the due date with an audit row', /if \(dueAsk\) setRecurringDueAsk\(dueAsk\)/.test(src) && /async function applyRecurringDueDate\(\)[\s\S]{0,900}dueDate: ask\.to[\s\S]{0,200}\} \}[\s\S]{0,400}— Due date/.test(src) || /— Due date`, from: ask\.from/.test(src));
-check('a quick completion refreshes an open dialog draft', /else setMaintenanceDraft\(d => \(d && d\.id === itemId \? \{ \.\.\.d, lastPerformed: date \} : d\)\)/.test(src));
+check('a quick completion refreshes an open dialog draft', /else \{ setMaintenanceDraft\(d => \(d && d\.id === itemId \? \{ \.\.\.d, lastPerformed: date \} : d\)\); setMaintenanceBaseline/.test(src));
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

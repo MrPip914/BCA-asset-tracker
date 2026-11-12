@@ -7225,7 +7225,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-11-12.5";
+const APP_VERSION = "2026-11-12.6";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -9534,6 +9534,8 @@ function AssetTracker() {
   // The draft behind the task dialog, filled by BOTH modes -- `id` is the item
   // the dialog acts on, minted on open in add mode so a photo can name the task
   // while the form is still being filled in.
+  // What the task looked like when its dialog opened: Save stays grey until the draft differs from it.
+  const [maintenanceBaseline, setMaintenanceBaseline] = useState(null);
   const [maintenanceDraft, setMaintenanceDraft] = useState({ id: "", kind: TASK_KIND_ONEOFF, task: "", notes: "", frequency: MAINTENANCE_FREQUENCIES[1].label, recurrence: { ...DEFAULT_RECURRENCE_DRAFT }, startDate: "", doOn: "", dueDate: "", lastPerformed: "", owner: "", taskType: "", custom: {}, paneGroupIds: [], parentTaskId: "", blockedBy: [] });
   // null when closed; { mode: "add" } or { mode: "edit", itemId }. ONE dialog
   // for both, the shape changeModal already uses and for the same reason: a
@@ -13664,7 +13666,7 @@ function AssetTracker() {
     // An instance shows its configuration's frequency (edited through the gear).
     const cfgRef = item.recurringId ? taskIndexOf(assets).get(item.recurringId) : null;
     const freqSrc = cfgRef ? cfgRef.item : item;
-    setMaintenanceDraft({
+    const editSeed = {
       id: item.id,
       kind: taskKindOf(item),
       task: item.task,
@@ -13684,7 +13686,9 @@ function AssetTracker() {
       parentTaskId: item.parentTaskId || "",
       recurringId: item.recurringId || "",
       blockedBy: Array.isArray(item.blockedBy) ? [...item.blockedBy] : [],
-    });
+    };
+    setMaintenanceDraft(editSeed);
+    setMaintenanceBaseline(editSeed);
     // `viewId` set means opened from a view: the dialog shows only that view's fields.
     // The view decides whether the task opens to read or to edit (an editor only).
     const openView = viewId ? viewsCfg.list.find(v => v.id === viewId) : null;
@@ -14101,7 +14105,7 @@ function AssetTracker() {
     await persist(reset.assets, { auditLog: logAudit([entry, ...reset.entries]) });
     if (!keepOpen) setMaintenanceModal(null);
     // A dialog left open shows the completion at once (its draft was seeded while open).
-    else setMaintenanceDraft(d => (d && d.id === itemId ? { ...d, lastPerformed: date } : d));
+    else { setMaintenanceDraft(d => (d && d.id === itemId ? { ...d, lastPerformed: date } : d)); setMaintenanceBaseline(b => (b && b.id === itemId ? { ...b, lastPerformed: date } : b)); }
     return true;
   }
 
@@ -14140,6 +14144,7 @@ function AssetTracker() {
     }
     // An open dialog on this task shows it open again (its draft was seeded while done).
     setMaintenanceDraft(d => (d && d.id === itemId ? { ...d, lastPerformed: "" } : d));
+    setMaintenanceBaseline(b => (b && b.id === itemId ? { ...b, lastPerformed: "" } : b));
     await persist(next, { auditLog: logAudit(entries) });
     if (!keepOpen) setMaintenanceModal(null);
   }
@@ -14253,6 +14258,7 @@ function AssetTracker() {
     }]) });
     setStopRepeatAsk(null);
     setMaintenanceDraft(d => ({ ...d, recurringId: "", kind: TASK_KIND_ONEOFF }));
+    setMaintenanceBaseline(b => (b ? { ...b, recurringId: "", kind: TASK_KIND_ONEOFF } : b));
     setRecurringGear(false);
   }
   // Template subtasks live under the configuration and are edited in the gear dialog.
@@ -17854,7 +17860,7 @@ function AssetTracker() {
                     disabled={!changeDraft.changeType || !workTarget || (changeDraft.markPerformed && !changeDraft.performedOn) || !!validateCustomValues(workModel, "work", changeDraft.changeType, changeDraft.custom)}
                     style={{ padding: "8px 14px", background: (changeDraft.changeType && workTarget && !(changeDraft.markPerformed && !changeDraft.performedOn) && !validateCustomValues(workModel, "work", changeDraft.changeType, changeDraft.custom)) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                   >
-                    {(changeModal.mode === "edit" ? "Save changes" : "Log work")}
+                    {(changeModal.mode === "edit" ? "Save" : "Log work")}
                   </button>
                 </div>
               </div>
@@ -17890,6 +17896,8 @@ function AssetTracker() {
             const taskDone = taskItem ? taskIsDone(taskItem) : false;
             // A Custom frequency must describe a real rule before Save lights.
             const maintenanceFrequencyOk = maintenanceDraft.kind === TASK_KIND_ONEOFF || !!frequencyFromDraft(maintenanceDraft);
+            // Editing: Save is grey until something differs from what the dialog opened with.
+            const maintenanceDirty = !editing || !maintenanceBaseline || maintenanceBaseline.id !== maintenanceDraft.id || JSON.stringify(maintenanceDraft) !== JSON.stringify(maintenanceBaseline);
             const taskCustomError = validateCustomValues(workModel, "task", maintenanceDraft.taskType, maintenanceDraft.custom, viewVisibleCustomKeys(dialogView));
             const taskStatusMeta = taskItem ? maintenanceStatusMeta(taskStatusOf(taskItem)) : null;
             // The done circle lives in the dialog only when the view asked for it
@@ -18574,10 +18582,10 @@ function AssetTracker() {
                   {!viewReadOnly && (
                   <button
                     onClick={editing ? () => saveMaintenanceEdit() : addMaintenanceItem}
-                    disabled={!maintenanceDraft.task.trim() || !workTarget || !maintenanceFrequencyOk || !!taskCustomError}
-                    style={{ padding: "8px 14px", background: (maintenanceDraft.task.trim() && workTarget && maintenanceFrequencyOk && !taskCustomError) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
+                    disabled={!maintenanceDraft.task.trim() || !workTarget || !maintenanceFrequencyOk || !!taskCustomError || !maintenanceDirty}
+                    style={{ padding: "8px 14px", background: (maintenanceDraft.task.trim() && workTarget && maintenanceFrequencyOk && !taskCustomError && maintenanceDirty) ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}
                   >
-                    {editing ? "Save changes" : "Add task"}
+                    {editing ? "Save" : "Add task"}
                   </button>
                   )}
                 </div>
@@ -23572,7 +23580,7 @@ function TemplateEditor({ initial, assets, model, onSave, onDelete, onCancel }) 
           )}
           {!curItem && <button onClick={onCancel} style={{ padding: "8px 14px", background: "transparent", border: `1.5px solid ${C.brandDark}`, borderRadius: 10, fontWeight: 600, fontSize: 13, color: C.ink }}>Cancel</button>}
           {!curItem && <button onClick={() => canSave && onSave(clean())} disabled={!canSave}
-            style={{ padding: "8px 14px", background: canSave ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>{initial ? "Save changes" : "Add template"}</button>}
+            style={{ padding: "8px 14px", background: canSave ? C.brand : C.border, color: "#fff", border: "none", borderRadius: 10, fontWeight: 600, fontSize: 13 }}>{initial ? "Save" : "Add template"}</button>}
         </div>
     </>
   );
