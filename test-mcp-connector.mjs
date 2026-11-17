@@ -346,11 +346,15 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   const w = async (name, args, sites = ONE) => { const ctx = ctxFor(sites); const r = await call(name, args, ctx); return { ...r, writes: ctx.writes }; };
 
   // add_task
-  let r = await w("add_task", { asset: "Mini Split 1", task: "Drain check", frequency: "Quarterly", last_done: "2026-09-01", owner: " Jim " });
+  // Done today, so the quarterly task is due 90 days out and reads "ok" whenever this runs.
+  const today = todayIn();
+  const in90 = new Date(today + "T00:00:00Z"); in90.setUTCDate(in90.getUTCDate() + 90);
+  const due90 = in90.toISOString().slice(0, 10);
+  let r = await w("add_task", { asset: "Mini Split 1", task: "Drain check", frequency: "Quarterly", last_done: today, owner: " Jim " });
   eq("add_task writes the app's record shape", r.writes, [{ tenant: "dev", op: "add_task", args: ["ms1", {
     kind: "scheduled", task: "Drain check", notes: "", frequencyLabel: "Quarterly", frequencyDays: 90, recurrence: "",
-    dueDate: "", lastPerformed: "2026-09-01", owner: "Jim", taskType: "", custom: {} }] }]);
-  eq("add_task answers with the new task's status", [r.data.added.id, r.data.added.due, r.data.added.status], ["new-1", "2026-11-30", "ok"]);
+    dueDate: "", lastPerformed: today, owner: "Jim", taskType: "", custom: {} }] }]);
+  eq("add_task answers with the new task's status", [r.data.added.id, r.data.added.due, r.data.added.status], ["new-1", due90, "ok"]);
   r = await w("add_task", { asset: "b300", task: "Gutters", kind: "one-off", due_date: "2026-11-01" });
   eq("a one-off keeps its due date and blanks the schedule half",
     [r.writes[0].args[1].kind, r.writes[0].args[1].dueDate, r.writes[0].args[1].frequencyLabel, r.writes[0].args[1].frequencyDays], ["oneoff", "2026-11-01", "", ""]);
