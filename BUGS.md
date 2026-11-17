@@ -844,3 +844,4 @@ Found while adding the views sidebar pin. It fails identically on a clean `origi
 `test-frontend-recurring.js` ("a never-done config is due today") and `test-frontend-setters.js`
 ("setters called but never declared: setItems") both fail on a clean `origin/dev`. Frontend only;
 no deploy involved. Not investigated.
+- 2026-11-17: test-mcp-connector.mjs 'add_task answers with the new task's status' is date-dependent (fixed due date 2026-11-30 now reads due-soon); fails CI on dev. Fix: derive the date from today.
