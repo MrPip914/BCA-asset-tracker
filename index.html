@@ -7261,7 +7261,7 @@ const FRONTEND_SCRIPT_VERSION = "v52";
 // misleading label, never dropped data. About also shows the browser-reported
 // file date (document.lastModified), which needs no discipline at all and is the
 // cross-check when this number looks wrong.
-const APP_VERSION = "2026-11-17.4";
+const APP_VERSION = "2026-11-25.1";
 
 // ---------- DEVICE DIAGNOSTICS LOG ----------
 // What this browser saw happen: loads, saves, sign-ins, sign-outs and uncaught
@@ -28896,22 +28896,71 @@ function assetSwipeBlocked(target, root) {
   }
   return false;
 }
+// The page follows the finger while it drags sideways, then slides out and the next tab
+// slides in from the far side (Web Animations; no re-render per move). Nothing here is
+// load-bearing: with no `animate` support the swipe still changes tab, just abruptly.
+function assetSwipeShift(el, x) {
+  if (!el) return;
+  el.style.transform = x ? `translateX(${x}px)` : "";
+  el.style.opacity = x ? String(Math.max(0.35, 1 - Math.abs(x) / 420)) : "";
+}
+function assetSwipeClip(on) {
+  try { document.body.style.overflowX = on ? "hidden" : ""; } catch (e) { /* ignore */ }
+}
+function assetSwipeSettle(el, from, to, ms, done) {
+  if (!el || typeof el.animate !== "function") { assetSwipeShift(el, 0); assetSwipeClip(false); if (done) done(); return; }
+  const o0 = Math.max(0.35, 1 - Math.abs(from) / 420), o1 = Math.max(0, 1 - Math.abs(to) / 420);
+  const a = el.animate([{ transform: `translateX(${from}px)`, opacity: o0 }, { transform: `translateX(${to}px)`, opacity: o1 }], { duration: ms, easing: "ease-out" });
+  assetSwipeShift(el, to);
+  const fin = () => { if (done) done(); };
+  a.onfinish = fin; a.oncancel = fin;
+}
 function assetSwipeProps(keys, current, go) {
+  const reduced = () => { try { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (e) { return false; } };
+  const idx = keys.indexOf(current);
   return {
     onTouchStart: e => {
       const t = e.touches[0];
-      ASSET_SWIPE_START = e.touches.length === 1 && !assetSwipeBlocked(e.target, e.currentTarget) ? { x: t.clientX, y: t.clientY } : null;
+      ASSET_SWIPE_START = e.touches.length === 1 && !assetSwipeBlocked(e.target, e.currentTarget) ? { x: t.clientX, y: t.clientY, drag: false } : null;
+    },
+    onTouchMove: e => {
+      const s = ASSET_SWIPE_START;
+      if (!s || !e.touches[0]) return;
+      const dx = e.touches[0].clientX - s.x, dy = e.touches[0].clientY - s.y;
+      if (!s.drag) {
+        if (Math.abs(dx) < 12 || Math.abs(dx) < Math.abs(dy) * 1.6) return;
+        s.drag = true;
+        assetSwipeClip(true);
+      }
+      // No tab on that side: resist instead of following.
+      const has = keys[idx + (dx < 0 ? 1 : -1)] != null;
+      assetSwipeShift(e.currentTarget, has ? dx : dx / 5);
     },
     onTouchEnd: e => {
       const s = ASSET_SWIPE_START;
       ASSET_SWIPE_START = null;
+      const el = e.currentTarget;
       if (!s || !e.changedTouches[0]) return;
       const dx = e.changedTouches[0].clientX - s.x, dy = e.changedTouches[0].clientY - s.y;
-      if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 1.6) return;
-      const next = keys[keys.indexOf(current) + (dx < 0 ? 1 : -1)];
-      if (next) go(next);
+      const next = keys[idx + (dx < 0 ? 1 : -1)];
+      const commit = Math.abs(dx) >= 70 && Math.abs(dx) >= Math.abs(dy) * 1.6 && next;
+      if (!s.drag || reduced()) {
+        assetSwipeShift(el, 0); assetSwipeClip(false);
+        if (commit) go(next);
+        return;
+      }
+      if (!commit) { assetSwipeSettle(el, dx, 0, 180, () => { assetSwipeShift(el, 0); assetSwipeClip(false); }); return; }
+      const w = Math.min(window.innerWidth || 400, 480), dir = dx < 0 ? -1 : 1;
+      assetSwipeSettle(el, dx, dir * w, 130, () => {
+        go(next);
+        assetSwipeShift(el, 0);
+        assetSwipeSettle(el, -dir * w * 0.6, 0, 200, () => { assetSwipeShift(el, 0); assetSwipeClip(false); });
+      });
     },
-    onTouchCancel: () => { ASSET_SWIPE_START = null; },
+    onTouchCancel: e => {
+      ASSET_SWIPE_START = null;
+      assetSwipeShift(e.currentTarget, 0); assetSwipeClip(false);
+    },
   };
 }
 
