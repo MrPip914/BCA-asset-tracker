@@ -117,7 +117,7 @@ check('the group save returns false when refused, so the tab keeps the selection
 check('the tab is wired: Sections tab renders WindowLayoutTabContent only for a window',
   /detailTab === "windowLayout" && hasModule\(selectedAsset\.type, "windowLayout"\)/.test(src));
 check('all four task drafts carry paneGroupIds, and opening a task seeds them',
-  (src.match(/taskType: "", custom: \{\}, paneGroupIds: \[\] \}/g) || []).length === 4
+  (src.match(/taskType: "", custom: \{\}, paneGroupIds: \[\], parentTaskId: "", blockedBy: \[\] \}/g) || []).length === 4
   && /paneGroupIds: Array\.isArray\(item\.paneGroupIds\) \? \[\.\.\.item\.paneGroupIds\] : \[\]/.test(src));
 check('add and edit both save only live groups',
   (src.match(/livePaneGroupIds\(workTarget, maintenanceDraft\.paneGroupIds\)/g) || []).length >= 4);
@@ -128,7 +128,7 @@ check('the task preview only mounts for a window whose task names a group (no fl
   /isWindowLayoutType\(selectedAsset\.type\) && taskPaneGroupsOf\(selectedAsset, item\)\.length > 0/.test(src));
 check('the Tasks search finds a task by its group name', /\.\.\.taskPaneGroupsOf\(r\.asset, r\.item\)\.map\(g => g\.name\)/.test(src));
 check('the edge function keeps paneGroupIds on a task',
-  /TASK_EXTRA_KEYS = \["taskType", "custom", "paneGroupIds"\]/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api/save-shape.ts'), 'utf8')));
+  /TASK_EXTRA_KEYS = \["taskType", "custom", "paneGroupIds"/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api/save-shape.ts'), 'utf8')));
 check('Sandbox carries a Window with a layout, groups and tasks that name them',
   /label: "BCA0121", type: "Window"/.test(src) && /floorPlanUrl: "data:image\/svg\+xml;utf8,"/.test(src)
   && /id: "wg-b1-lower"/.test(src) && /paneGroupIds: \["wg-b1-lower", "wg-b2-lower"\]/.test(src));
@@ -149,14 +149,14 @@ check('a layout with a photo offers Photo and Shapes toggles, and never both off
 check('hiding the shapes removes the panes from the view', /\(!hasPhoto \|\| showShapes\) && list\.map/.test(src));
 check('the view draws the photo behind the shapes', /b\.image\s*\?[\s\S]{0,200}<image key=/.test(src));
 check('both window views get the backdrop and the hook asks for it',
-  (src.match(/useFloorPlanSvg\([^)]*, true\)/g) || []).length === 2 && (src.match(/backdrop=\{plan\.backdrop\}/g) || []).length === 4);
+  (src.match(/useFloorPlanSvg\([^)]*, true\)/g) || []).length === 3 && (src.match(/backdrop=\{plan\.backdrop\}/g) || []).length === 6);
 check('a backdrop shape is never clickable', /strokeLinejoin="round" style=\{\{ pointerEvents: "none" \}\}/.test(src));
 
 const tpl = src.slice(src.indexOf('function TaskPaneLayout('), src.indexOf('function WindowLayoutTabContent('));
 check('a task\'s layout starts COLLAPSED behind a chevron and is only fetched once opened',
   /useState\(false\)/.test(tpl) && /aria-expanded=\{open\}/.test(tpl) && /useFloorPlanSvg\(open && asset/.test(tpl) && /ChevronRight/.test(tpl));
-check('the layout is on the task dialog (editing and reading), the task card AND the completion form',
-  (src.match(/<TaskPaneLayout /g) || []).length === 4);
+check('the layout is on the phone task dialog (the desktop one has its own collapsible field), the task card AND the completion form',
+  (src.match(/<TaskPaneLayout /g) || []).length === 3 && (src.match(/\{paneLayoutEl\}/g) || []).length === 2);
 
 // --- zoom (2026-10-16) ----------------------------------------------------------------
 {

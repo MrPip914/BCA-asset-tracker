@@ -16,6 +16,20 @@ version that fixed them.
 
 ## Open
 
+### A person's name in the Assets list reads in the border colour (nearly invisible)
+**Found:** 2026-10-28, while adding dark mode.
+**Needs a deploy:** no; frontend only.
+**Confirmed:** in the Assets table a User row's Name cell takes `applies ? C.muted : C.border` and
+`name` is excluded for a person type, so `applies` is false and the name is drawn in the faint
+border colour (about 1.3:1 on the surface, in light mode as well as dark). It should read like any other name.
+
+### test-frontend-setters.js fails on the Views editor's `renderConds`
+**Found:** 2026-10-28, while building tasks with no asset (fails on `dev` without that change).
+**Needs a deploy:** no; test or one rename only.
+**Confirmed:** the test reports "setters called but never declared: setItems". `setItems` is a
+parameter of the arrow function `renderConds = (items, setItems, depth)` in the Views editor, so
+nothing is actually broken; the test's declared-setter scan does not count arrow parameters.
+
 ### A floor-plan group's audit rows read "undefined changed from ..." on the Audit tab
 **Found:** 2026-10-13, while building window pane groups.
 **Needs a deploy:** no; frontend only (`describeAudit`).
@@ -820,3 +834,13 @@ Pre-existing on `dev` (fails with and without the install-app change). Found whi
 ## test-frontend-setters.js fails on dev (found 2026-10-22)
 
 Reports "setters called but never declared: setItems". Fails without the asset-page + change too. Not investigated; does not block anything known.
+
+## test-frontend-setters.js fails on dev: `setItems` called but never declared (found 2026-10-29)
+
+Found while adding the views sidebar pin. It fails identically on a clean `origin/dev`, so it is not from that change. Not investigated; needs a look at which `setItems` call the test is seeing.
+
+## Two frontend tests fail on dev (found 2026-11-07, not caused by the task-dialog rework)
+
+`test-frontend-recurring.js` ("a never-done config is due today") and `test-frontend-setters.js`
+("setters called but never declared: setItems") both fail on a clean `origin/dev`. Frontend only;
+no deploy involved. Not investigated.

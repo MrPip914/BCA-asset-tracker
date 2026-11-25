@@ -39,7 +39,7 @@ const eq = (name, got, want) => check(name, JSON.stringify(got) === JSON.stringi
     ...["RECURRENCE_UNITS", "RECURRENCE_ORDINALS", "MAINTENANCE_FREQUENCIES"].map(arr),
     line("WEEKDAY_NAMES"),
     ...["recurrenceCount", "parseRecurrence", "addCalendarMonths", "nthWeekdayOfMonth", "nextRecurrenceDate",
-      "dateOnly", "taskKindOf", "isOneOffTask", "taskIsDone", "taskDueDate", "maintenanceStatusOf", "cellsLabel_",
+      "dateOnly", "taskKindOf", "isOneOffTask", "taskIsDone", "taskDueDate", "localDateString", "taskNotStarted", "maintenanceStatusOf", "cellsLabel_",
       "formatRecurrence", "describeRecurrence", "recurrenceApproxDays",
       "floorPlanPathToPoints", "floorPlanRemapShapeIds", "floorPlanRemapLinksAndGroups", "floorPlanSegmentId", "floorPlanSegmentParts",
       // The outside-wall rule, and the geometry it runs on: set_plan_walls must
@@ -346,11 +346,15 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   const w = async (name, args, sites = ONE) => { const ctx = ctxFor(sites); const r = await call(name, args, ctx); return { ...r, writes: ctx.writes }; };
 
   // add_task
-  let r = await w("add_task", { asset: "Mini Split 1", task: "Drain check", frequency: "Quarterly", last_done: "2026-09-01", owner: " Jim " });
+  // Done today, so the quarterly task is due 90 days out and reads "ok" whenever this runs.
+  const today = todayIn();
+  const in90 = new Date(today + "T00:00:00Z"); in90.setUTCDate(in90.getUTCDate() + 90);
+  const due90 = in90.toISOString().slice(0, 10);
+  let r = await w("add_task", { asset: "Mini Split 1", task: "Drain check", frequency: "Quarterly", last_done: today, owner: " Jim " });
   eq("add_task writes the app's record shape", r.writes, [{ tenant: "dev", op: "add_task", args: ["ms1", {
     kind: "scheduled", task: "Drain check", notes: "", frequencyLabel: "Quarterly", frequencyDays: 90, recurrence: "",
-    dueDate: "", lastPerformed: "2026-09-01", owner: "Jim", taskType: "", custom: {} }] }]);
-  eq("add_task answers with the new task's status", [r.data.added.id, r.data.added.due, r.data.added.status], ["new-1", "2026-11-30", "ok"]);
+    dueDate: "", lastPerformed: today, owner: "Jim", taskType: "", custom: {} }] }]);
+  eq("add_task answers with the new task's status", [r.data.added.id, r.data.added.due, r.data.added.status], ["new-1", due90, "ok"]);
   r = await w("add_task", { asset: "b300", task: "Gutters", kind: "one-off", due_date: "2026-11-01" });
   eq("a one-off keeps its due date and blanks the schedule half",
     [r.writes[0].args[1].kind, r.writes[0].args[1].dueDate, r.writes[0].args[1].frequencyLabel, r.writes[0].args[1].frequencyDays], ["oneoff", "2026-11-01", "", ""]);
@@ -1137,7 +1141,7 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   const model = {
     taskTypes: [{ id: "tt-insp", name: "Inspection" }],
     taskTypeSettings: {
-      "tt-insp": { fieldKeys: ["cf_result", "cf_count"], requiredFields: ["cf_result"], hiddenFields: ["owner"] },
+      "tt-insp": { fieldKeys: ["cf_result", "cf_count"], requiredFields: ["cf_result"], hiddenFields: ["notes"] },
     },
     taskFields: [
       { key: "cf_result", label: "Result", dataType: "select", options: ["Pass", "Fail"] },
@@ -1157,7 +1161,7 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   eq("task types: get_schema lists them, Default first", tw.tasks.types.map((t) => t.name), ["Default", "Inspection"]);
   check("task types: a type's custom fields, required, and switched-off built-ins",
     JSON.stringify(tw.tasks.types[1].customFields.map((f) => [f.label, f.dataType, !!f.required, f.choices])) === JSON.stringify([["Result", "select", true, ["Pass", "Fail"]], ["Count", "number", false, null]])
-    && tw.tasks.types[1].switchedOff.join() === "Owner", r.text);
+    && tw.tasks.types[1].switchedOff.join() === "Notes", r.text);
   const repair = tw.work.types.find((t) => t.name === "Repair");
   check("work types: a work type's fields and switched-off built-ins", repair.customFields[0].label === "Part number" && repair.switchedOff.join() === "Cost", r.text);
 
@@ -1179,8 +1183,8 @@ const call = async (name, args, ctx = ctxFor(ONE)) => {
   check("add_task: an unknown custom field is refused, not dropped", r.isError && /no custom field/.test(r.text) && c.writes.length === 0, r.text);
   r = await call("add_task", { asset: "ms1", task: "Roof look", kind: "one-off", task_type: "Inspection", custom: { Result: "Pass", Count: "lots" } }, c);
   check("add_task: the data type is checked", r.isError && c.writes.length === 0, r.text);
-  r = await call("add_task", { asset: "ms1", task: "Roof look", kind: "one-off", task_type: "Inspection", owner: "Bob", custom: { Result: "Pass" } }, c);
-  check("add_task: a switched-off built-in is refused", r.isError && /Owner.{1,3} switched off/.test(r.text) && c.writes.length === 0, r.text);
+  r = await call("add_task", { asset: "ms1", task: "Roof look", kind: "one-off", task_type: "Inspection", notes: "Bob", custom: { Result: "Pass" } }, c);
+  check("add_task: a switched-off built-in is refused", r.isError && /Notes.{1,3} switched off/.test(r.text) && c.writes.length === 0, r.text);
   r = await call("add_task", { asset: "ms1", task: "Roof look", kind: "one-off", task_type: "Nope" }, c);
   check("add_task: an unknown task type lists the real ones", r.isError && /Default, Inspection/.test(r.text), r.text);
 

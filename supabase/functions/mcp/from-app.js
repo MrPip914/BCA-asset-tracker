@@ -119,9 +119,23 @@ function taskDueDate(item) {
   return new Date(last.getTime() + item.frequencyDays * 86400000);
 }
 
+function localDateString(d) {
+  const dt = d || new Date();
+  if (isNaN(dt.getTime())) return "";
+  return dt.getFullYear() + "-" +
+    String(dt.getMonth() + 1).padStart(2, "0") + "-" +
+    String(dt.getDate()).padStart(2, "0");
+}
+
+function taskNotStarted(item) {
+  const start = dateOnly(item && item.startDate);
+  return !!start && isOneOffTask(item) && start > localDateString(new Date());
+}
+
 function maintenanceStatusOf(item) {
   const oneOff = isOneOffTask(item);
   if (oneOff && taskIsDone(item)) return "done";
+  if (oneOff && taskNotStarted(item)) return "upcoming";
   const due = taskDueDate(item);
   if (!due) return oneOff ? "undated" : "never";
   const daysUntil = Math.floor((due.getTime() - Date.now()) / 86400000);
@@ -386,7 +400,7 @@ function livePaneGroupIds(asset, ids) {
 export {
   MAINTENANCE_FREQUENCIES, WEEKDAY_NAMES, formatRecurrence, describeRecurrence, recurrenceApproxDays,
   TASK_KIND_SCHEDULED, TASK_KIND_ONEOFF, parseRecurrence, dateOnly,
-  taskKindOf, isOneOffTask, taskIsDone, taskDueDate, maintenanceStatusOf, cellsLabel_,
+  taskKindOf, isOneOffTask, taskIsDone, taskDueDate, taskNotStarted, maintenanceStatusOf, cellsLabel_,
   floorPlanRemapLinksAndGroups, floorPlanPathToPoints,
   floorPlanRound2, floorPlanParseTransform, floorPlanApplyChain, floorPlanBbox, floorPlanPointInPoly, floorPlanRotateSpaces,
   floorPlanSegmentId, floorPlanSegmentParts, floorPlanIsSegmentId, floorPlanExteriorSegments, floorPlanWallCoverSet, floorPlanSetWallSegments,

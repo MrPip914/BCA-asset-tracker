@@ -53,6 +53,56 @@ Deno.test("a task keeps the window pane groups it names, and an empty list is no
   assert(!("paneGroupIds" in a.maintenanceItems[1]));
 });
 
+Deno.test("a one-off task keeps its start and scheduled dates, and a blank one is not stored", () => {
+  const [a] = shapeAssets([{
+    id: "a1", label: "a1", type: "Room",
+    maintenanceItems: [
+      { id: "m1", task: "Repaint", kind: "oneoff", startDate: "2026-11-01", doOn: "2026-11-05", dueDate: "2026-11-10" },
+      { id: "m2", task: "Old task", kind: "scheduled", startDate: "", doOn: "" },
+    ],
+  }], []);
+  assertEquals(a.maintenanceItems[0].startDate, "2026-11-01");
+  assertEquals(a.maintenanceItems[0].doOn, "2026-11-05");
+  assert(!("startDate" in a.maintenanceItems[1]));
+  assert(!("doOn" in a.maintenanceItems[1]));
+});
+
+Deno.test("a subtask keeps its parentTaskId, and a top-level task stores none", () => {
+  const [a] = shapeAssets([{
+    id: "a1", label: "a1", type: "Room",
+    maintenanceItems: [
+      { id: "m1", task: "Event", kind: "oneoff" },
+      { id: "m2", task: "Set up", kind: "oneoff", parentTaskId: "m1" },
+    ],
+  }], []);
+  assertEquals(a.maintenanceItems[1].parentTaskId, "m1");
+  assert(!("parentTaskId" in a.maintenanceItems[0]));
+});
+
+Deno.test("a task keeps its blockedBy list, and an empty one is not stored", () => {
+  const [a] = shapeAssets([{
+    id: "a1", label: "a1", type: "Room",
+    maintenanceItems: [
+      { id: "m1", task: "Prime", kind: "oneoff", blockedBy: ["m0"] },
+      { id: "m2", task: "Paint", kind: "oneoff", blockedBy: [] },
+    ],
+  }], []);
+  assertEquals(a.maintenanceItems[0].blockedBy, ["m0"]);
+  assert(!("blockedBy" in a.maintenanceItems[1]));
+});
+
+Deno.test("a task stamped from a template keeps its origin, and a task without one stores none", () => {
+  const [a] = shapeAssets([{
+    id: "a1", label: "a1", type: "Room",
+    maintenanceItems: [
+      { id: "m1", task: "Set up", kind: "oneoff", origin: { templateId: "t1", itemId: "i1", runDate: "2026-11-01" } },
+      { id: "m2", task: "Paint", kind: "oneoff" },
+    ],
+  }], []);
+  assertEquals(a.maintenanceItems[0].origin, { templateId: "t1", itemId: "i1", runDate: "2026-11-01" });
+  assert(!("origin" in a.maintenanceItems[1]));
+});
+
 const OWNER = "mrpip914@gmail.com";
 const verifyIdToken = (token: unknown) => {
   const [kind, email] = String(token).split(":");
@@ -280,6 +330,23 @@ if (!DATABASE_URL) {
     const ok = await saveBoth(bodyFrom(p, sid, { assets: [], confirmEmptyAssets: true }));
     assertEquals(ok.ok, true);
     assertEquals((await read(sid)).assets.length, 0);
+  });
+
+  Deno.test("emptying the templates list is refused unless confirmed, and a shrink is logged", async () => {
+    await reset();
+    const sid = await signIn();
+    const cfg = { _dirty: { assets: false, config: true, breakerTypes: false, photos: false } };
+    const mk = (n: number) => ({ list: Array.from({ length: n }, (_, i) => ({ id: "t" + i, name: "T" + i, parent: {}, items: [] })) });
+    let q = await read(sid);
+    assertEquals((await post(bodyFrom(q, sid, { ...cfg, taskTemplates: mk(2) }))).ok, true);
+    q = await read(sid);
+    const r = await post(bodyFrom(q, sid, { ...cfg, taskTemplates: { list: [] } }));
+    assertEquals([r.ok, r.refused], [false, "emptyLists"]);
+    assertEquals((await read(sid)).taskTemplates.list.length, 2);
+    assertEquals((await post(bodyFrom(q, sid, { ...cfg, taskTemplates: mk(1) }))).ok, true);
+    assertEquals((await diag()).at(-1).event, "list_shrunk");
+    q = await read(sid);
+    assertEquals((await post(bodyFrom(q, sid, { ...cfg, taskTemplates: { list: [] }, confirmEmptyLists: true }))).ok, true);
   });
 
   Deno.test("an allowlist in a config save replaces the list and ends a removed person's sessions", async () => {

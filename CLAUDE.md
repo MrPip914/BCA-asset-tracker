@@ -823,6 +823,149 @@ instead, and still is for anything that takes that path.
   Driven in Chromium against the real function on a local Postgres: two pages saving
   different assets both land; a third, stale on the same asset, gets the not-saved modal.
 
+## Tasks with no asset (2026-10-28)
+
+Phase 1 of `/mnt/project-files/plans/task-relationships-scheduling.md`. **Frontend only: no
+backend change, no migration, no deploy.** Every task is a row of its asset's
+`maintenanceItems`, so a task that belongs to nothing physical lives on ONE hidden catch-all
+asset per site (`GENERAL_ASSET_ID` = `"__general"`, type `General`, name "No asset").
+
+- **To everything but the lists it is an ordinary asset**, which is why work entries, files,
+  audit rows, views, Kanban, the save path and per-record saves needed no change. The only code
+  that knows about it is code that LISTS assets (`isGeneralAsset`): the Assets list, the type
+  filter options, the workbook's Assets sheet, `openDetail` (it has no page), the task dialog's
+  asset link, and `AssetPickerField`, which never browses it and offers it as a "No asset" row
+  only where `allowNone` is passed (the task dialog; Log work does not).
+- **Created in memory at load (`ensureGeneralAsset`, in `applySnapshot`) and stored only with
+  the first task saved onto it**, so a site that never uses it never stores it. Same shape as
+  the other load-time adoptions. Two editors both saving the first no-asset task at once: the
+  second is refused as "already exists", the usual not-saved modal.
+- **Any NEW place that lists assets must skip it** (`isGeneralAsset`), or "No asset" turns up
+  as an asset. The connector does not know about it yet (queued).
+- Covered by `test-frontend-general-asset.js`; driven in Chromium against Sandbox (add a task
+  with "No asset" from the Tasks tab; it shows in the table and not in the Assets list).
+
+## Templates and events (2026-10-28)
+
+Phase 7 of `/mnt/project-files/plans/task-relationships-scheduling.md`. A **template** is a recipe for an event: a parent task plus tasks under it, each with dates set relative to the event's day. **Schedule template** stamps it on one or several dates at once. **Frontend plus `asset-api`: a push to dev redeploys the Edge Function; no migration, no Apps Script change.**
+
+- **Stored in ONE Config key, `taskTemplates` = `{ list: [template] }`** (an object, as for `views`, since the Edge Function keeps only optional keys that are objects; `OPTIONAL_CONFIG_KEYS` in `save.ts` and `inventory.ts`). Template: `{ id, name, taskType, parent: { task, notes, assetId }, items: [{ id, parentItemId, task, notes, taskType, owner, asset: "event" | assetId, start, doOn, due }] }`. The Apps Script fallback drops it, as for `views`.
+- **A rule is `null`, `{kind:"days", n, dir:"before"|"after"}` or `{kind:"weekday", weekday, which:"preceding"|"following"}`.** A weekday rule is STRICTLY before or after the event day (the Monday before a Monday event is a week earlier).
+- **Items nest one level** (`TEMPLATE_ITEM_MAX_DEPTH`), so with the event the deepest task is depth 3, the cap parent/child already has. `adoptTaskTemplates` drops a grandchild's parent link rather than rejecting the template.
+- **A template is a SNAPSHOT recipe.** Stamped tasks are ordinary one-offs (`parentTaskId` to the event or item above them) carrying `origin: { templateId, itemId, runDate }`; editing or deleting the template never touches events already made. `origin` is kept by `TASK_EXTRA_KEYS`; nothing reads it yet beyond recording where a task came from. An item whose asset is gone falls back to the event's asset.
+- **One `persist()` writes every task of every date**, then a notice says how many were added.
+- **Moving an event offers to move its tasks.** Changing a one-off's Scheduled for between two dates, when it has subtasks with dates, asks "Move the tasks too?" (`shiftAsk`); Yes shifts every descendant's start, scheduled and due dates by the same number of days, audited as "<task> - Dates". Never automatic, and never for a task with no dated descendants.
+- Managed in **Settings > Templates** (editors); **Schedule template** is also in the floating + menu once a template exists.
+- Not built: recurring templates (phase 8: a Schedule button is enough, no automatic generation), template-level custom fields.
+- Covered by `test-frontend-templates.js` (rule maths, stamping, adoption and shifting run for real; wiring read as source) and a case in `save_test.ts`; driven in Chromium against Sandbox (editor opens; scheduling the fixture on two dates added 8 tasks that appear on the Calendar). The shift prompt is covered as source only.
+
+## Events: a task type that is never completed (2026-11-09)
+
+Plan: `/mnt/project-files/plans/calendar-events.md` (Eric chose option A). A Sunday service or special event is a task with tasks under it that is itself never checked off. **Frontend only: no backend change, no migration, no deploy.**
+
+- **It is a fourth completion mode, `event`**, beside required / optional / simple: `completion: "event"` on `workModel.taskTypeSettings[typeId]`, so it is a property on an existing Config blob and cost no release. Settings > Task types > Completing > "Event (never completed)". Templates need no change: give a template an event type as its event type and Schedule template stamps events.
+- **An event has no done circle** (`TaskDoneCircle` draws a calendar mark), no Mark done / Log completion buttons, no Completed field, and every completing door refuses it (`toggleTaskDone`, `completeTaskQuick`). Its subtasks are ordinary tasks and still complete, so "N of M done" on the parent is the progress.
+- **Status**: `taskStatusOf` adds `event` (today or later, or undated) and `past` (after the LAST of its start, scheduled and due dates) on top of `maintenanceStatusOf`. **`maintenanceStatusOf` was deliberately left alone**, because it is copied verbatim into the connector's `from-app.js`, which does not know events yet. An event is never overdue.
+- **Counts**: the Tasks badge counts only work still to do (`taskStatusCounts`); an upcoming event is listed under Open but not counted, and a past event leaves Open like a finished task (`taskStatusFinished`) and shows under completed.
+- **The event model is MODULE STATE** (`applyEventModel`, called at the top of render like `applyPersonNameOrder`), so `taskIsEvent` works inside plain functions. **A `useMemo` that derives a status must list `workModel` as a dependency** (`allMaintenanceRows` does).
+- There is deliberately no "Add event" shortcut in the + menus (removed 2026-11-09, Eric): it only opened Add task on the first Event type. Add task, pick an Event type.
+- Sandbox: `MOCK_SNAPSHOT.workModel` carries an "Event" type and the Sunday service template uses it.
+- **Repeat weekly on Schedule template**: once a date is chosen the dialog offers "Repeat weekly for N more weeks" (1-52, default 8; `templateRepeatDays`), which appends the same weekday each week after the LATEST chosen date, skipping dates already there. Each date is still its own event stamped in the one save. No scheduler and no deterministic ids or skipped-dates record (the plan's optional extras): a re-run simply stamps again, as Schedule always did.
+- Not built yet: event times of day, a monthly ("first Sunday") repeat, event-aware connector tools (queued).
+- Covered by `test-frontend-events.js` (the helpers run for real, wiring read as source); driven in Chromium against Sandbox (Add task with an Event type, scheduling the template, badge unchanged by the event, the dialog showing no completion controls).
+
+## Calendar view type (2026-10-28)
+
+Phase 6 of `/mnt/project-files/plans/task-relationships-scheduling.md`. A **Views** view can be a **Calendar** (`type: "calendar"`, the third beside list and Kanban): the tasks its query finds laid on a **month or a week** (Sunday first, Today / previous / next, per-visit state only). **Frontend only: no backend change, no migration, no deploy** (`adoptViews` just accepts the new type; the Edge Function keeps it as it keeps the other view fields).
+
+- **Where a task sits (`calendarPlacement`)**: a one-off with Scheduled for (`doOn`) on that day; with start AND due but no `doOn`, a dashed **span** strip across the week rows it touches ("anytime in this window"); else its due date (a schedule's derived next due); else its start date. A task with no date is listed under **No date**, never dropped. A finished task keeps its place, struck through.
+- **Drag to schedule** (editors, desktop): dragging a chip to another day sets the task's `doOn` and audits "<task> — Scheduled for" (`setTaskDoOn`). Only an open one-off can move; a schedule's due date is derived, so dropping one says why it cannot. It is the browser's own drag and drop, so on a phone the way to move a task is the Scheduled for field in its dialog.
+- Tapping a chip opens the task like any other view. The live filter works; ordering, grouping and card columns do not apply, so the editor hides them for a calendar. The preview in Settings is the calendar itself (not draggable).
+- **Follow-up (2026-11-04, Eric)**: Month/Week is ONE segmented toggle; "Place tasks by" (Start date / Scheduled for / Due date) is a PickerField dropdown. **Week mode is Kanban-shaped**: seven equal columns (day name + date, count, card-style chips, a span shown as a dashed card on each day it covers), the month grid unchanged. The **No date** area is always shown to editors and is a drop target: dropping a task there calls `setTaskDate(key, "", field)`, which clears the chosen date (audited with "—"). In Scheduled-for mode a task that still has a due or start date stays on the calendar by that fallback, so it only moves to No date when it has none. Frontend only.
+- **Follow-up 2 (2026-11-04, Eric)**: the week's day count is gone, day buckets are taller (`minHeight` 420, min width 160), and the No date box says only "No date (N)" (the ? tip explains the drop). **Cards move like Kanban cards**: `CalendarView` uses `usePointerSort` instead of native drag and drop (lifted card follows the pointer, edge auto-scroll, works on touch). Each day cell and the No date box is a `data-drop-group` (day string, or `__none`); the hovered one is highlighted rather than showing a drop line, since a day stores no order, and a drop calls `onSchedule(key, day|"", dateField)`. Month chips use it too. A tap still opens the task; a drag does not (`tappedIn`). Frontend only.
+- **Follow-up 3 (2026-11-05, Eric)**: **the week never ends.** Week mode is one endless strip of consecutive days (`stripFrom`/`stripCount` state in `CalendarView`, 28-day chunks, starting 4 weeks before and after the anchor's week). Near either edge (7 days) `onStripScroll` grows the window; growing at the LEFT also moves `stripFrom` back, and a layout effect adds the same number of days of width to `scrollLeft` (`shiftRef`) so nothing jumps. `calendarLayout` is given the whole strip as its range, so cards, spans and drop areas exist for every rendered day. Previous / Next scroll by seven days (smooth), Today re-centres (`jumpStrip`, with a tick so a same-value state still re-runs the scroll), and the title is the visible days (`visFrom`). Each column is `max(160px, 1/7 of the strip)` wide so seven fill a wide screen. Month mode is unchanged. Frontend only.
+- Not built: a Day mode, calendar feed, time of day, drag for touch screens, a span's start/end handles.
+- Covered by `test-frontend-calendar.js` (the pure range, shift, placement and layout helpers run for real; wiring read as source); driven in Chromium against Sandbox (the new Calendar fixture view: a drag to another day, Week/Month, the span strip, the task opening).
+
+## Task dependencies (2026-10-28)
+
+**SWITCHED OFF (2026-11-10, Eric: not ready to test it, may return).** One flag, `TASK_BLOCKED_BY_ENABLED = false` beside `taskOpenBlockers`, turns it all off: no Blocked by picker, no Blocked label, no Blocked / Blocked by view fields, no completion warning (`taskOpenBlockers` returns nothing). **Stored `blockedBy` lists are untouched and still saved** (the draft carries them through an edit; `TASK_EXTRA_KEYS` and the round-to-round relinking are unchanged), so setting the flag to `true` brings it back exactly as it was. A saved view that queries Blocked now matches nothing. Frontend only; no backend change.
+
+Phase 5 of `/mnt/project-files/plans/task-relationships-scheduling.md`. A one-off task can be **blocked by** other tasks: `blockedBy`, an array of task ids on the blocked task only. **Blocked is derived, never stored** (`taskOpenBlockers`, `taskIsBlocked`): a task is blocked while any listed task still exists and is not done, so a finished or deleted blocker just stops counting.
+
+- **It warns and never refuses.** Completing a blocked task (the dialog and card buttons, through `guardComplete`, the same prompt as open subtasks) says "Blocked by X" and offers Complete anyway.
+- **One-offs only**: a repeating task is never done, so it is neither blocked nor a blocker (saving a task as scheduled drops the list, as it drops the dates). Loops are refused at the picker (`blockedByWouldLoop`), which also leaves out the task itself and finished tasks; a blocker already chosen stays listed.
+- Set with a multi-select "Blocked by" in the task dialog (any task, any asset); the dialog header shows a red Blocked label; the change is audited as "Blocked by".
+- **View fields `Blocked` (Yes/No) and `Blocked by`** (names of the open blockers), both needing `ctx.assets`. `maintenanceStatusOf` was left alone (it sees one task, not the list), so Blocked is a field and not a status; a Blocked Kanban column is "Blocked is Yes" as a query.
+- **Supabase keeps it through `TASK_EXTRA_KEYS`** (an `asset-api` redeploy on push to dev); the Apps Script fallback drops it. No migration.
+- Not built: a Blocked chip on the Tasks table and cards, and "blocks" (the reverse list) in a blocker's dialog.
+- Covered by `test-frontend-dependencies.js` and a `save_test.ts` case; driven in Chromium against Sandbox (pick a blocker, Blocked label, completion warning).
+
+## Parent / child tasks (2026-10-28)
+
+Phase 4 of `/mnt/project-files/plans/task-relationships-scheduling.md`. A task can be a **subtask** of another: `parentTaskId` on the child, and nothing on the parent. **A parent's children are derived** by scanning every asset's tasks (`taskChildrenOf`), the "reference on one side" rule, so a child may sit on a different asset from its parent. A parent id matching no task reads as top level.
+
+- **Supabase keeps the key through `TASK_EXTRA_KEYS`** in `save-shape.ts`, the one backend change: it goes out with the next `asset-api` deploy (the Database migrations workflow on a push to dev). The Apps Script fallback drops it. No migration.
+- **A child is always a one-off** (add and edit both force it; the kind toggle is hidden on a subtask). **Depth is capped at 3** (`TASK_MAX_DEPTH`; `canAddSubtaskTo`), and every walk up carries a visited set so bad data cannot loop. A parent can only be chosen at creation (Add subtask in the parent's dialog), so the form cannot create a loop.
+- **The parent's dialog lists its subtasks** with "N of M done", a + to add one (opens on the parent's asset, the Asset picker lets it sit elsewhere), and a checkbox on subtasks whose type completes in one tap (`completeTaskQuick(..., keepOpen)`). A subtask's dialog links back to its parent.
+- **Parents never complete themselves and never block.** Completing one with open subtasks asks "Complete anyway?" (`guardParentComplete`, on the dialog and card buttons).
+- **Completing a REPEATING parent reopens its finished subtasks** (`resetSubtasks`, in the same save, each audited as a cleared "Completed" edit), so a recurring checklist starts over. A one-off parent does not reset anything.
+- **Deleting a task deletes everything below it, on any asset**; the confirmation counts them, and each gets its own `maintenance_removed` row.
+- **View field `Parent task`** (the parent's name, blank for top level, so "Parent task is not *" is top-level only). Needs `ctx.assets`.
+- Not built yet: a progress chip on the Tasks table and cards (the dialog shows it), a "top-level only" view setting, date warnings between parent and child, and a Parent picker for an existing task.
+- Covered by `test-frontend-subtasks.js` and a case in `save_test.ts`; driven in Chromium against Sandbox (Add subtask, progress, back-link).
+
+## Recurring tasks: one entity with instances (2026-11-12)
+
+Plan: `/mnt/project-files/plans/recurring-tasks-single-entity.md` (replaces the configuration-plus-rounds design of 2026-11-06 / PR #144, which Eric did not like). **Frontend only** (`asset-api`'s `TASK_EXTRA_KEYS` already keeps `recurringId`, `instanced`, `skipped`): no backend change, no migration, no deploy.
+
+- **To the user it is ONE task.** A **Repeats toggle** (off by default) in the task dialog replaces the old Repeats / One-off choice. On, it shows the frequency in words, a **gear** (`RepeatsToggle`) and the Last performed fields. The configuration is never listed, browsed or opened as an object; it is reached only through the gear. Say **instances**, never "rounds".
+- **Storage is unchanged underneath**: a hidden configuration (`kind: scheduled`, `instanced: true`: name, notes, owner, type, custom fields, frequency, template subtasks, `lastPerformed`) plus **instances**, ordinary one-offs with `recurringId`. Exactly one open instance; completing it (any door) stamps the configuration and spawns the next in the SAME save (`afterInstanceCompleted` > `spawnNextInstance`), counting from the completion date, subtasks copied fresh from the template. A schedule with no `instanced` flag is a legacy schedule and behaves as before (it just shows Repeats on); there is no Convert button any more.
+- **Gear dialog**: frequency (`FrequencyPicker`, bound to the task draft and saved with Save changes) and the **subtask template** (the configuration's own children, added and removed immediately). Changes reach instances created from then on.
+- **An instance edit carries to the configuration** (name, notes, owner, type, custom fields, frequency) while the instance is open, so future instances inherit it; finished instances are never rewritten. The instance dialog shows the configuration's **Last performed** read-only above its own **Completed** date.
+- **History** link at the bottom of the main section lists every instance (open first, then newest finished; each opens its own dialog). A **finished** instance shows **Open current instance** under its name.
+- **Deleting the open instance asks**: delete this instance (the previous finished one is marked incomplete again, `recurringDeleteInstance`) or the whole recurring task (`recurringDetach(..., true)`: configuration, template and open instance go; finished instances stay as completed one-off tasks). With no previous instance only the second choice is offered. A finished instance deletes with the ordinary confirmation and the configuration's last-done date is recomputed (`recurringSyncLastDone`).
+- **Reopening a finished instance while another is open** (done circle, Completed field or Reopen dialog, any instance not only the newest) asks to **replace the current instance**; confirming deletes the open one and its subtasks (`recurringReopenReplacing`). Nothing is refused any more.
+- **Repeats ON for an existing one-off** keeps it as the first instance and creates the configuration beside it (`makeRecurringFrom`, its subtasks copied as the template; a finished one-off starts the next instance at once). **Repeats OFF on an instance** asks, then deletes the configuration and leaves every instance as a plain one-off (`recurringDetach(..., false)`).
+- **Removed**: the "Recurring tasks" section on the Tasks tab, Settings > Task types "Convert", Skip this round / Start next round, the refusal to reopen, the word "round". `skipped` is still read (old data) and cleared on reopen.
+- **Links follow the instance**: `blockedBy` entries naming a finished instance move to its successor (unchanged). Blocked by is switched off app-wide for now.
+- Kept from PR #144: the **Completion board source** (`builtin:completion`, Open / Done) on Kanban; dragging runs `toggleTaskDone`.
+- The connector does not know any of this yet (queued).
+- Covered by `test-frontend-recurring.js` (the helpers run for real; the dialogs and handlers are read as source), mutation-checked; driven in Chromium against Sandbox (add with Repeats on, template subtask through the gear, completing opened the next instance, History, Open current instance, replace-on-reopen, both delete choices, Repeats off).
+
+## Task completion modes (2026-10-28)
+
+Phase 2 of `/mnt/project-files/plans/task-relationships-scheduling.md`. **Frontend only: no backend change, no migration, no deploy.** A task TYPE chooses how completing works, stored as `completion` on `taskTypeSettings[typeId]` (a property on an existing blob, so no release): `required` (today's completion form and a work entry; absent reads this, so every existing type is unchanged), `optional` (a "Done" checkbox completes in one tap, and "Log work…" stays as a separate button) and `simple` (the checkbox only; never a work entry).
+
+- **A quick completion (`completeTaskQuick`) stamps `lastPerformed` and writes the same `maintenance_completed` audit row as the form, and nothing else.** Same single `persist()`, and it closes the task dialog behind it for the reason the form does.
+- Switched per type under Settings > Task types ("Completing", with a ? tip). The built-in Default type can be switched too, so untyped tasks follow it. `setTaskCompletionMode` stores nothing for `required`.
+- Shown in the task dialog (Mark done button) and on the asset's task cards (checkbox). The Tasks table row still opens the dialog. Applies to scheduled tasks as well as one-offs: the checkbox just stamps today.
+- Covered by `test-frontend-completion-modes.js`.
+
+## Task date roles (2026-10-28)
+
+Phase 3 of `/mnt/project-files/plans/task-relationships-scheduling.md`. A ONE-OFF task carries up
+to three optional dates, each a different promise: **Start date** (`startDate`, do not start
+before), **Scheduled for** (`doOn`, the day it is meant to be done) and **Due date** (`dueDate`,
+the latest). A scheduled task has none of them (its due date stays derived), and both save paths
+write them blank for a schedule so flipping the kind cannot resurrect a stale date.
+
+- **New status `upcoming`**: a one-off, not done, whose start date is still ahead (`taskNotStarted`;
+  today counts as started). It wins over overdue, since it cannot be late before it starts, and it is
+  not counted by the Tasks badge. It is in the Status filter, the Map list's status order and the view
+  Status field.
+- **Views**: `startDate` and `doOn` are query fields (date kind), columns and dialog fields. Date fields
+  gained tokens: `[TODAY]` (any comparison) and `[THIS WEEK]` (Sunday to Saturday: is = inside,
+  is not = outside, before / after = either side). `viewTokensFor(kind, op)` decides which tokens a line
+  offers; changing a line's field drops a token the new field cannot take.
+- **Supabase keeps both through `TASK_EXTRA_KEYS`** in `save-shape.ts`, the one backend change: it goes
+  out with the next `asset-api` deploy (the Database migrations workflow). The Apps Script fallback drops
+  them, as it drops `taskType`/`custom`. No migration.
+- `from-app.js` carries `taskNotStarted` and `localDateString` so the connector's status matches; it
+  does not yet read or write the new dates (queued).
+- Covered by `test-frontend-tasks.js` and `test-frontend-views.js`; driven in Chromium against Sandbox
+  (the new fixture task shows Upcoming and its three dates in the dialog).
+
 ## Views (2026-10-17, updated same day)
 
 A **Views** main tab shows saved task lists and boards an editor sets up in **Settings > Views**; each person sees only the views assigned to them. Tasks only. Plan: `/mnt/project-files/plans/views.md`. **Frontend plus `asset-api`: a push to dev redeploys the Edge Function; no Apps Script change, no version bump.**
@@ -848,11 +991,35 @@ A **Views** main tab shows saved task lists and boards an editor sets up in **Se
 - **Follow-up 11 (2026-10-21, Eric)**: the explanations under "Viewers can change task order", "Show new tasks at the top" and "When a task is opened", and the group-order hint, became `HelpTip` (?) icons. **Standing default: build in a tooltip rather than adding a grey description line.** Frontend only.
 - **Follow-up 12 (2026-10-21, Eric)**: `hideEmptyFields` on a Kanban view (editor checkbox with a ? tip): a card leaves out a field whose display is "—" (nothing in it). Cards only; stored as a boolean on the view, so the Edge Function keeps it as it keeps the other view fields. Frontend only. Connector support queued.
 - **Follow-up 13 (2026-10-21, Eric)**: a Kanban can take its columns from a choice-list task field (`fieldKey` on the view, picked under "Columns come from" in the editor). Each choice is a column, a task with no value sits in the default column, and a card's column IS its `custom[fieldKey]`: dragging writes the field (`setTaskBoardValue`, audited as `maintenance_edited` "<task> — <field>") and editing the field moves the card. **Resolved once, read everywhere**: `viewResolveField` gives the view `buckets` and `assignments` worked out from the tasks (`fieldBacked: true`), and `resolvedViews` feeds `visibleViews` and `viewCtx.views`, so queries, cards, grouping and other boards' `kanban:` fields needed no change. The view's own buckets/assignments stay stored underneath; a removed or non-choice field resolves back to the plain board. Only editors drag (the field is a task edit, not `viewState`), only tasks whose type carries the field (otherwise a notice), and the editor's preview does not drag. Choices are still fixed once created and managed in Settings > Task types; renaming/reordering them is the next step. The membership query and manual card `order` stay on the view. Frontend only; the Edge Function keeps `fieldKey` as it keeps the other view fields. Connector support queued.
+- **Follow-up 14 (2026-10-28, Eric)**: **the done circle, a repeat icon, Status as a plain field.** `done` is an optional COLUMN (`VIEW_DONE_COLUMN`, offered beside the fields in the column picker only, never a query field) and an optional dialog field. It draws `TaskDoneCircle` right before the task title on a Kanban card, in the task cell of a list row, and before the title in a task opened from the view. Pressing it runs `toggleTaskDone`: a finished one-off is reopened (`reopenTask` clears the completed date, audited as a cleared "Completed"); otherwise it completes the way the type says (`required` opens the Log work form, `optional`/`simple` one tap), through `guardComplete`. A repeating task is never done, so its ring stays empty and pressing it logs a completion. View-only people see the circle disabled. In a task opened from a view the circle REPLACES the Mark done / Log work buttons, but only when that view ticks it; other views and dialogs keep their buttons. The dialog title no longer says One-off / Scheduled: a repeating task shows a repeat icon after its name and a one-off shows nothing. Status left the dialog header and is a `status` dialog field like the rest (a read-only row; a read view takes its values from the stored task so the circle can change them live, and the pencil reseeds the draft). Existing views gain none of this until the editor ticks it; the Sandbox fixture views tick it. Frontend only. Covered by `test-frontend-done-circle.js`; driven in Chromium against Sandbox (complete via Log completion, reopen from the dialog, the repeat icon).
+- **Follow-up 15 (2026-10-28, Eric)**: **the done circle and logged work.** The work entries a task completed are the ones naming it (`maintenanceId`) with the same performed date as its completed date (`taskCompletionWork`). (1) Unticking a done one-off with such entries asks: **Reopen, keep work** (default, work records something that happened) or **Reopen and delete work** (`reopenTask(..., dropWork)`, one save). (2) The task dialog's Completed row reads "Oct 28 · 2 work entries, $120.00" (`taskWorkSummary`); the Service history list was already there. (3) Deleting a work entry that was a completion offers "Also reopen <task>" (`deleteChange(id, reopen)`, one save, the same audited cleared-Completed row). (4) Completing an open one-off that already has work logged asks first ("Work is already logged") through `guardComplete`. That prompt offers **Log new work** or **Complete without new entry** (`guardComplete`'s `quick`, `completeTaskQuick`), so a task whose work is already logged can be finished with no new entry. Logging work against an open task already had the opt-in "Mark this task performed" tick. Photos on a deleted work entry are left as orphan rows, as elsewhere. Frontend only. Covered by `test-frontend-done-work.js`.
+- **Follow-up 16 (2026-10-28, Eric)**: **"Log work optional" has no Log work button any more.** Completing such a task (circle, card checkbox, dialog Mark done) finishes it in one tap and then asks "Log work?" (`completeTaskAskWork`, `logWorkAsk`); Log work… opens the usual form for the task, No leaves it done. Only `required` types keep a Log work / Mark complete button. "Complete without new entry" (work already logged) stays a plain quick completion with no second prompt. Frontend only.
 - **Live filter**: a search box plus a Filters panel (`field is / is not / contains`), on lists and boards, over the tasks the view already shows. Client state only, never saved. `has` (contains) exists for it alone and is not a stored operator.
 - **A task opened from a view reads first** (`<fieldset disabled>`); editors get a pencil that turns on editing. It shows only the view's `dialogFields`, has no Delete, validates only the visible custom fields, and is read-only for a view-only person.
 - The relationship-query builder was not reused: it follows asset links, and a view is `field = value` over task rows.
 - **The connector does not know views yet** (queued in `/mnt/project-files/connector-queue.md`).
 - Covered by `test-frontend-views.js` (real helpers plus wiring, mutation-checked) and `save_test.ts` (`viewState` permission rule; runs in CI). Driven in Chromium against Sandbox: sidebar and counts, the phone flow, board drag between buckets, list drag and reload, read mode and pencil, the live filter, and the Settings editor and order icon. The viewer path of `viewState` is covered by the Deno test only.
+
+## Dark mode (2026-10-28)
+
+**Settings > Personal > Appearance**: Light, Dark or Follow system (the default), remembered per DEVICE
+in `localStorage` (`asset-tracker-theme-mode`, not tenant-namespaced). Frontend only: no backend change.
+
+- **`clients.js` resolves it before anything paints**: `DARK_THEME` replaces EVERY palette key for every
+  tenant (a school's light colours carry no contrast guarantee on dark), and `applyTheme` also sets
+  `color-scheme` on the root. `CLIENT.dark` / `CLIENT.themeMode` tell the app. The public panel pages
+  pick it up for free, since they read the same CSS variables.
+- **Changing it RELOADS the page**: `C` is plain values read at render and at module load, so there is
+  no re-render path. "Follow system" is read at load only.
+- **`brandBar` is `brandDark` as a SURFACE** (table headers, bars); `brandDark` stays the ink/link colour.
+  They are equal in light mode (a tenant naming only `brandDark` gets it as `brandBar` too) and part in dark,
+  where the ink goes light and the bar stays dark. **Use `C.brandBar` for any new background.**
+- **Never write `#fff`/`white` as a background**; use `C.surface`. White TEXT on brand/danger/success
+  buttons is fine, which is why those three stay mid-dark in the dark palette.
+- **Floor plans and section drawings sit on `PLAN_PAPER`**, a light sheet in dark mode, because an uploaded
+  plan is drawn in dark ink. The print door card is already light.
+- **`index.html` loads `clients.js?v=<build>`; bump that `v` whenever index.html starts depending on something new in clients.js.** A browser that kept the old clients.js beside the new page (Pages caches both) made the Appearance buttons reload without changing anything.
+- A tenant has no way to set its own dark palette yet.
 
 ## Phone bottom bar (2026-10-20)
 

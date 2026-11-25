@@ -118,4 +118,15 @@ check('a read\'s _rev is kept OFF the asset', /\.map\(\(\{ _rev, \.\.\.a \}\) =>
 check('and the read replaces the version map', /assetRevsRef\.current = readRevs;/.test(apply));
 
 console.log(`\n${pass} passed, ${fail} failed`);
+// ---- every config key rides a per-record save (templates were silently dropped) ----
+{
+  const p = { ...payload, views: { list: [] }, taskTemplates: { list: [{ id: 't1' }] }, confirmEmptyLists: true };
+  const d = { assets: false, config: true, breakerTypes: false, photos: false };
+  const bd = perRecordBody(p, d, null, []);
+  check('a per-record config save carries taskTemplates', bd.taskTemplates && bd.taskTemplates.list.length === 1);
+  check('a per-record config save carries confirmEmptyLists', bd.confirmEmptyLists === true);
+  check('confirmEmptyLists is not sent on a save that is not a config save',
+    perRecordBody(p, { assets: true, config: false, breakerTypes: false, photos: false }, { upsert: [], remove: [] }, []).confirmEmptyLists === undefined);
+}
+
 process.exit(fail ? 1 : 0);

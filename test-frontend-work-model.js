@@ -24,6 +24,8 @@ const code = [
   slice('function columnDataType(col) {'),
   slice('function columnOptions(col) {'),
   slice('function validateColumnValue(col, raw) {'),
+  slice('function taskCompletionWorkType(model, typeId) {'),
+  slice('function setTaskCompletionWorkType(model, typeId, name) {'),
   slice('function adoptWorkModel(raw) {'),
   'const DEFAULT_WORK_TYPE_ID = "__default";',
   slice('function workModelParts(model, kind) {'),
@@ -46,7 +48,7 @@ const code = [
   slice('function renameTaskType(model, id, name) {'),
   slice('function removeTaskType(model, id) {'),
   slice('function taskTypeNameOf(model, id) {'),
-  'return { defaultWorkTypeId, setDefaultWorkType, resolveWorkTypeId, workBuiltinShown, setWorkBuiltinShown, DEFAULT_WORK_TYPE_ID, addWorkField, addWorkFieldChoice, removeWorkField, setTypeHasField, setTypeFieldRequired, addTaskType, renameTaskType, removeTaskType, taskTypeNameOf, adoptWorkModel, customFieldsFor, requiredCustomFieldsFor, validateCustomValues, newWorkFieldKey };',
+  'return { taskCompletionWorkType, setTaskCompletionWorkType, defaultWorkTypeId, setDefaultWorkType, resolveWorkTypeId, workBuiltinShown, setWorkBuiltinShown, DEFAULT_WORK_TYPE_ID, addWorkField, addWorkFieldChoice, removeWorkField, setTypeHasField, setTypeFieldRequired, addTaskType, renameTaskType, removeTaskType, taskTypeNameOf, adoptWorkModel, customFieldsFor, requiredCustomFieldsFor, validateCustomValues, newWorkFieldKey };',
 ].join('\n');
 const H = new Function('DEFAULT_COLUMN_DATA_TYPES', code)({});
 
@@ -87,8 +89,8 @@ check('a workModel change marks config dirty', /nextWorkModel !== workModel/.tes
 check('per-record saves send workModel', /CONFIG_PAYLOAD_KEYS = \[[^\]]*"workModel"/.test(src));
 check('load adopts it', /setWorkModel\(adoptWorkModel\(data\.workModel\)\)/.test(src));
 const root = __dirname;
-check('the backend writes the key', /OPTIONAL_CONFIG_KEYS = \["workModel", "views"\]/.test(fs.readFileSync(path.join(root, 'supabase/functions/asset-api/save.ts'), 'utf8')));
-check('the backend reads the key', /OPTIONAL_CONFIG_KEYS = \["workModel", "views"\]/.test(fs.readFileSync(path.join(root, 'supabase/functions/asset-api/inventory.ts'), 'utf8')));
+check('the backend writes the key', /OPTIONAL_CONFIG_KEYS = \["workModel", "views"/.test(fs.readFileSync(path.join(root, 'supabase/functions/asset-api/save.ts'), 'utf8')));
+check('the backend reads the key', /OPTIONAL_CONFIG_KEYS = \["workModel", "views"/.test(fs.readFileSync(path.join(root, 'supabase/functions/asset-api/inventory.ts'), 'utf8')));
 
 // ---- editing
 let em = H.adoptWorkModel(null);
@@ -122,7 +124,7 @@ check('both saves validate custom values', (src.match(/validateCustomValues\(wor
 check('the draft is seeded with taskType/custom when editing', /taskType: item\.taskType \|\| "",/.test(src));
 check('Save is disabled while a custom value is invalid', /\|\| !!taskCustomError\}/.test(src));
 check('the Task types settings section exists', /key: "tasktypes"/.test(src) && /key === "tasktypes"/.test(src));
-check('the edge function keeps taskType/custom on save', /TASK_EXTRA_KEYS = \["taskType", "custom", "paneGroupIds"\]/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api/save-shape.ts'), 'utf8')));
+check('the edge function keeps taskType/custom on save', /TASK_EXTRA_KEYS = \["taskType", "custom", "paneGroupIds"/.test(fs.readFileSync(path.join(__dirname, 'supabase/functions/asset-api/save-shape.ts'), 'utf8')));
 
 // ---- work dialog wiring (source)
 check('add and edit work saves write custom', (src.match(/custom: \{ \.\.\.\(changeDraft\.custom \|\| \{\}\) \}/g) || []).length === 2);
@@ -175,6 +177,16 @@ check('work search covers custom values', /Object\.values\(r\.change\.custom/.te
   check('several picks validate', H.validateCustomValues(on, 'task', '', { [mr.key]: 'Roof; Gym' }) === '' || !H.validateCustomValues(on, 'task', '', { [mr.key]: 'Roof; Gym' }));
   const bad = H.validateCustomValues(on, 'task', '', { [mr.key]: 'Roof; Pool' });
   check('a pick outside the list is refused', !!bad && bad.length > 0);
+}
+
+{
+  const m0 = H.adoptWorkModel(null);
+  check('completion work type defaults to unset', H.taskCompletionWorkType(m0, '__default') === '');
+  const m1 = H.setTaskCompletionWorkType(m0, '__default', 'Repair');
+  check('completion work type is stored', H.taskCompletionWorkType(m1, '__default') === 'Repair');
+  check('completion work type survives adoption', H.taskCompletionWorkType(H.adoptWorkModel(JSON.parse(JSON.stringify(m1))), '__default') === 'Repair');
+  check('clearing it removes the key', H.taskCompletionWorkType(H.setTaskCompletionWorkType(m1, '__default', ''), '__default') === '');
+  check('completion form reads it', /taskCompletionWorkType\(workModel, doneItem\.taskType\)/.test(src) && /changeTypes\.includes\(wantedWorkType\)/.test(src));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

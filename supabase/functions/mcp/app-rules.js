@@ -1434,7 +1434,7 @@ const DEFAULT_WORK_TYPE_ID = "__default";
 const DEFAULT_WORK_TYPE_NAME = "Default";
 
 const WORK_BUILTIN_FIELDS = {
-  task: [{ key: "notes", label: "Notes" }, { key: "owner", label: "Owner" }],
+  task: [{ key: "notes", label: "Notes" }],
   work: [{ key: "vendor", label: "Vendor" }, { key: "cost", label: "Cost" }, { key: "task", label: "Linked task" }, { key: "note", label: "Details" }],
 };
 
@@ -1471,7 +1471,7 @@ function adoptWorkModel(raw) {
   const settings = v => {
     const out = {};
     Object.entries(obj(v)).forEach(([id, st]) => {
-      out[id] = { fieldKeys: list(st && st.fieldKeys).map(String), requiredFields: list(st && st.requiredFields).map(String), hiddenFields: list(st && st.hiddenFields).map(String) };
+      out[id] = { fieldKeys: list(st && st.fieldKeys).map(String), requiredFields: list(st && st.requiredFields).map(String), hiddenFields: list(st && st.hiddenFields).map(String), ...(st && (st.completion === "optional" || st.completion === "simple" || st.completion === "event") ? { completion: st.completion } : {}), ...(st && typeof st.completionWorkType === "string" && st.completionWorkType ? { completionWorkType: st.completionWorkType } : {}) };
     });
     return out;
   };
